@@ -310,32 +310,6 @@ function isRecruiterSource(source: string | null | undefined): boolean {
   return (source || "").toLowerCase() === "recruiter";
 }
 
-// Per-source outcome of the last search run, streamed as `source_status`
-// events by the unified search backend.
-type SourceStatusInfo = {
-  source: string;
-  status: "ok" | "empty" | "failed";
-  count: number;
-  reason?: string;
-  criteria_unconfigured?: boolean;
-};
-
-// Single source of truth tying a Step-5 source-filter pill to its display
-// label and the backend source strings whose rows land in that bucket —
-// the pill row, the status banners, and the empty-state reason lookup all
-// derive from this so a rename can't leave them disagreeing.
-const SOURCE_FILTER_META = [
-  { id: "jobdiva", label: "JobDiva Agent", backendSources: ["JobDiva-JobAgent", "JobDiva-Applicants"] },
-  { id: "talent-search", label: "JobDiva Talent", backendSources: ["JobDiva-TalentSearch"] },
-  { id: "linkedin-unipile", label: "LinkedIn-Unipile", backendSources: ["LinkedIn-Unipile"] },
-  { id: "linkedin-exa", label: "LinkedIn-Exa", backendSources: ["LinkedIn-Exa"] },
-  { id: "dice", label: "Dice", backendSources: ["Dice"] },
-  { id: "upload-resume", label: "Upload-Resume", backendSources: ["Upload-Resume"] },
-] as const;
-const sourceStatusDisplayLabel = (backendSource: string): string =>
-  SOURCE_FILTER_META.find((m) => (m.backendSources as readonly string[]).includes(backendSource))?.label
-  || backendSource;
-
 // Step / ScreeningLevel / RegenerateDifficulty / EmploymentType / ScreenQuestion /
 // WizardMode are now shared via @/lib/jobs/wizard-types (imported above) so the
 // campaign wizard can reuse the same step components + state container.
@@ -1137,11 +1111,6 @@ function NewJobPageContent() {
   // small amber banner above the results list nudging the recruiter to
   // open JobDiva and set criteria once for sharper matches.
   const [jobdivaCriteriaUnconfigured, setJobdivaCriteriaUnconfigured] = useState(false);
-  // Per-source outcome of the last search run, streamed as `source_status`
-  // events. Lets the UI say WHY a source bucket is empty (pool failed,
-  // JobDiva criteria unconfigured, genuinely no matches) instead of showing
-  // a silent zero.
-  const [sourceStatuses, setSourceStatuses] = useState<Record<string, SourceStatusInfo>>({});
   const [showJobdivaSkillsModal, setShowJobdivaSkillsModal] = useState(false);
   const [skillsCopied, setSkillsCopied] = useState(false);
   const [isCheckingJobdivaCriteria, setIsCheckingJobdivaCriteria] = useState(false);
@@ -1571,55 +1540,8 @@ function NewJobPageContent() {
     return "";
   };
 
-  // One classification shared by the visible-table filter and the
-  // all-hidden empty state, so the two can never drift on what hides a row.
-  const getCandidateHiddenReason = (c: any): null | "launched" | "excluded" | "filtered" => {
-    const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
-    const key = `${c.source ?? ''}:${candId}`;
-    // Hide anyone already launched (now in sourced_candidates / the rank
-    // list). Match on the composite source:id key, falling back to the bare
-    // candidate_id so source-string drift between sourcing runs can't let a
-    // launched candidate re-surface.
-    if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return "launched";
-    if (getCandidateExclusionReason(c)) return "excluded";
-    // Progressive rows (agent_result / details_loaded) bypass score &
-    // location filters so they stay visible while shimmering. Once the
-    // scored patch lands they fall back into the normal filter pipeline.
-    const stage = String(c?._stage || "");
-    const awaitingScore = stage === "agent_result" || stage === "details_loaded";
-    const awaitingDetails = stage === "agent_result";
-    // Candidates we couldn't score (detail_failed → N/A) are exempt from the
-    // min-score filter — a failed detail lookup must not hide a JobDiva row.
-    // JobDiva-JobAgent rows are unscored BY DESIGN (no % is shown for agent
-    // results), so a % filter can never hide them either.
-    const isAgentRow = String(c?.source || "") === "JobDiva-JobAgent";
-    if (minScore > 0 && !awaitingScore && !c?.detail_failed && !isAgentRow) {
-      const score = getCandidateMatchScore(c);
-      if (score < minScore) return "filtered";
-    }
-    if (locationFilter.size > 0 && !awaitingDetails) {
-      const loc = getCandidateLocationStr(c);
-      if (!loc || !locationFilter.has(loc)) return "filtered";
-    }
-    const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
-    if (trimmedQuery) {
-      const haystack = [
-        c.name,
-        c.firstName,
-        c.lastName,
-        c.email,
-        c.phone,
-        c.title,
-        c.headline,
-      ]
-        .map((v) => String(v || "").toLowerCase())
-        .join(" ");
-      if (!haystack.includes(trimmedQuery)) return "filtered";
-    }
-    return null;
-  };
-
   const sortedCandidates = useMemo(() => {
+    const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
     const sourcePriority = (c: any) => {
       const source = String(c.source || "").toLowerCase();
       if (source.includes("applicant")) return 1;
@@ -1628,9 +1550,48 @@ function NewJobPageContent() {
       return 4;
     };
 
-    const filtered = candidates.filter(
-      (c: any) => matchesSourceFilter(c) && getCandidateHiddenReason(c) === null
-    );
+    const filtered = candidates.filter((c: any) => {
+      const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
+      const key = `${c.source ?? ''}:${candId}`;
+      // Hide anyone already launched (now in sourced_candidates / the rank
+      // list). Match on the composite source:id key, falling back to the bare
+      // candidate_id so source-string drift between sourcing runs can't let a
+      // launched candidate re-surface.
+      if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return false;
+      if (getCandidateExclusionReason(c)) return false;
+      if (!matchesSourceFilter(c)) return false;
+      // Progressive rows (agent_result / details_loaded) bypass score &
+      // location filters so they stay visible while shimmering. Once the
+      // scored patch lands they fall back into the normal filter pipeline.
+      const stage = String(c?._stage || "");
+      const awaitingScore = stage === "agent_result" || stage === "details_loaded";
+      const awaitingDetails = stage === "agent_result";
+      // Candidates we couldn't score (detail_failed → N/A) are exempt from the
+      // min-score filter — a failed detail lookup must not hide a JobDiva row.
+      if (minScore > 0 && !awaitingScore && !c?.detail_failed) {
+        const score = getCandidateMatchScore(c);
+        if (score < minScore) return false;
+      }
+      if (locationFilter.size > 0 && !awaitingDetails) {
+        const loc = getCandidateLocationStr(c);
+        if (!loc || !locationFilter.has(loc)) return false;
+      }
+      if (trimmedQuery) {
+        const haystack = [
+          c.name,
+          c.firstName,
+          c.lastName,
+          c.email,
+          c.phone,
+          c.title,
+          c.headline,
+        ]
+          .map((v) => String(v || "").toLowerCase())
+          .join(" ");
+        if (!haystack.includes(trimmedQuery)) return false;
+      }
+      return true;
+    });
 
     const dirMul = sortDir === "asc" ? 1 : -1;
     const cmp = (a: any, b: any) => {
@@ -1647,14 +1608,8 @@ function NewJobPageContent() {
             return rankA - rankB;
           }
 
-          // JobDiva-JobAgent rows carry no % (unscored by design, ranked by
-          // JobDiva) — treat them as the top band so hiding their score
-          // doesn't sink JobDiva's trusted results below every scored row.
-          // Agent-vs-agent pairs were already ordered by api_rank above.
-          const agentA = String(a?.source || "") === "JobDiva-JobAgent";
-          const agentB = String(b?.source || "") === "JobDiva-JobAgent";
-          const scoreA = agentA ? Number.POSITIVE_INFINITY : getCandidateMatchScore(a);
-          const scoreB = agentB ? Number.POSITIVE_INFINITY : getCandidateMatchScore(b);
+          const scoreA = getCandidateMatchScore(a);
+          const scoreB = getCandidateMatchScore(b);
           if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
 
           const prioA = sourcePriority(a);
@@ -1689,23 +1644,6 @@ function NewJobPageContent() {
 
     return [...filtered].sort(cmp);
   }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds]);
-
-  // Feeds the all-hidden empty state; memoized because it runs the
-  // string-heavy exclusion classifier over every loaded row and would
-  // otherwise recompute per keystroke while that state is showing.
-  const hiddenBreakdown = useMemo(() => {
-    const bucket = candidates.filter((c: any) => matchesSourceFilter(c));
-    let launched = 0;
-    let excluded = 0;
-    let filtered = 0;
-    for (const c of bucket) {
-      const reason = getCandidateHiddenReason(c);
-      if (reason === "launched") launched++;
-      else if (reason === "excluded") excluded++;
-      else if (reason === "filtered") filtered++;
-    }
-    return { bucket: bucket.length, launched, excluded, filtered };
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -6165,36 +6103,19 @@ function NewJobPageContent() {
       });
     } catch (e: any) {
       if (e?.name === "AbortError") {
-        if (mode === "replace") {
-          setCandidates([]);
-          setSourceStatuses({});
-        }
+        if (mode === "replace") setCandidates([]);
         return [];
       }
       throw e;
     }
     if (!response.ok || !response.body) {
       console.error("Search failed:", response.status);
-      // A rejected search (rate limit, proxy 503, server error) must not
-      // masquerade as "search ran and found nothing".
-      showToast(
-        `Candidate search failed (HTTP ${response.status}). Please retry — if it persists, the server may be rate-limiting or down.`,
-        "error"
-      );
-      if (mode === "replace") {
-        setCandidates([]);
-        setSourceStatuses({});
-      }
+      if (mode === "replace") setCandidates([]);
       return [];
     }
     if (mode === "replace") {
       setCandidates([]);
       setCurrentPage(1);
-      setSourceStatuses({});
-      // Reset the pill filter too: a re-run can legitimately drop the
-      // selected source's bucket to zero, which hides its pill while the
-      // filter stays applied — an empty table with no visible cause.
-      setSourceFilter("all");
       seenCandidateIdsRef.current = new Set<string>();
     }
     const seenIds = seenCandidateIdsRef.current;
@@ -6314,25 +6235,8 @@ function NewJobPageContent() {
                 setShowJobdivaSkillsModal(true);
                 setSkillsCopied(false);
               }
-            } else if (event.type === "source_status") {
-              const status = event.data || {};
-              const src = String(status.source || "");
-              if (src) {
-                setSourceStatuses(prev => {
-                  // "ok" is sticky within a run: a later tranche or relaxation
-                  // pass that finds nothing (or fails) must not repaint a
-                  // bucket that already has rows as broken.
-                  const cur = prev[src];
-                  if (cur?.status === "ok" && status.status !== "ok") return prev;
-                  return { ...prev, [src]: status };
-                });
-                if (status.criteria_unconfigured) {
-                  setJobdivaCriteriaUnconfigured(true);
-                }
-              }
             } else if (event.type === "error") {
               console.error("Stream error:", event.message);
-              showToast(`Search ended with an error: ${event.message}`, "error");
             }
           } catch (e) {
             console.error("Failed to parse stream line:", line, e);
@@ -6404,12 +6308,12 @@ function NewJobPageContent() {
       const trimmed = candidates.slice(0, 100);
       window.localStorage.setItem(
         sourcingResultsKey,
-        JSON.stringify({ candidates: trimmed, savedAt: Date.now(), sourceStatuses })
+        JSON.stringify({ candidates: trimmed, savedAt: Date.now() })
       );
     } catch {
       /* quota / unavailable — swallow, results remain in-memory */
     }
-  }, [isSearching, hasSearched, candidates, sourcingResultsKey, sourceStatuses]);
+  }, [isSearching, hasSearched, candidates, sourcingResultsKey]);
 
   // Restore last-run results when the recruiter lands on Step 5 with nothing
   // in memory (e.g. after a reload). Gated to one-shot via the hasSearched
@@ -6434,12 +6338,6 @@ function NewJobPageContent() {
       setCandidates(dedupedCached);
       setHasSearched(true);
       setRestoredFromCache(true);
-      // Restore the per-source outcomes with the rows: without them a
-      // failed pool's banner silently vanishes on reload and its empty
-      // bucket reads as legitimately empty.
-      if (parsed?.sourceStatuses && typeof parsed.sourceStatuses === "object") {
-        setSourceStatuses(parsed.sourceStatuses);
-      }
       const seen = seenCandidateIdsRef.current;
       for (const c of dedupedCached) {
         const id = String(c?.candidate_id || c?.id || "");
@@ -7831,14 +7729,7 @@ function NewJobPageContent() {
   // in-radius candidates ahead of out-of-radius ones and a mild distance
   // tiebreak. Mirrors "best by skill and location and other matches".
   const searchAndLaunchRank = (c: any): number => {
-    // JobDiva-JobAgent rows carry no % (unscored by design) — rank them by
-    // JobDiva's own order (api_rank 0 = best → base 100) so the JobDiva
-    // quota keeps the agent's ordering instead of degrading to distance-only.
-    const isAgentRow = String(c?.source || "") === "JobDiva-JobAgent";
-    const apiRank = Number(c?.api_rank);
-    let score = isAgentRow
-      ? 100 - Math.min(99, Number.isFinite(apiRank) ? apiRank : 50)
-      : getCandidateMatchScore(c);
+    let score = getCandidateMatchScore(c);
     if (c?.location_out_of_radius) score -= 40;
     const dist = Number(c?.distance_miles);
     if (Number.isFinite(dist) && dist > 0) score -= Math.min(10, dist / 25);
@@ -9467,29 +9358,20 @@ function NewJobPageContent() {
                       Checking JobDiva AI matcher criteria...
                     </p>
                   )}
-                  {!isSearching && Object.values(sourceStatuses)
-                    .filter((s) => s && s.status !== "ok" && s.reason)
-                    .map((s) => (
-                      <p
-                        key={s.source}
-                        className="text-[11.5px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-2 mr-1.5 inline-block"
-                      >
-                        {sourceStatusDisplayLabel(s.source)}: {s.reason}
-                      </p>
-                    ))}
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
-                      {[
+                      {([
                         { id: "all", label: "All", count: totalCandidatesCount },
                         // Labels mirror the Search Sources checkboxes so the
                         // recruiter can tie a result bucket back to the pool
                         // that produced it.
-                        ...SOURCE_FILTER_META.map((m) => ({
-                          id: m.id,
-                          label: m.label,
-                          count: sourceCounts[m.id] || 0,
-                        })),
-                      ].map(pill => {
+                        { id: "jobdiva", label: "JobDiva Agent", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "talent-search", label: "JobDiva Talent", count: sourceCounts["talent-search"] || 0 },
+                        { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
+                        { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
+                        { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
+                      ] as const).map(pill => {
                         if (pill.id !== "all" && pill.count === 0) return null;
                         const active = sourceFilter === pill.id;
                         return (
@@ -9818,51 +9700,7 @@ function NewJobPageContent() {
                     </div>
                   )}
 
-                  {candidates.length > 0 && sortedCandidates.length === 0 && !isSearching ? (
-                    (() => {
-                      const meta = SOURCE_FILTER_META.find((m) => m.id === sourceFilter);
-                      const label = meta?.label || sourceFilter;
-                      const statusReason = meta?.backendSources
-                        .map((s) => sourceStatuses[s]?.reason)
-                        .find(Boolean);
-                      const { bucket, launched, excluded, filtered } = hiddenBreakdown;
-                      const parts: string[] = [];
-                      if (launched > 0) parts.push(`${launched} already launched (on the rank list)`);
-                      if (excluded > 0) parts.push(`${excluded} excluded (client employee / offer status)`);
-                      if (filtered > 0) parts.push(`${filtered} hidden by the score, location, or search filters`);
-                      return (
-                        <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
-                          <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-                            <Users className="w-8 h-8 text-slate-300" />
-                          </div>
-                          {bucket > 0 ? (
-                            <>
-                              <p className="text-slate-600 text-base font-bold">
-                                {sourceFilter === "all"
-                                  ? `All ${bucket} candidates are hidden.`
-                                  : `All ${bucket} ${label} candidate${bucket === 1 ? " is" : "s are"} hidden.`}
-                              </p>
-                              {parts.length > 0 && (
-                                <p className="text-slate-500 text-[13px] mt-2 font-medium">{parts.join(" · ")}</p>
-                              )}
-                              <p className="text-slate-400 text-[13px] mt-2 font-medium">
-                                Already-launched candidates live on the rank list. Adjust or clear the filters to see the rest.
-                              </p>
-                            </>
-                          ) : (
-                            <>
-                              <p className="text-slate-600 text-base font-bold">
-                                No {label} candidates in this run.
-                              </p>
-                              <p className="text-slate-400 text-[13px] mt-2 font-medium">
-                                {statusReason || "Pick another source above, or re-run the search."}
-                              </p>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })()
-                  ) : candidates.length > 0 ? (
+                  {candidates.length > 0 ? (
                     <CandidateMatchTable
                       candidates={paginatedCandidates}
                       selectedIds={selectedCandidates}
@@ -9960,7 +9798,7 @@ function NewJobPageContent() {
 {/* Pagination Controls */ }
 {/* Pagination Controls */ }
 {
-  sortedCandidates.length > 0 && (
+  candidates.length > 0 && (
     <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
 
       {/* Context & Rows Selection */}
@@ -9968,10 +9806,10 @@ function NewJobPageContent() {
         <div className="flex items-center gap-2 text-[13px]">
           <span className="text-slate-500 font-medium">Showing</span>
           <span className="font-bold text-slate-800">
-            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, sortedCandidates.length)}
+            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
           </span>
           <span className="text-slate-500 font-medium">
-            of {sortedCandidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
+            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
           </span>
         </div>
 

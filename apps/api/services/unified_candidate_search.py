@@ -587,25 +587,10 @@ class UnifiedCandidateSearch:
             cand["match_score_details"] = score_result.get("score_details", {})
 
             if cand.get("scoring_mode") == "high_level":
-                # No % is shown for agent rows (see the match_score=None stamp
-                # below), so drop the rubric tier-judgment line — it reads as
-                # a verdict on a score the recruiter never sees. Concrete
-                # lines (matched dimensions, location note, hard exclusions)
-                # stay: those are the legitimate reasons the popup surfaces.
-                _tier_lines = {
-                    "Excellent rubric and sourcing alignment",
-                    "Strong overall fit across active filters",
-                    "Partial fit; review missing rubric requirements",
-                    "Limited fit against active rubric and sourcing filters",
-                }
-                _expl = [
-                    line for line in (cand["explainability"] or [])
-                    if line not in _tier_lines
-                ]
                 cand["explainability"] = [
-                    "Matched by JobDiva agent search — detailed AI skills "
-                    "analysis skipped"
-                ] + _expl[:5]
+                    "High-level score — matched by JobDiva agent search; "
+                    "detailed AI skills analysis skipped"
+                ] + list(cand["explainability"] or [])[:5]
 
             # JobAgent-rank floor: JobDiva's JobAgent endpoint pre-ranks
             # candidates by their own relevance matcher. After refactor
@@ -694,17 +679,6 @@ class UnifiedCandidateSearch:
                 if not hard_veto.get("triggered"):
                     cand["match_score"] = None
 
-            # JobDiva-JobAgent rows are never presented as a percentage
-            # (2026-08-25 policy): they follow the criteria the recruiter
-            # authored inside JobDiva and JobDiva's own ranking, so a rubric %
-            # misleads. The scoring pass above still runs — matched/missing
-            # skills, explainability, and the location badge feed the row and
-            # its popup — only the number is withheld. NULL match_score is
-            # already the storage/UI "unscored" sentinel (kept by every
-            # min-score gate, NULLS LAST in rank-list sorting).
-            if str(cand.get("source") or "") == "JobDiva-JobAgent":
-                cand["match_score"] = None
-
             return cand
 
         # Which JobDiva producers this request selects — see
@@ -770,7 +744,7 @@ class UnifiedCandidateSearch:
                     f"dropping candidate_id={cand.get('candidate_id') or cand.get('id')} "
                     f"reason={location_reason} distance={distance}",
                 )
-                return False
+                return
 
             cand["screening_summary"] = build_screening(assessment)
 
@@ -813,7 +787,7 @@ class UnifiedCandidateSearch:
                         f"reason={cand.get('location_veto_reason')} "
                         f"distance={cand.get('distance_miles')}",
                     )
-                    return False
+                    return
                 _min_score = getattr(_sc_gate, "EXTERNAL_SOURCE_MIN_SCORE", None)
                 if (
                     _min_score is not None
@@ -826,10 +800,10 @@ class UnifiedCandidateSearch:
                         f"dropping candidate_id={cid} source={_src} "
                         f"match_score={cand.get('match_score')} < min_score={_min_score}",
                     )
-                    return False
+                    return
 
             if cid and cid in seen_ids:
-                return False
+                return
             cross_keys = self._dedup_keys(cand)
             owner = next((dedup_owner[k] for k in cross_keys if k in dedup_owner), None)
             if owner is not None:
@@ -850,7 +824,7 @@ class UnifiedCandidateSearch:
                         "candidate_id": owner_id,
                         "patch": dict(changed),
                     })
-                return False
+                return
             if cid:
                 seen_ids.add(cid)
             for k in cross_keys:
@@ -864,7 +838,6 @@ class UnifiedCandidateSearch:
             if exa_pass_b_should_run and str(cand.get("source") or "") == "LinkedIn-Exa":
                 exa_yielded_candidates.append(cand)
             await queue.put({"type": "candidate", "data": cand})
-            return True
 
         async def emit_jobdiva_agent_result(cand, source_label):
             """Stage 1 of progressive JobDiva flow: emit a minimal row from the
@@ -912,53 +885,6 @@ class UnifiedCandidateSearch:
             await queue.put({"type": "candidate", "data": agent_payload})
             return True
 
-        async def emit_source_status(
-            source: str,
-            *,
-            count: int,
-            error: Optional[BaseException] = None,
-            empty_reason: str = "",
-            skip_empty: bool = False,
-            **extra: Any,
-        ) -> None:
-            """Report how a source pool ended. Every pool fails open to zero
-            rows with only a log line, so without this event the browser
-            cannot tell a dead pool from a legitimately empty one. The
-            exception is sanitized to its class name — raw error text can
-            carry internal URLs/hosts and this reason renders verbatim in
-            the recruiter-facing banner."""
-            if error is not None:
-                status = "failed"
-                if count > 0:
-                    reason = (
-                        f"{source} search failed ({type(error).__name__}) after "
-                        f"{count} result(s) arrived — this list may be incomplete."
-                    )
-                else:
-                    reason = (
-                        f"{source} search failed ({type(error).__name__}) — "
-                        "check the API logs."
-                    )
-            elif count > 0:
-                status, reason = "ok", ""
-            elif skip_empty:
-                # An exhausted follow-up tranche ("Search more") is not a source
-                # problem — stay quiet rather than contradict rows already shown.
-                return
-            else:
-                status = "empty"
-                reason = empty_reason or f"{source} returned no results for this job."
-            await queue.put({
-                "type": "source_status",
-                "data": {
-                    "source": source,
-                    "status": status,
-                    "count": count,
-                    "reason": reason,
-                    **extra,
-                },
-            })
-
         async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None, min_score=None):
             """Stage 3 of progressive JobDiva flow: score the (now-enriched)
             candidate and emit a ``candidate_detail`` patch with the scored
@@ -987,7 +913,7 @@ class UnifiedCandidateSearch:
                     "stage": "dropped",
                     "patch": {"_stage": "dropped", "_drop_reason": "non_us_candidate"},
                 })
-                return False
+                return
 
             cand["screening_summary"] = build_screening(assessment)
 
@@ -1028,7 +954,7 @@ class UnifiedCandidateSearch:
                     "stage": "dropped",
                     "patch": {"_stage": "dropped", "_drop_reason": "below_min_score"},
                 })
-                return False
+                return
 
             # Cross-source dedup runs here (not at agent_result) since the
             # keys depend on email / phone / linkedin URL, which are only
@@ -1084,7 +1010,7 @@ class UnifiedCandidateSearch:
                         "stage": "dropped",
                         "patch": {"_stage": "dropped", "_drop_reason": "cross_source_duplicate"},
                     })
-                    return False
+                    return
             else:
                 for k in cross_keys:
                     dedup_owner[k] = cand
@@ -1128,7 +1054,6 @@ class UnifiedCandidateSearch:
                 "stage": "scored",
                 "patch": scored_patch,
             })
-            return True
 
         async def produce_jobdiva_applicants():
             """
@@ -1137,10 +1062,6 @@ class UnifiedCandidateSearch:
             Skipped for external jobs (negative job_id / EXT-), which have
             no JobDiva applicants.
             """
-            _ap_emitted = 0
-            _ap_raw = 0
-            _ap_error: Optional[BaseException] = None
-            _ap_ran = False
             try:
                 if not applicants_selected:
                     return
@@ -1153,11 +1074,9 @@ class UnifiedCandidateSearch:
                     )
                     return
 
-                _ap_ran = True
                 await queue.put({"type": "stage", "data": "Searching JobDiva applicants..."})
                 applicants_res = await self._search_jobdiva_applicants(criteria)
                 applicants = applicants_res.get("candidates", [])
-                _ap_raw = len(applicants)
                 summary["job_applicants_count"] = len(applicants)
 
                 # Source cap (JOBDIVA_SOURCE_CAP) to prevent database locking &
@@ -1209,8 +1128,7 @@ class UnifiedCandidateSearch:
                     self._log_stage("Applicants", f"Bypassing LLM enrichment for {len(applicants)} applicants (instant sync mode).")
                     for cand in applicants:
                         assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
-                        if await emit_candidate(cand, assessment, "qualified_applicants"):
-                            _ap_emitted += 1
+                        await emit_candidate(cand, assessment, "qualified_applicants")
                     return
 
                 self._attach_cached_enhanced_info(applicants)
@@ -1252,26 +1170,10 @@ class UnifiedCandidateSearch:
                                 "Applicants",
                                 f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
                             )
-                        if await emit_jobdiva_scored(cand, assessment, "qualified_applicants"):
-                            _ap_emitted += 1
+                        await emit_jobdiva_scored(cand, assessment, "qualified_applicants")
             except Exception as e:
-                _ap_error = e
                 logger.error(f"JobDiva Applicants stage failed: {e}", exc_info=True)
             finally:
-                if _ap_ran or _ap_error is not None:
-                    _ap_offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
-                    await emit_source_status(
-                        "JobDiva-Applicants",
-                        count=_ap_emitted,
-                        error=_ap_error,
-                        empty_reason=(
-                            f"All {_ap_raw} applicants were already listed under "
-                            "another source or dropped by filters."
-                            if _ap_raw > 0
-                            else "JobDiva returned no applicants for this job."
-                        ),
-                        skip_empty=_ap_offset > 0,
-                    )
                 await queue.put(SENTINEL)
 
         async def produce_jobdiva_talent():
@@ -1304,12 +1206,7 @@ class UnifiedCandidateSearch:
                     cap_label: str,
                     min_score: Optional[int] = None,
                     high_level_scoring: bool = False,
-                ) -> int:
-                    """Returns how many rows survived to a scored emission —
-                    the min-score gate and cross-source dedup can drop every
-                    row of a pool AFTER the raw fetch looked healthy, and the
-                    pool's source_status must reflect what the UI shows."""
-                    emitted = 0
+                ) -> None:
                     talent_pool = talent_res.get("candidates", [])
 
                     # Source cap (JOBDIVA_SOURCE_CAP) — see Applicants stage above.
@@ -1324,7 +1221,7 @@ class UnifiedCandidateSearch:
 
                     if not talent_pool:
                         self._log_stage(stage_name, "No talent-pool candidates returned.")
-                        return 0
+                        return
                     self._attach_cached_enhanced_info(talent_pool)
 
                     fresh_talent: List[Dict[str, Any]] = []
@@ -1334,7 +1231,7 @@ class UnifiedCandidateSearch:
                             fresh_talent.append(_cand)
 
                     if not fresh_talent:
-                        return 0
+                        return
 
                     from core import sourcing_config as _sc_talent
                     async for event in self._enrich_filtered_jobdiva_progressive(
@@ -1354,11 +1251,9 @@ class UnifiedCandidateSearch:
                                     stage_name,
                                     f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
                                 )
-                            if await emit_jobdiva_scored(
+                            await emit_jobdiva_scored(
                                 cand, assessment, "qualified_talent", min_score=min_score
-                            ):
-                                emitted += 1
-                    return emitted
+                            )
 
                 async def _run_jobagent_pool():
                     from core import sourcing_config as _sc_pool
@@ -1403,113 +1298,50 @@ class UnifiedCandidateSearch:
                         and _batch > _quick_n
                         and not getattr(criteria, "bypass_screening", False)
                     )
-                    pool_exc: Optional[BaseException] = None
-                    try:
-                        if not two_phase:
-                            self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
-                            await _consume_jobagent(await self._search_jobdiva_talent(criteria))
-                        else:
-                            self._log_stage(
-                                "JobDiva",
-                                f"Running JobDiva JobAgent search (two-phase: quick {_quick_n} "
-                                f"+ full {_batch})...",
-                            )
+                    if not two_phase:
+                        self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
+                        await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+                        return
 
-                            async def _quick_phase():
-                                try:
-                                    res = await self._search_jobdiva_talent(
-                                        criteria, resume_count_override=_quick_n
-                                    )
-                                    await _consume_jobagent(res)
-                                except Exception as e:
-                                    # Quick phase is purely a first-paint accelerator —
-                                    # the full phase covers its ranks, so never let it
-                                    # fail the pool.
-                                    logger.warning(
-                                        f"JobAgent quick-first phase failed (full phase still covers it): {e}"
-                                    )
-
-                            async def _full_phase():
-                                await _consume_jobagent(await self._search_jobdiva_talent(criteria))
-
-                            # return_exceptions: a full-phase failure must still
-                            # WAIT for the quick phase — raising here would orphan
-                            # it mid-emit and snapshot the count too early.
-                            results = await asyncio.gather(
-                                _quick_phase(), _full_phase(), return_exceptions=True
-                            )
-                            pool_exc = next(
-                                (r for r in results if isinstance(r, Exception)), None
-                            )
-                    except Exception as e:
-                        # Contain the failure: both JobDiva pools share one outer
-                        # gather, so an uncaught JobAgent error would abandon the
-                        # TalentSearch pool mid-flight too.
-                        pool_exc = e
-                    if pool_exc is not None:
-                        # Keep the legacy "JobDiva Talent stage failed" signature —
-                        # incident greps and alerting key on it.
-                        logger.error(
-                            f"JobDiva Talent stage failed (JobAgent pool): {pool_exc}",
-                            exc_info=pool_exc,
-                        )
-                    _criteria_unset = bool(summary.get("jobdiva_criteria_unconfigured"))
-                    await emit_source_status(
-                        "JobDiva-JobAgent",
-                        count=len(jobagent_matched_ids),
-                        error=pool_exc,
-                        empty_reason=(
-                            "No Search Agent criteria are configured for this "
-                            "job in JobDiva, so the AI matcher returned nothing."
-                            if _criteria_unset
-                            else "JobDiva returned no Job Agent matches for this job."
-                        ),
-                        skip_empty=_offset > 0,
-                        criteria_unconfigured=_criteria_unset,
+                    self._log_stage(
+                        "JobDiva",
+                        f"Running JobDiva JobAgent search (two-phase: quick {_quick_n} "
+                        f"+ full {_batch})...",
                     )
+
+                    async def _quick_phase():
+                        try:
+                            res = await self._search_jobdiva_talent(
+                                criteria, resume_count_override=_quick_n
+                            )
+                            await _consume_jobagent(res)
+                        except Exception as e:
+                            # Quick phase is purely a first-paint accelerator —
+                            # the full phase covers its ranks, so never let it
+                            # fail the pool.
+                            logger.warning(
+                                f"JobAgent quick-first phase failed (full phase still covers it): {e}"
+                            )
+
+                    async def _full_phase():
+                        await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+
+                    await asyncio.gather(_quick_phase(), _full_phase())
 
                 async def _run_talent_search_pool():
                     from core import sourcing_config as _sc_pool
                     self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
-                    pool_exc: Optional[BaseException] = None
-                    raw_count = 0
-                    emitted_count = 0
-                    try:
-                        talent_res = await self._search_jobdiva_talent_search(criteria)
-                        raw_count = len(talent_res.get("candidates", []))
-                        summary["talent_search_count"] = raw_count
-                        _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
-                        emitted_count = await _process_talent_pool(
-                            talent_res,
-                            stage_name="TalentSearch",
-                            source_label="JobDiva-TalentSearch",
-                            cap_label="TalentSearch rank",
-                            # Machine-generated query → only surface strong
-                            # matches; the sub-threshold tail is noise.
-                            min_score=int(_min_score) if _min_score else None,
-                        )
-                    except Exception as e:
-                        # Contain the failure so it can't abandon the JobAgent
-                        # pool sharing the outer gather.
-                        pool_exc = e
-                        # Legacy signature — incident greps and alerting key on it.
-                        logger.error(
-                            f"JobDiva Talent stage failed (TalentSearch pool): {e}",
-                            exc_info=True,
-                        )
-                    _ts_offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
-                    await emit_source_status(
-                        "JobDiva-TalentSearch",
-                        count=emitted_count,
-                        error=pool_exc,
-                        empty_reason=(
-                            f"JobDiva returned {raw_count} boolean matches, but none "
-                            "cleared the quality bar or all were already listed "
-                            "under another source."
-                            if raw_count > 0
-                            else "The boolean Talent Search returned no matches for this job."
-                        ),
-                        skip_empty=_ts_offset > 0,
+                    talent_res = await self._search_jobdiva_talent_search(criteria)
+                    summary["talent_search_count"] = len(talent_res.get("candidates", []))
+                    _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
+                    await _process_talent_pool(
+                        talent_res,
+                        stage_name="TalentSearch",
+                        source_label="JobDiva-TalentSearch",
+                        cap_label="TalentSearch rank",
+                        # Machine-generated query → only surface strong
+                        # matches; the sub-threshold tail is noise.
+                        min_score=int(_min_score) if _min_score else None,
                     )
 
                 # Overlap the selected JobDiva talent searches to halve
@@ -1532,13 +1364,6 @@ class UnifiedCandidateSearch:
                 await queue.put(SENTINEL)
 
         async def produce_external(name, search_method):
-            # Status label must match the source string stamped on rows, which
-            # is only known after the search returns — fall back to the static
-            # mapping when the search fails or yields nothing.
-            _ext_label = {"LinkedIn": "LinkedIn-Unipile", "Exa": "LinkedIn-Exa"}.get(name, name)
-            _ext_raw = 0
-            _ext_emitted = 0
-            _ext_error: Optional[BaseException] = None
             try:
                 await queue.put({"type": "stage", "data": f"Searching {name}..."})
                 res = await search_method(criteria)
@@ -1546,8 +1371,6 @@ class UnifiedCandidateSearch:
                     return
                 ext_candidates = res.get("candidates", [])
                 source_type = res.get("source_type", name)
-                _ext_label = source_type
-                _ext_raw = len(ext_candidates)
                 summary[f"{source_type.lower()}_count"] = len(ext_candidates)
 
                 # HOTFIX: Hard cap at 100 — see Applicants stage above.
@@ -1747,8 +1570,7 @@ class UnifiedCandidateSearch:
                     if result["status"] in ("success", "no_contact_shown"):
                         cand = result["candidate"]
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
-                        if await emit_candidate(cand, assessment):
-                            _ext_emitted += 1
+                        await emit_candidate(cand, assessment)
                 if _status_counts:
                     self._log_stage(
                         name,
@@ -1756,21 +1578,8 @@ class UnifiedCandidateSearch:
                         + ", ".join(f"{k}={v}" for k, v in sorted(_status_counts.items())),
                     )
             except Exception as e:
-                _ext_error = e
                 logger.error(f"{name} search stage failed: {e}", exc_info=True)
             finally:
-                await emit_source_status(
-                    _ext_label,
-                    count=_ext_emitted,
-                    error=_ext_error,
-                    empty_reason=(
-                        f"{_ext_label} returned {_ext_raw} profiles, but none cleared "
-                        "the relevance/score gates or all were already listed."
-                        if _ext_raw > 0
-                        else f"{_ext_label} returned no matching profiles — the source "
-                        "may have no matches, be disabled, or be out of quota."
-                    ),
-                )
                 # Signal Pass A completion so the Exa Research producer can
                 # seed its run with the URLs we just yielded.
                 if name == "Exa" and exa_pass_b_should_run:
@@ -4718,18 +4527,6 @@ class UnifiedCandidateSearch:
         ):
             candidate["location_out_of_radius"] = True
             candidate.setdefault("location_match_reason", reason)
-        # JobDiva-JobAgent exemption: these rows follow the criteria the
-        # recruiter authored inside JobDiva (which may deliberately reach
-        # beyond the job's radius), so a confirmed mismatch never zeroes
-        # their score — the badge fields stamped above still render the
-        # distance and the recruiter filters via the UI chips. Every other
-        # source falls through to the hard veto below.
-        from core import sourcing_config as _sc_gate
-        if (
-            str(candidate.get("source") or "") == "JobDiva-JobAgent"
-            and not getattr(_sc_gate, "JOBAGENT_LOCATION_HARD_VETO", False)
-        ):
-            return None
         if reason in ("state_mismatch", "relocation_excluded_by_filter"):
             # Machine-readable veto marker for the emit-time drop gates and
             # telemetry (the human string below feeds explainability only).
@@ -4987,27 +4784,6 @@ class UnifiedCandidateSearch:
             explainability.insert(0, "Partial fit; review missing rubric requirements")
         else:
             explainability.insert(0, "Limited fit against active rubric and sourcing filters")
-
-        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
-        # _location_hard_gate exemption) — say so in the score popup, so the
-        # distance badge and a non-zero score don't read as a contradiction.
-        if (
-            not hard_veto_hits
-            and not location_veto
-            and candidate.get("location_out_of_radius")
-            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
-        ):
-            _dist = candidate.get("distance_miles")
-            _note = (
-                f"~{round(float(_dist))} mi from the job location"
-                if isinstance(_dist, (int, float))
-                else "Outside the job's location radius"
-            )
-            explainability.insert(
-                1,
-                f"{_note} — kept: JobDiva agent results follow the "
-                "recruiter's own criteria, so location isn't hard-enforced",
-            )
 
         if not explainability:
             explainability = ["No active resume-match filters were available for scoring"]
