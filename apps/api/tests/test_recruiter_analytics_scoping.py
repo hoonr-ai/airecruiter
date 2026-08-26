@@ -142,34 +142,36 @@ def test_compute_analytics_sync_signature_and_scoping(monkeypatch):
     assert res_recruiter["team_scope"] is None
 
 
-@pytest.mark.asyncio
-async def test_get_admin_analytics_endpoint_role_routing(monkeypatch):
-    called_args = {}
+def test_get_admin_analytics_endpoint_role_routing(monkeypatch):
+    async def _run_test():
+        called_args = {}
 
-    def fake_compute_analytics_sync(scope_team_id=None, scope_recruiter_email=None):
-        called_args["scope_team_id"] = scope_team_id
-        called_args["scope_recruiter_email"] = scope_recruiter_email
-        return {"status": "ok"}
+        def fake_compute_analytics_sync(scope_team_id=None, scope_recruiter_email=None):
+            called_args["scope_team_id"] = scope_team_id
+            called_args["scope_recruiter_email"] = scope_recruiter_email
+            return {"status": "ok"}
 
-    monkeypatch.setattr("routers.admin_analytics._compute_analytics_sync", fake_compute_analytics_sync)
+        monkeypatch.setattr("routers.admin_analytics._compute_analytics_sync", fake_compute_analytics_sync)
 
-    # Admin user
-    admin_user = UserIdentity(email="admin@hoonr.ai", role="admin")
-    await get_admin_analytics(team_id="team-99", user=admin_user)
-    assert called_args == {"scope_team_id": "team-99", "scope_recruiter_email": None}
+        # Admin user
+        admin_user = UserIdentity(email="admin@hoonr.ai", role="admin")
+        await get_admin_analytics(team_id="team-99", user=admin_user)
+        assert called_args == {"scope_team_id": "team-99", "scope_recruiter_email": None}
 
-    # Team lead user
-    lead_user = UserIdentity(email="lead@hoonr.ai", role="team_lead", team_id="team-lead-1")
-    await get_admin_analytics(team_id="ignored-id", user=lead_user)
-    assert called_args == {"scope_team_id": "team-lead-1", "scope_recruiter_email": None}
+        # Team lead user
+        lead_user = UserIdentity(email="lead@hoonr.ai", role="team_lead", team_id="team-lead-1")
+        await get_admin_analytics(team_id="ignored-id", user=lead_user)
+        assert called_args == {"scope_team_id": "team-lead-1", "scope_recruiter_email": None}
 
-    # Recruiter user
-    recruiter_user = UserIdentity(email="recruiter@hoonr.ai", role="recruiter")
-    await get_admin_analytics(user=recruiter_user)
-    assert called_args == {"scope_team_id": None, "scope_recruiter_email": "recruiter@hoonr.ai"}
+        # Recruiter user
+        recruiter_user = UserIdentity(email="recruiter@hoonr.ai", role="recruiter")
+        await get_admin_analytics(user=recruiter_user)
+        assert called_args == {"scope_team_id": None, "scope_recruiter_email": "recruiter@hoonr.ai"}
 
-    # Unauthorized role
-    invalid_user = UserIdentity(email="guest@hoonr.ai", role="guest")
-    with pytest.raises(HTTPException) as exc_info:
-        await get_admin_analytics(user=invalid_user)
-    assert exc_info.value.status_code == 403
+        # Unauthorized role
+        invalid_user = UserIdentity(email="guest@hoonr.ai", role="guest")
+        with pytest.raises(HTTPException) as exc_info:
+            await get_admin_analytics(user=invalid_user)
+        assert exc_info.value.status_code == 403
+
+    asyncio.run(_run_test())
