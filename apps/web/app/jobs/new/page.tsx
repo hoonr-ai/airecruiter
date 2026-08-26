@@ -1111,6 +1111,17 @@ function NewJobPageContent() {
   // small amber banner above the results list nudging the recruiter to
   // open JobDiva and set criteria once for sharper matches.
   const [jobdivaCriteriaUnconfigured, setJobdivaCriteriaUnconfigured] = useState(false);
+  // Per-source outcome of the last search run, streamed as `source_status`
+  // events. Lets the UI say WHY a source bucket is empty (pool failed,
+  // JobDiva criteria unconfigured, genuinely no matches) instead of showing
+  // a silent zero.
+  const [sourceStatuses, setSourceStatuses] = useState<Record<string, {
+    source: string;
+    status: "ok" | "empty" | "failed" | string;
+    count: number;
+    reason?: string;
+    criteria_unconfigured?: boolean;
+  }>>({});
   const [showJobdivaSkillsModal, setShowJobdivaSkillsModal] = useState(false);
   const [skillsCopied, setSkillsCopied] = useState(false);
   const [isCheckingJobdivaCriteria, setIsCheckingJobdivaCriteria] = useState(false);
@@ -6119,12 +6130,19 @@ function NewJobPageContent() {
     }
     if (!response.ok || !response.body) {
       console.error("Search failed:", response.status);
+      // A rejected search (rate limit, proxy 503, server error) must not
+      // masquerade as "search ran and found nothing".
+      showToast(
+        `Candidate search failed (HTTP ${response.status}). Please retry — if it persists, the server may be rate-limiting or down.`,
+        "error"
+      );
       if (mode === "replace") setCandidates([]);
       return [];
     }
     if (mode === "replace") {
       setCandidates([]);
       setCurrentPage(1);
+      setSourceStatuses({});
       seenCandidateIdsRef.current = new Set<string>();
     }
     const seenIds = seenCandidateIdsRef.current;
@@ -6244,8 +6262,15 @@ function NewJobPageContent() {
                 setShowJobdivaSkillsModal(true);
                 setSkillsCopied(false);
               }
+            } else if (event.type === "source_status") {
+              const status = event.data || {};
+              const src = String(status.source || "");
+              if (src) {
+                setSourceStatuses(prev => ({ ...prev, [src]: status }));
+              }
             } else if (event.type === "error") {
               console.error("Stream error:", event.message);
+              showToast(`Search ended with an error: ${event.message}`, "error");
             }
           } catch (e) {
             console.error("Failed to parse stream line:", line, e);
@@ -9374,6 +9399,20 @@ function NewJobPageContent() {
                       Checking JobDiva AI matcher criteria...
                     </p>
                   )}
+                  {!isSearching && Object.values(sourceStatuses)
+                    .filter((s) => s && s.status !== "ok" && s.reason)
+                    .map((s) => (
+                      <p
+                        key={s.source}
+                        className="text-[11.5px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-2 mr-1.5 inline-block"
+                      >
+                        {s.source === "JobDiva-JobAgent"
+                          ? "JobDiva Agent"
+                          : s.source === "JobDiva-TalentSearch"
+                            ? "JobDiva Talent"
+                            : s.source}: {s.reason}
+                      </p>
+                    ))}
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
@@ -9716,7 +9755,73 @@ function NewJobPageContent() {
                     </div>
                   )}
 
-                  {candidates.length > 0 ? (
+                  {candidates.length > 0 && sortedCandidates.length === 0 && !isSearching ? (
+                    (() => {
+                      // Every loaded row is hidden by the active filters. Say
+                      // exactly what hid them — a bare empty table here reads
+                      // as "the source returned nothing", which is wrong.
+                      const bucket = candidates.filter((c) => matchesSourceFilter(c));
+                      let launched = 0;
+                      let excluded = 0;
+                      for (const c of bucket) {
+                        const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
+                        const key = `${c.source ?? ''}:${candId}`;
+                        if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) {
+                          launched++;
+                        } else if (getCandidateExclusionReason(c)) {
+                          excluded++;
+                        }
+                      }
+                      const filteredOut = bucket.length - launched - excluded;
+                      const filterLabels: Record<string, string> = {
+                        all: "All",
+                        jobdiva: "JobDiva Agent",
+                        "talent-search": "JobDiva Talent",
+                        "linkedin-unipile": "LinkedIn-Unipile",
+                        "linkedin-exa": "LinkedIn-Exa",
+                        dice: "Dice",
+                        "upload-resume": "Upload-Resume",
+                      };
+                      const label = filterLabels[sourceFilter] || sourceFilter;
+                      const parts: string[] = [];
+                      if (launched > 0) parts.push(`${launched} already launched (on the rank list)`);
+                      if (excluded > 0) parts.push(`${excluded} excluded (client employee / offer status)`);
+                      if (filteredOut > 0) parts.push(`${filteredOut} hidden by the score, location, or search filters`);
+                      return (
+                        <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+                          <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+                            <Users className="w-8 h-8 text-slate-300" />
+                          </div>
+                          {bucket.length > 0 ? (
+                            <>
+                              <p className="text-slate-600 text-base font-bold">
+                                {sourceFilter === "all"
+                                  ? `All ${bucket.length} candidates are hidden.`
+                                  : `All ${bucket.length} ${label} candidate${bucket.length === 1 ? " is" : "s are"} hidden.`}
+                              </p>
+                              {parts.length > 0 && (
+                                <p className="text-slate-500 text-[13px] mt-2 font-medium">{parts.join(" · ")}</p>
+                              )}
+                              <p className="text-slate-400 text-[13px] mt-2 font-medium">
+                                Already-launched candidates live on the rank list. Adjust or clear the filters to see the rest.
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-slate-600 text-base font-bold">
+                                No {label} candidates in this run.
+                              </p>
+                              <p className="text-slate-400 text-[13px] mt-2 font-medium">
+                                {(sourceFilter === "jobdiva" && sourceStatuses["JobDiva-JobAgent"]?.reason) ||
+                                  (sourceFilter === "talent-search" && sourceStatuses["JobDiva-TalentSearch"]?.reason) ||
+                                  "Pick another source above, or re-run the search."}
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()
+                  ) : candidates.length > 0 ? (
                     <CandidateMatchTable
                       candidates={paginatedCandidates}
                       selectedIds={selectedCandidates}

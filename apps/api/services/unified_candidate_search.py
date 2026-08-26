@@ -1324,51 +1324,115 @@ class UnifiedCandidateSearch:
                         and _batch > _quick_n
                         and not getattr(criteria, "bypass_screening", False)
                     )
-                    if not two_phase:
-                        self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
-                        await _consume_jobagent(await self._search_jobdiva_talent(criteria))
-                        return
-
-                    self._log_stage(
-                        "JobDiva",
-                        f"Running JobDiva JobAgent search (two-phase: quick {_quick_n} "
-                        f"+ full {_batch})...",
-                    )
-
-                    async def _quick_phase():
-                        try:
-                            res = await self._search_jobdiva_talent(
-                                criteria, resume_count_override=_quick_n
-                            )
-                            await _consume_jobagent(res)
-                        except Exception as e:
-                            # Quick phase is purely a first-paint accelerator —
-                            # the full phase covers its ranks, so never let it
-                            # fail the pool.
-                            logger.warning(
-                                f"JobAgent quick-first phase failed (full phase still covers it): {e}"
+                    pool_error = ""
+                    try:
+                        if not two_phase:
+                            self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
+                            await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+                        else:
+                            self._log_stage(
+                                "JobDiva",
+                                f"Running JobDiva JobAgent search (two-phase: quick {_quick_n} "
+                                f"+ full {_batch})...",
                             )
 
-                    async def _full_phase():
-                        await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+                            async def _quick_phase():
+                                try:
+                                    res = await self._search_jobdiva_talent(
+                                        criteria, resume_count_override=_quick_n
+                                    )
+                                    await _consume_jobagent(res)
+                                except Exception as e:
+                                    # Quick phase is purely a first-paint accelerator —
+                                    # the full phase covers its ranks, so never let it
+                                    # fail the pool.
+                                    logger.warning(
+                                        f"JobAgent quick-first phase failed (full phase still covers it): {e}"
+                                    )
 
-                    await asyncio.gather(_quick_phase(), _full_phase())
+                            async def _full_phase():
+                                await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+
+                            await asyncio.gather(_quick_phase(), _full_phase())
+                    except Exception as e:
+                        # Contain the failure: both JobDiva pools share one outer
+                        # gather, so an uncaught JobAgent error would abandon the
+                        # TalentSearch pool mid-flight too.
+                        pool_error = str(e)
+                        logger.error(f"JobAgent pool failed: {e}", exc_info=True)
+                    finally:
+                        # Tell the UI how this pool ended. Every JobAgent failure
+                        # mode returns an empty list with only a log line, so
+                        # without this event a dead pool is indistinguishable
+                        # from a legitimately empty one in the browser.
+                        _matched = len(jobagent_matched_ids)
+                        _criteria_unset = bool(summary.get("jobdiva_criteria_unconfigured"))
+                        if pool_error:
+                            _status, _reason = "failed", f"JobDiva JobAgent search failed: {pool_error}"
+                        elif _matched > 0:
+                            _status, _reason = "ok", ""
+                        elif _criteria_unset:
+                            _status = "empty"
+                            _reason = (
+                                "No Search Agent criteria are configured for this "
+                                "job in JobDiva, so the AI matcher returned nothing."
+                            )
+                        else:
+                            _status = "empty"
+                            _reason = "JobDiva returned no Job Agent matches for this job."
+                        await queue.put({
+                            "type": "source_status",
+                            "data": {
+                                "source": "JobDiva-JobAgent",
+                                "status": _status,
+                                "count": _matched,
+                                "reason": _reason,
+                                "criteria_unconfigured": _criteria_unset,
+                            },
+                        })
 
                 async def _run_talent_search_pool():
                     from core import sourcing_config as _sc_pool
                     self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
-                    talent_res = await self._search_jobdiva_talent_search(criteria)
-                    summary["talent_search_count"] = len(talent_res.get("candidates", []))
-                    _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
-                    await _process_talent_pool(
-                        talent_res,
-                        stage_name="TalentSearch",
-                        source_label="JobDiva-TalentSearch",
-                        cap_label="TalentSearch rank",
-                        # Machine-generated query → only surface strong
-                        # matches; the sub-threshold tail is noise.
-                        min_score=int(_min_score) if _min_score else None,
-                    )
+                    pool_error = ""
+                    raw_count = 0
+                    try:
+                        talent_res = await self._search_jobdiva_talent_search(criteria)
+                        raw_count = len(talent_res.get("candidates", []))
+                        summary["talent_search_count"] = raw_count
+                        _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
+                        await _process_talent_pool(
+                            talent_res,
+                            stage_name="TalentSearch",
+                            source_label="JobDiva-TalentSearch",
+                            cap_label="TalentSearch rank",
+                            # Machine-generated query → only surface strong
+                            # matches; the sub-threshold tail is noise.
+                            min_score=int(_min_score) if _min_score else None,
+                        )
+                    except Exception as e:
+                        # Contain the failure so it can't abandon the JobAgent
+                        # pool sharing the outer gather.
+                        pool_error = str(e)
+                        logger.error(f"TalentSearch pool failed: {e}", exc_info=True)
+                    finally:
+                        if pool_error:
+                            _status = "failed"
+                            _reason = f"JobDiva Talent boolean search failed: {pool_error}"
+                        elif raw_count > 0:
+                            _status, _reason = "ok", ""
+                        else:
+                            _status = "empty"
+                            _reason = "The boolean Talent Search returned no matches for this job."
+                        await queue.put({
+                            "type": "source_status",
+                            "data": {
+                                "source": "JobDiva-TalentSearch",
+                                "status": _status,
+                                "count": raw_count,
+                                "reason": _reason,
+                            },
+                        })
 
                 # Overlap the selected JobDiva talent searches to halve
                 # wall-clock latency when both are on.
