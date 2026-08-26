@@ -1980,7 +1980,7 @@ export default function AdminAnalyticsPage() {
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
               <tr className="font-bold text-slate-500 text-[12.5px]">
-                <th className="py-3 px-6 sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">Job</th>
+                <th className="py-3 px-6 sticky left-0 z-30 shadow-[1px_0_0_0_#e2e8f0]">Job</th>
                 <th className="py-3 px-6">Client</th>
                 <th className="py-3 px-6">Posted (JobDiva)</th>
                 <th className="py-3 px-6">Added (PAIR)</th>
