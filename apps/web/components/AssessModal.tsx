@@ -350,6 +350,7 @@ export function AssessModal({
                             ? new Date(
                                 data.interview.created_at
                               ).toLocaleDateString("en-US", {
+                                timeZone: "America/New_York",
                                 month: "short",
                                 day: "numeric",
                                 year: "numeric",
@@ -551,6 +552,7 @@ export function AssessModal({
                               {new Date(msg.timestamp).toLocaleTimeString(
                                 "en-US",
                                 {
+                                  timeZone: "America/New_York",
                                   hour: "2-digit",
                                   minute: "2-digit",
                                 }
@@ -654,6 +656,7 @@ export function AssessModal({
                                           {new Date(
                                             comm.sent_at
                                           ).toLocaleString("en-US", {
+                                            timeZone: "America/New_York",
                                             month: "short",
                                             day: "numeric",
                                             hour: "2-digit",
