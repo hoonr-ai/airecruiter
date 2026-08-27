@@ -229,8 +229,9 @@ def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
 
     Two sources:
       - monitored_jobs counters (refreshed each auto-sync cycle):
-        complete/pass submissions (local PAIR funnel), pair_external_subs
-        (JobDiva submittals matching the strict PAIR criteria) and
+        complete/pass submissions (local PAIR funnel), pair_submits
+        (recruiter pressed Submit in PAIR), pair_external_subs (JobDiva
+        submittals matching the strict PAIR criteria) and
         jobdiva_total_subs (raw JobDiva submittal count per job).
       - jobdiva_submittals raw records (BI JobSubmittalsDetail mirror) for
         distinct-candidate and last-30-days cuts plus the top-jobs table.
@@ -245,11 +246,12 @@ def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
                 COALESCE(SUM({_int('complete_submissions')}), 0),
                 COALESCE(SUM({_int('pass_submissions')}), 0),
                 COALESCE(SUM({_int('pair_external_subs')}), 0),
+                COALESCE(SUM({_int('pair_submits')}), 0),
                 COALESCE(SUM({_int('jobdiva_total_subs')}), 0)
             FROM monitored_jobs
             WHERE {cond}
         """, params)
-        complete_subs, pass_subs, pair_external, jobdiva_total = cur.fetchone()
+        complete_subs, pass_subs, pair_external, pair_submits, jobdiva_total = cur.fetchone()
 
         sub_cond, sub_params = ("TRUE", []) if scope is None else ("job_id = ANY(%s)", [scope["job_ids"]])
         cur.execute(f"""
@@ -300,6 +302,9 @@ def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
         "complete_submissions": int(complete_subs or 0),
         "pass_submissions": int(pass_subs or 0),
         "pair_external_subs": int(pair_external or 0),
+        # What PAIR recorded (recruiter pressed Submit) vs what JobDiva
+        # confirms above. Both are reported; a gap is a real signal.
+        "pair_submits": int(pair_submits or 0),
         "top_jobs_by_submittals": top_jobs,
     }
 

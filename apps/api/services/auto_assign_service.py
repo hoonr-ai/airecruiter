@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from core.db import get_db_connection
+from services.feedback_metrics import count_feedback_metrics
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
 
@@ -201,8 +202,11 @@ class AutoAssignService:
         return payload
 
     async def _count_external_curate_submittals(
-        self, numeric_job_id, submittals: Optional[List[Dict[str, Any]]] = None
-    ) -> int:
+        self,
+        numeric_job_id,
+        submittals: Optional[List[Dict[str, Any]]] = None,
+        submittals_fetched: bool = False,
+    ) -> Optional[int]:
         """
         Count external curate submittals for a job.
 
@@ -213,17 +217,27 @@ class AutoAssignService:
 
         `submittals` lets refresh_job_performance_metrics share one
         JobSubmittalsDetail fetch between this counter and the raw-record
-        persistence; when None the method fetches them itself.
+        persistence. Pass `submittals_fetched=True` to say "this IS the
+        result of a fetch" — then a None means the fetch failed and we must
+        not silently refetch or treat it as an empty list.
 
-        Returns the count of valid external submittals.
+        Returns the count, or None when the answer is indeterminate because
+        a JobDiva call failed. Callers must leave `pair_external_subs` at
+        its last-known value on None: a transient JobDiva outage previously
+        wrote a 0 over a real count, so the dashboard column flickered to
+        zero whenever the BI API hiccuped. (`jobdiva_total_subs` already had
+        this guard; `pair_external_subs` did not.)
         """
         from services.jobdiva import jobdiva_service, get_field
 
         if not numeric_job_id:
             return 0
 
-        # Fetch contact name from JobDiva BI JobDetail
+        # Fetch contact name from JobDiva BI JobDetail. `contact_known`
+        # separates "JobDiva answered and this job has no contact" (a real
+        # 0 — no submittal can ever match) from "we could not ask" (None).
         contact_name = ""
+        contact_known = False
         try:
             token = await jobdiva_service.authenticate()
             if token:
@@ -233,6 +247,7 @@ class AutoAssignService:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     resp = await client.get(detail_url, params={"jobIds": [int(numeric_job_id)]}, headers=headers)
                     if resp.status_code == 200:
+                        contact_known = True
                         det_data = resp.json()
                         det_list = det_data.get("data", []) if isinstance(det_data, dict) else det_data
                         if det_list:
@@ -241,15 +256,29 @@ class AutoAssignService:
                             last = (d.get("CONTACTLASTNAME") or d.get("CONTACT_LAST_NAME") or "").strip()
                             contact_name = f"{first} {last}".strip().lower()
                             logger.info(f"📋 Job {numeric_job_id} contact: '{contact_name}'")
+                    else:
+                        logger.warning(
+                            f"[ExternalSubs] JobDetail returned {resp.status_code} for job "
+                            f"{numeric_job_id} — leaving pair_external_subs unchanged"
+                        )
         except Exception as e:
             logger.warning(f"[ExternalSubs] Could not fetch contact for job {numeric_job_id}: {e}")
+
+        if not contact_known:
+            return None
 
         if not contact_name:
             logger.debug(f"⏭️ _count_external_curate_submittals: No contact name for job {numeric_job_id} — skipping")
             return 0
 
+        if submittals is None and not submittals_fetched:
+            submittals = await jobdiva_service.get_job_submittals(numeric_job_id, none_on_error=True)
         if submittals is None:
-            submittals = await jobdiva_service.get_job_submittals(numeric_job_id)
+            logger.warning(
+                f"[ExternalSubs] Submittal fetch failed for job {numeric_job_id} — "
+                f"leaving pair_external_subs unchanged"
+            )
+            return None
         if not submittals:
             logger.debug(f"📋 No submittals found for job {numeric_job_id}")
             return 0
@@ -378,14 +407,44 @@ class AutoAssignService:
             f"📥 [AutoAssignService] Persisted {len(rows)} JobDiva submittal(s) for job {resolved_job_id}"
         )
 
-    async def _count_feedback_completed(self, target_job_id: str) -> int:
+    async def _count_feedback_metrics(self, target_job_id: str) -> Optional[Dict[str, int]]:
         """
-        Count candidates with recruiter action (submit/reject with reason)
-        stored locally in sourced_candidates.data.
+        Count the two PAIR feedback metrics for a job, from decisions stored
+        locally on sourced_candidates.data:
+
+          feedback_completed — any recruiter decision (Submit or Reject)
+          pair_submits       — the Submits only; each one is mirrored into
+                               JobDiva as a "PAIR Submit - Externally
+                               Submitted" note
+
+        `pair_submits` is reported next to `pair_external_subs` (the
+        JobDiva-verified count) so the dashboard shows both what PAIR
+        recorded and what JobDiva confirms.
+
+        Returns None when the counts are indeterminate (DB error) so the
+        caller leaves the last-known values alone rather than writing a 0
+        the dashboard renders as "no feedback yet".
+
+        Two bugs lived here and both produced a permanent 0 in the
+        dashboard's FEEDBACK COMPLETED column:
+
+        1. The cursor was a RealDictCursor but the rows were consumed
+           positionally. `ref_id, num_id = mj_row` unpacks a *dict*, so it
+           bound the column NAMES ('jobdiva_id', 'job_id') instead of the
+           job's ids, and `row[0]` on the COUNT row raised KeyError(0)
+           straight into the except below. A plain tuple cursor — same as
+           `_compute_candidate_counters` — is the fix; RealDictCursor
+           bought nothing here.
+        2. The predicate required a non-empty `feedback_reason`. The UI
+           only collects a reason on Reject, so every Submit was dropped.
+           See services/feedback_metrics.py for the shared definition now
+           used by the auto-sync, the write-through on the feedback
+           endpoint, and the startup backfill.
         """
         try:
             with self._get_db_connection() as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '10000ms'")
                     # Get both IDs first
                     cur.execute(
                         "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
@@ -393,26 +452,13 @@ class AutoAssignService:
                     )
                     mj_row = cur.fetchone()
                     if not mj_row:
-                        return 0
-                    ref_id, num_id = mj_row
+                        return {"feedback_completed": 0, "pair_submits": 0}
+                    ref_id, num_id = mj_row[0], mj_row[1]
 
-                    # Count where feedback_type is set and feedback_reason is not null/empty
-                    cur.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM sourced_candidates
-                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND data->>'feedback_type' IS NOT NULL
-                          AND data->>'feedback_reason' IS NOT NULL
-                          AND data->>'feedback_reason' != ''
-                        """,
-                        (ref_id, num_id)
-                    )
-                    row = cur.fetchone()
-                    return row[0] if row else 0
+                    return count_feedback_metrics(cur, ref_id, num_id)
         except Exception as e:
             logger.warning(f"[AutoAssignService] Failed to count feedback for job {target_job_id}: {e}")
-            return 0
+            return None
 
     async def _calculate_time_to_first_pass(self, target_job_id: str) -> float:
         """
@@ -870,13 +916,21 @@ class AutoAssignService:
         """
         Recalculates and persists performance metrics for a specific job:
         - Time to First Pass (minutes)
-        - External Curate Submittals (from JobDiva)
-        - Feedback Completed (local actions)
+        - PAIR External Subs (JobDiva-verified: a submittal to the job's
+          contact whose candidate carries PAIR Candidates=Pass)
+        - PAIR Submits (what PAIR recorded: recruiter pressed Submit)
+        - Feedback Completed (any recruiter decision, Submit or Reject)
         - Candidate counters (sourced/launched/complete_submissions/pass_submissions)
         - JobDiva JobAgent "Criteria Not Assigned" flag (F7) — only written
           when an explicit boolean is passed; left untouched when None so
           ad-hoc callers (e.g. backfills) don't overwrite an existing flag
           with stale data.
+
+        Every metric is written only when this cycle actually determined it.
+        A counter that returns None means "couldn't tell" (JobDiva outage,
+        DB error, no numeric JobDiva id) and its column keeps its
+        last-known value — writing the 0 instead is what made these columns
+        flicker back to zero on a bad cycle.
 
         The candidate counters used to be computed live on every dashboard
         load via `_aggregate_candidate_metrics`. That JOIN + JSONB extraction
@@ -887,20 +941,34 @@ class AutoAssignService:
         try:
             from services.jobdiva import jobdiva_service
             numeric_jd_id = await jobdiva_service._resolve_jobdiva_job_id(str(target_job_id))
-            if not numeric_jd_id:
-                logger.debug(f"[AutoAssignService] Could not resolve numeric ID for {target_job_id} — skipping metrics refresh")
-                return
 
-            # 0. Fetch raw submittals ONCE for this cycle. None means the
-            #    JobDiva call failed — keep the previously stored records and
-            #    total instead of wiping them with an empty snapshot.
-            submittals = await jobdiva_service.get_job_submittals(numeric_jd_id, none_on_error=True)
+            # A job whose numeric JobDiva id can't be resolved (JobDiva down,
+            # or a locally-created job that has no JobDiva counterpart) used
+            # to return here, which threw away the *local* metrics too —
+            # feedback, time-to-first-pass and the candidate counters never
+            # got written for those jobs. Only the JobDiva-derived halves
+            # depend on the numeric id; skip just those.
+            submittals = None
+            ext_subs = None
+            if numeric_jd_id:
+                # 0. Fetch raw submittals ONCE for this cycle. None means the
+                #    JobDiva call failed — keep the previously stored records and
+                #    total instead of wiping them with an empty snapshot.
+                submittals = await jobdiva_service.get_job_submittals(numeric_jd_id, none_on_error=True)
 
-            # 1. Count and persist external curate submittals (reuses the
-            #    fetched records; falls back to its own fetch on None)
-            ext_subs = await self._count_external_curate_submittals(numeric_jd_id, submittals=submittals)
-            # 2. Count and persist feedback completed (local actions)
-            feedback_count = await self._count_feedback_completed(target_job_id)
+                # 1. Count and persist external curate submittals (reuses the
+                #    fetched records; None = indeterminate, leave column alone)
+                ext_subs = await self._count_external_curate_submittals(
+                    numeric_jd_id, submittals=submittals, submittals_fetched=True
+                )
+            else:
+                logger.debug(
+                    f"[AutoAssignService] Could not resolve numeric ID for {target_job_id} — "
+                    f"refreshing local metrics only"
+                )
+            # 2. Count and persist the PAIR feedback counters (local actions):
+            #    feedback_completed (Submit+Reject) and pair_submits (Submit).
+            feedback_metrics = await self._count_feedback_metrics(target_job_id)
             # 3. Calculate time to first PASS candidate (in minutes)
             time_to_pass = await self._calculate_time_to_first_pass(target_job_id)
             # 4. Compute candidate counters via the bounded aggregate.
@@ -941,8 +1009,6 @@ class AutoAssignService:
                         return
                     resolved_job_id, resolved_jobdiva_ref = row[0], row[1]
                     set_clauses = [
-                        "pair_external_subs = %s",
-                        "feedback_completed = %s",
                         "time_to_first_pass = %s",
                         "candidates_sourced = %s",
                         "candidates_launched = %s",
@@ -950,14 +1016,24 @@ class AutoAssignService:
                         "pass_submissions = %s",
                     ]
                     params: List[Any] = [
-                        ext_subs,
-                        feedback_count,
                         time_to_pass,
                         counters["candidates_sourced"],
                         counters["candidates_launched"],
                         counters["complete_submissions"],
                         counters["pass_submissions"],
                     ]
+                    # Same guard the JobDiva total already had: a None from
+                    # either counter means "couldn't determine", not "zero".
+                    # Writing the 0 anyway is what made PAIR EXTERNAL SUBS /
+                    # FEEDBACK COMPLETED drop back to 0 on a bad cycle.
+                    if ext_subs is not None:
+                        set_clauses.append("pair_external_subs = %s")
+                        params.append(ext_subs)
+                    if feedback_metrics is not None:
+                        set_clauses.append("feedback_completed = %s")
+                        params.append(feedback_metrics["feedback_completed"])
+                        set_clauses.append("pair_submits = %s")
+                        params.append(feedback_metrics["pair_submits"])
                     # Only overwrite jobdiva_total_subs when this cycle got a
                     # real snapshot — a failed fetch (None) keeps the
                     # last-known total instead of zeroing the dashboard.
@@ -979,6 +1055,16 @@ class AutoAssignService:
                     )
                     conn.commit()
 
+            # Drop this worker's cached /jobs/monitored payload so the next
+            # dashboard load reflects the numbers we just wrote instead of
+            # waiting out the 30s TTL. Late import: routers.jobs imports
+            # services, not the other way round.
+            try:
+                from routers.jobs import invalidate_monitored_jobs_cache
+                invalidate_monitored_jobs_cache()
+            except Exception:  # noqa: BLE001
+                pass
+
             # 5. Mirror the raw submittal records for date-bucketed analytics
             #    (admin / team-lead dashboards). Full per-job replace; skipped
             #    when the fetch failed so stored history survives outages.
@@ -996,7 +1082,9 @@ class AutoAssignService:
                     )
             logger.info(
                 f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: "
-                f"pass_time={time_to_pass}min ext_subs={ext_subs} feedback={feedback_count} "
+                f"pass_time={time_to_pass}min ext_subs={ext_subs} "
+                f"feedback={(feedback_metrics or {}).get('feedback_completed')} "
+                f"pair_submits={(feedback_metrics or {}).get('pair_submits')} "
                 f"sourced={counters['candidates_sourced']} pass={counters['pass_submissions']} "
                 f"jd_total_subs={'n/a (fetch failed)' if submittals is None else len(submittals)} "
                 f"jd_unconfigured={jobdiva_criteria_unconfigured}"
