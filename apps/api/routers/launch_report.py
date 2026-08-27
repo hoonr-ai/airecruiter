@@ -31,11 +31,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.auth import UserIdentity, get_current_user
-from routers._helpers import get_db_connection
-
-# Single source of truth for these — admin_analytics already had to solve the
-# same monitored_jobs type-inconsistency and team-scoping problems.
-from routers.admin_analytics import (
+from routers._helpers import (
+    get_db_connection,
     _load_team_scope,
     _mj_filter,
     _parse_posted_date,
@@ -185,8 +182,12 @@ def _fetch_jobs_launched_on(conn, report_date: datetime.date, scope: Optional[Di
                 COUNT(DISTINCT NULLIF(a.interview_id, ''))    AS total_launched
             FROM monitored_jobs mj
             JOIN engage_interview_audit a
-              ON a.jobdiva_id = mj.jobdiva_id
-              OR a.jobdiva_id = mj.job_id::text
+              -- monitor_job_locally writes `data.get("jobdiva_id") or ""`, so a
+              -- job with no JobDiva reference stores '' rather than NULL. Without
+              -- this guard an audit row that also has '' matches EVERY such job at
+              -- once, silently pooling their launch counts together.
+              ON NULLIF(a.jobdiva_id, '') IS NOT NULL
+             AND (a.jobdiva_id = NULLIF(mj.jobdiva_id, '') OR a.jobdiva_id = mj.job_id::text)
             WHERE {mj_cond}
             GROUP BY mj.job_id
         )
@@ -450,9 +451,16 @@ def _build_row(
 
     buckets = outreach["buckets"]
     # Percentage = (Completed + Partial Complete) / Total Launched * 100.
+    #
     # Undefined rather than 0 when nothing launched, and undefined when the
     # outreach fan-out resolved nothing — a 0% that only means "pair-bot did
     # not answer" would read as a real result.
+    #
+    # Note the asymmetry when the fan-out only PARTIALLY resolves: the
+    # numerator counts just the interviews pair-bot answered for, while the
+    # denominator stays the full launched count, so the figure reads low. That
+    # is deliberate — inferring the unanswered ones would invent data — and the
+    # row carries outreach_detail_resolved/_expected so the UI can mark it.
     resolved = sum(buckets.values())
     percentage = (
         round((buckets["completed"] + buckets["partial_complete"]) / total_launched * 100, 1)
@@ -581,8 +589,10 @@ async def get_launch_report(
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        # Full detail to the server log; the client gets a generic message so a
+        # DB error string never reaches the browser.
         logger.error(f"LAUNCH-REPORT: failed to load {report_date}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to build launch report: {e}")
+        raise HTTPException(status_code=500, detail="Failed to build the launch report.")
 
     # Fan out over every launched interview across every job in one pass, so
     # the concurrency cap applies to the whole report rather than per job.

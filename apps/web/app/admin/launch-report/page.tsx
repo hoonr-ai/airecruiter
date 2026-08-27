@@ -253,31 +253,49 @@ export default function LaunchReportPage() {
   const { isAdmin, isTeamLead, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
 
-  const [date, setDate] = useState<string>(yesterdayEastern);
+  // Computed once per mount: the report is historical, so re-deriving "today"
+  // mid-session would let the max silently drift past midnight.
+  const [maxDate] = useState<string>(yesterdayEastern);
+  const [date, setDate] = useState<string>(maxDate);
   const [data, setData] = useState<LaunchReportData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Bumped by Refresh to re-run the effect for an unchanged date.
+  const [reloadToken, setReloadToken] = useState(0);
 
-  const fetchReport = useCallback(async (target: string) => {
+  // The spinner is turned ON by whatever triggers a load — initial state, a
+  // date change, or Refresh — so this effect only ever updates state after an
+  // await. Setting it synchronously here would cascade an extra render.
+  const requestReload = useCallback(() => {
     setIsLoading(true);
     setError(null);
-    try {
-      const res = await api.launchReport.get(target);
-      setData(res?.data ?? null);
-    } catch (err) {
-      console.error("Error loading launch report:", err);
-      setError(err instanceof Error ? err.message : "Failed to load the launch report.");
-      setData(null);
-    } finally {
-      setIsLoading(false);
-    }
+    setReloadToken((token) => token + 1);
   }, []);
 
   useEffect(() => {
-    if (!isRoleLoading && canView) {
-      fetchReport(date);
-    }
-  }, [isRoleLoading, canView, date, fetchReport]);
+    if (isRoleLoading || !canView) return;
+    // Guards against a slow response for an earlier date landing after a
+    // newer one and overwriting it.
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.launchReport.get(date);
+        if (cancelled) return;
+        setData(res?.data ?? null);
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Error loading launch report:", err);
+        setError(err instanceof Error ? err.message : "Failed to load the launch report.");
+        setData(null);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isRoleLoading, canView, date, reloadToken]);
 
   const rows = useMemo(() => data?.jobs ?? [], [data]);
 
@@ -345,14 +363,22 @@ export default function LaunchReportPage() {
               id="report-date"
               type="date"
               value={date}
-              max={yesterdayEastern()}
-              onChange={(e) => e.target.value && setDate(e.target.value)}
+              max={maxDate}
+              required
+              // Clearing the field yields "" — fall back to the default date
+              // rather than ignoring the event, so the input and state never
+              // disagree about what is displayed.
+              onChange={(e) => {
+                setIsLoading(true);
+                setError(null);
+                setDate(e.target.value || maxDate);
+              }}
               className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
             />
           </label>
           <Button
             variant="outline"
-            onClick={() => fetchReport(date)}
+            onClick={requestReload}
             disabled={isLoading}
             className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
           >
