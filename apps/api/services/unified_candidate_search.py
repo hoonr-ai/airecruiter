@@ -1408,36 +1408,43 @@ class UnifiedCandidateSearch:
                         return 0
 
                     from core import sourcing_config as _sc_talent
-                    async for event in self._enrich_filtered_jobdiva_progressive(
+                    enrich_gen = self._enrich_filtered_jobdiva_progressive(
                         fresh_talent, criteria, skip_llm=high_level_scoring
-                    ):
-                        ev_type = event.get("type")
-                        if ev_type == "candidate_detail":
-                            # Sample mode paints no skeleton rows, so there is
-                            # nothing client-side for these patches to target.
-                            if not sample_mode:
-                                await queue.put(event)
-                            continue
-                        if ev_type == "candidate_enriched":
-                            cand = event["candidate"]
-                            assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                            if _sc_talent.JOBDIVA_BYPASS_PASS_GATE:
-                                assessment["passes"] = True
-                            elif not assessment["passes"]:
-                                self._log_stage(
-                                    stage_name,
-                                    f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
-                                )
-                            if await emit_jobdiva_scored(
-                                cand, assessment, "qualified_talent",
-                                min_score=min_score, as_full_row=sample_mode
-                            ):
-                                emitted += 1
-                                if sample_mode and emitted >= sample_cap:
-                                    # Cap reached — closing the generator
-                                    # cancels the pool's in-flight enrichment
-                                    # tasks (its finally block handles this).
-                                    break
+                    )
+                    try:
+                        async for event in enrich_gen:
+                            ev_type = event.get("type")
+                            if ev_type == "candidate_detail":
+                                # Sample mode paints no skeleton rows, so there is
+                                # nothing client-side for these patches to target.
+                                if not sample_mode:
+                                    await queue.put(event)
+                                continue
+                            if ev_type == "candidate_enriched":
+                                cand = event["candidate"]
+                                assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                                if _sc_talent.JOBDIVA_BYPASS_PASS_GATE:
+                                    assessment["passes"] = True
+                                elif not assessment["passes"]:
+                                    self._log_stage(
+                                        stage_name,
+                                        f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                                    )
+                                if await emit_jobdiva_scored(
+                                    cand, assessment, "qualified_talent",
+                                    min_score=min_score, as_full_row=sample_mode
+                                ):
+                                    emitted += 1
+                                    if sample_mode and emitted >= sample_cap:
+                                        # Cap reached — stop enriching.
+                                        break
+                    finally:
+                        # Deterministically close the generator: a bare break
+                        # would leave its in-flight enrichment tasks (resume
+                        # fetches / LLM calls) running until GC finalization.
+                        # aclose() raises GeneratorExit inside it, whose finally
+                        # cancels those tasks immediately.
+                        await enrich_gen.aclose()
                     return emitted
 
                 async def _run_jobagent_pool():
