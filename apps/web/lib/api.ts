@@ -243,6 +243,18 @@ export const api = {
       req<any>(`/api/v1/admin/analytics${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`),
     linkedinAccounts: () => req<any>(`/api/v1/admin/linkedin-accounts`),
   },
+  launchReport: {
+    // `date` is a calendar date in Eastern time (YYYY-MM-DD); omitting it asks
+    // the backend for yesterday. Team leads are auto-scoped server-side, so
+    // teamId is only meaningful for admins.
+    get: (date?: string | null, teamId?: string | null) => {
+      const qs = new URLSearchParams();
+      if (date) qs.set("date", date);
+      if (teamId) qs.set("team_id", teamId);
+      const suffix = qs.toString();
+      return req<any>(`/api/v1/launch-report${suffix ? `?${suffix}` : ""}`);
+    },
+  },
   noContact: {
     // Read-only: the list is code-managed (core/sourcing_config.py); admins
     // can view it but edits happen through code for now.
