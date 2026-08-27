@@ -1612,7 +1612,15 @@ async def save_candidates(
     Saves a batch of candidates to the sourced_candidates table.
     Always stores the alphanumeric jobdiva_id (e.g. '26-05172'), never the numeric job_id PK.
     """
-    _verify_job_access_by_id(str(request.jobdiva_id), user)
+    # allow_not_found=True because `jobdiva_id` here is not always a real
+    # monitored job: components/sourced-candidates-view.tsx posts the
+    # sentinel "GENERAL_SOURCING" to park a candidate in the master pool
+    # with no job attached. Without the flag `_verify_job_access_by_id`
+    # 403s anything it can't find in monitored_jobs (see save_job_draft,
+    # which needs the same escape hatch for a not-yet-saved job).
+    # Authentication above is what closes the actual hole; for a job that
+    # *does* exist the membership check still applies in full.
+    _verify_job_access_by_id(str(request.jobdiva_id), user, allow_not_found=True)
     try:
         print(f"🔄 Saving {len(request.candidates)} candidates for job: {request.jobdiva_id}")
 

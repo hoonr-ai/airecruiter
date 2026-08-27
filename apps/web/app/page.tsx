@@ -201,6 +201,18 @@ export default function DashboardPage() {
       }
       const data = await response.json();
 
+      // A silent refresh must never blank a table the user is reading. The
+      // backend answers 200 with `source: "error"` and an empty job map
+      // when its DB/cache is degraded; on a foreground load that
+      // (correctly) shows the "couldn't load" banner, but applying it to a
+      // background tick would wipe a populated list under the user for a
+      // condition that usually clears on the next poll. Keep what we have
+      // and just mark it stale.
+      if (background && data?.source === "error") {
+        setIsStale(true);
+        return;
+      }
+
       // Sort explicitly by createdAt DESC after mapping — do not rely on
       // Object.entries order, since JS engines iterate numeric-string keys
       // in ascending numeric order (not insertion order), which would break
