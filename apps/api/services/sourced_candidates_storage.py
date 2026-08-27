@@ -1664,70 +1664,9 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
     except Exception as e:
         print(f"Error saving candidate_enhanced_info for {candidate_id}: {e}")
 
-def save_sourced_candidate(candidate: Dict[str, Any], enhanced_info: Dict[str, Any]):
-    """Update sourced_candidates table with enriched LLM-only candidate info."""
-    try:
-        engine = _get_engine()
-        with engine.connect() as conn:
-            # Source-native location wins at PERSIST time too — this row is
-            # what Step-5 reloads read, so an LLM-first merge here would
-            # re-poison the display no matter what the live stream showed.
-            # Both sides run through the work-arrangement sanitizer.
-            clean_location = (
-                sanitize_candidate_location(candidate.get("location"))
-                or sanitize_candidate_location(enhanced_info.get("current_location"))
-            )
-            sourced_payload = {
-                "candidate_name": enhanced_info.get("candidate_name") or candidate.get("name"),
-                "email": enhanced_info.get("email") or candidate.get("email"),
-                "phone": enhanced_info.get("phone") or candidate.get("phone"),
-                "job_title": enhanced_info.get("job_title") or candidate.get("title") or candidate.get("headline"),
-                "years_of_experience": enhanced_info.get("years_of_experience"),
-                "current_location": clean_location,
-                # Structured geo fields so reloads can rebuild a display
-                # string even when `location` is blank.
-                "city": candidate.get("city") or "",
-                "state": candidate.get("state") or "",
-                "zipcode": candidate.get("zipcode") or "",
-                "country": candidate.get("country") or "",
-                "skills": enhanced_info.get("structured_skills", []),
-                "company_experience": enhanced_info.get("company_experience", []),
-                "candidate_education": enhanced_info.get("candidate_education", []),
-                "candidate_certification": enhanced_info.get("candidate_certification", []),
-                "urls": enhanced_info.get("urls", {}),
-                "resume_text": candidate.get("resume_text", ""),
-                "resume_extraction_status": enhanced_info.get("resume_extraction_status", "pending"),
-                "source": enhanced_info.get("source", candidate.get("source", "JobDiva"))
-            }
-
-            conn.execute(text("""
-                UPDATE sourced_candidates SET
-                    name = COALESCE(:name, name),
-                    email = COALESCE(:email, email),
-                    phone = COALESCE(:phone, phone),
-                    headline = COALESCE(:headline, headline),
-                    location = COALESCE(:location, location),
-                    resume_text = COALESCE(:resume_text, resume_text),
-                    data = :data,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE jobdiva_id = :jobdiva_id AND candidate_id = :candidate_id AND source = :source
-            """), {
-                "name": sourced_payload["candidate_name"],
-                "email": sourced_payload["email"],
-                "phone": sourced_payload["phone"],
-                "headline": sourced_payload["job_title"],
-                # Bind None when we have no clean value so COALESCE keeps the
-                # existing column (e.g. a hydrated city/state) instead of
-                # blanking it with an empty string.
-                "location": sourced_payload["current_location"] or None,
-                "resume_text": sourced_payload["resume_text"],
-                "data": json.dumps(sourced_payload),
-                "jobdiva_id": candidate.get("jobdiva_id"),
-                "candidate_id": candidate["candidate_id"],
-                "source": candidate.get("source", "JobDiva")
-            })
-            conn.commit()
-    except Exception as e:
-        print(f"Error updating sourced_candidates for {candidate['candidate_id']}: {e}")
-
-# Implement save_candidate_enhanced_info and save_sourced_candidate as needed
+# NOTE: save_sourced_candidate() was removed here. It was dead code (zero
+# callers) that looked like the missing back-fill of enhanced-info into
+# sourced_candidates.data, but did `data = :data` — a full replace that
+# would have clobbered engage_status. The launch gate now hydrates from
+# candidate_enhanced_info directly instead (routers/engagement.py
+# `_fetch_stored_employer_signals`).

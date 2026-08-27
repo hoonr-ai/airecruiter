@@ -42,7 +42,15 @@ _LEGAL_NOISE_TOKENS = {
 }
 
 # Placeholder client names that must never drive an exclusion.
-_PLACEHOLDER_CLIENTS = {"external", "unknown", "n/a", "na", "none", "internal"}
+# "unknown customer" is the JobDiva sync's own fallback when a req carries no
+# customer (services/jobdiva.py: `str(raw_customer or "").title() or "Unknown
+# Customer"`). Without it here the normalized form is treated as a real client,
+# so a candidate whose company is literally "Unknown" token-matches it and gets
+# excluded as "Employed by Hiring Client".
+_PLACEHOLDER_CLIENTS = {
+    "external", "unknown", "n/a", "na", "none", "internal",
+    "unknown customer", "unknown client", "unknown company",
+}
 
 
 def normalize_company_name(name: str) -> str:

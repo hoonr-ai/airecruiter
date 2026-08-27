@@ -197,6 +197,24 @@ class AutoAssignService:
             "enhanced_info": cand.get("enhanced_info") or existing_data.get("enhanced_info"),
             "auto_assigned": True,
         })
+
+        # Contact-gate inputs. JobApplicantsDetail returns all of these
+        # (services/jobdiva.py `_get_all_job_applicants`), but they used to be
+        # dropped here — and `data` is the ONLY thing the launch gate reads
+        # (routers/engagement.py `is_candidate_excluded_from_pair`). With them
+        # missing, every exclusion reason it checks was inert on the auto-launch
+        # path: Pyramid current employees, Offer Extended/Accepted, and the
+        # hiring-client check alike. `available` is meaningfully False, so these
+        # are copied with an explicit None test rather than an `or` chain, which
+        # would silently discard it.
+        for field in ("available", "availability_status", "employee_status",
+                      "status", "qualifications", "title", "headline"):
+            value = cand.get(field)
+            if value is None or value == "":
+                value = existing_data.get(field)
+            if value is not None:
+                payload[field] = value
+
         if candidate_id:
             payload["jobdiva_candidate_id"] = candidate_id
         return payload
