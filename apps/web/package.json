@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test lib/activityTimeline.test.ts"
+    "test": "node --test lib/*.test.ts"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.26.3",

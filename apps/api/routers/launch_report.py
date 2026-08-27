@@ -122,6 +122,11 @@ def _parse_monitored_jobs_timestamp(raw: Optional[str]) -> Optional[datetime.dat
     try:
         naive = datetime.datetime.fromisoformat(text[:19].replace(" ", "T"))
     except ValueError:
+        # Logged for the same reason _bucket_status logs unknown statuses: a
+        # shape this parser does not know would otherwise surface only as a
+        # quietly blank PAIR Published / Turn Around Time cell, indistinguishable
+        # from a legitimately missing value.
+        logger.warning(f"LAUNCH-REPORT: unparseable monitored_jobs timestamp {raw!r} — reported as blank")
         return None
     return naive.replace(tzinfo=tz)
 
@@ -523,7 +528,8 @@ def _build_row(
         "recruiter_emails": _parse_recruiter_emails(job.get("recruiter_emails")),
         "job_title": (job.get("enhanced_title") or job.get("title") or "").strip(),
         "customer_name": (job.get("customer_name") or "").strip(),
-        "version": int(job.get("version") or 1),
+        # Only a missing version defaults to 1 — `or 1` would rewrite a real 0.
+        "version": 1 if job.get("version") is None else int(job["version"]),
 
         # JobDiva only ever gives a date here, never a time of day.
         "jobdiva_published_date": jobdiva_published.isoformat() if jobdiva_published else None,

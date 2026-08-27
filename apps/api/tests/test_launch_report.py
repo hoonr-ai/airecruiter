@@ -468,3 +468,100 @@ def test_ist_and_now_written_rows_both_land_in_eastern():
     now = lr._build_row({**_job(0), "job_created_at_text": "2026-08-27 18:00:00"}, [], [], {})
     assert ist["pair_published_at"] == "2026-08-20T08:00:00-04:00"   # 17:30 IST -> 08:00 EDT
     assert now["pair_published_at"] == "2026-08-27T14:00:00-04:00"   # 18:00 UTC -> 14:00 EDT
+
+
+# ---------------------------------------------------------------------------
+# Integration: the query really is executed, not just string-matched
+# ---------------------------------------------------------------------------
+# The substring assertions above pin the SQL's shape; these run it against a
+# real Postgres so a change that keeps the same GROUP BY text but breaks the
+# actual grouping or join is still caught. Everything happens in TEMP tables
+# inside a transaction that is always rolled back, so no real schema is
+# touched. Skipped when no Postgres is reachable (set LAUNCH_REPORT_TEST_DSN
+# to point at one).
+import os
+
+import pytest
+
+psycopg2 = pytest.importorskip("psycopg2")
+
+_TEST_DSN = os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
+
+_FIXTURE_SQL = """
+CREATE TEMP TABLE monitored_jobs (
+  job_id TEXT, jobdiva_id TEXT, title TEXT, enhanced_title TEXT, customer_name TEXT,
+  recruiter_emails TEXT, posted_date TEXT, time_to_first_pass DOUBLE PRECISION,
+  parent_job_id TEXT, version INT, created_at TEXT) ON COMMIT DROP;
+CREATE TEMP TABLE engage_interview_audit (
+  candidate_id VARCHAR(255), jobdiva_id VARCHAR(255), interview_id VARCHAR(255),
+  created_at TIMESTAMP) ON COMMIT DROP;
+
+INSERT INTO monitored_jobs VALUES
+  -- v1 arrived via JobDiva import (readable_ist_now string)
+  ('26-06182','26-06182','Data Engineer',NULL,'Acme','["r@x.com"]','Aug 20, 2026',NULL,NULL,1,
+   '2026-08-20 17:30:00 IST'),
+  -- v2 cloned by Edit Job Setup (NOW(), plain timestamp)
+  ('26-06182-v2','26-06182-v2','Data Engineer',NULL,'Acme','["r@x.com"]','Aug 20, 2026',NULL,
+   '26-06182',2,'2026-08-27 18:00:00'),
+  -- two referenceless jobs: jobdiva_id is '' rather than NULL
+  ('60','','Ghost A',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00'),
+  ('61','','Ghost B',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00');
+
+INSERT INTO engage_interview_audit VALUES
+  ('c1','26-06182',   '901','2026-08-28 01:00:00'),   -- keyed by ref
+  ('c2','26-06182',   '902','2026-08-28 01:05:00'),
+  ('c3','26-06182-v2','903','2026-08-28 02:30:00'),   -- v2's own launch
+  ('g1','60',         '960','2026-08-28 02:10:00'),   -- keyed by job_id
+  ('g2','',           '961','2026-08-28 02:20:00');   -- blank key: matches nothing
+"""
+
+
+@pytest.fixture()
+def pg_conn():
+    try:
+        conn = psycopg2.connect(_TEST_DSN, connect_timeout=3)
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"no Postgres reachable at {_TEST_DSN!r}: {exc}")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_FIXTURE_SQL)
+        yield conn
+    finally:
+        conn.rollback()  # ON COMMIT DROP never fires; rollback discards everything
+        conn.close()
+
+
+def test_query_returns_one_row_per_job_version(pg_conn):
+    """v1 and v2 must each get their own row with their own launch count."""
+    jobs = lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)
+    by_id = {j["job_id"]: j for j in jobs}
+    assert by_id["26-06182"]["total_launched"] == 2
+    assert by_id["26-06182-v2"]["total_launched"] == 1
+
+
+def test_query_does_not_pool_referenceless_jobs(pg_conn):
+    """An audit row with jobdiva_id='' must attach to no job at all.
+
+    Without the NULLIF guard it would join every job whose jobdiva_id is also
+    '', silently merging Ghost A and Ghost B.
+    """
+    jobs = lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)
+    by_id = {j["job_id"]: j for j in jobs}
+    assert by_id["60"]["total_launched"] == 1   # only its own job_id-keyed row
+    assert "61" not in by_id                    # no launches, so absent entirely
+
+
+def test_query_filters_on_the_eastern_calendar_day(pg_conn):
+    """Every launch here is on Aug 28 in UTC but Aug 27 in Eastern."""
+    assert lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)
+    assert lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 28), None) == []
+
+
+def test_query_rows_render_both_timestamp_shapes_in_eastern(pg_conn):
+    jobs = lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)
+    by_id = {j["job_id"]: j for j in jobs}
+    v1 = lr._build_row(by_id["26-06182"], [], [], {})
+    v2 = lr._build_row(by_id["26-06182-v2"], [], [], {})
+    assert v1["pair_published_at"] == "2026-08-20T08:00:00-04:00"   # IST string
+    assert v2["pair_published_at"] == "2026-08-27T14:00:00-04:00"   # NOW() timestamp
+    assert v2["version"] == 2

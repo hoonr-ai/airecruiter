@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
+import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -255,31 +256,24 @@ const COLUMN_GROUPS: ColumnGroup[] = [
 
 const FLAT_COLUMNS = COLUMN_GROUPS.flatMap((g) => g.columns);
 
-/** Wrap a value for CSV only when it would otherwise break the row. */
-function escapeCSV(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
 /**
  * Build the report CSV.
  *
- * Columns come from COLUMN_GROUPS, so the export always matches what is on
- * screen. The leading Job/JobDiva ID columns mirror the pinned first cell,
- * which is rendered separately from the column list.
+ * Columns come from COLUMN_GROUPS so the export always matches what is on
+ * screen. The leading Job/ID/Version cells mirror the pinned first column,
+ * which is rendered outside the column list. Escaping (including formula-
+ * injection defence) lives in lib/csv.
  */
 function buildCsv(rows: LaunchReportRow[]): string {
-  const headers = ["Job Title", "JobDiva ID", "Version", ...FLAT_COLUMNS.map((c) => c.label)];
-  const lines = rows.map((row) =>
-    [
+  return toCsv(
+    ["Job Title", "JobDiva ID", "Version", ...FLAT_COLUMNS.map((c) => c.label)],
+    rows.map((row) => [
       row.job_title || "Untitled job",
       row.jobdiva_id || row.job_id,
       `v${row.version}`,
       ...FLAT_COLUMNS.map((col) => col.text(row)),
-    ]
-      .map((cell) => escapeCSV(String(cell ?? "")))
-      .join(","),
+    ]),
   );
-  return [headers.map(escapeCSV).join(","), ...lines].join("\n");
 }
 
 function StatTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
@@ -317,9 +311,7 @@ export default function LaunchReportPage() {
 
   const downloadCsv = useCallback(() => {
     if (!data?.jobs.length) return;
-    // BOM so Excel reads the UTF-8 en-dashes and "—" placeholders correctly
-    // instead of mojibake.
-    const blob = new Blob(["﻿", buildCsv(data.jobs)], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([UTF8_BOM, buildCsv(data.jobs)], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
