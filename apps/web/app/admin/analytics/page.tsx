@@ -32,7 +32,7 @@ import { api } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-
+import { normalizeToUtcDate } from "@/lib/date";
 interface AnalyticsOverview {
   total_monitored_jobs: number;
   total_archived_jobs: number;
@@ -179,10 +179,9 @@ const formatDate = (iso: string | null | undefined): string => {
 
 /** ISO date/datetime → "Feb 24, 2026, 10:30 AM EST"; null/invalid → "—". */
 const formatDateTime = (iso: string | null | undefined): string => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-US", {
+  const date = normalizeToUtcDate(iso);
+  if (!date) return "—";
+  return date.toLocaleString("en-US", {
     timeZone: "America/New_York",
     month: "short",
     day: "numeric",
@@ -732,8 +731,8 @@ export default function AdminAnalyticsPage() {
           escapeCsvField(job.jobdiva_id),
           escapeCsvField(job.customer_name),
           escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
-          escapeCsvField(job.added_to_curate_at),
-          escapeCsvField(job.curate_launched_at),
+          escapeCsvField(formatDateTime(job.added_to_curate_at)),
+          escapeCsvField(formatDateTime(job.curate_launched_at)),
           // Mirror the UI's lag chip: negative = unreliable posted date
           escapeCsvField(
             job.posted_to_launch_days === null ||
@@ -762,8 +761,8 @@ export default function AdminAnalyticsPage() {
                 escapeCsvField(acc.account_name || "Unnamed account"),
                 escapeCsvField(acc.account_id),
                 acc.use_count,
-                escapeCsvField(acc.last_used_at),
-                escapeCsvField(acc.cooldown_until),
+                escapeCsvField(formatDateTime(acc.last_used_at)),
+                escapeCsvField(formatDateTime(acc.cooldown_until)),
                 escapeCsvField(acc.last_error),
               ].join(","),
             ),
