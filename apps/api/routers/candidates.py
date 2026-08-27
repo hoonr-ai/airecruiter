@@ -2709,6 +2709,16 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user
     Bulk update candidate phone and email to avoid Nginx rate limits (503)
     when updating multiple candidates at once.
     """
+    # Per-item job scope, matching the singular phone/email routes. Checked
+    # for every item up front so a partially-authorised batch is rejected
+    # whole rather than applying the items the caller happened to own.
+    # `jobdiva_id` is optional on the item model, so as with the singular
+    # routes this can only narrow the check — authentication is the guard
+    # that actually closes the hole.
+    for item in request.updates:
+        if item.jobdiva_id:
+            _verify_job_access_by_id(str(item.jobdiva_id), user)
+
     try:
         conn = get_db_connection()
         updated_total = 0
@@ -3004,6 +3014,56 @@ async def analyze_candidates(request: CandidateAnalysisRequest, user: UserIdenti
 # ---------------------------------------------------------------------------
 # Candidate Evaluation Report
 # ---------------------------------------------------------------------------
+def _verify_report_access_by_candidate(candidate_id: str, user: UserIdentity) -> None:
+    """Authorize an evaluation report when the caller gave no `job_id`.
+
+    `job_id` is an optional query param, so a `if job_id:` guard alone
+    would be trivially skippable: omit it and any authenticated recruiter
+    could pull any candidate's resume, contact details and full interview
+    transcript. Instead, resolve the jobs this candidate actually sits on
+    and require access to at least one of them — which is the same
+    authority the report itself is scoped by.
+
+    Fails closed: if no job can be resolved, there is nothing to authorize
+    against and the report would be empty anyway (the handler's own
+    fallback reads `sourced_candidates` for this candidate).
+    """
+    if user.is_admin:
+        return
+
+    refs: List[str] = []
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5000ms'")
+                # Capped: this only runs on the no-job_id path (the UI always
+                # sends job_id), and each ref below costs one access lookup.
+                cur.execute(
+                    "SELECT DISTINCT jobdiva_id FROM sourced_candidates "
+                    "WHERE candidate_id = %s AND jobdiva_id IS NOT NULL LIMIT 10",
+                    (str(candidate_id),),
+                )
+                refs = [str(r[0]) for r in cur.fetchall() if r and r[0]]
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"evaluation-report access resolve failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    for ref in refs:
+        try:
+            _verify_job_access_by_id(ref, user)
+            return
+        except HTTPException:
+            continue
+
+    raise HTTPException(
+        status_code=403,
+        detail="Access denied. You are not assigned to any job for this candidate.",
+    )
+
+
 @router.get("/candidates/evaluation-report")
 @router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
@@ -3034,6 +3094,11 @@ async def get_candidate_evaluation_report(
         raise HTTPException(status_code=400, detail="candidate_id is required")
     if job_id:
         _verify_job_access_by_id(str(job_id), user)
+    else:
+        # No job named — do NOT fall through unguarded. `job_id` is optional,
+        # so a bare `if job_id:` guard would be skippable by simply omitting
+        # it. Authorize against the jobs this candidate is on instead.
+        _verify_report_access_by_candidate(candidate_id, user)
     """
     Aggregate a full Candidate Evaluation Report from multiple data sources:
       - sourced_candidates      : basic profile, resume, match scores

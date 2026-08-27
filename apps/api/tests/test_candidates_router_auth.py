@@ -199,3 +199,69 @@ def test_job_scoped_routes_check_job_access(func):
         f"{func} is job-scoped, so it needs both get_current_user and "
         "_verify_job_access_by_id"
     )
+
+
+# --------------------------------------------------------------------------
+# Optional-parameter guards must not be skippable
+# --------------------------------------------------------------------------
+# A guard written as `if job_id: _verify_job_access_by_id(...)` on an
+# *optional* parameter is bypassed by simply omitting the parameter. Reported
+# on this PR for /candidates/evaluation-report, where omitting `job_id` would
+# have returned any candidate's resume, contacts and interview transcript to
+# any authenticated recruiter.
+def test_evaluation_report_has_no_unguarded_branch():
+    """The no-job_id path must authorize, not fall through."""
+    route = _by_func("get_candidate_evaluation_report")
+    src = ROUTER_PATH.read_text()
+    tree = ast.parse(src)
+    body = next(
+        ast.get_source_segment(src, n)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "get_candidate_evaluation_report"
+    )
+    assert route["authenticated"]
+    assert "_verify_job_access_by_id" in body, "job_id path must check job access"
+    assert "_verify_report_access_by_candidate" in body, (
+        "the no-job_id path must authorize against the candidate's jobs — an "
+        "`if job_id:` guard alone is skippable by omitting job_id"
+    )
+
+
+def test_report_access_fallback_fails_closed():
+    """Resolving zero jobs must deny, not allow."""
+    src = ROUTER_PATH.read_text()
+    tree = ast.parse(src)
+    body = next(
+        ast.get_source_segment(src, n)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "_verify_report_access_by_candidate"
+    )
+    # The function must end by raising, so an empty ref list denies access.
+    assert body.rstrip().endswith(")"), "expected a trailing raise expression"
+    assert "status_code=403" in body
+    # And the DB-error path must also deny rather than silently pass.
+    assert body.count("403") >= 2, "a resolve failure must also deny"
+
+
+def test_bulk_contacts_checks_job_access_per_item():
+    """bulk-contacts must not be weaker than its singular twins."""
+    src = ROUTER_PATH.read_text()
+    tree = ast.parse(src)
+    body = next(
+        ast.get_source_segment(src, n)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "update_candidate_contacts_bulk"
+    )
+    assert "_verify_job_access_by_id" in body, (
+        "update_candidate_contacts_bulk applies the same writes as "
+        "update_candidate_phone/email, so it needs the same job check — "
+        "otherwise the bulk route is a way around the singular ones"
+    )
+    # Checked up front, before any write, so a partially-authorised batch is
+    # rejected whole instead of half-applied.
+    assert body.index("_verify_job_access_by_id") < body.index("get_db_connection"), (
+        "the access check must run before the first write"
+    )

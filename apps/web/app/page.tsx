@@ -147,6 +147,14 @@ export default function DashboardPage() {
   const viewStateRef = useRef({ searchQuery, sortField, sortDirection });
   viewStateRef.current = { searchQuery, sortField, sortDirection };
 
+  // Same reason, for the fetch error path. The poll effect below depends on
+  // [activeTab] only, so the `fetchJobs` it captured on mount is reused for
+  // every tick — and that closure's `allJobs` is still the initial []. Its
+  // catch block uses the row count to choose between the light "stale"
+  // banner and the full "couldn't load" state, so reading the stale value
+  // would show a hard failure over a populated, healthy table.
+  const allJobsCountRef = useRef(0);
+
   useEffect(() => {
     fetchJobs();
   }, [activeTab]);
@@ -256,6 +264,7 @@ export default function DashboardPage() {
       }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
       setAllJobs(jobs);
+      allJobsCountRef.current = jobs.length;
       // Re-apply whatever the user has on screen. A foreground load starts
       // clean (newest-first, no query); a background refresh must land the
       // new numbers without clearing their search box or re-sorting the
@@ -276,7 +285,7 @@ export default function DashboardPage() {
       console.error("Error fetching jobs:", error);
       // Keep showing whatever we had before. Mark the list as stale so the
       // user sees something is off, instead of a blank "No job results" pane.
-      if (allJobs.length > 0) {
+      if (allJobsCountRef.current > 0) {
         setIsStale(true);
       } else {
         setLoadFailed(true);
