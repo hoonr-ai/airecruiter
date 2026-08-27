@@ -32,7 +32,7 @@ import { api } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-
+import { normalizeToUtcDate } from "@/lib/date";
 interface AnalyticsOverview {
   total_monitored_jobs: number;
   total_archived_jobs: number;
@@ -179,10 +179,9 @@ const formatDate = (iso: string | null | undefined): string => {
 
 /** ISO date/datetime → "Feb 24, 2026, 10:30 AM EST"; null/invalid → "—". */
 const formatDateTime = (iso: string | null | undefined): string => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-US", {
+  const date = normalizeToUtcDate(iso);
+  if (!date) return "—";
+  return date.toLocaleString("en-US", {
     timeZone: "America/New_York",
     month: "short",
     day: "numeric",

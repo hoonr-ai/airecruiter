@@ -26,13 +26,13 @@ import {
 import { api } from "@/lib/api";
 import { shouldShowQuestionsCompleted } from "@/lib/activityTimeline";
 
+import { normalizeToUtcDate } from "@/lib/date";
+
 const formatActivityDate = (dateString: string) => {
   try {
-    let safeStr = dateString;
-    if (typeof safeStr === "string" && !safeStr.match(/(Z|[+-]\d{2}:?\d{2})$/)) {
-      safeStr = safeStr.replace(" ", "T") + "Z";
-    }
-    const date = new Date(safeStr);
+    const date = normalizeToUtcDate(dateString);
+    if (!date) return dateString;
+
     return new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
       month: "short",

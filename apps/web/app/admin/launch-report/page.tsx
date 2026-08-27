@@ -21,6 +21,7 @@ import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { normalizeToUtcDate } from "@/lib/date";
 
 interface LaunchReportRow {
   job_id: string;
@@ -83,9 +84,8 @@ function yesterdayEastern(): string {
 
 /** ISO date-only → "Feb 24, 2026"; null/invalid → "—". */
 function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T00:00:00`) : new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  const d = normalizeToUtcDate(iso);
+  if (!d) return "—";
   return d.toLocaleDateString("en-US", {
     timeZone: "America/New_York",
     month: "short",
@@ -96,9 +96,8 @@ function formatDate(iso: string | null | undefined): string {
 
 /** ISO datetime → "Feb 24, 2026, 10:30 AM EST"; null/invalid → "—". */
 function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  const d = normalizeToUtcDate(iso);
+  if (!d) return "—";
   return d.toLocaleString("en-US", {
     timeZone: "America/New_York",
     month: "short",
