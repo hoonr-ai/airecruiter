@@ -37,7 +37,6 @@ from routers._helpers import (
     _mj_filter,
     _parse_posted_date,
     _parse_recruiter_emails,
-    _ts,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
@@ -51,6 +50,9 @@ REPORT_TIMEZONE = ZoneInfo(os.getenv("REPORT_TIMEZONE", "America/New_York"))
 # DB that is not on UTC is a one-line env fix, not a silent day-boundary bug.
 REPORT_DB_TIMEZONE = os.getenv("REPORT_DB_TIMEZONE", "UTC")
 _DB_TZ = ZoneInfo(REPORT_DB_TIMEZONE)
+
+# Some monitored_jobs rows carry a readable_ist_now() string (".. IST").
+_IST = ZoneInfo("Asia/Kolkata")
 
 EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
 
@@ -100,6 +102,30 @@ def _parse_iso(value: Any) -> Optional[datetime.datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
 
 
+def _parse_monitored_jobs_timestamp(raw: Optional[str]) -> Optional[datetime.datetime]:
+    """Parse a monitored_jobs timestamp column read as ::text.
+
+    The column is written by `readable_ist_now()` in some paths, which emits
+    "2026-05-20 20:46:36 IST" — an India wall-clock reading. Casting that to
+    ::timestamp drops the suffix, so the value would be read back as if it
+    were REPORT_DB_TIMEZONE and land ~5.5h off. Now that this timestamp is
+    user-facing ("PAIR Published"), that skew would be visible and wrong, so
+    the suffix is honoured explicitly. Everything else is interpreted as
+    REPORT_DB_TIMEZONE, matching NOW()/CURRENT_TIMESTAMP writers.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    tz = _IST if text.upper().endswith("IST") else _DB_TZ
+    # Truncate to "YYYY-MM-DD HH:MM:SS" — the same 19-char window _ts() uses,
+    # which covers every shape observed in this column.
+    try:
+        naive = datetime.datetime.fromisoformat(text[:19].replace(" ", "T"))
+    except ValueError:
+        return None
+    return naive.replace(tzinfo=tz)
+
+
 def _from_db(value: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
     """Attach a timezone to a naive `TIMESTAMP` column read from Postgres.
 
@@ -132,6 +158,16 @@ def _minutes_between(start: Optional[datetime.datetime], end: Optional[datetime.
         return None
     delta = (end - start).total_seconds() / 60.0
     return round(delta, 1) if delta >= 0 else None
+
+
+def _midnight_eastern(day: Optional[datetime.date]) -> Optional[datetime.datetime]:
+    """Start of an Eastern calendar day, for durations anchored on a date-only
+    column. JobDiva's posted_date carries no time, so this is the earliest
+    instant it could mean — durations from it are day-granular, not exact.
+    """
+    if day is None:
+        return None
+    return datetime.datetime.combine(day, datetime.time.min, tzinfo=REPORT_TIMEZONE)
 
 
 def _mean(values: List[float]) -> Optional[float]:
@@ -200,8 +236,12 @@ def _fetch_jobs_launched_on(conn, report_date: datetime.date, scope: Optional[Di
             mj.recruiter_emails,
             mj.posted_date,
             mj.time_to_first_pass,
-            {_ts('mj.pair_launched_at')} AS pair_published_at,
-            {_ts('mj.created_at')}       AS job_created_at,
+            -- "PAIR Published" is when the job was brought INTO pair, i.e. the
+            -- monitored_jobs row's birth — not monitored_jobs.pair_launched_at,
+            -- which is stamped by the publish endpoint. Selected as ::text and
+            -- parsed in Python because some rows carry an "… IST" suffix that a
+            -- ::timestamp cast silently reads as if it were the DB's own zone.
+            mj.created_at::text          AS job_created_at_text,
             l.first_launch_at,
             l.total_launched
         FROM launches l
@@ -444,9 +484,12 @@ def _build_row(
     ]
     outreach = _summarise_outreach(payloads)
 
-    pair_published_at = _parse_iso(job.get("pair_published_at"))
-    job_created_at = _parse_iso(job.get("job_created_at"))
+    # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
+    # clicked, i.e. the first call out to pair-bot, which is exactly when the
+    # first engage_interview_audit row is written.
+    pair_published_at = _parse_monitored_jobs_timestamp(job.get("job_created_at_text"))
     launch_at = _parse_iso(job.get("first_launch_at"))
+    jobdiva_published = _parse_posted_date(job.get("posted_date"))
     total_launched = int(job.get("total_launched") or 0)
 
     buckets = outreach["buckets"]
@@ -476,15 +519,20 @@ def _build_row(
         "customer_name": (job.get("customer_name") or "").strip(),
 
         # JobDiva only ever gives a date here, never a time of day.
-        "jobdiva_published_date": (
-            d.isoformat() if (d := _parse_posted_date(job.get("posted_date"))) else None
-        ),
+        "jobdiva_published_date": jobdiva_published.isoformat() if jobdiva_published else None,
         "pair_published_at": _edt(pair_published_at),
-        "time_to_source_minutes": _minutes_between(job_created_at, cand["first_sourced_at"]),
+        "time_to_source_minutes": _minutes_between(pair_published_at, cand["first_sourced_at"]),
         "total_candidates_sourced": cand["total_sourced"],
         "pair_launch_at": _edt(launch_at),
         "total_candidates_launched": total_launched,
-        "time_to_launch_minutes": _minutes_between(pair_published_at, launch_at),
+        # Time to Launch spans the whole pipeline: JobDiva posting → PAIR
+        # launch. Anchored on posted_date (day granularity — JobDiva gives no
+        # time of day) so it stays distinct from Turn Around Time below, which
+        # measures only the stretch pair itself owns.
+        "time_to_launch_minutes": _minutes_between(_midnight_eastern(jobdiva_published), launch_at),
+        # Turn Around Time = PAIR Launch − PAIR Published: how long the job sat
+        # in pair before going out.
+        "turn_around_time_minutes": _minutes_between(pair_published_at, launch_at),
 
         "pending": buckets["pending"],
         "in_progress": buckets["in_progress"],

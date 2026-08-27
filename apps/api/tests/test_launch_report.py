@@ -222,8 +222,7 @@ def _job(total_launched):
         "recruiter_emails": '["r@x.com"]',
         "posted_date": "Aug 25, 2026",
         "time_to_first_pass": None,
-        "pair_published_at": datetime.datetime(2026, 8, 27, 12, 0),
-        "job_created_at": datetime.datetime(2026, 8, 25, 12, 0),
+        "job_created_at_text": "2026-08-25 12:00:00",
         "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2),
         "total_launched": total_launched,
     }
@@ -318,3 +317,79 @@ def test_outstanding_feedback_never_goes_negative():
     row = lr._build_row(_job(1), candidates, audit, {"1": _outreach("completed")})
     assert row["completed"] == 1
     assert row["outstanding_feedback"] == 0
+
+
+# ---------------------------------------------------------------------------
+# PAIR Published / PAIR Launch / Turn Around Time
+# ---------------------------------------------------------------------------
+def test_pair_published_reads_the_job_arrival_time():
+    """PAIR Published is when the job was brought into pair (the
+    monitored_jobs row's birth), not monitored_jobs.pair_launched_at.
+    """
+    row = lr._build_row(
+        {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"},
+        [], [], {},
+    )
+    assert row["pair_published_at"] == "2026-08-25T08:00:00-04:00"  # 12:00 UTC -> 08:00 EDT
+
+
+def test_pair_published_honours_the_ist_suffix():
+    """readable_ist_now() rows are India wall-clock, not DB-zone.
+
+    Reading "12:00:00 IST" as UTC would put PAIR Published 5.5h late.
+    """
+    row = lr._build_row(
+        {**_job(0), "job_created_at_text": "2026-08-25 12:00:00 IST"},
+        [], [], {},
+    )
+    # 12:00 IST == 06:30 UTC == 02:30 EDT
+    assert row["pair_published_at"] == "2026-08-25T02:30:00-04:00"
+
+
+def test_pair_published_survives_a_garbage_value():
+    row = lr._build_row({**_job(0), "job_created_at_text": "not a timestamp"}, [], [], {})
+    assert row["pair_published_at"] is None
+    assert row["turn_around_time_minutes"] is None
+
+
+def test_turn_around_time_is_launch_minus_published():
+    job = {
+        **_job(1),
+        "job_created_at_text": "2026-08-27 12:00:00",          # 12:00 UTC
+        "first_launch_at": datetime.datetime(2026, 8, 27, 14, 30),  # 14:30 UTC
+    }
+    row = lr._build_row(job, [], [{"interview_id": "1"}], {"1": _outreach("completed")})
+    assert row["turn_around_time_minutes"] == 150.0
+
+
+def test_turn_around_time_is_distinct_from_time_to_launch():
+    """Time to Launch spans JobDiva posting -> launch; Turn Around Time spans
+    only the stretch pair owns. They must not collapse into one number.
+    """
+    job = {
+        **_job(1),
+        "posted_date": "Aug 25, 2026",
+        "job_created_at_text": "2026-08-27 12:00:00",
+        "first_launch_at": datetime.datetime(2026, 8, 27, 14, 30),
+    }
+    row = lr._build_row(job, [], [], {})
+    assert row["turn_around_time_minutes"] == 150.0
+    # Aug 25 00:00 EDT -> Aug 27 10:30 EDT
+    assert row["time_to_launch_minutes"] == 3510.0
+    assert row["time_to_launch_minutes"] != row["turn_around_time_minutes"]
+
+
+def test_time_to_launch_is_none_without_a_jobdiva_date():
+    job = {**_job(1), "posted_date": "", "job_created_at_text": "2026-08-27 12:00:00"}
+    assert lr._build_row(job, [], [], {})["time_to_launch_minutes"] is None
+
+
+def test_time_to_source_runs_from_pair_published():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [{
+        "candidate_id": "c1",
+        "created_at": datetime.datetime(2026, 8, 26, 12, 0),
+        "feedback_type": None, "feedback_reason": None,
+        "feedback_at": None, "engage_completed_at": None,
+    }]
+    assert lr._build_row(job, candidates, [], {})["time_to_source_minutes"] == 1440.0

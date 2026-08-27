@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CalendarDays, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
+import { ArrowLeft, CalendarDays, Download, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
@@ -34,6 +34,7 @@ interface LaunchReportRow {
   pair_launch_at: string | null;
   total_candidates_launched: number;
   time_to_launch_minutes: number | null;
+  turn_around_time_minutes: number | null;
   pending: number;
   in_progress: number;
   completed: number;
@@ -126,12 +127,15 @@ function formatPercent(value: number | null): string {
   return value === null || value === undefined ? "—" : `${value}%`;
 }
 
-// Column groups drive both the header spans and the cell order, so the two
-// can't drift apart as columns get added.
+// Column groups drive the header spans, the cell order AND the CSV export, so
+// the three can't drift apart as columns get added.
 type Column = {
   key: string;
   label: string;
-  render: (row: LaunchReportRow) => React.ReactNode;
+  /** Plain-text value. Used for the CSV, and for display unless `render` overrides. */
+  text: (row: LaunchReportRow) => string;
+  /** Optional richer cell; the CSV always uses `text`. */
+  render?: (row: LaunchReportRow) => React.ReactNode;
   /** Right-aligned for numbers, left for text/timestamps. */
   numeric?: boolean;
 };
@@ -147,6 +151,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       {
         key: "recruiter",
         label: "Recruiter",
+        text: (r) => r.recruiter_emails.join("; ") || "—",
         render: (r) =>
           r.recruiter_emails.length ? (
             <span title={r.recruiter_emails.join(", ")}>
@@ -159,37 +164,47 @@ const COLUMN_GROUPS: ColumnGroup[] = [
             "—"
           ),
       },
-      { key: "customer", label: "Customer", render: (r) => r.customer_name || "—" },
+      { key: "customer", label: "Customer", text: (r) => r.customer_name || "—" },
     ],
   },
   {
     title: "Sourcing",
     columns: [
-      { key: "jd_published", label: "JobDiva Published", render: (r) => formatDate(r.jobdiva_published_date) },
-      { key: "pair_published", label: "PAIR Published", render: (r) => formatDateTime(r.pair_published_at) },
-      { key: "tt_source", label: "Time to Source", numeric: true, render: (r) => formatDuration(r.time_to_source_minutes) },
-      { key: "sourced", label: "Sourced", numeric: true, render: (r) => num(r.total_candidates_sourced) },
+      { key: "jd_published", label: "JobDiva Published", text: (r) => formatDate(r.jobdiva_published_date) },
+      { key: "pair_published", label: "PAIR Published", text: (r) => formatDateTime(r.pair_published_at) },
+      { key: "tt_source", label: "Time to Source", numeric: true, text: (r) => formatDuration(r.time_to_source_minutes) },
+      { key: "sourced", label: "Sourced", numeric: true, text: (r) => num(r.total_candidates_sourced) },
     ],
   },
   {
     title: "Launch",
     columns: [
-      { key: "launch_at", label: "PAIR Launch", render: (r) => formatDateTime(r.pair_launch_at) },
-      { key: "launched", label: "Launched", numeric: true, render: (r) => num(r.total_candidates_launched) },
-      { key: "tt_launch", label: "Time to Launch", numeric: true, render: (r) => formatDuration(r.time_to_launch_minutes) },
+      { key: "launch_at", label: "PAIR Launch", text: (r) => formatDateTime(r.pair_launch_at) },
+      { key: "launched", label: "Launched", numeric: true, text: (r) => num(r.total_candidates_launched) },
+      { key: "tt_launch", label: "Time to Launch", numeric: true, text: (r) => formatDuration(r.time_to_launch_minutes) },
+      {
+        key: "tat",
+        label: "Turn Around Time",
+        numeric: true,
+        text: (r) => formatDuration(r.turn_around_time_minutes),
+        render: (r) => (
+          <span title="PAIR Launch − PAIR Published">{formatDuration(r.turn_around_time_minutes)}</span>
+        ),
+      },
     ],
   },
   {
     title: "Interview Status",
     columns: [
-      { key: "pending", label: "Pending", numeric: true, render: (r) => num(r.pending) },
-      { key: "in_progress", label: "In Progress", numeric: true, render: (r) => num(r.in_progress) },
-      { key: "completed", label: "Completed", numeric: true, render: (r) => num(r.completed) },
-      { key: "partial", label: "Partial Complete", numeric: true, render: (r) => num(r.partial_complete) },
+      { key: "pending", label: "Pending", numeric: true, text: (r) => num(r.pending) },
+      { key: "in_progress", label: "In Progress", numeric: true, text: (r) => num(r.in_progress) },
+      { key: "completed", label: "Completed", numeric: true, text: (r) => num(r.completed) },
+      { key: "partial", label: "Partial Complete", numeric: true, text: (r) => num(r.partial_complete) },
       {
         key: "percentage",
         label: "%",
         numeric: true,
+        text: (r) => formatPercent(r.percentage),
         render: (r) => (
           <span
             className="font-semibold text-slate-900"
@@ -204,40 +219,66 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Response",
     columns: [
-      { key: "tt_first_resp", label: "To First Response", numeric: true, render: (r) => formatDuration(r.time_to_first_response_minutes) },
-      { key: "launch_to_resp", label: "Launch → Response", numeric: true, render: (r) => formatDuration(r.launch_to_response_minutes) },
-      { key: "overall_resp", label: "Overall Response", numeric: true, render: (r) => formatDuration(r.overall_response_time_minutes) },
+      { key: "tt_first_resp", label: "To First Response", numeric: true, text: (r) => formatDuration(r.time_to_first_response_minutes) },
+      { key: "launch_to_resp", label: "Launch → Response", numeric: true, text: (r) => formatDuration(r.launch_to_response_minutes) },
+      { key: "overall_resp", label: "Overall Response", numeric: true, text: (r) => formatDuration(r.overall_response_time_minutes) },
     ],
   },
   {
     title: "Feedback",
     columns: [
-      { key: "submitted", label: "Submitted", numeric: true, render: (r) => num(r.submitted_candidates) },
-      { key: "rejected", label: "Rejected", numeric: true, render: (r) => num(r.rejected_candidates) },
-      { key: "outstanding", label: "Outstanding", numeric: true, render: (r) => num(r.outstanding_feedback) },
-      { key: "tt_feedback", label: "Time to Feedback", numeric: true, render: (r) => formatDuration(r.time_to_feedback_minutes) },
-      { key: "tt_first_pass", label: "To First Pass", numeric: true, render: (r) => formatDuration(r.time_to_first_pass_minutes) },
+      { key: "submitted", label: "Submitted", numeric: true, text: (r) => num(r.submitted_candidates) },
+      { key: "rejected", label: "Rejected", numeric: true, text: (r) => num(r.rejected_candidates) },
+      { key: "outstanding", label: "Outstanding", numeric: true, text: (r) => num(r.outstanding_feedback) },
+      { key: "tt_feedback", label: "Time to Feedback", numeric: true, text: (r) => formatDuration(r.time_to_feedback_minutes) },
+      { key: "tt_first_pass", label: "To First Pass", numeric: true, text: (r) => formatDuration(r.time_to_first_pass_minutes) },
     ],
   },
   {
     title: "Channel",
     columns: [
-      { key: "call", label: "Call", numeric: true, render: (r) => num(r.call) },
-      { key: "sms", label: "SMS", numeric: true, render: (r) => num(r.sms) },
-      { key: "web", label: "Web", numeric: true, render: (r) => num(r.web) },
+      { key: "call", label: "Call", numeric: true, text: (r) => num(r.call) },
+      { key: "sms", label: "SMS", numeric: true, text: (r) => num(r.sms) },
+      { key: "web", label: "Web", numeric: true, text: (r) => num(r.web) },
     ],
   },
   {
     title: "Phase",
     columns: [
-      { key: "phase1", label: "Phase 1", numeric: true, render: (r) => num(r.phase1) },
-      { key: "phase2", label: "Phase 2", numeric: true, render: (r) => num(r.phase2) },
-      { key: "phase3", label: "Phase 3", numeric: true, render: (r) => num(r.phase3) },
+      { key: "phase1", label: "Phase 1", numeric: true, text: (r) => num(r.phase1) },
+      { key: "phase2", label: "Phase 2", numeric: true, text: (r) => num(r.phase2) },
+      { key: "phase3", label: "Phase 3", numeric: true, text: (r) => num(r.phase3) },
     ],
   },
 ];
 
 const FLAT_COLUMNS = COLUMN_GROUPS.flatMap((g) => g.columns);
+
+/** Wrap a value for CSV only when it would otherwise break the row. */
+function escapeCSV(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/**
+ * Build the report CSV.
+ *
+ * Columns come from COLUMN_GROUPS, so the export always matches what is on
+ * screen. The leading Job/JobDiva ID columns mirror the pinned first cell,
+ * which is rendered separately from the column list.
+ */
+function buildCsv(rows: LaunchReportRow[]): string {
+  const headers = ["Job Title", "JobDiva ID", ...FLAT_COLUMNS.map((c) => c.label)];
+  const lines = rows.map((row) =>
+    [
+      row.job_title || "Untitled job",
+      row.jobdiva_id || row.job_id,
+      ...FLAT_COLUMNS.map((col) => col.text(row)),
+    ]
+      .map((cell) => escapeCSV(String(cell ?? "")))
+      .join(","),
+  );
+  return [headers.map(escapeCSV).join(","), ...lines].join("\n");
+}
 
 function StatTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -271,6 +312,19 @@ export default function LaunchReportPage() {
     setError(null);
     setReloadToken((token) => token + 1);
   }, []);
+
+  const downloadCsv = useCallback(() => {
+    if (!data?.jobs.length) return;
+    // BOM so Excel reads the UTF-8 en-dashes and "—" placeholders correctly
+    // instead of mojibake.
+    const blob = new Blob(["﻿", buildCsv(data.jobs)], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Pair Bulk Launch Report - ${data.report_date}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [data]);
 
   useEffect(() => {
     if (isRoleLoading || !canView) return;
@@ -376,6 +430,16 @@ export default function LaunchReportPage() {
               className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
             />
           </label>
+          <Button
+            variant="outline"
+            onClick={downloadCsv}
+            disabled={isLoading || rows.length === 0}
+            title={rows.length === 0 ? "Nothing to export for this date" : "Download this report as CSV"}
+            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
+          >
+            <Download className="h-4 w-4 text-slate-500" />
+            Download CSV
+          </Button>
           <Button
             variant="outline"
             onClick={requestReload}
@@ -506,7 +570,7 @@ export default function LaunchReportPage() {
                             col.numeric ? "text-right tabular-nums" : "text-left"
                           }`}
                         >
-                          {col.render(row)}
+                          {col.render ? col.render(row) : col.text(row)}
                         </td>
                       ))}
                     </tr>
