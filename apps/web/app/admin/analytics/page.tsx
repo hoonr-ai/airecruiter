@@ -732,8 +732,8 @@ export default function AdminAnalyticsPage() {
           escapeCsvField(job.jobdiva_id),
           escapeCsvField(job.customer_name),
           escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
-          escapeCsvField(job.added_to_curate_at),
-          escapeCsvField(job.curate_launched_at),
+          escapeCsvField(formatDateTime(job.added_to_curate_at)),
+          escapeCsvField(formatDateTime(job.curate_launched_at)),
           // Mirror the UI's lag chip: negative = unreliable posted date
           escapeCsvField(
             job.posted_to_launch_days === null ||
@@ -762,8 +762,8 @@ export default function AdminAnalyticsPage() {
                 escapeCsvField(acc.account_name || "Unnamed account"),
                 escapeCsvField(acc.account_id),
                 acc.use_count,
-                escapeCsvField(acc.last_used_at),
-                escapeCsvField(acc.cooldown_until),
+                escapeCsvField(formatDateTime(acc.last_used_at)),
+                escapeCsvField(formatDateTime(acc.cooldown_until)),
                 escapeCsvField(acc.last_error),
               ].join(","),
             ),
