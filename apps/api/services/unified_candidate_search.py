@@ -202,6 +202,18 @@ class SearchCriteria(BaseModel):
     # dimension. Optional — when blank both signals degrade gracefully
     # (the same-client dimension drops out and redistributes).
     client_name: str = ""
+    # Sample-first flow. "sample": each selected source probes a small ranked
+    # pool (SAMPLE_MODE_POOL_SIZE), fully enriches + scores it, and emits only
+    # the first `sample_per_source` rows that clear the normal gates — cheap
+    # source-quality preview before the recruiter commits to the full run.
+    # "full": normal behavior.
+    search_mode: str = "full"
+    sample_per_source: int = 2
+    # Run the full LLM skills-match on every source, including JobDiva-JobAgent
+    # rows (which otherwise use high-level scoring and render score-less).
+    # Required by the auto-launch (≥ threshold) selection so every row carries
+    # a comparable numeric match_score.
+    assess_all_sources: bool = False
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -702,7 +714,13 @@ class UnifiedCandidateSearch:
             # its popup — only the number is withheld. NULL match_score is
             # already the storage/UI "unscored" sentinel (kept by every
             # min-score gate, NULLS LAST in rank-list sorting).
-            if str(cand.get("source") or "") == "JobDiva-JobAgent":
+            # Exception: assess_all_sources (sample→approve→auto-launch flow)
+            # runs the full LLM assessment on agent rows precisely so they
+            # carry a real, comparable percentage — keep it.
+            if (
+                str(cand.get("source") or "") == "JobDiva-JobAgent"
+                and not criteria.assess_all_sources
+            ):
                 cand["match_score"] = None
 
             return cand
@@ -716,6 +734,24 @@ class UnifiedCandidateSearch:
         jobagent_selected = _jobdiva_selection["jobagent"]
         talentsearch_selected = _jobdiva_selection["talentsearch"]
         talent_selected = jobagent_selected or talentsearch_selected
+
+        # Sample-first flow: probe each source with a small ranked pool and
+        # emit only the first `sample_cap` rows per source that clear the
+        # normal gates. Everything latency- or cost-heavy that doesn't change
+        # what a sample row looks like (Exa Pass B, background hydration,
+        # contact enrichment, the JobAgent full tranche) is skipped.
+        from core import sourcing_config as _sc_sample
+        sample_mode = str(getattr(criteria, "search_mode", "full")).lower() == "sample"
+        sample_cap = max(1, int(getattr(criteria, "sample_per_source", 2) or 2))
+        sample_pool = max(
+            sample_cap,
+            int(getattr(_sc_sample, "SAMPLE_MODE_POOL_SIZE", 8) or 8),
+        )
+        if sample_mode:
+            self._log_stage(
+                "SampleMode",
+                f"sample search: cap={sample_cap}/source pool={sample_pool}",
+            )
 
         queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
@@ -731,6 +767,9 @@ class UnifiedCandidateSearch:
         exa_pass_b_should_run = (
             _sc.EXA_AGENT_ENABLED
             and ("Exa" in criteria.sources)
+            # Sample mode: Pass B is a multi-minute deep-search sweep whose
+            # whole point is breadth — the sample preview never needs it.
+            and not sample_mode
         )
         # Visible diagnostic so support can grep one line and confirm Pass B
         # is gated correctly for this request — without this the only signal
@@ -959,7 +998,7 @@ class UnifiedCandidateSearch:
                 },
             })
 
-        async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None, min_score=None):
+        async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None, min_score=None, as_full_row=False):
             """Stage 3 of progressive JobDiva flow: score the (now-enriched)
             candidate and emit a ``candidate_detail`` patch with the scored
             payload. Mirrors :py:func:`emit_candidate` for dedup +
@@ -972,6 +1011,11 @@ class UnifiedCandidateSearch:
             JobDiva-TalentSearch (machine-generated query → only surface
             >JOBDIVA_TALENTSEARCH_MIN_SCORE matches). Unscoreable rows
             (``detail_failed`` → match_score None) are always kept.
+
+            ``as_full_row``: sample-mode variant. The agent_result skeleton
+            was never emitted, so instead of patching a (nonexistent) row this
+            emits a complete ``candidate`` event on success and stays silent on
+            drops — no drop patch is sent for a row the client never saw.
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
@@ -981,12 +1025,13 @@ class UnifiedCandidateSearch:
                     "LocationGate",
                     f"dropping candidate_id={cid} reason={location_reason} distance={distance}",
                 )
-                await queue.put({
-                    "type": "candidate_detail",
-                    "candidate_id": cid,
-                    "stage": "dropped",
-                    "patch": {"_stage": "dropped", "_drop_reason": "non_us_candidate"},
-                })
+                if not as_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "non_us_candidate"},
+                    })
                 return False
 
             cand["screening_summary"] = build_screening(assessment)
@@ -1022,12 +1067,13 @@ class UnifiedCandidateSearch:
                 # never-dropped JobAgent copy re-emit if it arrives later.
                 if cid:
                     seen_ids.discard(cid)
-                await queue.put({
-                    "type": "candidate_detail",
-                    "candidate_id": cid,
-                    "stage": "dropped",
-                    "patch": {"_stage": "dropped", "_drop_reason": "below_min_score"},
-                })
+                if not as_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "below_min_score"},
+                    })
                 return False
 
             # Cross-source dedup runs here (not at agent_result) since the
@@ -1078,12 +1124,13 @@ class UnifiedCandidateSearch:
                             "candidate_id": owner_id,
                             "patch": dict(changed),
                         })
-                    await queue.put({
-                        "type": "candidate_detail",
-                        "candidate_id": cid,
-                        "stage": "dropped",
-                        "patch": {"_stage": "dropped", "_drop_reason": "cross_source_duplicate"},
-                    })
+                    if not as_full_row:
+                        await queue.put({
+                            "type": "candidate_detail",
+                            "candidate_id": cid,
+                            "stage": "dropped",
+                            "patch": {"_stage": "dropped", "_drop_reason": "cross_source_duplicate"},
+                        })
                     return False
             else:
                 for k in cross_keys:
@@ -1091,6 +1138,15 @@ class UnifiedCandidateSearch:
 
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
+
+            if as_full_row:
+                # Sample mode: no skeleton row exists client-side — emit the
+                # fully-enriched, scored candidate as a complete row. The
+                # total_candidates counter normally increments at the
+                # agent_result emission, which this path skipped.
+                summary["total_candidates"] += 1
+                await queue.put({"type": "candidate", "data": cand})
+                return True
 
             scored_patch: Dict[str, Any] = {"_stage": "scored"}
             for key in (
@@ -1315,6 +1371,10 @@ class UnifiedCandidateSearch:
                     # Source cap (JOBDIVA_SOURCE_CAP) — see Applicants stage above.
                     from core import sourcing_config as _sc_cap
                     _talent_cap = _sc_cap.JOBDIVA_SOURCE_CAP
+                    if sample_mode:
+                        # Sample probe: only the top-of-rank pool is worth
+                        # enriching — we stop after `sample_cap` emissions.
+                        _talent_cap = min(_talent_cap or sample_pool, sample_pool)
                     if talent_pool and _talent_cap and len(talent_pool) > _talent_cap:
                         self._log_stage(
                             stage_name,
@@ -1330,7 +1390,18 @@ class UnifiedCandidateSearch:
                     fresh_talent: List[Dict[str, Any]] = []
                     for _cand in talent_pool:
                         _cand["source"] = _cand.get("source") or source_label
-                        if await emit_jobdiva_agent_result(_cand, source_label):
+                        if sample_mode:
+                            # No skeleton emission in sample mode (rows arrive
+                            # complete via as_full_row), but the same-source
+                            # dedup that emit_jobdiva_agent_result performs is
+                            # still required.
+                            _scid = str(_cand.get("candidate_id") or _cand.get("id") or "")
+                            if _scid and _scid in seen_ids:
+                                continue
+                            if _scid:
+                                seen_ids.add(_scid)
+                            fresh_talent.append(_cand)
+                        elif await emit_jobdiva_agent_result(_cand, source_label):
                             fresh_talent.append(_cand)
 
                     if not fresh_talent:
@@ -1342,7 +1413,10 @@ class UnifiedCandidateSearch:
                     ):
                         ev_type = event.get("type")
                         if ev_type == "candidate_detail":
-                            await queue.put(event)
+                            # Sample mode paints no skeleton rows, so there is
+                            # nothing client-side for these patches to target.
+                            if not sample_mode:
+                                await queue.put(event)
                             continue
                         if ev_type == "candidate_enriched":
                             cand = event["candidate"]
@@ -1355,9 +1429,15 @@ class UnifiedCandidateSearch:
                                     f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
                                 )
                             if await emit_jobdiva_scored(
-                                cand, assessment, "qualified_talent", min_score=min_score
+                                cand, assessment, "qualified_talent",
+                                min_score=min_score, as_full_row=sample_mode
                             ):
                                 emitted += 1
+                                if sample_mode and emitted >= sample_cap:
+                                    # Cap reached — closing the generator
+                                    # cancels the pool's in-flight enrichment
+                                    # tasks (its finally block handles this).
+                                    break
                     return emitted
 
                 async def _run_jobagent_pool():
@@ -1378,9 +1458,11 @@ class UnifiedCandidateSearch:
                             # Recruiter-authored criteria in JobDiva + its own
                             # ranking → trust the results: high-level score only
                             # (no per-candidate LLM skills-match), never dropped.
+                            # assess_all_sources (auto-launch flow) overrides
+                            # this: agent rows need a real, comparable score.
                             high_level_scoring=bool(
                                 getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
-                            ),
+                            ) and not criteria.assess_all_sources,
                         )
 
                     # Two-phase fetch: JobAgentSearch latency scales with
@@ -1402,10 +1484,24 @@ class UnifiedCandidateSearch:
                         and _offset == 0
                         and _batch > _quick_n
                         and not getattr(criteria, "bypass_screening", False)
+                        and not sample_mode
                     )
                     pool_exc: Optional[BaseException] = None
                     try:
-                        if not two_phase:
+                        if sample_mode:
+                            # Sample probe: JobAgentSearch latency scales with
+                            # resumeCount, so ask for exactly the probe pool —
+                            # returns in seconds. No full-tranche follow-up.
+                            self._log_stage(
+                                "JobDiva",
+                                f"Running JobDiva JobAgent sample probe (resumeCount={sample_pool})...",
+                            )
+                            await _consume_jobagent(
+                                await self._search_jobdiva_talent(
+                                    criteria, resume_count_override=sample_pool
+                                )
+                            )
+                        elif not two_phase:
                             self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
                             await _consume_jobagent(await self._search_jobdiva_talent(criteria))
                         else:
@@ -1560,10 +1656,11 @@ class UnifiedCandidateSearch:
                 # and an unranked FIFO slice can discard the best matches
                 # if Exa returns ordered by its own relevance and we ask
                 # for 50 results but the cap fires elsewhere.
-                if ext_candidates and len(ext_candidates) > 100:
+                _ext_keep_top = min(100, sample_pool) if sample_mode else 100
+                if ext_candidates and len(ext_candidates) > _ext_keep_top:
                     before_rank = len(ext_candidates)
                     ext_candidates = self._rank_candidates_by_skill(
-                        ext_candidates, criteria, keep_top=100
+                        ext_candidates, criteria, keep_top=_ext_keep_top
                     )
                     self._log_stage(
                         source_type,
@@ -1573,7 +1670,10 @@ class UnifiedCandidateSearch:
 
                 self._log_stage(source_type, f"Found {len(ext_candidates)} profiles; starting streaming enrichment...")
 
-                semaphore = asyncio.Semaphore(5)
+                from core import sourcing_config as _sc_ext
+                semaphore = asyncio.Semaphore(
+                    max(1, int(getattr(_sc_ext, "EXTERNAL_PROCESS_CONCURRENCY", 12) or 12))
+                )
 
                 async def _process_external_single(cand):
                     async with semaphore:
@@ -1680,6 +1780,7 @@ class UnifiedCandidateSearch:
                         # fallback when the agent path is disabled.
                         if (
                             source_type == "LinkedIn-Exa"
+                            and not sample_mode
                             and not exa_pass_b_should_run
                             and os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "true").strip().lower() == "true"
                         ):
@@ -1733,7 +1834,10 @@ class UnifiedCandidateSearch:
                         # the Step 5 phone button. The helper is also told
                         # want_phone=False, so this is belt-and-braces.
                         has_email = bool(str(cand.get("email") or "").strip())
-                        if is_exa_source or not has_email:
+                        # Sample mode: never spend paid enrichment credits on a
+                        # preview row — contact info is acquired in the full
+                        # run / at Launch PAIR for the rows that matter.
+                        if (is_exa_source or not has_email) and not sample_mode:
                             await self._apply_contact_enrichment(
                                 cand, criteria, overwrite=is_exa_source
                             )
@@ -1744,14 +1848,25 @@ class UnifiedCandidateSearch:
                 # with no counter or log line, so "Exa found 50, UI shows 1"
                 # was undiagnosable from the stream log.
                 _status_counts: Dict[str, int] = {}
-                for task in asyncio.as_completed(process_tasks):
-                    result = await task
-                    _status_counts[result["status"]] = _status_counts.get(result["status"], 0) + 1
-                    if result["status"] in ("success", "no_contact_shown"):
-                        cand = result["candidate"]
-                        assessment = self._filter_assessment(cand, criteria, enforce_years=False)
-                        if await emit_candidate(cand, assessment):
-                            _ext_emitted += 1
+                try:
+                    for task in asyncio.as_completed(process_tasks):
+                        result = await task
+                        _status_counts[result["status"]] = _status_counts.get(result["status"], 0) + 1
+                        if result["status"] in ("success", "no_contact_shown"):
+                            cand = result["candidate"]
+                            assessment = self._filter_assessment(cand, criteria, enforce_years=False)
+                            if await emit_candidate(cand, assessment):
+                                _ext_emitted += 1
+                                if sample_mode and _ext_emitted >= sample_cap:
+                                    break
+                finally:
+                    # Sample early-stop (or an exception) can leave pool tasks
+                    # in flight — cancel and drain so no work leaks past the
+                    # producer. No-op when the loop ran to completion.
+                    for _t in process_tasks:
+                        if not _t.done():
+                            _t.cancel()
+                    await asyncio.gather(*process_tasks, return_exceptions=True)
                 if _status_counts:
                     self._log_stage(
                         name,
@@ -2100,7 +2215,9 @@ class UnifiedCandidateSearch:
             # the UI display order. Records without api_rank (other sources)
             # sort last.
             from core import sourcing_config as _sc
-            if hydration_targets and _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
+            # Sample mode: rows were emitted fully enriched (as_full_row) and
+            # the preview doesn't warrant a background CandidatesDetail sweep.
+            if hydration_targets and _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH and not sample_mode:
                 def _hydration_key(c: Dict[str, Any]) -> int:
                     rank = c.get("api_rank")
                     return rank if isinstance(rank, int) else 10**9
@@ -5735,7 +5852,16 @@ class UnifiedCandidateSearch:
 
         out_queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
-        semaphore = asyncio.Semaphore(5)
+        from core import sourcing_config as _sc_conc
+        # Outer width: how many candidates are in enrichment flight at once.
+        # The JobDiva-facing resume fetch keeps its own tighter bound below so
+        # widening the LLM fan-out can't burst JobDiva's rate limiter.
+        semaphore = asyncio.Semaphore(
+            max(1, int(getattr(_sc_conc, "JOBDIVA_ENRICH_CONCURRENCY", 12) or 12))
+        )
+        resume_fetch_semaphore = asyncio.Semaphore(
+            max(1, int(getattr(_sc_conc, "JOBDIVA_RESUME_FETCH_CONCURRENCY", 5) or 5))
+        )
         counters = {
             "screened": 0,
             "skipped": 0,
@@ -5788,10 +5914,11 @@ class UnifiedCandidateSearch:
                     resume_text = candidate.get("resume_text") or ""
                     if not resume_text or "Resume content unavailable" in resume_text:
                         self._log_stage("ResumeScreen", f"fetching resume for candidate_id={cid}")
-                        resume_data = await self.jobdiva_service.get_candidate_resume(
-                            cid,
-                            resume_id=candidate.get("resume_id"),
-                        )
+                        async with resume_fetch_semaphore:
+                            resume_data = await self.jobdiva_service.get_candidate_resume(
+                                cid,
+                                resume_id=candidate.get("resume_id"),
+                            )
                         rt = (resume_data or {}).get("resume_text", "")
                         if rt and "Resume content unavailable" not in rt:
                             candidate["resume_text"] = rt

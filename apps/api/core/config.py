@@ -34,10 +34,14 @@ ALLOWED_ORIGINS = get_env_with_default("ALLOWED_ORIGINS", "*").split(",")
 OPENAI_MODEL = get_env_with_default("OPENAI_MODEL", "gpt-4o-mini")
 
 # ---- LLM Runtime Tuning ----
-# Maximum concurrent outbound LLM calls (crisp + extract). The previous default
-# of 2 was set to dodge 429s under gpt-4-turbo; gpt-4o-mini tier comfortably
-# handles 5-8 concurrent. Raise via env for higher-tier accounts.
-LLM_CONCURRENCY = int(get_env_with_default("LLM_CONCURRENCY", "5"))
+# Maximum concurrent outbound LLM calls (crisp + extract). History: 2 (dodging
+# gpt-4-turbo 429s) → 5 → 16. At 5 this semaphore was the whole pipeline's
+# choke point: every source's per-candidate extraction funnels through it, so
+# a 150-row JobDiva pool alone took minutes. gpt-4o-mini tier rate limits
+# absorb 16 concurrent comfortably, and both call sites already retry 429s
+# with backoff, so a burst degrades to the old throughput instead of failing.
+# Tune via env per deployment tier.
+LLM_CONCURRENCY = int(get_env_with_default("LLM_CONCURRENCY", "16"))
 
 # When true, skip LLM extraction for candidates that already have structured
 # skills + company history + title from the source API (e.g. LinkedIn/Unipile).
