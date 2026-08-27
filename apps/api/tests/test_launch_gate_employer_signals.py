@@ -125,14 +125,44 @@ def test_unrelated_client_is_not_excluded():
     assert is_candidate_excluded_from_pair(hydrated, "Wells Fargo") == (False, "")
 
 
-def test_past_employer_alone_never_excludes():
-    """Only present employment blocks outreach — ex-employees are fair game."""
-    past_only = {
+def test_named_current_employer_beats_a_client_stint_in_the_past():
+    """The bar is present employment. Someone who left the client for a named
+    employer is contactable — the last employer is a FALLBACK, not a union."""
+    moved_on = {
         "company_experience": [
-            {"company": "Bank Of America", "start_date": "3/2018", "end_date": "2/2020"}
+            {"company": "Bank Of America", "start_date": "3/2018", "end_date": "2/2024"},
+            {"company": "Stripe", "end_date": "Present"},
         ]
     }
-    hydrated = _merge_employer_signals(BARE_BLOB, signals=past_only)
+    hydrated = _merge_employer_signals(BARE_BLOB, signals=moved_on)
+    assert is_candidate_excluded_from_pair(hydrated, CLIENT) == (False, "")
+
+
+def test_last_employer_counts_when_no_current_one_is_on_file():
+    """Many source rows carry a history with no "Present" entry. There the most
+    recent employer is the best available answer to "where do they work now?"."""
+    no_current = {
+        "company_experience": [
+            {"company": "Bank Of America", "start_date": "3/2018", "end_date": "2/2024"}
+        ]
+    }
+    hydrated = _merge_employer_signals(BARE_BLOB, signals=no_current)
+    assert is_candidate_excluded_from_pair(hydrated, CLIENT) == (
+        True,
+        "Employed by Hiring Client (last known employer)",
+    )
+
+
+def test_old_history_never_reaches_back_past_the_most_recent_employer():
+    """Only the single most recent past employer is consulted, so a stint at
+    the client years ago cannot block someone."""
+    ancient = {
+        "company_experience": [
+            {"company": "Bank Of America", "start_date": "2005", "end_date": "2008"},
+            {"company": "Google", "start_date": "2008", "end_date": "2/2024"},
+        ]
+    }
+    hydrated = _merge_employer_signals(BARE_BLOB, signals=ancient)
     assert is_candidate_excluded_from_pair(hydrated, CLIENT) == (False, "")
 
 
@@ -182,6 +212,47 @@ def test_fetch_signals_tolerates_null_columns():
     assert _fetch_stored_employer_signals(conn, ["999"]) == {
         "999": {"company_experience": [], "title": ""}
     }
+
+
+# ── the client_conflict flag shown in the candidate list ──────────────────
+
+def test_flag_stamps_reason_and_relation():
+    from services.company_match import apply_client_conflict_flag
+
+    cand = {"company_experience": [{"company": "Bank Of America", "end_date": "Present"}]}
+    assert apply_client_conflict_flag(cand, CLIENT) is True
+    assert cand["client_conflict"] is True
+    assert cand["client_conflict_relation"] == "current"
+    assert cand["client_conflict_company"] == "Bank Of America"
+    assert "hiring client" in cand["client_conflict_reason"]
+
+
+def test_flag_wording_distinguishes_the_fallback():
+    from services.company_match import apply_client_conflict_flag
+
+    cand = {"company_experience": [{"company": "Bank Of America", "end_date": "2/2024"}]}
+    apply_client_conflict_flag(cand, CLIENT)
+    assert cand["client_conflict_relation"] == "last"
+    assert "No current employer on file" in cand["client_conflict_reason"]
+
+
+def test_flag_self_heals_against_a_different_job():
+    """The conflict is per-job, so a flag from another req must clear rather
+    than silently blocking the candidate everywhere."""
+    from services.company_match import apply_client_conflict_flag
+
+    cand = {"company_experience": [{"company": "Bank Of America", "end_date": "Present"}]}
+    apply_client_conflict_flag(cand, CLIENT)
+    assert apply_client_conflict_flag(cand, "Wells Fargo") is False
+    assert cand["client_conflict"] is False
+    assert "client_conflict_reason" not in cand
+
+
+def test_flag_never_set_for_placeholder_client():
+    from services.company_match import apply_client_conflict_flag
+
+    cand = {"company_experience": [{"company": "Bank Of America", "end_date": "Present"}]}
+    assert apply_client_conflict_flag(cand, "Unknown Customer") is False
 
 
 # ── merge semantics ───────────────────────────────────────────────────────

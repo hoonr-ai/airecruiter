@@ -243,8 +243,8 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     # rows often carry the employer only in headline text.
     from services.company_match import (
         collect_current_companies,
+        employed_by_client,
         is_placeholder_client,
-        is_same_company,
         normalize_company_name,
     )
 
@@ -252,10 +252,18 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     for comp in current_companies:
         if "pyramid" in normalize_company_name(comp).split():
             return True, "Current Employee (Pyramid)"
-        # Match on whole-word tokens, not raw substrings: client "Meta"
-        # must match "Meta Platforms" but NOT "Metadata Solutions".
-        if is_same_company(comp, client_name):
+
+    # Works at the client TODAY. The last employer is consulted only when no
+    # current employer is on file at all (many source rows carry no "Present"
+    # entry) — a fallback, not a union, so someone who left the client for a
+    # named employer stays contactable. Matching is on whole-word tokens, not
+    # raw substrings: client "Meta" matches "Meta Platforms", never "Metadata
+    # Solutions".
+    client_hit = employed_by_client(candidate, client_name)
+    if client_hit:
+        if client_hit["relation"] == "current":
             return True, "Employed by Hiring Client"
+        return True, "Employed by Hiring Client (last known employer)"
 
     # No-contact companies (services/no_contact.py): current or LAST employer
     # on the code-managed list. Step 5 greys these rows out and /candidates/
@@ -278,9 +286,14 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     # recruiter happened to read a phone-screen notification.
     if current_companies or not client_name or is_placeholder_client(client_name):
         return False, ""
+    from services.company_match import collect_last_companies
+
+    if collect_last_companies(candidate):
+        return False, ""
     logger.warning(
-        "client_conflict_check_blind candidate=%s client=%r — no current-employer "
-        "signal on the stored row; hiring-client exclusion could not be evaluated",
+        "client_conflict_check_blind candidate=%s client=%r — no current- or "
+        "last-employer signal on the stored row; hiring-client exclusion could "
+        "not be evaluated",
         candidate.get("candidate_id") or candidate.get("id") or "?",
         client_name,
     )

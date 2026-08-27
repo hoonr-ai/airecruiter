@@ -21,6 +21,7 @@ from services.location import (
 )
 from services.jobdiva_boolean_translator import strip_jobdiva_dialect
 from services.no_contact import apply_no_contact_flag
+from services.company_match import apply_client_conflict_flag
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -569,6 +570,18 @@ class UnifiedCandidateSearch:
                 ]
                 cand["match_score_details"] = {}
                 return cand
+
+            # Hiring-client conflict: current OR last employer is the client.
+            # Stamped at the same choke-point so every source is covered, and
+            # kept as a FLAG rather than a drop — the row stays visible in the
+            # candidate list, greyed out with the reason on it, so a recruiter
+            # can see why the person is off-limits instead of silently never
+            # meeting them. (External rows whose CURRENT employer is the client
+            # are still dropped upstream by _drop_client_employees, per the
+            # standing "never source a client's own employees" rule.) Scoring
+            # is left intact: unlike the no-contact list this is a per-job
+            # conflict, and the match quality is still worth showing.
+            apply_client_conflict_flag(cand, getattr(criteria, "client_name", ""))
 
             if criteria.bypass_screening:
                 cand["match_score"] = 0
