@@ -28,7 +28,11 @@ import { shouldShowQuestionsCompleted } from "@/lib/activityTimeline";
 
 const formatActivityDate = (dateString: string) => {
   try {
-    const date = new Date(dateString);
+    let safeStr = dateString;
+    if (typeof safeStr === "string" && !safeStr.match(/(Z|[+-]\d{2}:?\d{2})$/)) {
+      safeStr = safeStr.replace(" ", "T") + "Z";
+    }
+    const date = new Date(safeStr);
     return new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
       month: "short",
