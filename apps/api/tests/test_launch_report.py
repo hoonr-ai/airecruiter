@@ -393,3 +393,78 @@ def test_time_to_source_runs_from_pair_published():
         "feedback_at": None, "engage_completed_at": None,
     }]
     assert lr._build_row(job, candidates, [], {})["time_to_source_minutes"] == 1440.0
+
+
+# ---------------------------------------------------------------------------
+# Job versions
+# ---------------------------------------------------------------------------
+def test_each_job_version_is_its_own_report_row():
+    """"Edit Job Setup" clones a job into a versioned monitored_jobs row.
+
+    Grouping by mj.job_id is what keeps v1 and v2 as separate report rows; a
+    GROUP BY on jobdiva_id or parent_job_id would merge their launches.
+    """
+    captured = {}
+
+    class _Cur:
+        description = []
+
+        def execute(self, sql, params):
+            captured["sql"] = sql
+
+        def fetchall(self):
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    lr._fetch_jobs_launched_on(_Conn(), datetime.date(2026, 8, 27), None)
+    assert "GROUP BY mj.job_id" in captured["sql"]
+    assert "parent_job_id" not in captured["sql"]
+
+
+def test_version_keys_do_not_overlap_between_versions():
+    """v2 carries its own ref, so neither of its keys can match v1's rows."""
+    v1 = lr._keys_for({"job_id": "26-06182", "jobdiva_id": "26-06182"})
+    v2 = lr._keys_for({"job_id": "26-06182-v2", "jobdiva_id": "26-06182-v2"})
+    assert set(v1).isdisjoint(v2)
+
+
+def test_version_is_surfaced_and_defaults_to_one():
+    assert lr._build_row({**_job(0), "version": 2}, [], [], {})["version"] == 2
+    assert lr._build_row({**_job(0), "version": None}, [], [], {})["version"] == 1
+    assert lr._build_row(_job(0), [], [], {})["version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Every emitted timestamp is Eastern
+# ---------------------------------------------------------------------------
+def test_all_emitted_timestamps_carry_an_eastern_offset():
+    """No field may leak a UTC/naive timestamp to the UI or the CSV."""
+    job = {
+        **_job(1),
+        "job_created_at_text": "2026-08-27 12:00:00",
+        "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2),
+    }
+    row = lr._build_row(job, [], [{"interview_id": "1"}], {"1": _outreach("completed")})
+    for field in ("pair_published_at", "pair_launch_at"):
+        assert row[field].endswith(("-04:00", "-05:00")), (field, row[field])
+
+
+def test_ist_and_now_written_rows_both_land_in_eastern():
+    """The two shapes this column is written in must agree on the timezone.
+
+    JobDiva import / manual create stamp readable_ist_now(); the version clone
+    stamps NOW(). Both must render as Eastern.
+    """
+    ist = lr._build_row({**_job(0), "job_created_at_text": "2026-08-20 17:30:00 IST"}, [], [], {})
+    now = lr._build_row({**_job(0), "job_created_at_text": "2026-08-27 18:00:00"}, [], [], {})
+    assert ist["pair_published_at"] == "2026-08-20T08:00:00-04:00"   # 17:30 IST -> 08:00 EDT
+    assert now["pair_published_at"] == "2026-08-27T14:00:00-04:00"   # 18:00 UTC -> 14:00 EDT

@@ -233,6 +233,12 @@ def _fetch_jobs_launched_on(conn, report_date: datetime.date, scope: Optional[Di
             mj.title,
             mj.enhanced_title,
             mj.customer_name,
+            -- "Edit Job Setup" after launch clones a job into a new versioned
+            -- monitored_jobs row with its own created_at and its own launches.
+            -- Grouping by mj.job_id therefore already gives each version its own
+            -- report row; version is surfaced so two rows sharing a title are
+            -- tellable apart.
+            mj.version,
             mj.recruiter_emails,
             mj.posted_date,
             mj.time_to_first_pass,
@@ -517,6 +523,7 @@ def _build_row(
         "recruiter_emails": _parse_recruiter_emails(job.get("recruiter_emails")),
         "job_title": (job.get("enhanced_title") or job.get("title") or "").strip(),
         "customer_name": (job.get("customer_name") or "").strip(),
+        "version": int(job.get("version") or 1),
 
         # JobDiva only ever gives a date here, never a time of day.
         "jobdiva_published_date": jobdiva_published.isoformat() if jobdiva_published else None,

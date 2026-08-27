@@ -27,6 +27,7 @@ interface LaunchReportRow {
   recruiter_emails: string[];
   job_title: string;
   customer_name: string;
+  version: number;
   jobdiva_published_date: string | null;
   pair_published_at: string | null;
   time_to_source_minutes: number | null;
@@ -267,11 +268,12 @@ function escapeCSV(value: string): string {
  * which is rendered separately from the column list.
  */
 function buildCsv(rows: LaunchReportRow[]): string {
-  const headers = ["Job Title", "JobDiva ID", ...FLAT_COLUMNS.map((c) => c.label)];
+  const headers = ["Job Title", "JobDiva ID", "Version", ...FLAT_COLUMNS.map((c) => c.label)];
   const lines = rows.map((row) =>
     [
       row.job_title || "Untitled job",
       row.jobdiva_id || row.job_id,
+      `v${row.version}`,
       ...FLAT_COLUMNS.map((col) => col.text(row)),
     ]
       .map((cell) => escapeCSV(String(cell ?? "")))
@@ -553,6 +555,14 @@ export default function LaunchReportPage() {
                         </Link>
                         <div className="flex items-center gap-2 mt-0.5">
                           <span className="text-[12px] text-slate-500 tabular-nums">{row.jobdiva_id || row.job_id}</span>
+                          {row.version > 1 && (
+                            <span
+                              className="inline-flex items-center rounded-md border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-indigo-700"
+                              title="A later version of this job, created by Edit Job Setup. It has its own PAIR Published time and its own launches."
+                            >
+                              v{row.version}
+                            </span>
+                          )}
                           {isPartial && (
                             <span
                               className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-700"
