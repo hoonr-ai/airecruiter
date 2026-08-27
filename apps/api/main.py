@@ -339,6 +339,7 @@ jobs_router = _safe_import("jobs")
 dnc_router = _safe_import("dnc")
 no_contact_router = _safe_import("no_contact")
 admin_analytics_router = _safe_import("admin_analytics")
+launch_report_router = _safe_import("launch_report")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
 
@@ -389,6 +390,7 @@ _mount(jobs_router, "jobs")
 _mount(dnc_router, "dnc")
 _mount(no_contact_router, "no_contact")
 _mount(admin_analytics_router, "admin_analytics")
+_mount(launch_report_router, "launch_report")
 _mount(teams_router, "teams")
 # Mounted under /api so the existing nginx `location /api/` passthrough routes
 # it to the backend — avoids a collision with the frontend's /campaigns pages

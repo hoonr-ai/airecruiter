@@ -111,6 +111,7 @@ class TranscriptionItem(BaseModel):
     # cannot 422 the whole interview webhook (PAI-154).
     question: Optional[str] = None
     answer: Optional[str] = None
+    timestamp: Optional[str] = None
     candidate_score: Optional[float] = None
     total_score: Optional[float] = None
     # PairBot sends "pending" on in-flight HF rows; null/empty is not an HF marker.

@@ -60,14 +60,15 @@ const formatDate = (dateStr: string) => {
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-GB', {
-      day: '2-digit',
-      month: '2-digit',
+    return date.toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      month: 'short',
+      day: 'numeric',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       hour12: true
-    }).toUpperCase();
+    });
   } catch {
     return dateStr;
   }
@@ -1360,13 +1361,24 @@ export default function CandidateRankingsPage() {
       };
       const merged = Array.from(new Set([...srcList(dst), ...srcList(src)]));
       if (merged.length) dst.sources = merged;
-      for (const f of ["phone", "location", "headline", "title", "profile_url", "linkedin_url", "image_url"]) {
+      for (const f of [
+        "phone", "location", "headline", "title", "profile_url", "linkedin_url", "image_url",
+        "engage_status", "engage_interview_id", "engage_score",
+        "audit_status", "audit_interview_id", "audit_created_at", "audit_payload", "audit_response"
+      ]) {
         if (!dst[f] && src[f]) dst[f] = src[f];
       }
       const dEmail = String(dst.email || "");
       const sEmail = String(src.email || "");
       if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmail(dEmail) && !isPlaceholderEmail(sEmail)))) {
         dst.email = sEmail;
+      }
+      // Merge candidate data dictionary so nested fields like engage_status are preserved
+      if (src.data && typeof src.data === "object" && !Array.isArray(src.data)) {
+        dst.data = {
+          ...src.data,
+          ...(dst.data || {})
+        };
       }
       return dst;
     };

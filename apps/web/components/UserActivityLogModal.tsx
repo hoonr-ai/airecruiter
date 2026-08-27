@@ -30,11 +30,13 @@ const formatActivityDate = (dateString: string) => {
   try {
     const date = new Date(dateString);
     return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
       month: "short",
       day: "numeric",
       hour: "numeric",
       minute: "numeric",
       hour12: true,
+      timeZoneName: "short",
     }).format(date);
   } catch (e) {
     return dateString;
