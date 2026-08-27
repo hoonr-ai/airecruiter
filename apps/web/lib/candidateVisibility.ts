@@ -45,9 +45,13 @@ export function candidateHiddenReason(
   // Candidates we couldn't score (detail_failed → N/A) are exempt from the
   // min-score filter — a failed detail lookup must not hide a JobDiva row.
   // JobDiva-JobAgent rows are unscored BY DESIGN (no % is shown for agent
-  // results), so a % filter can never hide them either.
-  const isAgentRow = String(c?.source || "") === "JobDiva-JobAgent";
-  if (ctx.minScore > 0 && !awaitingScore && !c?.detail_failed && !isAgentRow) {
+  // results), so a % filter can never hide them either — unless the search
+  // ran with assess_all_sources (sample→approve flow), in which case agent
+  // rows carry a real numeric score and filter like everyone else.
+  const isUnscoredAgentRow =
+    String(c?.source || "") === "JobDiva-JobAgent" &&
+    typeof c?.match_score !== "number";
+  if (ctx.minScore > 0 && !awaitingScore && !c?.detail_failed && !isUnscoredAgentRow) {
     if (ctx.getScore(c) < ctx.minScore) return "filtered";
   }
   if (ctx.locationFilter.size > 0 && !awaitingDetails) {

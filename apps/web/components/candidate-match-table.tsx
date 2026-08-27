@@ -511,11 +511,14 @@ export function CandidateMatchTable({
                       >
                         —
                       </span>
-                    ) : isJobAgentRow(candidate) ? (
-                      // JobDiva-JobAgent rows are never shown as a % — the
-                      // agent's results follow the recruiter's own criteria in
-                      // JobDiva and JobDiva's ranking. The pill still opens the
-                      // details popup (matched-by-agent provenance + reasons).
+                    ) : isJobAgentRow(candidate) && matchScore == null ? (
+                      // Unscored JobDiva-JobAgent rows aren't shown as a % —
+                      // the agent's results follow the recruiter's own criteria
+                      // in JobDiva and JobDiva's ranking. The pill still opens
+                      // the details popup (matched-by-agent provenance +
+                      // reasons). In the sample→approve flow the backend runs
+                      // the full assessment on agent rows too (assess_all_sources),
+                      // and those carry a numeric score → normal % circle below.
                       <button
                         type="button"
                         onClick={() => onOpenDetails(candidate)}
@@ -887,7 +890,7 @@ function HoverDetailsCard({
                   </span>
                 </>
               )}
-              {matchScore != null && matchTone && !isJobAgentRow(candidate) && (
+              {matchScore != null && matchTone && (
                 <>
                   <span className="text-slate-300">·</span>
                   <span
