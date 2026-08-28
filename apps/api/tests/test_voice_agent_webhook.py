@@ -288,3 +288,82 @@ def test_count_pending_hard_filters_dedupes_and_skips_ordinary_rows():
         ],
     )
     assert count_pending_hard_filters(payload.hard_filter_results, payload.transcriptions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for closing-bot-sentence exclusion (PR #517)
+# ---------------------------------------------------------------------------
+
+def _is_closing_sentence(item: dict) -> bool:
+    """
+    Mirror of the exclusion logic added in engagement.py so we can unit-test
+    it without standing up a DB.
+    """
+    score = item.get("candidate_score")
+    total = item.get("total_score", 10.0)
+    answer = item.get("answer") or "—"
+    hf = str(item.get("hard_filter_status") or "").strip().lower().replace(" ", "_")
+    is_hard_filter = hf not in ("", "not_hard_filter", "na", "n/a", "none")
+    q_order = item.get("question_order", 0) or 0
+
+    try:
+        score_value = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score_value = None
+
+    try:
+        total_value = float(total) if total is not None else None
+    except (TypeError, ValueError):
+        total_value = None
+
+    _BOT_CLOSING_SENTINEL = "—"
+    return (
+        q_order == 0
+        and score_value == 0.0
+        and total_value == 0.0
+        and (not answer or answer == _BOT_CLOSING_SENTINEL)
+        and not is_hard_filter
+    )
+
+
+def test_closing_sentence_is_excluded():
+    """Bot closing sentence (score=0, total=0, no answer, no order) is filtered out."""
+    item = {
+        "question": "Thank you for your time! A recruiter will be in touch.",
+        "answer": None,
+        "candidate_score": 0.0,
+        "total_score": 0.0,
+        "hard_filter_status": None,
+        "question_order": 0,
+    }
+    assert _is_closing_sentence(item) is True
+
+
+def test_closing_sentence_with_null_total_score_does_not_raise():
+    """Guard: explicit null total_score must not raise TypeError (PR critical fix)."""
+    item = {
+        "question": "Thank you for sharing!",
+        "answer": None,
+        "candidate_score": 0.0,
+        "total_score": None,   # partner API sends "total_score": null
+        "hard_filter_status": None,
+        "question_order": 0,
+    }
+    # total_value will be None (not 0.0) so it should NOT be excluded —
+    # but more importantly it must not raise TypeError.
+    result = _is_closing_sentence(item)
+    assert result is False  # total_value is None ≠ 0.0, so condition is not met
+
+
+def test_real_skipped_scored_question_is_not_excluded():
+    """A genuinely scored question (Q10+) that the candidate skipped must NOT be filtered."""
+    item = {
+        "question": "Describe a time you led a cross-functional team.",
+        "answer": None,
+        "candidate_score": 0.0,
+        "total_score": 0.0,
+        "hard_filter_status": None,
+        "question_order": 10,   # Q10+ → is_scored_question = True → must not be dropped
+    }
+    assert _is_closing_sentence(item) is False
+
