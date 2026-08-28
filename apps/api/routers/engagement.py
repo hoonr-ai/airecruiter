@@ -3025,6 +3025,10 @@ async def _check_and_fire_candidate_passed_notification(
                     )
                 is_scored_question = (not is_hard_filter) and (not is_info_only)
 
+                # Exclude the bot's closing sentence which is often scored 0.0/0 with no answer
+                if score_value == 0.0 and float(total) == 0.0 and (not a_text or a_text == "—"):
+                    continue
+
                 screening_summary.append({
                     "question": q_text,
                     "answer": a_text,
