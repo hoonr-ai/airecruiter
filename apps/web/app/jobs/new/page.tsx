@@ -6624,10 +6624,18 @@ function NewJobPageContent() {
   // not already launched. Unscored rows (N/A / agent rows without a score)
   // never auto-launch: "more than 60% match" requires a match score. DNC and
   // missing-contact handling stay inside the shared Launch PAIR flow.
-  const computeAutoLaunchSelection = (pool: any[]): string[] => {
+  //
+  // Safety net: the confirmation-free launch is hard-capped at the same
+  // ceiling as Search & Launch (SEARCH_AND_LAUNCH_TOTAL, highest scores
+  // first), so a scoring/exclusion regression can never translate into
+  // unbounded outreach in one click — the overflow stays in the table for
+  // manual review.
+  const computeAutoLaunchSelection = (
+    pool: any[]
+  ): { ids: string[]; eligibleTotal: number } => {
     const idOf = (c: any) =>
       String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-    const ids: string[] = [];
+    const eligible: { id: string; score: number }[] = [];
     const seen = new Set<string>();
     for (const c of pool) {
       const id = idOf(c);
@@ -6638,9 +6646,12 @@ function NewJobPageContent() {
       if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
       if (typeof c?.match_score !== "number" || c.match_score < AUTO_LAUNCH_MIN_SCORE) continue;
       seen.add(id);
-      ids.push(id);
+      eligible.push({ id, score: c.match_score });
     }
-    return ids;
+    const capped = [...eligible]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, SEARCH_AND_LAUNCH_TOTAL);
+    return { ids: capped.map((e) => e.id), eligibleTotal: eligible.length };
   };
 
   // Phase 2 of the sample-first flow: the recruiter approved the sample →
@@ -6662,11 +6673,12 @@ function NewJobPageContent() {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const pool =
       candidatesRef.current.length >= results.length ? candidatesRef.current : results;
-    const ids = computeAutoLaunchSelection(pool);
+    const { ids, eligibleTotal } = computeAutoLaunchSelection(pool);
     trackEvent("job_wizard_step5_auto_launch_selection", {
       step: 5,
       pool_size: pool.length,
       selected_count: ids.length,
+      eligible_total: eligibleTotal,
       auto_launch_min_score: AUTO_LAUNCH_MIN_SCORE,
     });
     if (ids.length === 0) {
@@ -6677,7 +6689,9 @@ function NewJobPageContent() {
       return;
     }
     showToast(
-      `Search complete — auto-launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} scoring ≥ ${AUTO_LAUNCH_MIN_SCORE}%…`,
+      eligibleTotal > ids.length
+        ? `Search complete — auto-launching PAIR for the top ${ids.length} of ${eligibleTotal} candidates scoring ≥ ${AUTO_LAUNCH_MIN_SCORE}% (safety cap). Select and launch the rest manually.`
+        : `Search complete — auto-launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} scoring ≥ ${AUTO_LAUNCH_MIN_SCORE}%…`,
       "info",
     );
     // Land the selection in state first (the launch flow reads it there);
