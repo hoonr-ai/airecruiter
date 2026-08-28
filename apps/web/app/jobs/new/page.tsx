@@ -1106,10 +1106,28 @@ function NewJobPageContent() {
   const SEARCH_AND_LAUNCH_TOTAL = 250;
   const SEARCH_AND_LAUNCH_JOBDIVA_QUOTA = 150;
   const [isSearchAndLaunch, setIsSearchAndLaunch] = useState(false);
-  // Armed by handleSearchAndLaunchClick: the launch must fire AFTER the
-  // auto-selection lands in selectedCandidates state (the launch flow reads
-  // that state), so a selection-effect performs the actual launch call.
+  // Armed by handleSearchAndLaunchClick / the sample-flow auto-launch: the
+  // launch must fire AFTER the auto-selection lands in selectedCandidates
+  // state (the launch flow reads that state), so a selection-effect performs
+  // the actual launch call.
   const searchAndLaunchArmedRef = useRef(false);
+
+  // ── Sample-first search flow ─────────────────────────────────────────────
+  // "Run Search" now probes every selected source and shows SAMPLE_PER_SOURCE
+  // preview candidates per source (fast + cheap). The recruiter approves the
+  // sample via "Search All Candidates", which runs the full search with the
+  // normal limits, scores every source (assess_all_sources), and auto-launches
+  // PAIR for everyone scoring ≥ AUTO_LAUNCH_MIN_SCORE.
+  //   idle     → nothing run yet (or criteria changed / restored cache)
+  //   sample   → sample search streaming
+  //   sampled  → sample shown, waiting for approval
+  //   full     → full search streaming
+  //   complete → full results in (auto-launch may be running/finished)
+  const SAMPLE_PER_SOURCE = 2;
+  const AUTO_LAUNCH_MIN_SCORE = 60;
+  const [searchPhase, setSearchPhase] = useState<
+    "idle" | "sample" | "sampled" | "full" | "complete"
+  >("idle");
 
   const [hasSearched, setHasSearched] = useState(false);
   const [hasFetchedMoreJobDiva, setHasFetchedMoreJobDiva] = useState(false);
@@ -1615,12 +1633,13 @@ function NewJobPageContent() {
             return rankA - rankB;
           }
 
-          // JobDiva-JobAgent rows carry no % (unscored by design, ranked by
-          // JobDiva) — treat them as the top band so hiding their score
-          // doesn't sink JobDiva's trusted results below every scored row.
-          // Agent-vs-agent pairs were already ordered by api_rank above.
-          const agentA = String(a?.source || "") === "JobDiva-JobAgent";
-          const agentB = String(b?.source || "") === "JobDiva-JobAgent";
+          // UNSCORED JobDiva-JobAgent rows carry no % (ranked by JobDiva) —
+          // treat them as the top band so hiding their score doesn't sink
+          // JobDiva's trusted results below every scored row. Agent rows with
+          // a real score (assess_all_sources runs) sort by it like everyone
+          // else. Agent-vs-agent pairs were already ordered by api_rank above.
+          const agentA = String(a?.source || "") === "JobDiva-JobAgent" && typeof a?.match_score !== "number";
+          const agentB = String(b?.source || "") === "JobDiva-JobAgent" && typeof b?.match_score !== "number";
           const scoreA = agentA ? Number.POSITIVE_INFINITY : getCandidateMatchScore(a);
           const scoreB = agentB ? Number.POSITIVE_INFINITY : getCandidateMatchScore(b);
           if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
@@ -6058,6 +6077,11 @@ function NewJobPageContent() {
       // backend falls back to monitored_jobs.customer_name when this is
       // omitted, and filters placeholder values ("External"/"Unknown").
       client_name: (jobData?.customer_name || jobData?.customer || "").trim() || undefined,
+      // Sample→approve→auto-launch flow: every row (JobDiva-JobAgent
+      // included) gets the full LLM skills assessment and a numeric score, so
+      // the ≥ AUTO_LAUNCH_MIN_SCORE auto-launch selection is meaningful
+      // across sources.
+      assess_all_sources: true,
       page: 1,
       page_size: 100
     };
@@ -6074,6 +6098,10 @@ function NewJobPageContent() {
       sourcesOverride?: string[];
       jobdivaOffset?: number;
       jobdivaBatchSize?: number;
+      // Sample-first flow: probe each source and stream back only
+      // `samplePerSource` fully-scored preview rows per source.
+      searchMode?: "sample" | "full";
+      samplePerSource?: number;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -6082,6 +6110,8 @@ function NewJobPageContent() {
       ...(overrides?.sourcesOverride ? { sources: overrides.sourcesOverride } : {}),
       ...(typeof overrides?.jobdivaOffset === "number" ? { jobdiva_offset: overrides.jobdivaOffset } : {}),
       ...(typeof overrides?.jobdivaBatchSize === "number" ? { jobdiva_batch_size: overrides.jobdivaBatchSize } : {}),
+      ...(overrides?.searchMode ? { search_mode: overrides.searchMode } : {}),
+      ...(typeof overrides?.samplePerSource === "number" ? { sample_per_source: overrides.samplePerSource } : {}),
     };
 
     const mapStageToStatus = (stage: string) => {
@@ -6361,6 +6391,10 @@ function NewJobPageContent() {
     if (isSearching) return;
     if (!hasSearched) return;
     if (candidates.length === 0) return;
+    // Never persist sample previews: a restored 2-per-source list would
+    // masquerade as a full run after reload (the approve banner state
+    // doesn't survive the restore).
+    if (searchPhase === "sample" || searchPhase === "sampled") return;
     try {
       const trimmed = candidates.slice(0, 100);
       window.localStorage.setItem(
@@ -6370,7 +6404,7 @@ function NewJobPageContent() {
     } catch {
       /* quota / unavailable — swallow, results remain in-memory */
     }
-  }, [isSearching, hasSearched, candidates, sourcingResultsKey, sourceStatuses]);
+  }, [isSearching, hasSearched, candidates, sourcingResultsKey, sourceStatuses, searchPhase]);
 
   // Restore last-run results when the recruiter lands on Step 5 with nothing
   // in memory (e.g. after a reload). Gated to one-shot via the hasSearched
@@ -6411,6 +6445,65 @@ function NewJobPageContent() {
     }
   }, [currentStep, sourcingResultsKey]);
 
+  // Phase 1 of the sample-first flow: probe every selected source and show
+  // SAMPLE_PER_SOURCE fully-scored preview candidates per source. No boolean
+  // relaxation, no tranche follow-ups — one fast pass so the recruiter can
+  // judge source quality before approving the full (expensive) run.
+  const handleRunSampleSearch = async (): Promise<any[]> => {
+    const searchStartMs = Date.now();
+    let sampleResults: any[] = [];
+
+    setIsSearching(true);
+    setHasSearched(true);
+    setSearchPhase("sample");
+    setHasFetchedMoreJobDiva(false);
+    setRestoredFromCache(false);
+    detailFailedIdsRef.current = new Set<string>();
+    trackEvent("job_wizard_step5_sample_search_started", {
+      step: 5,
+      sample_per_source: SAMPLE_PER_SOURCE,
+      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+      recent_days: recentDaysFilter,
+      include_no_resume: includeNoResume,
+    });
+    try {
+      const initial = resolvedGeneratedBoolean;
+      setGeneratedBoolean(initial);
+      setBooleanAttempts([{ query: initial, label: "PAIR generated" }]);
+      setSearchStatus(`Sampling sources — previewing up to ${SAMPLE_PER_SOURCE} candidates from each...`);
+      sampleResults = await runSearchStream(initial, "replace", {
+        searchMode: "sample",
+        samplePerSource: SAMPLE_PER_SOURCE,
+      });
+      setSearchPhase("sampled");
+      setSearchStatus(
+        sampleResults.length > 0
+          ? `Sample ready — ${sampleResults.length} preview candidate${sampleResults.length === 1 ? "" : "s"}. Approve to search everything.`
+          : "Sample found no candidates — adjust criteria, or run the full search anyway."
+      );
+    } catch (error) {
+      console.error("Failed to run sample search:", error);
+      setSearchPhase("idle");
+      trackEvent("job_wizard_step5_sample_search_failed", {
+        step: 5,
+        error: truncateForTelemetry((error as Error)?.message || String(error)),
+      });
+    } finally {
+      setIsSearching(false);
+      const runtimeSeconds = Number(((Date.now() - searchStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(1);
+      trackEvent("job_wizard_step5_sample_search_finished", {
+        step: 5,
+        candidates_found: sampleResults.length,
+        runtime_seconds: runtimeSeconds,
+        sample_per_source: SAMPLE_PER_SOURCE,
+        quality: collectCandidateQualityStats(sampleResults),
+      });
+    }
+    return sampleResults;
+  };
+
   const handleRunSearch = async (): Promise<any[]> => {
     const searchStartMs = Date.now();
     let accumulated: any[] = [];
@@ -6419,6 +6512,7 @@ function NewJobPageContent() {
 
     setIsSearching(true);
     setHasSearched(true);
+    setSearchPhase("full");
     setHasFetchedMoreJobDiva(false);
     setRestoredFromCache(false);
     detailFailedIdsRef.current = new Set<string>();
@@ -6494,6 +6588,7 @@ function NewJobPageContent() {
       });
     } finally {
       setIsSearching(false);
+      setSearchPhase("complete");
       const detailFailedCount = detailFailedIdsRef.current.size;
       if (detailFailedCount > 0) {
         showToast(
@@ -6521,6 +6616,74 @@ function NewJobPageContent() {
       });
     }
     return accumulated;
+  };
+
+  // Auto-launch selection for the sample→approve flow: every candidate with a
+  // real numeric score ≥ AUTO_LAUNCH_MIN_SCORE that is actually launchable —
+  // not excluded (client employee / offer status), not a no-contact company,
+  // not already launched. Unscored rows (N/A / agent rows without a score)
+  // never auto-launch: "more than 60% match" requires a match score. DNC and
+  // missing-contact handling stay inside the shared Launch PAIR flow.
+  const computeAutoLaunchSelection = (pool: any[]): string[] => {
+    const idOf = (c: any) =>
+      String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const c of pool) {
+      const id = idOf(c);
+      if (!id || seen.has(id)) continue;
+      if (getCandidateExclusionReason(c)) continue;
+      if (c?.no_contact === true) continue;
+      const launchedKey = `${c?.source ?? ""}:${id}`;
+      if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
+      if (typeof c?.match_score !== "number" || c.match_score < AUTO_LAUNCH_MIN_SCORE) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  };
+
+  // Phase 2 of the sample-first flow: the recruiter approved the sample →
+  // run the full search (normal limits + boolean relaxation), then
+  // auto-launch PAIR for everyone scoring ≥ AUTO_LAUNCH_MIN_SCORE. The
+  // launch itself rides the existing Launch PAIR pipeline (enrichment,
+  // DNC re-check, missing-contact modal, batching, progress modal).
+  const handleApproveAndSearchAll = async () => {
+    if (isSearching || isEnrichingContacts || launchProgress.open || isViewOnly) return;
+    trackEvent("job_wizard_step5_full_search_after_sample_started", {
+      step: 5,
+      sample_candidates_shown: candidatesRef.current.length,
+      auto_launch_min_score: AUTO_LAUNCH_MIN_SCORE,
+    });
+    const results = await handleRunSearch();
+    if (searchAbortRef.current?.signal.aborted) return;
+    // Let the final stream updates flush into candidates state/ref before
+    // computing the auto-launch selection (mirrors Search & Launch).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pool =
+      candidatesRef.current.length >= results.length ? candidatesRef.current : results;
+    const ids = computeAutoLaunchSelection(pool);
+    trackEvent("job_wizard_step5_auto_launch_selection", {
+      step: 5,
+      pool_size: pool.length,
+      selected_count: ids.length,
+      auto_launch_min_score: AUTO_LAUNCH_MIN_SCORE,
+    });
+    if (ids.length === 0) {
+      showToast(
+        `Search complete — no candidates scored ≥ ${AUTO_LAUNCH_MIN_SCORE}%, so nothing was auto-launched. You can still select and launch manually.`,
+        "info",
+      );
+      return;
+    }
+    showToast(
+      `Search complete — auto-launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} scoring ≥ ${AUTO_LAUNCH_MIN_SCORE}%…`,
+      "info",
+    );
+    // Land the selection in state first (the launch flow reads it there);
+    // the selection-effect below handleSearchAndLaunchClick fires the launch.
+    searchAndLaunchArmedRef.current = true;
+    setSelectedCandidates(new Set(ids));
   };
 
   const handleSearchMoreJobDiva = async () => {
@@ -7851,10 +8014,12 @@ function NewJobPageContent() {
     if (isSearching || isSearchAndLaunch || isEnrichingContacts || launchProgress.open || isViewOnly) return;
     setIsSearchAndLaunch(true);
     try {
-      // Reuse a completed search's pool; otherwise run the standard
+      // Reuse a completed FULL search's pool; otherwise run the standard
       // cross-source search (it covers exactly the sources selected above).
+      // A sample preview never qualifies — selecting 250 from a 2-per-source
+      // probe would launch to almost nobody.
       let searched: any[] = [];
-      if (!hasSearched || candidatesRef.current.length === 0) {
+      if (!hasSearched || candidatesRef.current.length === 0 || searchPhase !== "complete") {
         searched = await handleRunSearch();
         // Let the final stream updates flush into candidates state/ref.
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -7908,8 +8073,9 @@ function NewJobPageContent() {
     }
   };
 
-  // Fires the launch one render AFTER Search & Launch lands its auto-selection
-  // in state, so handleLaunchPairClick's reads of selectedCandidates see the
+  // Fires the launch one render AFTER Search & Launch — or the sample-flow
+  // auto-launch (handleApproveAndSearchAll) — lands its auto-selection in
+  // state, so handleLaunchPairClick's reads of selectedCandidates see the
   // fresh set. No-op for every ordinary selection change (ref stays false).
   useEffect(() => {
     if (!searchAndLaunchArmedRef.current) return;
@@ -9218,9 +9384,9 @@ function NewJobPageContent() {
                                 )}
                                 <button
                                   onClick={handleExtendBoolean}
-                                  disabled={isSearching || booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS}
+                                  disabled={isSearching || booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS || searchPhase === "sample" || searchPhase === "sampled"}
                                   className="text-[11px] font-bold text-[#6366f1] hover:text-white hover:bg-[#6366f1] px-2.5 py-1 rounded-md border border-[#ddd6fe] bg-[#f5f3ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                  title="Relax the boolean string and search again, appending new candidates"
+                                  title={searchPhase === "sampled" ? "Approve the sample first — leniency passes run on the full search" : "Relax the boolean string and search again, appending new candidates"}
                                 >
                                   Make more lenient
                                 </button>
@@ -9352,8 +9518,9 @@ function NewJobPageContent() {
                       )}
                       <Button
                         className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                        onClick={handleRunSearch}
+                        onClick={handleRunSampleSearch}
                         disabled={isSearching}
+                        title={`Fast preview: up to ${SAMPLE_PER_SOURCE} candidates per selected source. Approve the sample to run the full search.`}
                       >
                         {isSearching ? (
                           <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -9383,8 +9550,12 @@ function NewJobPageContent() {
                   </h4>
                   <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
                     {hasSearched ? (
-                      isSearching ? searchStatus : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
-                    ) : 'Run a search to find candidates.'}
+                      isSearching
+                        ? searchStatus
+                        : searchPhase === "sampled"
+                          ? `${candidates.length} sample candidate${candidates.length === 1 ? "" : "s"} — approve below to search everything`
+                          : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
+                    ) : 'Run a search to preview candidates from each source.'}
                   </p>
                   {hasSearched && !isSearching && candidates.length > 0 && qualityScorecard && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
@@ -9438,6 +9609,27 @@ function NewJobPageContent() {
                         {sourceStatusDisplayLabel(s.source)}: {s.reason}
                       </p>
                     ))}
+                  {searchPhase === "sampled" && !isSearching && (
+                    <div className="mt-3 rounded-xl border border-[#c7d2fe] bg-[#eef2ff] px-4 py-3 max-w-2xl">
+                      <p className="text-[13px] font-bold text-[#3730a3]">
+                        Sample preview — up to {SAMPLE_PER_SOURCE} candidates per source
+                      </p>
+                      <p className="text-[12px] text-[#4338ca] mt-1">
+                        Happy with these sources? Approve to run the full search
+                        with the standard limits. Every candidate is
+                        skill-assessed, and PAIR launches automatically for
+                        everyone scoring ≥ {AUTO_LAUNCH_MIN_SCORE}%.
+                      </p>
+                      <Button
+                        className="mt-2.5 bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px]"
+                        onClick={handleApproveAndSearchAll}
+                        disabled={isSearching || isEnrichingContacts || launchProgress.open || isViewOnly}
+                      >
+                        <Search className="w-4 h-4" />
+                        Search All Candidates & Auto-Launch
+                      </Button>
+                    </div>
+                  )}
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {[
@@ -9470,7 +9662,8 @@ function NewJobPageContent() {
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
-                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && jobdivaSelected && (
+                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && jobdivaSelected &&
+                      searchPhase !== "sample" && searchPhase !== "sampled" && (
                       <Button
                         variant="outline"
                         className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"

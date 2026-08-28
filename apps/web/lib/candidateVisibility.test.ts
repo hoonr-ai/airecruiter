@@ -67,11 +67,35 @@ test("min-score filter hides sub-threshold rows", () => {
   );
 });
 
-test("JobDiva-JobAgent rows are exempt from the min-score filter (unscored by design)", () => {
+test("unscored JobDiva-JobAgent rows are exempt from the min-score filter", () => {
+  const ctx = baseCtx({ minScore: 60 });
+  // No numeric score (the default agent-row policy: no % shown) → the %
+  // filter can never hide the row.
+  assert.equal(
+    candidateHiddenReason(
+      { candidate_id: "1", source: "JobDiva-JobAgent", match_score: null },
+      ctx
+    ),
+    null
+  );
+  assert.equal(
+    candidateHiddenReason({ candidate_id: "2", source: "JobDiva-JobAgent" }, ctx),
+    null
+  );
+});
+
+test("scored JobDiva-JobAgent rows (assess_all_sources) filter like everyone else", () => {
   const ctx = baseCtx({ minScore: 60 });
   assert.equal(
     candidateHiddenReason(
-      { candidate_id: "1", source: "JobDiva-JobAgent", match_score: 0 },
+      { candidate_id: "1", source: "JobDiva-JobAgent", match_score: 30 },
+      ctx
+    ),
+    "filtered"
+  );
+  assert.equal(
+    candidateHiddenReason(
+      { candidate_id: "2", source: "JobDiva-JobAgent", match_score: 75 },
       ctx
     ),
     null

@@ -107,13 +107,16 @@ def test_extract_wizard_shaped_boolean():
 
 def _run_pool(monkeypatch, **kwargs):
     """Call _search_talent_pool with the network layer stubbed; capture the
-    (base_body, must_terms, title) handed to the fetcher."""
+    (base_body, must_terms, titles) handed to the fetcher."""
     captured = {}
 
-    async def fake_fetch(token, base_body, must_terms, title=""):
+    async def fake_fetch(token, base_body, must_terms, titles=None, limit=150):
         captured["base_body"] = base_body
         captured["must_terms"] = must_terms
-        captured["title"] = title
+        captured["titles"] = list(titles or [])
+        # Back-compat for assertions written against the old single-title
+        # fetcher signature.
+        captured["title"] = (titles or [""])[0] if titles else ""
         return []
 
     monkeypatch.setattr(jobdiva_service, "_fetch_talent_search_rows", fake_fetch)

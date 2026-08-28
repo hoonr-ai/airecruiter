@@ -604,6 +604,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                 "" if client_name.lower() in ("", "external", "unknown", "n/a")
                 else client_name
             ),
+            search_mode=(
+                "sample" if str(request.search_mode or "").strip().lower() == "sample"
+                else "full"
+            ),
+            # Clamp the preview size: above ~10 per source a "sample" costs
+            # more than it saves (pool + enrichment scale with it).
+            sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
+            assess_all_sources=bool(request.assess_all_sources),
         )
 
         # Execute unified search as a stream. Persist each candidate to
