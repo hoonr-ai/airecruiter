@@ -255,6 +255,45 @@ def test_flag_never_set_for_placeholder_client():
     assert apply_client_conflict_flag(cand, "Unknown Customer") is False
 
 
+# ── read-path hydration (GET /jobs/{id}/candidates → rankings page) ───────
+
+def _rankings_row(cei_company_experience):
+    """A row shaped like the rankings query result, hydrated the way
+    get_job_candidates does it."""
+    from services.company_match import apply_client_conflict_flag
+
+    cand = {"candidate_id": "999", "name": "X", "headline": "QA Engineer", "data": {}}
+    data_blob = cand["data"]
+    if cei_company_experience and not data_blob.get("company_experience"):
+        data_blob["company_experience"] = cei_company_experience
+        cand["data"] = data_blob
+    apply_client_conflict_flag(cand, CLIENT)
+    return cand
+
+
+def test_rankings_row_is_flagged_from_the_joined_history():
+    row = _rankings_row([{"company": "Bank Of America", "end_date": "Present"}])
+    assert row["client_conflict"] is True
+    assert row["client_conflict_relation"] == "current"
+
+
+def test_rankings_row_without_joined_history_is_not_flagged():
+    assert _rankings_row(None).get("client_conflict") is not True
+
+
+def test_company_experience_must_live_inside_the_data_blob():
+    """Guards the trap the read path hit: collect_current_companies reads
+    company_experience from candidate["data"] whenever that is a dict, so a
+    top-level copy is silently ignored and the row renders clean."""
+    from services.company_match import collect_current_companies
+
+    exp = [{"company": "Bank Of America", "end_date": "Present"}]
+    assert collect_current_companies({"data": {}, "company_experience": exp}) == []
+    assert collect_current_companies({"data": {"company_experience": exp}}) == [
+        "Bank Of America"
+    ]
+
+
 # ── merge semantics ───────────────────────────────────────────────────────
 
 def test_merge_does_not_mutate_the_stored_blob():
