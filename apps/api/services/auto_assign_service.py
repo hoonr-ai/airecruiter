@@ -197,6 +197,29 @@ class AutoAssignService:
             "enhanced_info": cand.get("enhanced_info") or existing_data.get("enhanced_info"),
             "auto_assigned": True,
         })
+
+        # Contact-gate inputs. JobApplicantsDetail returns all of these
+        # (services/jobdiva.py `_get_all_job_applicants`), but they used to be
+        # dropped here — and `data` is the ONLY thing the launch gate reads
+        # (routers/engagement.py `is_candidate_excluded_from_pair`). With them
+        # missing, every exclusion reason it checks was inert on the auto-launch
+        # path: Pyramid current employees, Offer Extended/Accepted, and the
+        # hiring-client check alike. `available` is meaningfully False, so these
+        # are copied with an explicit None test rather than an `or` chain, which
+        # would silently discard it.
+        for field in ("available", "availability_status", "employee_status",
+                      "status", "qualifications", "title", "headline",
+                      # Hiring-client conflict flag stamped by finalize_candidate.
+                      # Safe to persist per-row because sourced_candidates is
+                      # keyed per job, so the flag can never leak to another req.
+                      "client_conflict", "client_conflict_reason",
+                      "client_conflict_company", "client_conflict_relation"):
+            value = cand.get(field)
+            if value is None or value == "":
+                value = existing_data.get(field)
+            if value is not None:
+                payload[field] = value
+
         if candidate_id:
             payload["jobdiva_candidate_id"] = candidate_id
         return payload
@@ -536,17 +559,19 @@ class AutoAssignService:
             sourcing_filters = {}
             jobdiva_numeric_id = None
             job_location_type = ""
+            job_customer_name = ""
 
             try:
                 with self._get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status, location_type, city FROM monitored_jobs "
+                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status, location_type, city, customer_name FROM monitored_jobs "
                             "WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                             (job_id, job_id)
                         )
                         row = cur.fetchone()
                         if row:
+                            job_customer_name = str(row[6] or "").strip()
                             resume_match_filters = row[0] if isinstance(row[0], list) else (json.loads(row[0]) if row[0] else [])
                             sourcing_filters = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
                             jobdiva_ref_id = row[2]
@@ -613,6 +638,12 @@ class AutoAssignService:
                 # even though Step-5 "JobDiva" now maps to talent search only.
                 sources=["JobDiva Applicants"],
                 bypass_screening=True,
+                # Without this the hiring-client conflict flag can't be stamped
+                # on auto-synced applicants — finalize_candidate reads the
+                # client off the criteria. Placeholder customers ("Unknown",
+                # "External", …) are filtered by is_placeholder_client, so the
+                # raw value is safe to pass straight through.
+                client_name=job_customer_name,
             )
 
             # 3. Build an in-memory lookup index of existing candidates for

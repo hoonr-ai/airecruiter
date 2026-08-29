@@ -1148,13 +1148,14 @@ async def get_job_candidates(
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT jobdiva_id, job_id, screening_level FROM monitored_jobs
+                    SELECT jobdiva_id, job_id, screening_level, customer_name FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
                 resolved_jobdiva_id = job_id_or_ref
                 job_screening_level = ""
+                job_customer_name = str(result[3] or "").strip() if result and len(result) > 3 else ""
                 if result:
                     resolved_jobdiva_id = result[0] or result[1]
                     resolved_numeric_job_id = result[1] or result[0]
@@ -1283,12 +1284,20 @@ async def get_job_candidates(
                         sc.resume_match_percentage as match_score,
                         sc.created_at,
                         sc.data,
+                        -- Employment history lives here, NOT in sc.data: the
+                        -- applicant sync writes `data` before resume extraction
+                        -- runs, and nothing back-fills it. Without this join the
+                        -- hiring-client flag below has nothing to match on and
+                        -- the row renders clean while the résumé says otherwise.
+                        cei.company_experience as cei_company_experience,
                         la.status as audit_status,
                         la.interview_id as audit_interview_id,
                         la.created_at as audit_created_at,
                         la.payload as audit_payload,
                         la.response as audit_response
                     FROM deduped_candidates sc
+                    LEFT JOIN candidate_enhanced_info cei
+                        ON cei.candidate_id = sc.candidate_id
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
                     ORDER BY sc.created_at DESC, sc.id DESC
@@ -1310,6 +1319,28 @@ async def get_job_candidates(
                     pass
 
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+
+            # Hiring-client conflict, recomputed on read rather than trusted
+            # from `data`: rows saved before the flag existed carry nothing, and
+            # the conflict is per-job, so a value persisted for another req must
+            # not be believed here. apply_client_conflict_flag is authoritative
+            # in both directions, so this both sets and clears.
+            #
+            # The joined history goes INSIDE the data blob, not alongside it:
+            # collect_current_companies reads company_experience from
+            # candidate["data"] whenever that is a dict, so a top-level copy
+            # would be silently ignored. The rankings page reads it from the
+            # same place, so this also fills in histories it was missing.
+            cei_exp = cand.pop("cei_company_experience", None)
+            if cei_exp and isinstance(data_blob, dict) and not data_blob.get("company_experience"):
+                data_blob["company_experience"] = cei_exp
+                cand["data"] = data_blob
+            try:
+                from services.company_match import apply_client_conflict_flag
+                apply_client_conflict_flag(cand, job_customer_name)
+            except Exception as _cc_err:  # noqa: BLE001 — never fail the list
+                logger.warning(f"client-conflict flag skipped for {cand.get('candidate_id')}: {_cc_err}")
+
             # Promote engage values from JSONB blob to top-level response fields.
             # These are persisted by engagement sync endpoints in sourced_candidates.data.
             if isinstance(data_blob, dict):

@@ -597,6 +597,15 @@ const deduplicateCandidatesUI = (candidatesList: any[]) => {
       dst.no_contact_reason = src.no_contact_reason;
       dst.no_contact_company = src.no_contact_company;
     }
+    // Hiring-client conflict is sticky-true for the same reason: one source
+    // may carry the employment history that another lacks, and the merged row
+    // must keep the block.
+    if (src.client_conflict === true && dst.client_conflict !== true) {
+      dst.client_conflict = true;
+      dst.client_conflict_reason = src.client_conflict_reason;
+      dst.client_conflict_company = src.client_conflict_company;
+      dst.client_conflict_relation = src.client_conflict_relation;
+    }
     const dEmail = String(dst.email || "");
     const sEmail = String(src.email || "");
     if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmailUI(dEmail) && !isPlaceholderEmailUI(sEmail)))) {
@@ -1583,9 +1592,13 @@ function NewJobPageContent() {
       }
     }
 
-    if (isEmployedByClient(c)) {
-      return "Employed by Hiring Client";
-    }
+    // NOTE: "employed by the hiring client" is deliberately NOT returned here.
+    // This helper also drives row VISIBILITY (see the sortedCandidates filter),
+    // and hiding those rows meant a recruiter never saw that the person works
+    // at the client — they simply vanished from the list. They now stay
+    // visible, greyed out behind the backend-stamped `client_conflict` flag,
+    // and are filtered out of the save/launch paths separately, exactly as
+    // `no_contact` already is.
 
     return "";
   };
@@ -1605,6 +1618,24 @@ function NewJobPageContent() {
   };
   const getCandidateHiddenReason = (c: any) => candidateHiddenReason(c, visibilityCtx);
 
+  // Client-side fallback for the backend `client_conflict` flag, so rows
+  // sourced before the flag existed still render greyed out. Narrower than the
+  // backend rule (current employer only — it does not do the "no current
+  // employer on file, fall back to the most recent one" step), so it can only
+  // under-flag, never over-flag.
+  const withClientConflictFlag = <T extends Record<string, unknown>>(c: T): T => {
+    if (!c || c.client_conflict !== undefined) return c;
+    if (!isEmployedByClient(c)) return c;
+    return {
+      ...c,
+      client_conflict: true,
+      client_conflict_relation: "current",
+      client_conflict_reason: `Current employer is the hiring client (${
+        jobData?.customer_name || jobData?.customer || "client"
+      })`,
+    };
+  };
+
   const sortedCandidates = useMemo(() => {
     const sourcePriority = (c: any) => {
       const source = String(c.source || "").toLowerCase();
@@ -1614,7 +1645,7 @@ function NewJobPageContent() {
       return 4;
     };
 
-    const filtered = candidates.filter(
+    const filtered = candidates.map(withClientConflictFlag).filter(
       (c: any) => matchesSourceFilter(c) && getCandidateHiddenReason(c) === null
     );
 
@@ -7334,6 +7365,10 @@ function NewJobPageContent() {
       // getCandidateExclusionReason — that helper also drives row VISIBILITY,
       // and no-contact rows must stay visible (greyed out).
       .filter(c => c.no_contact !== true)
+      // Same treatment for the hiring-client conflict: the row stays visible
+      // and greyed out in the table, but must never be persisted or launched.
+      // Backend re-checks at the launch gate — defense in depth.
+      .filter(c => withClientConflictFlag(c).client_conflict !== true)
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -7997,7 +8032,7 @@ function NewJobPageContent() {
         c.sources.some((s: any) => String(s).toLowerCase().includes("jobdiva")));
 
     const launchable = pool.filter(
-      (c) => idOf(c) && !getCandidateExclusionReason(c) && c.no_contact !== true
+      (c) => idOf(c) && !getCandidateExclusionReason(c) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true
     );
     const byRank = [...launchable].sort(
       (a, b) => searchAndLaunchRank(b) - searchAndLaunchRank(a)
@@ -9706,7 +9741,7 @@ function NewJobPageContent() {
                         const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !dncCandidateKeys.has(key) && c.no_contact !== true;
+                            return !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
                           })
                           .slice(0, n);
 
@@ -9739,7 +9774,7 @@ function NewJobPageContent() {
                         const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !dncCandidateKeys.has(key) && c.no_contact !== true;
+                            return !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -9780,7 +9815,7 @@ function NewJobPageContent() {
                         // rows hidden by the min-match/location filters.
                         const eligible = sortedCandidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !dncCandidateKeys.has(key) && c.no_contact !== true;
+                          return !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -9805,7 +9840,7 @@ function NewJobPageContent() {
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key) && c.no_contact !== true;
+                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));

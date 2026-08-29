@@ -399,12 +399,23 @@ export function CandidateMatchTable({
               const noContactTitle =
                 candidate.no_contact_reason ||
                 "Employer is on the no-contact company list — no actions can be taken";
+              // Backend-stamped: this candidate works at the company we are
+              // hiring for. Kept visible (unlike the old behaviour, which hid
+              // the row entirely) so the recruiter can see WHY they are
+              // off-limits — but greyed out and unselectable, same as
+              // no-contact.
+              const isClientConflict = candidate.client_conflict === true;
+              const clientConflictTitle =
+                candidate.client_conflict_reason ||
+                "Employed by the hiring client — no actions can be taken";
+              const isBlocked = isNoContact || isClientConflict;
+              const blockedTitle = isNoContact ? noContactTitle : clientConflictTitle;
 
               return (
                 <TableRow
                   key={id}
                   className={`cursor-default transition-colors ${
-                    isNoContact
+                    isBlocked
                       ? "bg-slate-100/80 opacity-50"
                       : isDnc
                         ? "bg-rose-50 opacity-80"
@@ -416,15 +427,15 @@ export function CandidateMatchTable({
                   <TableCell className="pl-4">
                     <Checkbox
                       className="w-4 h-4 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                      checked={checked && !isDnc && !isNoContact}
-                      disabled={isAlreadyLaunched || isDnc || isNoContact}
+                      checked={checked && !isDnc && !isBlocked}
+                      disabled={isAlreadyLaunched || isDnc || isBlocked}
                       onCheckedChange={(v) => {
-                        if (isAlreadyLaunched || isDnc || isNoContact) return;
+                        if (isAlreadyLaunched || isDnc || isBlocked) return;
                         onToggleSelect(id, !!v);
                       }}
                       title={
-                        isNoContact
-                          ? noContactTitle
+                        isBlocked
+                          ? blockedTitle
                           : isDnc
                             ? "Phone is on the Do Not Contact list"
                             : isAlreadyLaunched
@@ -434,10 +445,10 @@ export function CandidateMatchTable({
                     />
                   </TableCell>
                   <TableCell className="max-w-[280px]">
-                    {isNoContact ? (
+                    {isBlocked ? (
                       <span
                         className="text-left text-[13.5px] font-semibold text-slate-500 truncate block max-w-full"
-                        title={noContactTitle}
+                        title={blockedTitle}
                       >
                         {displayName}
                       </span>
@@ -469,7 +480,7 @@ export function CandidateMatchTable({
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
                         linkedinUrl={candidate.profile_url}
                         source={candidate.source}
-                        disabled={isNoContact}
+                        disabled={isBlocked}
                       />
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-24" data-testid="shimmer-phone" />
@@ -482,7 +493,7 @@ export function CandidateMatchTable({
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
                         linkedinUrl={candidate.profile_url}
                         source={candidate.source}
-                        disabled={isNoContact}
+                        disabled={isBlocked}
                       />
                     )}
                   </TableCell>
@@ -671,6 +682,16 @@ export function CandidateMatchTable({
                           title={noContactTitle}
                         >
                           No Contact
+                        </span>
+                      )}
+                      {isClientConflict && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-orange-100 text-orange-700 border-orange-300"
+                          title={clientConflictTitle}
+                        >
+                          {candidate.client_conflict_relation === "last"
+                            ? "Client (Last Known)"
+                            : "Works at Client"}
                         </span>
                       )}
                       {isDnc && (

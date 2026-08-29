@@ -108,6 +108,76 @@ def _parse_json_list(val) -> list:
     return []
 
 
+def _fetch_stored_employer_signals(
+    conn, candidate_ids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Employer signals persisted OUTSIDE `sourced_candidates.data`.
+
+    The applicant sync writes `data` BEFORE any resume extraction runs (auto-
+    sync passes bypass_screening=True, which skips LLM enrichment entirely), so
+    on the auto-launch path that blob carries no employer fields at all. The
+    extracted employment history lands in `candidate_enhanced_info` instead —
+    a separate table, UNIQUE on candidate_id — and is only ever joined back in
+    memory at read time (`_attach_cached_enhanced_info`), never persisted.
+
+    The result was that the UI rendered "Bank Of America … Present" from the
+    hydrated blob while the launch gate, reading only `data`, matched against
+    an empty candidate and let the outreach through. Everything the gate reads
+    must come from the same view of the candidate the recruiter sees.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    # `c is not None` before str(): str(None) is the truthy literal "None",
+    # which would otherwise be sent to the DB as a candidate id.
+    ids = [str(c) for c in (candidate_ids or []) if c is not None and str(c).strip()]
+    if not ids:
+        return out
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT candidate_id, job_title, company_experience
+                FROM candidate_enhanced_info
+                WHERE candidate_id = ANY(%s)
+                """,
+                (ids,),
+            )
+            for row in cur.fetchall() or []:
+                out[str(row["candidate_id"])] = {
+                    "company_experience": row.get("company_experience") or [],
+                    "title": row.get("job_title") or "",
+                }
+    except Exception as exc:  # noqa: BLE001 — hydration must never block a launch
+        logger.warning(
+            "employer-signal hydration failed (exclusion gate may run blind): %s", exc
+        )
+    return out
+
+
+def _merge_employer_signals(
+    candidate: Dict[str, Any],
+    headline: str = "",
+    signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """`candidate` plus any employer signal it was missing, for the gate.
+
+    Copy-on-merge so the caller's stored blob is never mutated, and strictly
+    fill-if-absent — a value already on the row wins over the cached one.
+    `headline` comes from the sourced_candidates column (which the gate's
+    queries must select): `collect_current_companies` has an "… at X" parse
+    built for rows that carry the employer only in headline text, and it could
+    never fire at launch while that column went unread.
+    """
+    merged = dict(candidate) if isinstance(candidate, dict) else {}
+    if headline and not merged.get("headline"):
+        merged["headline"] = headline
+    signals = signals or {}
+    if signals.get("company_experience") and not merged.get("company_experience"):
+        merged["company_experience"] = signals["company_experience"]
+    if signals.get("title") and not merged.get("title"):
+        merged["title"] = signals["title"]
+    return merged
+
+
 def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
     """Check if a candidate should be excluded from PAIR outreach.
 
@@ -117,6 +187,11 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
       3. Offer Accepted
       4. Current Employee of the hiring client
       5. Current or LAST employer on the no-contact company list
+
+    Callers MUST pass a candidate hydrated via `_merge_employer_signals` —
+    a bare `sourced_candidates.data` blob can be missing every field checked
+    below, in which case this returns "not excluded" because it had nothing to
+    judge, not because the candidate is clean.
     """
     if not candidate or not isinstance(candidate, dict):
         return False, ""
@@ -168,17 +243,27 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     # rows often carry the employer only in headline text.
     from services.company_match import (
         collect_current_companies,
-        is_same_company,
+        employed_by_client,
+        is_placeholder_client,
         normalize_company_name,
     )
 
-    for comp in collect_current_companies(candidate):
+    current_companies = collect_current_companies(candidate)
+    for comp in current_companies:
         if "pyramid" in normalize_company_name(comp).split():
             return True, "Current Employee (Pyramid)"
-        # Match on whole-word tokens, not raw substrings: client "Meta"
-        # must match "Meta Platforms" but NOT "Metadata Solutions".
-        if is_same_company(comp, client_name):
+
+    # Works at the client TODAY. The last employer is consulted only when no
+    # current employer is on file at all (many source rows carry no "Present"
+    # entry) — a fallback, not a union, so someone who left the client for a
+    # named employer stays contactable. Matching is on whole-word tokens, not
+    # raw substrings: client "Meta" matches "Meta Platforms", never "Metadata
+    # Solutions".
+    client_hit = employed_by_client(candidate, client_name)
+    if client_hit:
+        if client_hit["relation"] == "current":
             return True, "Employed by Hiring Client"
+        return True, "Employed by Hiring Client (last known employer)"
 
     # No-contact companies (services/no_contact.py): current or LAST employer
     # on the code-managed list. Step 5 greys these rows out and /candidates/
@@ -192,6 +277,26 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     if nc_hit:
         return True, f"No-Contact Company ({nc_hit['keyword']})"
 
+    # Visibility for the failure mode that put a Bank of America employee into
+    # outreach for a Bank of America req: a real hiring client, but not one
+    # current-employer signal on the row, so the check above had nothing to
+    # match. Passing here means UNKNOWN, not clean. We still let the launch
+    # proceed (blocking would hold back every applicant synced before resume
+    # extraction runs), but it must not be silent — this was invisible until a
+    # recruiter happened to read a phone-screen notification.
+    if current_companies or not client_name or is_placeholder_client(client_name):
+        return False, ""
+    from services.company_match import collect_last_companies
+
+    if collect_last_companies(candidate):
+        return False, ""
+    logger.warning(
+        "client_conflict_check_blind candidate=%s client=%r — no current- or "
+        "last-employer signal on the stored row; hiring-client exclusion could "
+        "not be evaluated",
+        candidate.get("candidate_id") or candidate.get("id") or "?",
+        client_name,
+    )
     return False, ""
 
 
@@ -1577,7 +1682,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
                     _excl_cur.execute(
                         """
-                        SELECT candidate_id, data, name
+                        SELECT candidate_id, data, name, headline
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -1588,13 +1693,25 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                             str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
                         ),
                     )
-                    for _row in _excl_cur.fetchall() or []:
+                    _excl_rows = _excl_cur.fetchall() or []
+                    # Employment history lives in candidate_enhanced_info, not
+                    # in `data` — without this the gate matches an empty blob.
+                    _excl_signals = _fetch_stored_employer_signals(
+                        _excl_conn, [str(r[0]) for r in _excl_rows]
+                    )
+                    for _row in _excl_rows:
                         _cdata = _row[1] or {}
                         if isinstance(_cdata, str):
                             try:
                                 _cdata = json.loads(_cdata)
                             except Exception:
                                 _cdata = {}
+                        _cdata = _merge_employer_signals(
+                            _cdata,
+                            headline=str(_row[3] or ""),
+                            signals=_excl_signals.get(str(_row[0])),
+                        )
+                        _cdata.setdefault("candidate_id", str(_row[0]))
                         _is_excl, _excl_reason = is_candidate_excluded_from_pair(
                             _cdata, _excl_client
                         )
@@ -2541,7 +2658,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
 
             cur.execute(
                 """
-                SELECT candidate_id, data
+                SELECT candidate_id, data, headline
                 FROM sourced_candidates
                 WHERE candidate_id = ANY(%s)
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -2570,13 +2687,29 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 (list(candidate_ids), str(job_id), str(job_id), str(job_id), str(job_id)),
             )
             eligible_ids = []
-            for r in cur.fetchall():
+            candidate_rows = cur.fetchall() or []
+            # This is the path that contacted a Bank of America employee for a
+            # Bank of America req: the applicant sync persists `data` before
+            # resume extraction, so every employer field the gate reads is
+            # absent from it. Hydrate from candidate_enhanced_info (+ the
+            # headline column) so the gate judges the same candidate the
+            # recruiter sees, not an empty row.
+            employer_signals = _fetch_stored_employer_signals(
+                conn, [str(r["candidate_id"]) for r in candidate_rows]
+            )
+            for r in candidate_rows:
                 c_data = r.get("data") or {}
                 if isinstance(c_data, str):
                     try:
                         c_data = json.loads(c_data)
                     except Exception:
                         c_data = {}
+                c_data = _merge_employer_signals(
+                    c_data,
+                    headline=str(r.get("headline") or ""),
+                    signals=employer_signals.get(str(r["candidate_id"])),
+                )
+                c_data.setdefault("candidate_id", str(r["candidate_id"]))
                 excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
                 if excluded:
                     logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", r["candidate_id"], job_id, reason)
