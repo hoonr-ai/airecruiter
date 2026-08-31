@@ -3159,22 +3159,38 @@ async def _check_and_fire_candidate_passed_notification(
                 is_scored_question = (not is_hard_filter) and (not is_info_only)
 
                 # Exclude the bot's closing sentence which is always scored 0.0/0.
-                # The ONLY reliable signal is total_score == 0 (scored out of 0) —
-                # no real evaluation question is ever out of 0 (they are always out of 10.0).
+                # The ONLY reliable signal is total_score == 0 (explicitly sent as 0 by
+                # pairbot) — no real evaluation question is ever scored out of 0 (they are
+                # always out of 10.0).
                 # We intentionally do NOT check the answer text because newer pairbot
                 # versions populate the closing-sentence answer with the full thank-you
                 # paragraph, so checking for empty/"—" would miss it.
-                # Guard total_score against explicit null (partner API may send "total_score": null).
+                #
+                # Assumption (info-only): info-only questions (Q2,3,5-9) always carry
+                # a non-zero total_score in production. We have not observed total_score==0
+                # for any real info-only item in payload logs. The logger.warning below
+                # will surface any unexpected case if that assumption ever breaks.
+                #
+                # Intentional tradeoff (null total_score): we do NOT include
+                # total_value is None in the condition. A null total_score on a real
+                # scored question (e.g. a transient API omission) should surface in the
+                # email rather than be silently dropped. If pairbot sends null for the
+                # closing sentence, that item will pass through — that is the safer choice.
                 try:
                     total_value = float(total) if total is not None else None
                 except (TypeError, ValueError):
                     total_value = None
                 is_closing_sentence = (
                     score_value == 0.0
-                    and total_value in (0.0, None)
+                    and total_value == 0.0
                     and not is_hard_filter
                 )
                 if is_closing_sentence:
+                    logger.warning(
+                        "⏭️ Skipping item as bot closing sentence "
+                        "(score=%.1f, total=%.1f, q_order=%d): %.60r",
+                        score_value, total_value, q_order, q_text,
+                    )
                     continue
 
                 screening_summary.append({

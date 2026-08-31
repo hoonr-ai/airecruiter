@@ -296,14 +296,12 @@ def test_count_pending_hard_filters_dedupes_and_skips_ordinary_rows():
 
 def _is_closing_sentence(item: dict) -> bool:
     """
-    Mirror of the exclusion logic in engagement.py so we can unit-test
-    it without standing up a DB.
+    Mirror of the closing-sentence exclusion logic in engagement.py so we can
+    unit-test it without standing up a DB. Keep in sync with that function.
 
-    The ONLY reliable signal is total_score == 0 (scored out of 0).
-    No real evaluation question is ever out of 0 (always out of 10.0).
-    We deliberately do NOT check answer text because newer pairbot
-    versions populate the closing-sentence answer with the full
-    thank-you paragraph.
+    Definitive signal: total_score == 0.0 exactly (not None — see intentional
+    tradeoff comment in engagement.py). No real evaluation question is ever
+    scored out of 0.
     """
     score = item.get("candidate_score")
     total = item.get("total_score", 10.0)
@@ -322,7 +320,7 @@ def _is_closing_sentence(item: dict) -> bool:
 
     return (
         score_value == 0.0
-        and total_value in (0.0, None)
+        and total_value == 0.0       # exact 0 only — None is intentionally excluded
         and not is_hard_filter
     )
 
@@ -342,7 +340,7 @@ def test_closing_sentence_is_excluded():
 
 def test_closing_sentence_with_real_answer_text_is_excluded():
     """Regression: newer pairbot populates the closing-sentence answer with the full
-    thank-you paragraph. The old logic (checking for empty/\u2014 answer) missed this.
+    thank-you paragraph. The old logic (checking for empty/— answer) missed this.
     The definitive signal is total_score == 0, regardless of answer text."""
     item = {
         "question": "Thank you, Dmitry, for sharing your background and insights today.",
@@ -360,8 +358,12 @@ def test_closing_sentence_with_real_answer_text_is_excluded():
     assert _is_closing_sentence(item) is True
 
 
-def test_closing_sentence_with_null_total_score_is_excluded():
-    """Closing sentence with explicit null total_score must be successfully excluded."""
+def test_closing_sentence_with_null_total_score_is_not_excluded():
+    """Intentional tradeoff: explicit null total_score is NOT treated as a closing
+    sentence. A real scored question (Q10+) where the partner API transiently omits
+    total_score should surface in the email rather than be silently dropped.
+    If pairbot sends null for the actual closing sentence, that item passes through —
+    the safer choice over accidental data loss. See engagement.py for full rationale."""
     item = {
         "question": "Thank you for sharing!",
         "answer": None,
@@ -370,18 +372,38 @@ def test_closing_sentence_with_null_total_score_is_excluded():
         "hard_filter_status": None,
         "question_order": 0,
     }
-    # total_value will be None, which should now correctly trigger the exclusion.
     result = _is_closing_sentence(item)
-    assert result is True
+    # total_value is None → does NOT match total_value == 0.0 → NOT excluded.
+    assert result is False
+
+
+def test_info_only_question_at_score_boundary_is_not_excluded():
+    """Guard: an info-only question (Q2-9) with candidate_score==0.0 must NOT be
+    filtered out as a closing sentence, provided its total_score is non-zero.
+    Info-only questions always carry total_score > 0 in production (pairbot contract).
+    This test makes that assumption explicit."""
+    item = {
+        "question": "What is your current notice period?",
+        "answer": "Two weeks.",
+        "candidate_score": 0.0,   # Low/zero score is still a real answer
+        "total_score": 10.0,      # Info-only questions are always scored out of 10
+        "hard_filter_status": None,
+        "question_order": 5,      # Q5 → info-only range
+    }
+    assert _is_closing_sentence(item) is False
 
 
 def test_real_skipped_scored_question_is_not_excluded():
-    """A genuinely scored question (Q10+) that the candidate skipped must NOT be filtered."""
+    """A genuinely scored question (Q10+) that the candidate skipped must NOT be filtered.
+    total_score is 10.0 (not 0.0) because real scored questions are always out of 10 —
+    that is exactly what separates them from the bot closing sentence (total_score==0).
+    A Q10+ with total_score==0 would be misclassified; that is a pairbot contract
+    violation, not something we defend against here."""
     item = {
         "question": "Describe a time you led a cross-functional team.",
         "answer": None,
         "candidate_score": 0.0,
-        "total_score": 10.0,    # Real scored questions are out of 10
+        "total_score": 10.0,    # Real scored questions are out of 10, never 0
         "hard_filter_status": None,
         "question_order": 10,   # Q10+ → is_scored_question = True
     }
