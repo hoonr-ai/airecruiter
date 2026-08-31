@@ -29,11 +29,24 @@ BLOCKED_MARKERS = (
 # _resolve_link_candidate_id
 # ---------------------------------------------------------------------------
 
-def test_jobdiva_jobagent_numeric_id_does_not_link():
-    """JobAgent candidate, numeric id, no stored jobdiva_candidate_id MUST NOT link."""
+def test_jobdiva_jobagent_numeric_id_links():
+    """JobAgent candidate, numeric id, no stored jobdiva_candidate_id MUST link.
+
+    Reverses the PR #493 assertion. That PR excluded JobAgent on the premise
+    that PAIR mints its own ids for those rows. It does not:
+    ``_search_with_job_agent`` reads the id straight off JobDiva's own response
+    (``get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])``), and the
+    sourcing stream depends on all three JobDiva pools sharing one id space --
+    it dedups them against a single ``seen_ids`` set and tests JobAgent ids
+    against TalentSearch rows via ``jobagent_matched_ids``.
+
+    Excluding JobAgent meant every JobAgent launch was sent with
+    ``link_candidate_id=None``, which is the instruction to JobDiva to mint a
+    fresh duplicate profile.
+    """
     assert (
         _resolve_link_candidate_id("JobDiva-JobAgent", {}, "462058065251")
-        is None
+        == "462058065251"
     )
 
 def test_jobdiva_direct_numeric_id_links():
@@ -62,6 +75,12 @@ def test_non_jobdiva_numeric_id_does_not_link():
 def test_non_numeric_id_does_not_link():
     """A non-numeric id (e.g. UUID) is never linked even for JobDiva sources."""
     assert _resolve_link_candidate_id("JobDiva-JobAgent", {}, "abc-uuid") is None
+
+
+def test_jobdiva_applicants_and_talentsearch_link():
+    """The remaining JobDiva pools link on their own numeric id too."""
+    for src in ("JobDiva-Applicants", "JobDiva-TalentSearch", "jobdiva"):
+        assert _resolve_link_candidate_id(src, {}, "847213") == "847213", src
 
 
 def test_missing_id_returns_none():
@@ -214,3 +233,39 @@ def test_update_candidate_name_fallback(jobdiva_service):
             assert "phone" not in second_payload
             assert second_payload["firstName"] == "John"
     asyncio.run(run_test())
+
+
+# ---------------------------------------------------------------------------
+# jobdiva_profile_id — the write-time stamp that makes the link possible
+# ---------------------------------------------------------------------------
+
+def test_jobdiva_profile_id_accepts_every_jobdiva_pool():
+    from services.jobdiva import jobdiva_profile_id
+
+    for src in (
+        "JobDiva",
+        "JobDiva-Applicants",
+        "JobDiva-JobAgent",
+        "JobDiva-TalentSearch",
+        "jobdiva-applicants",
+    ):
+        assert jobdiva_profile_id(src, "847213") == "847213", src
+    assert jobdiva_profile_id("JobDiva", 847213) == "847213"
+    assert jobdiva_profile_id("JobDiva", "  847213  ") == "847213"
+
+
+def test_jobdiva_profile_id_rejects_non_jobdiva_and_non_numeric():
+    from services.jobdiva import jobdiva_profile_id
+
+    # A LinkedIn row's numeric internal id must never be linked to a JobDiva
+    # profile — that is the regression PR #493 was guarding against.
+    assert jobdiva_profile_id("LinkedIn", "123456") is None
+    assert jobdiva_profile_id("LinkedIn-Exa", "123456") is None
+    assert jobdiva_profile_id("Dice", "123456") is None
+    # Non-numeric ids are never JobDiva profile ids.
+    assert jobdiva_profile_id("JobDiva", "exa_linkedin.com/in/foo") is None
+    assert jobdiva_profile_id("JobDiva-JobAgent", "abc-uuid") is None
+    # Missing / empty inputs.
+    assert jobdiva_profile_id("JobDiva", "") is None
+    assert jobdiva_profile_id("JobDiva", None) is None
+    assert jobdiva_profile_id(None, "847213") is None

@@ -10,6 +10,7 @@ from core.db import get_db_connection
 from services.feedback_metrics import count_feedback_metrics
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
+from services.jobdiva import jobdiva_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +221,16 @@ class AutoAssignService:
             if value is not None:
                 payload[field] = value
 
-        if candidate_id:
-            payload["jobdiva_candidate_id"] = candidate_id
+        # Only a genuine JobDiva profile id may be stamped here. This sync
+        # normally writes JobDiva-Applicants rows, but `source` is caller-
+        # supplied (see `synchronize_job_applicants`), and a non-JobDiva id
+        # linked as `link_candidate_id` at launch would attach the application
+        # to an unrelated JobDiva profile.
+        jd_profile_id = jobdiva_profile_id(
+            cand.get("source") or "JobDiva-Applicants", candidate_id
+        )
+        if jd_profile_id:
+            payload["jobdiva_candidate_id"] = jd_profile_id
         return payload
 
     async def _count_external_curate_submittals(
@@ -729,16 +738,25 @@ class AutoAssignService:
                                         location    = COALESCE(NULLIF(sc.location, ''), v.location),
                                         profile_url = COALESCE(NULLIF(sc.profile_url, ''), v.profile_url),
                                         resume_text = COALESCE(NULLIF(sc.resume_text, ''), v.resume_text),
-                                        data        = COALESCE(sc.data, '{}'::jsonb) || COALESCE(v.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
-                                            'engage_status',       sc.data->>'engage_status',
-                                            'engage_interview_id', sc.data->>'engage_interview_id',
-                                            'engage_score',        sc.data->'engage_score',
-                                            'engage_updated_at',   sc.data->>'engage_updated_at',
-                                            'engage_last_response',sc.data->'engage_last_response',
-                                            'engage_hard_filter_status', sc.data->>'engage_hard_filter_status',
-                                            'engage_hard_filter_reason', sc.data->>'engage_hard_filter_reason',
-                                            'engage_passed_email_sent',  sc.data->'engage_passed_email_sent'
-                                        )),
+                                        -- Copy stored values VERBATIM: jsonb_strip_nulls
+                                        -- recurses and would delete legitimately-null members
+                                        -- inside engage_last_response (candidates.py:115).
+                                        -- jsonb_each is strict, so NULL data yields zero rows.
+                                        data        = COALESCE(sc.data, '{}'::jsonb)
+                                                      || COALESCE(v.data, '{}'::jsonb)
+                                                      || COALESCE((
+                                                           SELECT jsonb_object_agg(e.k, e.v)
+                                                           FROM jsonb_each(sc.data) AS e(k, v)
+                                                           WHERE e.k IN (
+                                                               'jobdiva_candidate_id', 'jobdiva_resume_id',
+                                                               'engage_status', 'engage_interview_id',
+                                                               'engage_score', 'engage_updated_at',
+                                                               'engage_last_response',
+                                                               'engage_hard_filter_status',
+                                                               'engage_hard_filter_reason',
+                                                               'engage_passed_email_sent'
+                                                           )
+                                                         ), '{}'::jsonb),
                                         updated_at  = CURRENT_TIMESTAMP
                                     FROM (VALUES %s) AS v (
                                         id, email, phone, headline, location,
@@ -777,16 +795,25 @@ class AutoAssignService:
                                         location    = EXCLUDED.location,
                                         profile_url = EXCLUDED.profile_url,
                                         resume_text = EXCLUDED.resume_text,
-                                        data        = COALESCE(sourced_candidates.data, '{}'::jsonb) || COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
-                                            'engage_status',       sourced_candidates.data->>'engage_status',
-                                            'engage_interview_id', sourced_candidates.data->>'engage_interview_id',
-                                            'engage_score',        sourced_candidates.data->'engage_score',
-                                            'engage_updated_at',   sourced_candidates.data->>'engage_updated_at',
-                                            'engage_last_response',sourced_candidates.data->'engage_last_response',
-                                            'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
-                                            'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
-                                            'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
-                                        )),
+                                        -- Copy stored values VERBATIM: jsonb_strip_nulls
+                                        -- recurses and would delete legitimately-null members
+                                        -- inside engage_last_response (candidates.py:115).
+                                        -- jsonb_each is strict, so NULL data yields zero rows.
+                                        data        = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                                                      || COALESCE(EXCLUDED.data, '{}'::jsonb)
+                                                      || COALESCE((
+                                                           SELECT jsonb_object_agg(e.k, e.v)
+                                                           FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                                           WHERE e.k IN (
+                                                               'jobdiva_candidate_id', 'jobdiva_resume_id',
+                                                               'engage_status', 'engage_interview_id',
+                                                               'engage_score', 'engage_updated_at',
+                                                               'engage_last_response',
+                                                               'engage_hard_filter_status',
+                                                               'engage_hard_filter_reason',
+                                                               'engage_passed_email_sent'
+                                                           )
+                                                         ), '{}'::jsonb),
                                         status      = EXCLUDED.status,
                                         resume_match_percentage = EXCLUDED.resume_match_percentage,
                                         updated_at  = CURRENT_TIMESTAMP

@@ -388,7 +388,27 @@ class SourcedCandidatesStorage:
                                 location = EXCLUDED.location,
                                 profile_url = EXCLUDED.profile_url,
                                 image_url = EXCLUDED.image_url,
-                                data = EXCLUDED.data,
+                                -- Merge, never replace: preserve backend-owned keys the caller never
+                                -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                                -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                                -- profile and duplicate outreach on re-save.
+                                data = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                                       || COALESCE(EXCLUDED.data, '{}'::jsonb)
+                                       || COALESCE((
+                                            -- Copy the stored values VERBATIM. Do not route them through
+                                            -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                            -- is legitimately null for failed launches (candidates.py:115).
+                                            -- jsonb_each is strict, so a NULL data column yields zero rows
+                                            -- and the COALESCE supplies '{}'.
+                                            SELECT jsonb_object_agg(e.k, e.v)
+                                            FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                            WHERE e.k IN (
+                                                'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                                'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                                'engage_last_response', 'engage_hard_filter_status',
+                                                'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                            )
+                                       ), '{}'::jsonb),
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 updated_at = CURRENT_TIMESTAMP
@@ -445,7 +465,27 @@ class SourcedCandidatesStorage:
                         image_url = EXCLUDED.image_url,
                         resume_id = EXCLUDED.resume_id,
                         resume_text = EXCLUDED.resume_text,
-                        data = EXCLUDED.data,
+                        -- Merge, never replace: preserve backend-owned keys the caller never
+                        -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                        -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                        -- profile and duplicate outreach on re-save.
+                        data = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                               || COALESCE(EXCLUDED.data, '{}'::jsonb)
+                               || COALESCE((
+                                    -- Copy the stored values VERBATIM. Do not route them through
+                                    -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                    -- is legitimately null for failed launches (candidates.py:115).
+                                    -- jsonb_each is strict, so a NULL data column yields zero rows
+                                    -- and the COALESCE supplies '{}'.
+                                    SELECT jsonb_object_agg(e.k, e.v)
+                                    FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                    WHERE e.k IN (
+                                        'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                        'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                        'engage_last_response', 'engage_hard_filter_status',
+                                        'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                    )
+                               ), '{}'::jsonb),
                         status = 'sourced',
                         updated_at = CURRENT_TIMESTAMP
                 """), candidate_data)

@@ -359,6 +359,32 @@ def _collect_field_values(data: Dict[str, Any], keys: List[str]) -> List[str]:
     return values
 
 
+def jobdiva_profile_id(source: Optional[str], candidate_id: Any) -> Optional[str]:
+    """Return the real JobDiva profile id for a JobDiva-sourced row, else None.
+
+    For every JobDiva pool (TalentSearch / JobAgent / Applicants) ``candidate_id``
+    IS the profile id JobDiva's own API returned -- each reader extracts it with
+    ``get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])`` (services/jobdiva.py
+    ``_search_talent_pool`` / ``_search_with_job_agent`` / ``_get_all_job_applicants``).
+    That the three pools share one id space is load-bearing elsewhere: the sourcing
+    stream dedups them against a single ``seen_ids`` set and matches JobAgent ids
+    against TalentSearch rows via ``jobagent_matched_ids``
+    (services/unified_candidate_search.py).
+
+    Persisting this id is what lets Launch PAIR link the JobDiva application to the
+    person's existing profile instead of making JobDiva mint a duplicate
+    "Unknown Unknown" one -- see routers/engagement.py ``_resolve_link_candidate_id``.
+
+    Non-JobDiva sources mint their own ids (``exa_<url>``, ``<source>_<md5>``, and
+    LinkedIn rows that merely *look* numeric), so they must never be linked to a
+    JobDiva profile.
+    """
+    cid = str(candidate_id or "").strip()
+    if cid.isdigit() and str(source or "").lower().startswith("jobdiva"):
+        return cid
+    return None
+
+
 def _get_candidate_email(data: Dict[str, Any]) -> str:
     """Return the candidate's best email: the first well-formed, non-placeholder
     address across all email keys/list items. Falls back to the first well-formed

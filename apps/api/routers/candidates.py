@@ -10,7 +10,7 @@ import httpx
 import re
 
 from services.ai_service import ai_service
-from services.jobdiva import jobdiva_service
+from services.jobdiva import jobdiva_service, jobdiva_profile_id
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
@@ -1910,6 +1910,15 @@ async def save_candidates(
                         else:
                             scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
 
+                        # For JobDiva-sourced rows candidate_id IS the JobDiva
+                        # profile id. Persist it explicitly so Launch PAIR links
+                        # the application to the existing profile instead of
+                        # making JobDiva mint a duplicate "Unknown Unknown" one
+                        # (routers/engagement.py `_resolve_link_candidate_id`).
+                        # Recomputed on every save, so it self-heals rows whose
+                        # blob predates this and survives the upsert either way.
+                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+
                         # Prepare candidate data with clean schema
                         candidate_data = {
                             "jobdiva_id": resolved_jobdiva_id,
@@ -1942,7 +1951,8 @@ async def save_candidates(
                                 "matched_skills": scoring["matched_skills"],
                                 "missing_skills": scoring["missing_skills"],
                                 "explainability": scoring["explainability"],
-                                "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
+                                "enhanced_info": getattr(c, 'enhanced_info', None),  # Full LLM extraction data
+                                **({"jobdiva_candidate_id": jd_profile_id} if jd_profile_id else {}),
                             }),
                             "status": "sourced"
                         }
@@ -1968,7 +1978,27 @@ async def save_candidates(
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 resume_match_percentage = EXCLUDED.resume_match_percentage,
-                                data = EXCLUDED.data,
+                                -- Merge, never replace: preserve backend-owned keys the caller never
+                                -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                                -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                                -- profile and duplicate outreach on re-save.
+                                data = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                                       || COALESCE(EXCLUDED.data, '{}'::jsonb)
+                                       || COALESCE((
+                                            -- Copy the stored values VERBATIM. Do not route them through
+                                            -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                            -- is legitimately null for failed launches (candidates.py:115).
+                                            -- jsonb_each is strict, so a NULL data column yields zero rows
+                                            -- and the COALESCE supplies '{}'.
+                                            SELECT jsonb_object_agg(e.k, e.v)
+                                            FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                            WHERE e.k IN (
+                                                'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                                'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                                'engage_last_response', 'engage_hard_filter_status',
+                                                'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                            )
+                                       ), '{}'::jsonb),
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
                         """, candidate_data)

@@ -31,7 +31,13 @@ from core.email import (
     resolve_app_base_url,
 )
 from services.gender_logic import normalize_gender_prediction, infer_gender_from_name_ai
-from services.jobdiva import jobdiva_service
+from services.jobdiva import (
+    jobdiva_service,
+    get_field as _jd_get_field,
+    _get_candidate_email as _jd_candidate_email,
+    _get_candidate_phone as _jd_candidate_phone,
+)
+from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
@@ -1236,11 +1242,27 @@ async def _wait_for_pairbot_creation(
     raise TimeoutError(f"Pairbot stream ended without creation_completed bulk_id={bulk_id}")
 
 
+# JobDiva's parser requires an email, so the provisioner mints one for
+# phone-only candidates. It is deterministic per candidate and
+# `_update_candidate_name` writes it through to JobDiva, which makes it a real
+# lookup key on re-provision — see the applicant index in
+# `_provision_batch_to_jobdiva`.
+_PAIR_SYNTHETIC_EMAIL_DOMAIN = "@no-email.jobdiva.local"
+
+
 def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[str, Any]) -> None:
     """Brief write to stamp jobdiva_candidate_id into sourced_candidates.data.
 
     Split out of _provision_candidate_to_jobdiva so the pool slot is held only
     for the UPDATE itself, never across the multi-second JobDiva HTTP calls.
+
+    ``cand_data`` MUST be the delta to merge, never a whole row blob. The UPDATE
+    has no ``jobdiva_id`` predicate — correct for the id, since a JobDiva profile
+    is person-level and the id is valid on every job's row for that person — so
+    passing a full blob would splat one job's match_score / engage_status /
+    enhanced_info onto every other job's row for the same candidate. That in turn
+    trips ``/engage/launch`` idempotency (``engage_status NOT IN ('', 'failed')``)
+    and permanently silences outreach on jobs the person was never contacted for.
     """
     conn = get_db_connection()
     try:
@@ -1267,21 +1289,28 @@ def _resolve_link_candidate_id(
     candidate's numeric internal id to an unrelated JobDiva profile.
     """
     # The id is trusted if it was explicitly persisted from a previous JobDiva interaction.
-    # Note: `existing_jd_id` and `explicitly_stored_jd_id` may currently be derived from the
-    # same source upstream, making this check defensively redundant for current callers.
     explicitly_stored_jd_id = str((cand_data or {}).get("jobdiva_candidate_id") or "")
     if existing_jd_id and str(existing_jd_id).isdigit():
         if existing_jd_id == explicitly_stored_jd_id:
             return str(existing_jd_id)
-            
-        # Fallback: if not explicitly stored, we can trust the internal numeric ID
-        # ONLY IF the candidate was sourced directly from JobDiva (i.e. 'JobDiva' or 'JobDiva-Applicants').
-        # We MUST reject 'JobDiva-JobAgent' candidates here, because PAIR generates its own
-        # internal numeric IDs for them which are NOT valid JobDiva profile IDs.
-        source_lower = str(source or "").lower()
-        if source_lower.startswith("jobdiva") and "jobagent" not in source_lower:
+
+        # Fallback: if not explicitly stored, we can trust the internal numeric
+        # id when the candidate was sourced from JobDiva, because every JobDiva
+        # pool sets candidate_id from JobDiva's own response
+        # (`get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])` in
+        # services/jobdiva.py `_search_talent_pool` / `_search_with_job_agent` /
+        # `_get_all_job_applicants`).
+        #
+        # JobAgent is included deliberately. PR #493 excluded it on the premise
+        # that PAIR mints its own ids for JobAgent rows; the code does not — and
+        # the sourcing stream relies on the opposite, deduping all three pools
+        # against one shared `seen_ids` set and testing JobAgent ids against
+        # TalentSearch rows via `jobagent_matched_ids`
+        # (services/unified_candidate_search.py). Excluding JobAgent here is what
+        # made JobDiva mint a duplicate profile for every JobAgent launch.
+        if str(source or "").lower().startswith("jobdiva"):
             return str(existing_jd_id)
-            
+
     return None
 
 
@@ -1390,20 +1419,57 @@ async def _provision_batch_to_jobdiva(
             existing_applicants = await jobdiva_service.get_job_applicants_detail(jd_job_id)
             logger.info(f"✅ [{label}] Found {len(existing_applicants)} existing applicants in JobDiva")
 
-        # Build fast-lookup sets for dedup — keyed on normalised email, phone, and JD candidate ID
-        existing_jd_ids: set = {
-            str(a.get("candidateId") or a.get("CANDIDATEID") or "")
-            for a in existing_applicants
-        }
-        existing_emails: set = {
-            str(a.get("EMAIL") or a.get("email") or "").lower().strip()
-            for a in existing_applicants
-            if not str(a.get("EMAIL") or a.get("email") or "").lower().startswith("auto_")
-        }
-        existing_phones: set = {
-            "".join(ch for ch in str(a.get("PHONE") or a.get("phone") or "") if ch.isdigit())
-            for a in existing_applicants
-        }
+        # Build fast lookups for dedup, keyed on JD candidate id / normalised
+        # email / normalised phone. These are MAPS, not sets: on an email- or
+        # phone-only match we need the matching applicant's real JobDiva id so
+        # we can persist it (see the match branch below), otherwise the row
+        # stays without a `jobdiva_candidate_id` forever and /engage/re-provision
+        # re-attempts it on every run.
+        #
+        # Field extraction goes through the shared jobdiva.py helpers rather
+        # than a hand-rolled two-key read: JobDiva BI varies its casing and puts
+        # numbers in CELLPHONE / PHONE1..4 slots, so `a.get("PHONE")` alone
+        # yields an empty set and makes every candidate look new.
+        existing_jd_ids: set = set()
+        existing_emails: Dict[str, str] = {}
+        existing_phones: Dict[str, str] = {}
+        def _remember(index: Dict[str, str], key: str, jd_id: str) -> None:
+            """First writer wins, but a real id always beats a blank one.
+
+            JobDiva BI can emit a partial row for a person (no CANDIDATEID) ahead
+            of the full one; a plain `setdefault` would pin the blank and the
+            stamp-back below would learn nothing.
+            """
+            if key and not index.get(key):
+                index[key] = jd_id
+
+        for a in existing_applicants:
+            a_jd_id = str(_jd_get_field(a, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
+            if a_jd_id:
+                existing_jd_ids.add(a_jd_id)
+
+            a_email = str(_jd_candidate_email(a) or "").lower().strip()
+            # `auto_*@jobdiva.com` is JobDiva's own placeholder and is worthless as
+            # a key. Our `pair-…@no-email.jobdiva.local` is NOT: we mint it below
+            # it is deterministic per candidate, and `_update_candidate_name` writes
+            # it through to JobDiva — so it is the only handle we have on the
+            # phone-only cohort and must stay indexed.
+            if a_email and not a_email.startswith("auto_") and (
+                _PAIR_SYNTHETIC_EMAIL_DOMAIN in a_email or not is_placeholder_email(a_email)
+            ):
+                _remember(existing_emails, a_email, a_jd_id)
+
+            # Index the mobile-preferred number AND the plain PHONE field. Keying
+            # only on `_get_candidate_phone` would return the cell when both exist,
+            # losing the match for candidates whose stored number is the landline —
+            # a narrowing versus the `a.get("PHONE")` this replaced. Deliberately
+            # NOT every slot: a shared switchboard in PHONE3 would match an
+            # unrelated person and make us skip provisioning someone genuinely
+            # absent from JobDiva, which is worse than a duplicate.
+            for raw_phone in (_jd_candidate_phone(a), a.get("PHONE"), a.get("phone")):
+                a_phone = "".join(ch for ch in str(raw_phone or "") if ch.isdigit())
+                if len(a_phone) >= 7:
+                    _remember(existing_phones, a_phone, a_jd_id)
 
         # ── Phase 4: Provision each candidate (concurrent, semaphore-bounded)
         async def _provision_one(cand_id: str) -> str:
@@ -1433,7 +1499,7 @@ async def _provision_batch_to_jobdiva(
                 # JobDiva parser absolutely requires an email address.
                 # If none is provided, generate a dummy one so the profile creates successfully.
                 if not email:
-                    email = f"pair-{phone_norm or cand_id}@no-email.jobdiva.local"
+                    email = f"pair-{phone_norm or cand_id}{_PAIR_SYNTHETIC_EMAIL_DOMAIN}"
 
                 email_lower = email.lower()
 
@@ -1453,10 +1519,22 @@ async def _provision_batch_to_jobdiva(
                         f"✅ [{label}] Candidate {cand_id} already in JobDiva "
                         f"(jcid={jcid_match} email={email_match} phone={phone_match})"
                     )
-                    # Stamp the JD id if it wasn't persisted yet
-                    if not cand_data.get("jobdiva_candidate_id") and existing_jd_id:
-                        cand_data["jobdiva_candidate_id"] = existing_jd_id
-                        _persist_jobdiva_candidate_id(cand_id, cand_data)
+                    # Persist the matched applicant's real JobDiva id if we don't
+                    # have one yet. The previous guard here read
+                    # `cand_data.get("jobdiva_candidate_id")` and `existing_jd_id`,
+                    # which are the same value — so it could never fire, and an
+                    # email/phone match learned nothing even though the id was
+                    # sitting right there in the applicant list.
+                    matched_jd_id = (
+                        existing_jd_id
+                        or existing_emails.get(email_lower, "")
+                        or existing_phones.get(phone_norm, "")
+                    )
+                    if matched_jd_id and not cand_data.get("jobdiva_candidate_id"):
+                        cand_data["jobdiva_candidate_id"] = matched_jd_id
+                        _persist_jobdiva_candidate_id(
+                            cand_id, {"jobdiva_candidate_id": matched_jd_id}
+                        )
                     return "skipped"
 
                 # ── Not found → create a new JobDiva application
@@ -1478,8 +1556,16 @@ async def _provision_batch_to_jobdiva(
                 # instead of spawning a duplicate "Unknown Unknown" applicant.
                 # If the linked id is stale/invalid, create_job_application_with_resume
                 # falls back to an email-based candidate lookup before creating anew.
+                # Pass the row's own id as the fallback. For a JobDiva-sourced
+                # row candidate_id IS the JobDiva profile id, and without this
+                # `_resolve_link_candidate_id` could only ever see the stored
+                # `jobdiva_candidate_id` — which is empty on a first launch and
+                # on any row saved before that key was persisted, so its
+                # source-aware carve-out was unreachable and every launch asked
+                # JobDiva to mint a new profile. Non-JobDiva sources are still
+                # rejected inside the resolver.
                 link_candidate_id = _resolve_link_candidate_id(
-                    row.get("source"), cand_data, existing_jd_id
+                    row.get("source"), cand_data, existing_jd_id or str(cand_id)
                 )
 
                 try:
@@ -1500,14 +1586,16 @@ async def _provision_batch_to_jobdiva(
                 if success and new_jd_id:
                     logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {new_jd_id}")
                     cand_data["jobdiva_candidate_id"] = new_jd_id
-                    _persist_jobdiva_candidate_id(cand_id, cand_data)
+                    _persist_jobdiva_candidate_id(
+                        cand_id, {"jobdiva_candidate_id": new_jd_id}
+                    )
                     # Add to in-memory sets so concurrent siblings don't re-create the same person.
                     # This covers both newly created AND pre-existing profiles that were linked.
                     existing_jd_ids.add(str(new_jd_id))
-                    if email_lower and not email_lower.startswith("auto_") and "@no-email.jobdiva.local" not in email_lower:
-                        existing_emails.add(email_lower)
+                    if email_lower and not email_lower.startswith("auto_") and not is_placeholder_email(email_lower):
+                        existing_emails[email_lower] = str(new_jd_id)
                     if phone_norm and len(phone_norm) >= 7:
-                        existing_phones.add(phone_norm)
+                        existing_phones[phone_norm] = str(new_jd_id)
                     return "success"
                 elif success:
                     # Linked to existing profile but JD returned no ID — treat as success
