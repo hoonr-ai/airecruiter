@@ -1,7 +1,8 @@
-"""Guard: `sourced_candidates.data` must be MERGED on upsert, never replaced.
+"""Guard: a caller-supplied `data` payload must be MERGED into the stored blob,
+never allowed to replace it, and never routed through `jsonb_strip_nulls`.
 
-`data` is a shared jsonb blob. Step 5 owns the scoring/profile keys it sends,
-but the backend writes keys the client never sends:
+`sourced_candidates.data` is shared. Callers own the scoring/profile keys they
+send, but the backend writes keys no caller carries:
 
   * `jobdiva_candidate_id` — the person's real JobDiva profile id. Without it
     Launch PAIR sends `link_candidate_id=None`, which is the instruction to
@@ -12,8 +13,15 @@ Every launch calls `/candidates/save` for its selection first (and again on
 retry), so a blanket `data = EXCLUDED.data` erased both on the way in — costing
 a duplicate JobDiva profile and duplicate outreach.
 
-This pins the invariant at the SQL level rather than mocking a DB, because the
-regression is a single token inside a string literal and that is exactly what a
+The second rule exists because the obvious way to write the merge is subtly
+wrong. Verified against PostgreSQL 15: carrying a value forward through
+`jsonb_strip_nulls(jsonb_build_object(...))` recurses into it and deletes null
+members, and `engage_last_response.data` is legitimately null for failed
+launches (see the comment at routers/candidates.py:115). Copy stored values
+verbatim with `jsonb_each` + `jsonb_object_agg` instead.
+
+These are pinned at the SQL level rather than against a live DB, because the
+regressions are single tokens inside string literals and that is exactly what a
 future edit is likely to reintroduce.
 """
 
@@ -23,27 +31,29 @@ from pathlib import Path
 
 API_ROOT = Path(__file__).resolve().parent.parent
 
-# Files holding an INSERT ... ON CONFLICT against sourced_candidates.
+# Files holding a statement that merges a caller-supplied blob into the table.
 UPSERT_FILES = (
     "routers/candidates.py",
     "services/sourced_candidates_storage.py",
     "services/auto_assign_service.py",
 )
 
-# Backend-owned keys that no client payload carries and that must therefore
-# survive an upsert driven by a client payload.
-PRESERVED_KEYS = ("engage_status", "engage_interview_id")
+# Backend-owned keys that no caller payload carries and that must therefore
+# survive a merge driven by a caller payload.
+PRESERVED_KEYS = ("jobdiva_candidate_id", "engage_status", "engage_interview_id")
 
-_WIPE_RE = re.compile(r"\bdata\s*=\s*EXCLUDED\.data\b", re.IGNORECASE)
-_ASSIGNS_DATA_RE = re.compile(r"\bdata\s*=", re.IGNORECASE)
+# The caller-supplied blob appears as `EXCLUDED.data` in an upsert and as
+# `v.data` in the applicant sync's `UPDATE ... FROM (VALUES %s) AS v`.
+_CALLER_BLOB_RE = re.compile(r"\b(EXCLUDED|v)\.data\b")
+_WIPE_RE = re.compile(r"\bdata\s*=\s*(EXCLUDED|v)\.data\b", re.IGNORECASE)
 
 
 def _strip_sql_comments(sql: str) -> str:
     """Drop `-- ...` line comments.
 
     Required, not cosmetic: the merge expressions are documented with comments
-    that quote the very anti-pattern this module forbids, so a naive scan of the
-    raw text reports the explanation as the offence.
+    that quote the very anti-patterns this module forbids, so a naive scan of
+    the raw text reports the explanation as the offence.
     """
     return "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
 
@@ -63,54 +73,60 @@ def _sql_blocks(path: Path):
         i = b + 3
 
 
-def _sourced_candidate_upserts():
-    """Return [(relpath, comment-stripped SQL)] for each sourced_candidates upsert."""
+def _caller_blob_merges():
+    """Return [(relpath, comment-stripped SQL)] for each statement that merges a
+    caller-supplied blob into `sourced_candidates.data`.
+
+    Keyed on the caller blob rather than on `ON CONFLICT`, so it catches both
+    shapes — the three upserts and the applicant sync's
+    `UPDATE sourced_candidates AS sc ... FROM (VALUES %s) AS v` — while ignoring
+    the many targeted `data = data || %s::jsonb` delta writes, which are fine.
+    """
     found = []
     for rel in UPSERT_FILES:
         for block in _sql_blocks(API_ROOT / rel):
-            lowered = block.lower()
-            if "on conflict" in lowered and "sourced_candidates" in lowered:
-                found.append((rel, _strip_sql_comments(block)))
+            if "sourced_candidates" not in block.lower():
+                continue
+            body = _strip_sql_comments(block)
+            if _CALLER_BLOB_RE.search(body):
+                found.append((rel, body))
     return found
 
 
-def test_upserts_are_discovered():
-    """Sanity: if this finds nothing, the guards below pass vacuously."""
-    upserts = _sourced_candidate_upserts()
-    assert len(upserts) >= 3, (
-        f"expected the known sourced_candidates upserts, found {len(upserts)} — "
-        "did a file move, or did the SQL stop living in a triple-quoted block?"
+def test_merge_sites_are_discovered():
+    """Sanity: if this finds nothing, every guard below passes vacuously."""
+    sites = _caller_blob_merges()
+    assert len(sites) >= 4, (
+        f"expected the known caller-blob merge sites, found {len(sites)} — did a "
+        "file move, or did the SQL stop living in a triple-quoted block?"
     )
 
 
-def test_no_upsert_replaces_the_data_blob():
-    offenders = sorted({rel for rel, sql in _sourced_candidate_upserts() if _WIPE_RE.search(sql)})
+def test_no_merge_site_replaces_the_stored_blob():
+    offenders = sorted({rel for rel, sql in _caller_blob_merges() if _WIPE_RE.search(sql)})
     assert not offenders, (
-        "these upserts replace the whole `data` blob instead of merging it, "
-        f"which erases backend-owned keys: {offenders}"
+        "these statements replace the whole stored `data` blob with the caller's "
+        f"instead of merging, erasing backend-owned keys: {offenders}"
     )
 
 
-def test_every_upsert_preserves_backend_owned_keys():
+def test_every_merge_site_preserves_backend_owned_keys():
     missing = {}
-    for rel, sql in _sourced_candidate_upserts():
-        if not _ASSIGNS_DATA_RE.search(sql):
-            continue  # this upsert doesn't touch `data` at all
+    for rel, sql in _caller_blob_merges():
         absent = [k for k in PRESERVED_KEYS if k not in sql]
         if absent:
             missing.setdefault(rel, set()).update(absent)
     assert not missing, (
-        "upserts that write `data` without carrying backend-owned keys forward: "
+        "merge sites that fail to carry backend-owned keys forward: "
         f"{ {k: sorted(v) for k, v in missing.items()} }"
     )
 
 
-def test_jobdiva_profile_link_survives_the_client_save_path():
-    """`/candidates/save` is the upsert every launch hits before engaging."""
-    blocks = [sql for rel, sql in _sourced_candidate_upserts() if rel == "routers/candidates.py"]
-    assert blocks, "no sourced_candidates upsert found in routers/candidates.py"
-    for sql in blocks:
-        assert "jobdiva_candidate_id" in sql, (
-            "the /candidates/save upsert must carry `jobdiva_candidate_id` forward — "
-            "losing it makes JobDiva mint a duplicate profile on the next provision"
-        )
+def test_no_merge_site_routes_preserved_values_through_jsonb_strip_nulls():
+    offenders = sorted(
+        {rel for rel, sql in _caller_blob_merges() if "jsonb_strip_nulls" in sql}
+    )
+    assert not offenders, (
+        "these merge sites carry preserved values through jsonb_strip_nulls, which "
+        f"recursively deletes legitimately-null members inside them: {offenders}"
+    )

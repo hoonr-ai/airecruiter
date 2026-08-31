@@ -240,7 +240,7 @@ def test_update_candidate_name_fallback(jobdiva_service):
 # ---------------------------------------------------------------------------
 
 def test_jobdiva_profile_id_accepts_every_jobdiva_pool():
-    from services.sourced_candidates_storage import jobdiva_profile_id
+    from services.jobdiva import jobdiva_profile_id
 
     for src in (
         "JobDiva",
@@ -255,7 +255,7 @@ def test_jobdiva_profile_id_accepts_every_jobdiva_pool():
 
 
 def test_jobdiva_profile_id_rejects_non_jobdiva_and_non_numeric():
-    from services.sourced_candidates_storage import jobdiva_profile_id
+    from services.jobdiva import jobdiva_profile_id
 
     # A LinkedIn row's numeric internal id must never be linked to a JobDiva
     # profile — that is the regression PR #493 was guarding against.

@@ -10,9 +10,9 @@ import httpx
 import re
 
 from services.ai_service import ai_service
-from services.jobdiva import jobdiva_service
+from services.jobdiva import jobdiva_service, jobdiva_profile_id
 from services.unipile import unipile_service
-from services.sourced_candidates_storage import sourced_candidates_storage, jobdiva_profile_id
+from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
@@ -1978,28 +1978,27 @@ async def save_candidates(
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 resume_match_percentage = EXCLUDED.resume_match_percentage,
-                                -- Merge, never replace. `data` is shared: the caller owns the
-                                -- scoring/profile keys it sends, but the backend writes keys
-                                -- the client never sends and a blanket `data = EXCLUDED.data`
-                                -- erased them. Every launch saves its selection first, so the
-                                -- wipe dropped the JobDiva profile link (JobDiva then minted a
-                                -- duplicate profile on the next provision) and the engage
-                                -- bookkeeping (duplicate outreach, since idempotency reads
-                                -- engage_status). Mirrors services/auto_assign_service.py.
+                                -- Merge, never replace: preserve backend-owned keys the caller never
+                                -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                                -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                                -- profile and duplicate outreach on re-save.
                                 data = COALESCE(sourced_candidates.data, '{}'::jsonb)
                                        || COALESCE(EXCLUDED.data, '{}'::jsonb)
-                                       || jsonb_strip_nulls(jsonb_build_object(
-                                           'jobdiva_candidate_id',      sourced_candidates.data->'jobdiva_candidate_id',
-                                           'jobdiva_resume_id',         sourced_candidates.data->'jobdiva_resume_id',
-                                           'engage_status',             sourced_candidates.data->>'engage_status',
-                                           'engage_interview_id',       sourced_candidates.data->>'engage_interview_id',
-                                           'engage_score',              sourced_candidates.data->'engage_score',
-                                           'engage_updated_at',         sourced_candidates.data->>'engage_updated_at',
-                                           'engage_last_response',      sourced_candidates.data->'engage_last_response',
-                                           'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
-                                           'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
-                                           'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
-                                       )),
+                                       || COALESCE((
+                                            -- Copy the stored values VERBATIM. Do not route them through
+                                            -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                            -- is legitimately null for failed launches (candidates.py:115).
+                                            -- jsonb_each is strict, so a NULL data column yields zero rows
+                                            -- and the COALESCE supplies '{}'.
+                                            SELECT jsonb_object_agg(e.k, e.v)
+                                            FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                            WHERE e.k IN (
+                                                'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                                'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                                'engage_last_response', 'engage_hard_filter_status',
+                                                'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                            )
+                                       ), '{}'::jsonb),
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
                         """, candidate_data)

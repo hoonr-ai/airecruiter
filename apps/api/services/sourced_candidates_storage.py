@@ -23,32 +23,6 @@ from core.db import get_db_connection
 logger = logging.getLogger(__name__)
 
 
-def jobdiva_profile_id(source: Optional[str], candidate_id: Any) -> Optional[str]:
-    """Return the real JobDiva profile id for a JobDiva-sourced row, else None.
-
-    For every JobDiva pool (TalentSearch / JobAgent / Applicants) ``candidate_id``
-    IS the profile id JobDiva's own API returned -- each reader extracts it with
-    ``get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])`` (services/jobdiva.py
-    ``_search_talent_pool`` / ``_search_with_job_agent`` / ``_get_all_job_applicants``).
-    That the three pools share one id space is load-bearing elsewhere: the sourcing
-    stream dedups them against a single ``seen_ids`` set and matches JobAgent ids
-    against TalentSearch rows via ``jobagent_matched_ids``
-    (services/unified_candidate_search.py).
-
-    Persisting this id is what lets Launch PAIR link the JobDiva application to the
-    person's existing profile instead of making JobDiva mint a duplicate
-    "Unknown Unknown" one -- see routers/engagement.py ``_resolve_link_candidate_id``.
-
-    Non-JobDiva sources mint their own ids (``exa_<url>``, ``<source>_<md5>``, and
-    LinkedIn rows that merely *look* numeric), so they must never be linked to a
-    JobDiva profile.
-    """
-    cid = str(candidate_id or "").strip()
-    if cid.isdigit() and str(source or "").lower().startswith("jobdiva"):
-        return cid
-    return None
-
-
 # v22: Module-level engine singleton. Pre-v22 every method/function created
 # its own `create_engine(db_url)` with default pool settings, leaking
 # connections until Postgres hit max_connections. Pool via a single engine
@@ -414,25 +388,27 @@ class SourcedCandidatesStorage:
                                 location = EXCLUDED.location,
                                 profile_url = EXCLUDED.profile_url,
                                 image_url = EXCLUDED.image_url,
-                                -- Merge, never replace: preserve backend-owned keys the caller
-                                -- never sends (JobDiva profile link + engage bookkeeping). A
-                                -- blanket `data = EXCLUDED.data` erased them, which cost us a
-                                -- duplicate JobDiva profile and duplicate outreach on re-save.
-                                -- Mirrors services/auto_assign_service.py.
+                                -- Merge, never replace: preserve backend-owned keys the caller never
+                                -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                                -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                                -- profile and duplicate outreach on re-save.
                                 data = COALESCE(sourced_candidates.data, '{}'::jsonb)
                                        || COALESCE(EXCLUDED.data, '{}'::jsonb)
-                                       || jsonb_strip_nulls(jsonb_build_object(
-                                           'jobdiva_candidate_id',      sourced_candidates.data->'jobdiva_candidate_id',
-                                           'jobdiva_resume_id',         sourced_candidates.data->'jobdiva_resume_id',
-                                           'engage_status',             sourced_candidates.data->>'engage_status',
-                                           'engage_interview_id',       sourced_candidates.data->>'engage_interview_id',
-                                           'engage_score',              sourced_candidates.data->'engage_score',
-                                           'engage_updated_at',         sourced_candidates.data->>'engage_updated_at',
-                                           'engage_last_response',      sourced_candidates.data->'engage_last_response',
-                                           'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
-                                           'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
-                                           'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
-                                       )),
+                                       || COALESCE((
+                                            -- Copy the stored values VERBATIM. Do not route them through
+                                            -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                            -- is legitimately null for failed launches (candidates.py:115).
+                                            -- jsonb_each is strict, so a NULL data column yields zero rows
+                                            -- and the COALESCE supplies '{}'.
+                                            SELECT jsonb_object_agg(e.k, e.v)
+                                            FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                            WHERE e.k IN (
+                                                'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                                'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                                'engage_last_response', 'engage_hard_filter_status',
+                                                'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                            )
+                                       ), '{}'::jsonb),
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 updated_at = CURRENT_TIMESTAMP
@@ -489,25 +465,27 @@ class SourcedCandidatesStorage:
                         image_url = EXCLUDED.image_url,
                         resume_id = EXCLUDED.resume_id,
                         resume_text = EXCLUDED.resume_text,
-                        -- Merge, never replace: preserve backend-owned keys the caller
-                        -- never sends (JobDiva profile link + engage bookkeeping). A
-                        -- blanket `data = EXCLUDED.data` erased them, which cost us a
-                        -- duplicate JobDiva profile and duplicate outreach on re-save.
-                        -- Mirrors services/auto_assign_service.py.
+                        -- Merge, never replace: preserve backend-owned keys the caller never
+                        -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                        -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                        -- profile and duplicate outreach on re-save.
                         data = COALESCE(sourced_candidates.data, '{}'::jsonb)
                                || COALESCE(EXCLUDED.data, '{}'::jsonb)
-                               || jsonb_strip_nulls(jsonb_build_object(
-                                   'jobdiva_candidate_id',      sourced_candidates.data->'jobdiva_candidate_id',
-                                   'jobdiva_resume_id',         sourced_candidates.data->'jobdiva_resume_id',
-                                   'engage_status',             sourced_candidates.data->>'engage_status',
-                                   'engage_interview_id',       sourced_candidates.data->>'engage_interview_id',
-                                   'engage_score',              sourced_candidates.data->'engage_score',
-                                   'engage_updated_at',         sourced_candidates.data->>'engage_updated_at',
-                                   'engage_last_response',      sourced_candidates.data->'engage_last_response',
-                                   'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
-                                   'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
-                                   'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
-                               )),
+                               || COALESCE((
+                                    -- Copy the stored values VERBATIM. Do not route them through
+                                    -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                    -- is legitimately null for failed launches (candidates.py:115).
+                                    -- jsonb_each is strict, so a NULL data column yields zero rows
+                                    -- and the COALESCE supplies '{}'.
+                                    SELECT jsonb_object_agg(e.k, e.v)
+                                    FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                    WHERE e.k IN (
+                                        'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                        'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                        'engage_last_response', 'engage_hard_filter_status',
+                                        'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                    )
+                               ), '{}'::jsonb),
                         status = 'sourced',
                         updated_at = CURRENT_TIMESTAMP
                 """), candidate_data)
