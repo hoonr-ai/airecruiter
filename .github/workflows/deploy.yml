@@ -41,11 +41,11 @@ jobs:
 
       - name: Run API tests
         # Env stubs live in apps/api/tests/conftest.py (single source of truth).
-        # test_jobdiva_talent_payload.py has 9 pre-existing failures on develop
-        # (mock signature drift) — tracked separately from this PR.
+        # Whole suite, no exclusions — an ignored file drifts silently and any
+        # pre-check that runs a plain `pytest` then fails where CI is green.
         run: |
           cd apps/api
-          pytest -q --ignore=tests/test_jobdiva_talent_payload.py
+          pytest -q
 
   test-web:
     runs-on: ubuntu-latest
@@ -62,8 +62,11 @@ jobs:
           node-version: "22"
 
       - name: Run web unit tests
+        # `npm test` (glob over lib/*.test.ts) so CI and a local run execute the
+        # same set — the previous explicit two-file list silently skipped
+        # lib/date.test.ts and lib/csv.test.ts.
         working-directory: apps/web
-        run: node --experimental-strip-types --test lib/activityTimeline.test.ts lib/candidateVisibility.test.ts
+        run: npm test
 
   # ----------------------
   # QA DEPLOYMENT
