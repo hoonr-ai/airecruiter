@@ -296,15 +296,19 @@ def test_count_pending_hard_filters_dedupes_and_skips_ordinary_rows():
 
 def _is_closing_sentence(item: dict) -> bool:
     """
-    Mirror of the exclusion logic added in engagement.py so we can unit-test
+    Mirror of the exclusion logic in engagement.py so we can unit-test
     it without standing up a DB.
+
+    The ONLY reliable signal is total_score == 0 (scored out of 0).
+    No real evaluation question is ever out of 0 (always out of 10.0).
+    We deliberately do NOT check answer text because newer pairbot
+    versions populate the closing-sentence answer with the full
+    thank-you paragraph.
     """
     score = item.get("candidate_score")
     total = item.get("total_score", 10.0)
-    answer = item.get("answer") or "—"
     hf = str(item.get("hard_filter_status") or "").strip().lower().replace(" ", "_")
     is_hard_filter = hf not in ("", "not_hard_filter", "na", "n/a", "none")
-    q_order = item.get("question_order", 0) or 0
 
     try:
         score_value = float(score) if score is not None else None
@@ -316,31 +320,48 @@ def _is_closing_sentence(item: dict) -> bool:
     except (TypeError, ValueError):
         total_value = None
 
-    _BOT_CLOSING_SENTINEL = "—"
     return (
-        q_order == 0
-        and score_value == 0.0
-        and total_value == 0.0
-        and (not answer or answer == _BOT_CLOSING_SENTINEL)
+        score_value == 0.0
+        and total_value in (0.0, None)
         and not is_hard_filter
     )
 
 
 def test_closing_sentence_is_excluded():
-    """Bot closing sentence (score=0, total=0, no answer, no order) is filtered out."""
+    """Bot closing sentence (score=0, total=0, no answer, any order) is filtered out."""
     item = {
         "question": "Thank you for your time! A recruiter will be in touch.",
         "answer": None,
         "candidate_score": 0.0,
         "total_score": 0.0,
         "hard_filter_status": None,
-        "question_order": 0,
+        "question_order": 13,  # Partner API might send a real order
     }
     assert _is_closing_sentence(item) is True
 
 
-def test_closing_sentence_with_null_total_score_does_not_raise():
-    """Guard: explicit null total_score must not raise TypeError (PR critical fix)."""
+def test_closing_sentence_with_real_answer_text_is_excluded():
+    """Regression: newer pairbot populates the closing-sentence answer with the full
+    thank-you paragraph. The old logic (checking for empty/\u2014 answer) missed this.
+    The definitive signal is total_score == 0, regardless of answer text."""
+    item = {
+        "question": "Thank you, Dmitry, for sharing your background and insights today.",
+        "answer": (
+            "Thank you, Dmitry, for sharing your background and insights today. "
+            "I appreciated hearing about your hands-on experience with Tableau for "
+            "data visualization. A human recruiter will be in touch soon to discuss "
+            "the next steps and address any questions you might have. Have a wonderful day!"
+        ),
+        "candidate_score": 0.0,
+        "total_score": 0,   # Comes in as integer 0 from pairbot
+        "hard_filter_status": None,
+        "question_order": 5,  # Pairbot may assign any order
+    }
+    assert _is_closing_sentence(item) is True
+
+
+def test_closing_sentence_with_null_total_score_is_excluded():
+    """Closing sentence with explicit null total_score must be successfully excluded."""
     item = {
         "question": "Thank you for sharing!",
         "answer": None,
@@ -349,10 +370,9 @@ def test_closing_sentence_with_null_total_score_does_not_raise():
         "hard_filter_status": None,
         "question_order": 0,
     }
-    # total_value will be None (not 0.0) so it should NOT be excluded —
-    # but more importantly it must not raise TypeError.
+    # total_value will be None, which should now correctly trigger the exclusion.
     result = _is_closing_sentence(item)
-    assert result is False  # total_value is None ≠ 0.0, so condition is not met
+    assert result is True
 
 
 def test_real_skipped_scored_question_is_not_excluded():
@@ -361,9 +381,8 @@ def test_real_skipped_scored_question_is_not_excluded():
         "question": "Describe a time you led a cross-functional team.",
         "answer": None,
         "candidate_score": 0.0,
-        "total_score": 0.0,
+        "total_score": 10.0,    # Real scored questions are out of 10
         "hard_filter_status": None,
-        "question_order": 10,   # Q10+ → is_scored_question = True → must not be dropped
+        "question_order": 10,   # Q10+ → is_scored_question = True
     }
     assert _is_closing_sentence(item) is False
-

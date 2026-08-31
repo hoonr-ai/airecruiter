@@ -3158,21 +3158,20 @@ async def _check_and_fire_candidate_passed_notification(
                     )
                 is_scored_question = (not is_hard_filter) and (not is_info_only)
 
-                # Exclude the bot's closing sentence which is scored 0.0/0 and has no candidate
-                # answer. The closing sentence always has question_order == 0 (or absent), whereas
-                # real scored questions always have q_order >= 10. We use q_order == 0 as the
-                # primary anchor to avoid accidentally dropping a real Q10+ skipped answer.
+                # Exclude the bot's closing sentence which is always scored 0.0/0.
+                # The ONLY reliable signal is total_score == 0 (scored out of 0) —
+                # no real evaluation question is ever out of 0 (they are always out of 10.0).
+                # We intentionally do NOT check the answer text because newer pairbot
+                # versions populate the closing-sentence answer with the full thank-you
+                # paragraph, so checking for empty/"—" would miss it.
                 # Guard total_score against explicit null (partner API may send "total_score": null).
-                _BOT_CLOSING_SENTINEL = "—"
                 try:
                     total_value = float(total) if total is not None else None
                 except (TypeError, ValueError):
                     total_value = None
                 is_closing_sentence = (
-                    q_order == 0
-                    and score_value == 0.0
-                    and total_value == 0.0
-                    and (not a_text or a_text == _BOT_CLOSING_SENTINEL)
+                    score_value == 0.0
+                    and total_value in (0.0, None)
                     and not is_hard_filter
                 )
                 if is_closing_sentence:
