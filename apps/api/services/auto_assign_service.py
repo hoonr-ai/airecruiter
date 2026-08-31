@@ -10,6 +10,7 @@ from core.db import get_db_connection
 from services.feedback_metrics import count_feedback_metrics
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
+from services.sourced_candidates_storage import jobdiva_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +221,16 @@ class AutoAssignService:
             if value is not None:
                 payload[field] = value
 
-        if candidate_id:
-            payload["jobdiva_candidate_id"] = candidate_id
+        # Only a genuine JobDiva profile id may be stamped here. This sync
+        # normally writes JobDiva-Applicants rows, but `source` is caller-
+        # supplied (see `synchronize_job_applicants`), and a non-JobDiva id
+        # linked as `link_candidate_id` at launch would attach the application
+        # to an unrelated JobDiva profile.
+        jd_profile_id = jobdiva_profile_id(
+            cand.get("source") or "JobDiva-Applicants", candidate_id
+        )
+        if jd_profile_id:
+            payload["jobdiva_candidate_id"] = jd_profile_id
         return payload
 
     async def _count_external_curate_submittals(
@@ -778,6 +787,10 @@ class AutoAssignService:
                                         profile_url = EXCLUDED.profile_url,
                                         resume_text = EXCLUDED.resume_text,
                                         data        = COALESCE(sourced_candidates.data, '{}'::jsonb) || COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                            -- Keep the JobDiva profile link: losing it makes
+                                            -- Launch PAIR provision a duplicate profile.
+                                            'jobdiva_candidate_id', sourced_candidates.data->'jobdiva_candidate_id',
+                                            'jobdiva_resume_id',   sourced_candidates.data->'jobdiva_resume_id',
                                             'engage_status',       sourced_candidates.data->>'engage_status',
                                             'engage_interview_id', sourced_candidates.data->>'engage_interview_id',
                                             'engage_score',        sourced_candidates.data->'engage_score',

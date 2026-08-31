@@ -12,7 +12,7 @@ import re
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
-from services.sourced_candidates_storage import sourced_candidates_storage
+from services.sourced_candidates_storage import sourced_candidates_storage, jobdiva_profile_id
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
@@ -1910,6 +1910,15 @@ async def save_candidates(
                         else:
                             scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
 
+                        # For JobDiva-sourced rows candidate_id IS the JobDiva
+                        # profile id. Persist it explicitly so Launch PAIR links
+                        # the application to the existing profile instead of
+                        # making JobDiva mint a duplicate "Unknown Unknown" one
+                        # (routers/engagement.py `_resolve_link_candidate_id`).
+                        # Recomputed on every save, so it self-heals rows whose
+                        # blob predates this and survives the upsert either way.
+                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+
                         # Prepare candidate data with clean schema
                         candidate_data = {
                             "jobdiva_id": resolved_jobdiva_id,
@@ -1942,7 +1951,8 @@ async def save_candidates(
                                 "matched_skills": scoring["matched_skills"],
                                 "missing_skills": scoring["missing_skills"],
                                 "explainability": scoring["explainability"],
-                                "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
+                                "enhanced_info": getattr(c, 'enhanced_info', None),  # Full LLM extraction data
+                                **({"jobdiva_candidate_id": jd_profile_id} if jd_profile_id else {}),
                             }),
                             "status": "sourced"
                         }
@@ -1968,7 +1978,28 @@ async def save_candidates(
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 resume_match_percentage = EXCLUDED.resume_match_percentage,
-                                data = EXCLUDED.data,
+                                -- Merge, never replace. `data` is shared: the caller owns the
+                                -- scoring/profile keys it sends, but the backend writes keys
+                                -- the client never sends and a blanket `data = EXCLUDED.data`
+                                -- erased them. Every launch saves its selection first, so the
+                                -- wipe dropped the JobDiva profile link (JobDiva then minted a
+                                -- duplicate profile on the next provision) and the engage
+                                -- bookkeeping (duplicate outreach, since idempotency reads
+                                -- engage_status). Mirrors services/auto_assign_service.py.
+                                data = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                                       || COALESCE(EXCLUDED.data, '{}'::jsonb)
+                                       || jsonb_strip_nulls(jsonb_build_object(
+                                           'jobdiva_candidate_id',      sourced_candidates.data->'jobdiva_candidate_id',
+                                           'jobdiva_resume_id',         sourced_candidates.data->'jobdiva_resume_id',
+                                           'engage_status',             sourced_candidates.data->>'engage_status',
+                                           'engage_interview_id',       sourced_candidates.data->>'engage_interview_id',
+                                           'engage_score',              sourced_candidates.data->'engage_score',
+                                           'engage_updated_at',         sourced_candidates.data->>'engage_updated_at',
+                                           'engage_last_response',      sourced_candidates.data->'engage_last_response',
+                                           'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
+                                           'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
+                                           'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
+                                       )),
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
                         """, candidate_data)
