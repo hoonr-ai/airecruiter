@@ -631,6 +631,14 @@ export default function CandidateRankingsPage() {
   const normalizeInterviewStatus = (c: Candidate): { label: string; color: string } => {
     const interviewId = deriveInterviewId(c);
     if (!interviewId) {
+      if (c.data?._stage === "dropped" && c.data?._drop_reason === "cross_source_duplicate") {
+        return { label: "Duplicate Candidate", color: "#64748b" };
+      }
+      const hasPhone = String(c.phone || "").replace(/\D/g, "").length >= 7;
+      const hasEmail = String(c.email || "").trim().length > 0;
+      if (!hasPhone && !hasEmail) {
+        return { label: "Invalid Contact", color: "#64748b" };
+      }
       return { label: "N/A", color: "#94a3b8" };
     }
 
