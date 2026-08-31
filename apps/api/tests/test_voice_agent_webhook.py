@@ -296,15 +296,17 @@ def test_count_pending_hard_filters_dedupes_and_skips_ordinary_rows():
 
 def _is_closing_sentence(item: dict) -> bool:
     """
-    Mirror of the exclusion logic added in engagement.py so we can unit-test
-    it without standing up a DB.
+    Mirror of the closing-sentence exclusion logic in engagement.py so we can
+    unit-test it without standing up a DB. Keep in sync with that function.
+
+    Definitive signal: total_score == 0.0 exactly (not None — see intentional
+    tradeoff comment in engagement.py). No real evaluation question is ever
+    scored out of 0.
     """
     score = item.get("candidate_score")
     total = item.get("total_score", 10.0)
-    answer = item.get("answer") or "—"
     hf = str(item.get("hard_filter_status") or "").strip().lower().replace(" ", "_")
     is_hard_filter = hf not in ("", "not_hard_filter", "na", "n/a", "none")
-    q_order = item.get("question_order", 0) or 0
 
     try:
         score_value = float(score) if score is not None else None
@@ -316,31 +318,52 @@ def _is_closing_sentence(item: dict) -> bool:
     except (TypeError, ValueError):
         total_value = None
 
-    _BOT_CLOSING_SENTINEL = "—"
     return (
-        q_order == 0
-        and score_value == 0.0
-        and total_value == 0.0
-        and (not answer or answer == _BOT_CLOSING_SENTINEL)
+        score_value == 0.0
+        and total_value == 0.0       # exact 0 only — None is intentionally excluded
         and not is_hard_filter
     )
 
 
 def test_closing_sentence_is_excluded():
-    """Bot closing sentence (score=0, total=0, no answer, no order) is filtered out."""
+    """Bot closing sentence (score=0, total=0, no answer, any order) is filtered out."""
     item = {
         "question": "Thank you for your time! A recruiter will be in touch.",
         "answer": None,
         "candidate_score": 0.0,
         "total_score": 0.0,
         "hard_filter_status": None,
-        "question_order": 0,
+        "question_order": 13,  # Partner API might send a real order
     }
     assert _is_closing_sentence(item) is True
 
 
-def test_closing_sentence_with_null_total_score_does_not_raise():
-    """Guard: explicit null total_score must not raise TypeError (PR critical fix)."""
+def test_closing_sentence_with_real_answer_text_is_excluded():
+    """Regression: newer pairbot populates the closing-sentence answer with the full
+    thank-you paragraph. The old logic (checking for empty/— answer) missed this.
+    The definitive signal is total_score == 0, regardless of answer text."""
+    item = {
+        "question": "Thank you, Dmitry, for sharing your background and insights today.",
+        "answer": (
+            "Thank you, Dmitry, for sharing your background and insights today. "
+            "I appreciated hearing about your hands-on experience with Tableau for "
+            "data visualization. A human recruiter will be in touch soon to discuss "
+            "the next steps and address any questions you might have. Have a wonderful day!"
+        ),
+        "candidate_score": 0.0,
+        "total_score": 0,   # Comes in as integer 0 from pairbot
+        "hard_filter_status": None,
+        "question_order": 5,  # Pairbot may assign any order
+    }
+    assert _is_closing_sentence(item) is True
+
+
+def test_closing_sentence_with_null_total_score_is_not_excluded():
+    """Intentional tradeoff: explicit null total_score is NOT treated as a closing
+    sentence. A real scored question (Q10+) where the partner API transiently omits
+    total_score should surface in the email rather than be silently dropped.
+    If pairbot sends null for the actual closing sentence, that item passes through —
+    the safer choice over accidental data loss. See engagement.py for full rationale."""
     item = {
         "question": "Thank you for sharing!",
         "answer": None,
@@ -349,21 +372,39 @@ def test_closing_sentence_with_null_total_score_does_not_raise():
         "hard_filter_status": None,
         "question_order": 0,
     }
-    # total_value will be None (not 0.0) so it should NOT be excluded —
-    # but more importantly it must not raise TypeError.
     result = _is_closing_sentence(item)
-    assert result is False  # total_value is None ≠ 0.0, so condition is not met
+    # total_value is None → does NOT match total_value == 0.0 → NOT excluded.
+    assert result is False
+
+
+def test_info_only_question_at_score_boundary_is_not_excluded():
+    """Guard: an info-only question (Q2-9) with candidate_score==0.0 must NOT be
+    filtered out as a closing sentence, provided its total_score is non-zero.
+    Info-only questions always carry total_score > 0 in production (pairbot contract).
+    This test makes that assumption explicit."""
+    item = {
+        "question": "What is your current notice period?",
+        "answer": "Two weeks.",
+        "candidate_score": 0.0,   # Low/zero score is still a real answer
+        "total_score": 10.0,      # Info-only questions are always scored out of 10
+        "hard_filter_status": None,
+        "question_order": 5,      # Q5 → info-only range
+    }
+    assert _is_closing_sentence(item) is False
 
 
 def test_real_skipped_scored_question_is_not_excluded():
-    """A genuinely scored question (Q10+) that the candidate skipped must NOT be filtered."""
+    """A genuinely scored question (Q10+) that the candidate skipped must NOT be filtered.
+    total_score is 10.0 (not 0.0) because real scored questions are always out of 10 —
+    that is exactly what separates them from the bot closing sentence (total_score==0).
+    A Q10+ with total_score==0 would be misclassified; that is a pairbot contract
+    violation, not something we defend against here."""
     item = {
         "question": "Describe a time you led a cross-functional team.",
         "answer": None,
         "candidate_score": 0.0,
-        "total_score": 0.0,
+        "total_score": 10.0,    # Real scored questions are out of 10, never 0
         "hard_filter_status": None,
-        "question_order": 10,   # Q10+ → is_scored_question = True → must not be dropped
+        "question_order": 10,   # Q10+ → is_scored_question = True
     }
     assert _is_closing_sentence(item) is False
-
