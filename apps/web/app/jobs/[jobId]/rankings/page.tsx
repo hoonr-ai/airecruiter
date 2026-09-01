@@ -490,6 +490,8 @@ export default function CandidateRankingsPage() {
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
+  const [duplicateCount, setDuplicateCount] = useState(0);
+  const [invalidContactCount, setInvalidContactCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
@@ -1510,6 +1512,14 @@ export default function CandidateRankingsPage() {
     if (Number.isFinite(launchedCount)) {
       setLaunchedRowCount(launchedCount);
     }
+    const duplicateCountApi = Number(candData?.duplicate_candidate_count);
+    if (Number.isFinite(duplicateCountApi)) {
+      setDuplicateCount(duplicateCountApi);
+    }
+    const invalidCountApi = Number(candData?.invalid_contact_count);
+    if (Number.isFinite(invalidCountApi)) {
+      setInvalidContactCount(invalidCountApi);
+    }
 
     const total = Number(candData?.pagination?.total);
     if (Number.isFinite(total)) {
@@ -1558,6 +1568,8 @@ export default function CandidateRankingsPage() {
     setFeedbacks({});
     setCandidateTotalCount(0);
     setLaunchedRowCount(0);
+    setDuplicateCount(0);
+    setInvalidContactCount(0);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
     try {
@@ -1750,6 +1762,23 @@ export default function CandidateRankingsPage() {
                 <>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="flex flex-col gap-3 text-sm text-slate-600 pl-4 border-l border-slate-200">
+              {isInitialLoading ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Invalid Contacts: <strong className="text-slate-900 ml-1">{invalidContactCount}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Duplicate Candidates: <strong className="text-slate-900 ml-1">{duplicateCount}</strong>
                   </div>
                 </>
               )}

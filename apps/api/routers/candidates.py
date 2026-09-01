@@ -1180,7 +1180,24 @@ async def get_job_candidates(
                                   AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
                                   AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
                             )
-                        ) AS launched_count
+                        ) AS launched_count,
+                        COUNT(DISTINCT sc.candidate_id) FILTER (
+                            WHERE sc.data->>'_stage' = 'dropped' 
+                              AND sc.data->>'_drop_reason' = 'cross_source_duplicate'
+                        ) AS duplicate_candidate_count,
+                        COUNT(DISTINCT sc.candidate_id) FILTER (
+                            WHERE (
+                                COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') = ''
+                            ) AND NOT EXISTS (
+                                SELECT 1 FROM engage_interview_audit ea
+                                WHERE ea.candidate_id = sc.candidate_id
+                                  AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                                  AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                            )
+                            AND (sc.data->>'_stage' IS NULL OR sc.data->>'_stage' <> 'dropped' OR sc.data->>'_drop_reason' NOT IN ('cross_source_duplicate', 'non_us_candidate', 'below_min_score', 'merged_into_jobdiva'))
+                            AND LENGTH(REGEXP_REPLACE(COALESCE(sc.phone, ''), '\\D', '', 'g')) < 7
+                            AND BTRIM(COALESCE(sc.email, '')) = ''
+                        ) AS invalid_contact_count
                     FROM sourced_candidates sc
                     WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                       AND (sc.email IS NULL OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
@@ -1208,11 +1225,14 @@ async def get_job_candidates(
                     """,
                     (resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id),
+                     resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
                 launched_count = int(counts_row.get("launched_count") or 0)
+                duplicate_candidate_count = int(counts_row.get("duplicate_candidate_count") or 0)
+                invalid_contact_count = int(counts_row.get("invalid_contact_count") or 0)
 
                 pagination_clause = ""
                 params: List[Any] = [
@@ -1452,6 +1472,8 @@ async def get_job_candidates(
             "status": "success",
             "candidates": candidates,
             "launched_count": launched_count,
+            "duplicate_candidate_count": duplicate_candidate_count,
+            "invalid_contact_count": invalid_contact_count,
             "pagination": {
                 "limit": effective_limit,
                 "offset": effective_offset,
