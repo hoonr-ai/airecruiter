@@ -1673,6 +1673,14 @@ export default function CandidateRankingsPage() {
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
   const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
 
+  const invalidContactCount = useMemo(() => {
+    return candidates.filter(c => normalizeInterviewStatus(c).label === "Invalid Contact").length;
+  }, [candidates]);
+
+  const duplicateCount = useMemo(() => {
+    return candidates.filter(c => normalizeInterviewStatus(c).label === "Duplicate Candidate").length;
+  }, [candidates]);
+
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
       {/* Top Navigation */}
@@ -1750,6 +1758,23 @@ export default function CandidateRankingsPage() {
                 <>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="flex flex-col gap-3 text-sm text-slate-600 pl-4 border-l border-slate-200">
+              {isInitialLoading ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Invalid Contacts: <strong className="text-slate-900 ml-1">{invalidContactCount}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Duplicate Candidates: <strong className="text-slate-900 ml-1">{duplicateCount}</strong>
                   </div>
                 </>
               )}
