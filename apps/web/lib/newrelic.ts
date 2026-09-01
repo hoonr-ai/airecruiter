@@ -13,6 +13,15 @@ let isInitialized = false;
 export const initNewRelic = (): void => {
   if (isInitialized || typeof window === "undefined") return;
 
+  // On PROD the copy/paste loader (public/newrelic-browser-agent.js) already
+  // runs before hydration and sets window.NREUM/newrelic — never start a
+  // second agent alongside it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if ((window as any).NREUM?.loader_config) {
+    isInitialized = true;
+    return;
+  }
+
   const licenseKey = process.env.NEXT_PUBLIC_NEW_RELIC_LICENSE_KEY;
   const accountID = process.env.NEXT_PUBLIC_NEW_RELIC_ACCOUNT_ID;
   const applicationID = process.env.NEXT_PUBLIC_NEW_RELIC_APPLICATION_ID;

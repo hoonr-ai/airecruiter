@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, Outfit } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AIProvider } from "@/context/ai-context";
@@ -40,6 +41,8 @@ export default function RootLayout({
           </AuthGuard>
         </MsalProviderWrapper>
       </body>
+      {/* New Relic Browser agent (self-gates to pair.pyramidci.com; no-op elsewhere) */}
+      <Script src="/newrelic-browser-agent.js" strategy="beforeInteractive" />
     </html>
   );
 }
