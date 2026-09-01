@@ -149,6 +149,17 @@ class CandidateSearchRequest(BaseModel):
     # customer_name from monitored_jobs. Powers the "Same client / industry"
     # scoring dimension and the currently-employed-by-client veto.
     client_name: Optional[str] = None
+    # Sample-first flow: "sample" probes each selected source and emits only
+    # `sample_per_source` fully-scored rows per source so the recruiter can
+    # approve source quality cheaply; "full" (default) is the normal run.
+    search_mode: str = "full"
+    sample_per_source: int = 2
+    # When True, every source gets the full LLM skills-match assessment and a
+    # numeric score — including JobDiva-JobAgent rows, which normally skip the
+    # LLM (high-level scoring) and render without a percentage. The new
+    # sample→approve→auto-launch flow needs real scores on every row to drive
+    # the ≥60% auto-launch selection.
+    assess_all_sources: bool = False
 
 class JobFetchRequest(BaseModel):
     job_id: str

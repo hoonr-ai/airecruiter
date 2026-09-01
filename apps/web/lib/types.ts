@@ -104,6 +104,16 @@ export interface Candidate {
   no_contact?: boolean;
   no_contact_reason?: string;
   no_contact_company?: string;
+  // Backend-stamped hiring-client conflict: the candidate works at the company
+  // this req is hiring for. relation "current" is an explicit present-day
+  // employer; "last" means no current employer was on file and their most
+  // recent one was the client. Unlike no_contact this is per-job, so the row
+  // stays VISIBLE in the list — flagged, greyed out and unselectable — rather
+  // than hidden, so a recruiter can see why the person is off-limits.
+  client_conflict?: boolean;
+  client_conflict_reason?: string;
+  client_conflict_company?: string;
+  client_conflict_relation?: "current" | "last";
   years_experience?: number;
   experience_years?: number;
   skills?: (string | { name: string; years?: number })[];
