@@ -4,7 +4,8 @@ Step 5's "Run Search" now probes each selected source (search_mode="sample")
 and emits only `sample_per_source` fully-scored preview rows per source; the
 recruiter approves the sample, and the follow-up full run (search_mode="full",
 assess_all_sources=True) scores every source — JobDiva-JobAgent included — so
-the frontend can auto-launch PAIR for everyone at/above the score threshold.
+the frontend can auto-launch PAIR for every launchable candidate (no minimum
+score; scores order the safety cap).
 
 These tests pin:
   - sample mode fires ONE small JobAgent probe (resume_count_override =

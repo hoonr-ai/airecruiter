@@ -157,8 +157,9 @@ class CandidateSearchRequest(BaseModel):
     # When True, every source gets the full LLM skills-match assessment and a
     # numeric score — including JobDiva-JobAgent rows, which normally skip the
     # LLM (high-level scoring) and render without a percentage. The new
-    # sample→approve→auto-launch flow needs real scores on every row to drive
-    # the ≥60% auto-launch selection.
+    # sample→approve→auto-launch flow needs real scores on every row so rows
+    # rank comparably across sources (auto-launch takes every launchable
+    # candidate; its safety cap keeps the highest scores first).
     assess_all_sources: bool = False
 
 class JobFetchRequest(BaseModel):

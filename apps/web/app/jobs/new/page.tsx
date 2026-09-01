@@ -1126,14 +1126,13 @@ function NewJobPageContent() {
   // preview candidates per source (fast + cheap). The recruiter approves the
   // sample via "Search All Candidates", which runs the full search with the
   // normal limits, scores every source (assess_all_sources), and auto-launches
-  // PAIR for everyone scoring ≥ AUTO_LAUNCH_MIN_SCORE.
+  // PAIR for every launchable candidate — no minimum match score.
   //   idle     → nothing run yet (or criteria changed / restored cache)
   //   sample   → sample search streaming
   //   sampled  → sample shown, waiting for approval
   //   full     → full search streaming
   //   complete → full results in (auto-launch may be running/finished)
   const SAMPLE_PER_SOURCE = 2;
-  const AUTO_LAUNCH_MIN_SCORE = 60;
   const [searchPhase, setSearchPhase] = useState<
     "idle" | "sample" | "sampled" | "full" | "complete"
   >("idle");
@@ -6110,8 +6109,8 @@ function NewJobPageContent() {
       client_name: (jobData?.customer_name || jobData?.customer || "").trim() || undefined,
       // Sample→approve→auto-launch flow: every row (JobDiva-JobAgent
       // included) gets the full LLM skills assessment and a numeric score, so
-      // the ≥ AUTO_LAUNCH_MIN_SCORE auto-launch selection is meaningful
-      // across sources.
+      // rows rank comparably across sources (the auto-launch safety cap
+      // keeps the highest scores when the pool overflows it).
       assess_all_sources: true,
       page: 1,
       page_size: 100
@@ -6649,18 +6648,17 @@ function NewJobPageContent() {
     return accumulated;
   };
 
-  // Auto-launch selection for the sample→approve flow: every candidate with a
-  // real numeric score ≥ AUTO_LAUNCH_MIN_SCORE that is actually launchable —
-  // not excluded (client employee / offer status), not a no-contact company,
-  // not already launched. Unscored rows (N/A / agent rows without a score)
-  // never auto-launch: "more than 60% match" requires a match score. DNC and
-  // missing-contact handling stay inside the shared Launch PAIR flow.
+  // Auto-launch selection for the sample→approve flow: every candidate that
+  // is actually launchable — not excluded (client employee / offer status),
+  // not a no-contact company, not already launched — regardless of match
+  // score. Unscored rows (N/A / agent rows without a score) launch too. DNC
+  // and missing-contact handling stay inside the shared Launch PAIR flow.
   //
   // Safety net: the confirmation-free launch is hard-capped at the same
   // ceiling as Search & Launch (SEARCH_AND_LAUNCH_TOTAL, highest scores
-  // first), so a scoring/exclusion regression can never translate into
-  // unbounded outreach in one click — the overflow stays in the table for
-  // manual review.
+  // first, unscored rows last), so an exclusion regression can never
+  // translate into unbounded outreach in one click — the overflow stays in
+  // the table for manual review.
   const computeAutoLaunchSelection = (
     pool: any[]
   ): { ids: string[]; eligibleTotal: number } => {
@@ -6675,9 +6673,11 @@ function NewJobPageContent() {
       if (c?.no_contact === true) continue;
       const launchedKey = `${c?.source ?? ""}:${id}`;
       if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
-      if (typeof c?.match_score !== "number" || c.match_score < AUTO_LAUNCH_MIN_SCORE) continue;
       seen.add(id);
-      eligible.push({ id, score: c.match_score });
+      eligible.push({
+        id,
+        score: typeof c?.match_score === "number" ? c.match_score : -1,
+      });
     }
     const capped = [...eligible]
       .sort((a, b) => b.score - a.score)
@@ -6687,15 +6687,15 @@ function NewJobPageContent() {
 
   // Phase 2 of the sample-first flow: the recruiter approved the sample →
   // run the full search (normal limits + boolean relaxation), then
-  // auto-launch PAIR for everyone scoring ≥ AUTO_LAUNCH_MIN_SCORE. The
-  // launch itself rides the existing Launch PAIR pipeline (enrichment,
-  // DNC re-check, missing-contact modal, batching, progress modal).
+  // auto-launch PAIR for every launchable candidate (no minimum match
+  // score). The launch itself rides the existing Launch PAIR pipeline
+  // (enrichment, DNC re-check, missing-contact modal, batching, progress
+  // modal).
   const handleApproveAndSearchAll = async () => {
     if (isSearching || isEnrichingContacts || launchProgress.open || isViewOnly) return;
     trackEvent("job_wizard_step5_full_search_after_sample_started", {
       step: 5,
       sample_candidates_shown: candidatesRef.current.length,
-      auto_launch_min_score: AUTO_LAUNCH_MIN_SCORE,
     });
     const results = await handleRunSearch();
     if (searchAbortRef.current?.signal.aborted) return;
@@ -6710,19 +6710,18 @@ function NewJobPageContent() {
       pool_size: pool.length,
       selected_count: ids.length,
       eligible_total: eligibleTotal,
-      auto_launch_min_score: AUTO_LAUNCH_MIN_SCORE,
     });
     if (ids.length === 0) {
       showToast(
-        `Search complete — no candidates scored ≥ ${AUTO_LAUNCH_MIN_SCORE}%, so nothing was auto-launched. You can still select and launch manually.`,
+        "Search complete — no launchable candidates found, so nothing was auto-launched. You can still select and launch manually.",
         "info",
       );
       return;
     }
     showToast(
       eligibleTotal > ids.length
-        ? `Search complete — auto-launching PAIR for the top ${ids.length} of ${eligibleTotal} candidates scoring ≥ ${AUTO_LAUNCH_MIN_SCORE}% (safety cap). Select and launch the rest manually.`
-        : `Search complete — auto-launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} scoring ≥ ${AUTO_LAUNCH_MIN_SCORE}%…`,
+        ? `Search complete — auto-launching PAIR for the top ${ids.length} of ${eligibleTotal} launchable candidates (safety cap). Select and launch the rest manually.`
+        : `Search complete — auto-launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"}…`,
       "info",
     );
     // Land the selection in state first (the launch flow reads it there);
@@ -9667,7 +9666,7 @@ function NewJobPageContent() {
                         Happy with these sources? Approve to run the full search
                         with the standard limits. Every candidate is
                         skill-assessed, and PAIR launches automatically for
-                        everyone scoring ≥ {AUTO_LAUNCH_MIN_SCORE}%.
+                        every launchable candidate.
                       </p>
                       <Button
                         className="mt-2.5 bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px]"
