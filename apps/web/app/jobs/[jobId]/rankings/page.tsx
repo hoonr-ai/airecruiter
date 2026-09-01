@@ -490,6 +490,8 @@ export default function CandidateRankingsPage() {
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
+  const [duplicateCount, setDuplicateCount] = useState(0);
+  const [invalidContactCount, setInvalidContactCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
@@ -1510,6 +1512,14 @@ export default function CandidateRankingsPage() {
     if (Number.isFinite(launchedCount)) {
       setLaunchedRowCount(launchedCount);
     }
+    const duplicateCountApi = Number(candData?.duplicate_candidate_count);
+    if (Number.isFinite(duplicateCountApi)) {
+      setDuplicateCount(duplicateCountApi);
+    }
+    const invalidCountApi = Number(candData?.invalid_contact_count);
+    if (Number.isFinite(invalidCountApi)) {
+      setInvalidContactCount(invalidCountApi);
+    }
 
     const total = Number(candData?.pagination?.total);
     if (Number.isFinite(total)) {
@@ -1558,6 +1568,8 @@ export default function CandidateRankingsPage() {
     setFeedbacks({});
     setCandidateTotalCount(0);
     setLaunchedRowCount(0);
+    setDuplicateCount(0);
+    setInvalidContactCount(0);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
     try {
@@ -1672,14 +1684,6 @@ export default function CandidateRankingsPage() {
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
   const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
-
-  const invalidContactCount = useMemo(() => {
-    return candidates.filter(c => normalizeInterviewStatus(c).label === "Invalid Contact").length;
-  }, [candidates]);
-
-  const duplicateCount = useMemo(() => {
-    return candidates.filter(c => normalizeInterviewStatus(c).label === "Duplicate Candidate").length;
-  }, [candidates]);
 
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
