@@ -212,8 +212,9 @@ class SearchCriteria(BaseModel):
     sample_per_source: int = 2
     # Run the full LLM skills-match on every source, including JobDiva-JobAgent
     # rows (which otherwise use high-level scoring and render score-less).
-    # Required by the auto-launch (≥ threshold) selection so every row carries
-    # a comparable numeric match_score.
+    # Used by the auto-launch flow so every row carries a comparable numeric
+    # match_score (auto-launch takes every launchable candidate; scores only
+    # order its safety cap).
     assess_all_sources: bool = False
 
     def sourcing_skill_values(self) -> List[str]:

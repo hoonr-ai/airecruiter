@@ -255,6 +255,11 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     "engage_interview_id": str(payload.interview_id),
                     "engage_last_response": detail_payload,
                 }
+
+                # Keep engage_completed_at fresh when webhook carries completion time.
+                if payload.completed_at:
+                    candidate_blob["engage_completed_at"] = payload.completed_at
+
                 if pending_hf:
                     candidate_blob["engage_hard_filter_pending_count"] = pending_hf
                 if should_persist_engage_scores(payload.status, effective_status):
@@ -263,20 +268,45 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     if payload.candidate_score is not None:
                         candidate_blob["engage_score"] = payload.candidate_score
                         candidate_blob["engage_candidate_score"] = payload.candidate_score
-                    if payload.completed_at:
-                        candidate_blob["engage_completed_at"] = payload.completed_at
                     if payload.hard_filter_status:
                         candidate_blob["engage_hard_filter_status"] = payload.hard_filter_status
 
                 cur.execute(
                     """
                     UPDATE sourced_candidates
-                    SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                    SET data = (
+                            WITH merged AS (
+                                SELECT COALESCE(data, '{}'::jsonb) || %s::jsonb AS doc
+                            ),
+                            attempted AS (
+                                SELECT CASE
+                                    WHEN COALESCE(BTRIM(COALESCE(doc->>'first_attempted_at', '')), '') = '' THEN
+                                        jsonb_set(doc, '{first_attempted_at}', to_jsonb(%s::text), true)
+                                    ELSE doc
+                                END AS doc
+                                FROM merged
+                            )
+                            SELECT CASE
+                                WHEN %s IS NOT NULL
+                                  AND COALESCE(BTRIM(COALESCE(doc->>'first_completed_at', '')), '') = '' THEN
+                                    jsonb_set(doc, '{first_completed_at}', to_jsonb(%s::text), true)
+                                ELSE doc
+                            END
+                            FROM attempted
+                        ),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE candidate_id = %s
                       AND (jobdiva_id = %s OR jobdiva_id = %s)
                     """,
-                    (json.dumps(candidate_blob), target_candidate_id, target_job_id, target_job_id),
+                    (
+                        json.dumps(candidate_blob),
+                        now_iso,
+                        payload.completed_at,
+                        payload.completed_at,
+                        target_candidate_id,
+                        target_job_id,
+                        target_job_id,
+                    ),
                 )
                 
                 # Fallback if job_id mapping missing
@@ -284,11 +314,36 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     cur.execute(
                         """
                         UPDATE sourced_candidates
-                        SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                        SET data = (
+                                WITH merged AS (
+                                    SELECT COALESCE(data, '{}'::jsonb) || %s::jsonb AS doc
+                                ),
+                                attempted AS (
+                                    SELECT CASE
+                                        WHEN COALESCE(BTRIM(COALESCE(doc->>'first_attempted_at', '')), '') = '' THEN
+                                            jsonb_set(doc, '{first_attempted_at}', to_jsonb(%s::text), true)
+                                        ELSE doc
+                                    END AS doc
+                                    FROM merged
+                                )
+                                SELECT CASE
+                                    WHEN %s IS NOT NULL
+                                      AND COALESCE(BTRIM(COALESCE(doc->>'first_completed_at', '')), '') = '' THEN
+                                        jsonb_set(doc, '{first_completed_at}', to_jsonb(%s::text), true)
+                                    ELSE doc
+                                END
+                                FROM attempted
+                            ),
                             updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s
                         """,
-                        (json.dumps(candidate_blob), target_candidate_id),
+                        (
+                            json.dumps(candidate_blob),
+                            now_iso,
+                            payload.completed_at,
+                            payload.completed_at,
+                            target_candidate_id,
+                        ),
                     )
 
                 

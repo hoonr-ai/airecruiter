@@ -333,8 +333,8 @@ function ResumeScreeningHoverCard({
   return (
     <div
       className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-5 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${open
-          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
-          : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
+        ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
+        : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
         }`}
     >
       {titleAtCompany && (
@@ -414,8 +414,8 @@ function HardFilterHoverCard({
   return (
     <div
       className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${open
-          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
-          : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
+        ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
+        : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
         }`}
     >
       <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2.5">
@@ -439,10 +439,10 @@ function HardFilterHoverCard({
               </div>
               <span
                 className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide shadow-sm ${item.status === "Pass"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                    : item.status === "Fail"
-                      ? "border-rose-200 bg-rose-50 text-rose-700"
-                      : "border-amber-200 bg-amber-50 text-amber-700"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : item.status === "Fail"
+                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                    : "border-amber-200 bg-amber-50 text-amber-700"
                   }`}
               >
                 {item.status}
@@ -490,6 +490,8 @@ export default function CandidateRankingsPage() {
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
+  const [duplicateCount, setDuplicateCount] = useState(0);
+  const [invalidContactCount, setInvalidContactCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
@@ -561,7 +563,7 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a";
+  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -631,6 +633,18 @@ export default function CandidateRankingsPage() {
   const normalizeInterviewStatus = (c: Candidate): { label: string; color: string } => {
     const interviewId = deriveInterviewId(c);
     if (!interviewId) {
+      if (c.data?._stage === "dropped") {
+        const reason = c.data?._drop_reason;
+        if (reason === "cross_source_duplicate") return { label: "Duplicate Candidate", color: "#f59e0b" };
+        if (reason === "non_us_candidate") return { label: "Non-US Candidate", color: "#8b5cf6" };
+        if (reason === "below_min_score") return { label: "Below Min Score", color: "#f43f5e" };
+        if (reason === "merged_into_jobdiva") return { label: "Merged", color: "#06b6d4" };
+      }
+      const hasPhone = String(c.phone || "").replace(/\D/g, "").length >= 7;
+      const hasEmail = String(c.email || "").trim().length > 0;
+      if (!hasPhone && !hasEmail) {
+        return { label: "Invalid Contact", color: "#ef4444" };
+      }
       return { label: "N/A", color: "#94a3b8" };
     }
 
@@ -742,8 +756,17 @@ export default function CandidateRankingsPage() {
       // Status
       if (statusFilter !== "all") {
         const engageLabel = normalizeInterviewStatus(c).label.toLowerCase();
-        const sf = statusFilter === "in_progress" ? "in progress" : statusFilter;
-        if (engageLabel !== sf) return false;
+        let sf = statusFilter as string;
+        if (statusFilter === "in_progress") sf = "in progress";
+        else if (statusFilter === "duplicate_candidate") sf = "duplicate candidate";
+        else if (statusFilter === "invalid_contact") sf = "invalid contact";
+
+        if (sf === "n/a") {
+          const droppedLabels = ["n/a", "non-us candidate", "below min score", "merged"];
+          if (!droppedLabels.includes(engageLabel)) return false;
+        } else {
+          if (engageLabel !== sf) return false;
+        }
       }
       // Activity History
       if (activityFilter === "has_activity" && !deriveInterviewId(c)) return false;
@@ -1489,6 +1512,14 @@ export default function CandidateRankingsPage() {
     if (Number.isFinite(launchedCount)) {
       setLaunchedRowCount(launchedCount);
     }
+    const duplicateCountApi = Number(candData?.duplicate_candidate_count);
+    if (Number.isFinite(duplicateCountApi)) {
+      setDuplicateCount(duplicateCountApi);
+    }
+    const invalidCountApi = Number(candData?.invalid_contact_count);
+    if (Number.isFinite(invalidCountApi)) {
+      setInvalidContactCount(invalidCountApi);
+    }
 
     const total = Number(candData?.pagination?.total);
     if (Number.isFinite(total)) {
@@ -1537,6 +1568,8 @@ export default function CandidateRankingsPage() {
     setFeedbacks({});
     setCandidateTotalCount(0);
     setLaunchedRowCount(0);
+    setDuplicateCount(0);
+    setInvalidContactCount(0);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
     try {
@@ -1631,7 +1664,7 @@ export default function CandidateRankingsPage() {
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  // Re-attach when hasMoreCandidates changes so we stop observing when done
+    // Re-attach when hasMoreCandidates changes so we stop observing when done
   }, [hasMoreCandidates]);
 
   const openDetails = (candidate: Candidate) => {
@@ -1729,6 +1762,23 @@ export default function CandidateRankingsPage() {
                 <>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="flex flex-col gap-3 text-sm text-slate-600 pl-4 border-l border-slate-200">
+              {isInitialLoading ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Invalid Contacts: <strong className="text-slate-900 ml-1">{invalidContactCount}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Duplicate Candidates: <strong className="text-slate-900 ml-1">{duplicateCount}</strong>
                   </div>
                 </>
               )}
@@ -1932,6 +1982,8 @@ export default function CandidateRankingsPage() {
               <option value="in_progress">In Progress</option>
               <option value="pending">Pending</option>
               <option value="n/a">N/A</option>
+              <option value="duplicate_candidate">Duplicate Candidate</option>
+              <option value="invalid_contact">Invalid Contact</option>
             </select>
           </div>
 

@@ -282,6 +282,27 @@ def test_channel_counts_are_per_candidate_not_per_message():
     assert summary["channels"] == {"call": 0, "sms": 1, "web": 1}
 
 
+def test_channel_counts_accept_source_fallback_keys():
+    payload = _outreach(
+        "completed",
+        comms=[
+            {"source": "phone", "sent_at": "2026-08-27T14:00:00Z", "response_at": None},
+            {"communication_source": "text", "sent_at": "2026-08-27T14:05:00Z", "response_at": None},
+        ],
+    )
+    summary = lr._summarise_outreach([payload])
+    assert summary["channels"] == {"call": 1, "sms": 1, "web": 0}
+
+
+def test_channel_counts_fall_back_to_outreach_level_source_when_comms_empty():
+    payload = {
+        "outreach": {"outreach_status": "completed", "outreach_phase": "phase1", "source": "email"},
+        "communications": [],
+    }
+    summary = lr._summarise_outreach([payload])
+    assert summary["channels"] == {"call": 0, "sms": 0, "web": 1}
+
+
 def test_response_times_use_first_contact_and_first_reply():
     payloads = [
         _outreach("completed", comms=[
@@ -298,9 +319,21 @@ def test_response_times_use_first_contact_and_first_reply():
     assert summary["responded_count"] == 2
 
 
-def test_phase_distribution_ignores_unknown_phases():
-    payloads = [_outreach("pending", phase=p) for p in ("phase1", "phase1", "phase3", "contact_check")]
-    assert lr._summarise_outreach(payloads)["phases"] == {"phase1": 2, "phase2": 0, "phase3": 1}
+def test_phase_distribution_normalizes_phase_variants():
+    payloads = [_outreach("pending", phase=p) for p in ("phase1", "phase 1", "phase_2", "3", "contact_check")]
+    assert lr._summarise_outreach(payloads)["phases"] == {"phase1": 3, "phase2": 1, "phase3": 1}
+
+
+def test_phase_distribution_falls_back_to_status_when_phase_missing():
+    payload = {"outreach": {"outreach_status": "phase2"}, "communications": []}
+    summary = lr._summarise_outreach([payload])
+    assert summary["phases"] == {"phase1": 0, "phase2": 1, "phase3": 0}
+
+
+def test_phase_distribution_does_not_promote_pending_status_to_phase1_when_phase_missing():
+    payload = {"outreach": {"outreach_status": "queued"}, "communications": []}
+    summary = lr._summarise_outreach([payload])
+    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0}
 
 
 def test_outstanding_feedback_never_goes_negative():
