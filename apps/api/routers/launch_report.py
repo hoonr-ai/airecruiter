@@ -78,6 +78,33 @@ _PARTIAL_STATUSES = {
 }
 
 _CHANNEL_COLUMNS = {"call": "call", "sms": "sms", "email": "web"}
+_CHANNEL_ALIASES = {
+    "phone": "call",
+    "voice": "call",
+    "telephony": "call",
+    "text": "sms",
+    "whatsapp": "sms",
+    "mail": "web",
+    "web": "web",
+}
+_PHASE_ALIASES = {
+    "phase_1": "phase1",
+    "phase 1": "phase1",
+    "1": "phase1",
+    "stage1": "phase1",
+    "contact_check": "phase1",
+    "queued": "phase1",
+    "scheduled": "phase1",
+    "not_started": "phase1",
+    "phase_2": "phase2",
+    "phase 2": "phase2",
+    "2": "phase2",
+    "stage2": "phase2",
+    "phase_3": "phase3",
+    "phase 3": "phase3",
+    "3": "phase3",
+    "stage3": "phase3",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +226,59 @@ def _bucket_status(raw: Optional[str]) -> str:
     return "partial_complete"
 
 
+def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
+    """Map phase variants onto phase1/phase2/phase3."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+    if value in ("phase1", "phase2", "phase3"):
+        return value
+    if not allow_pending_aliases and value in _PENDING_STATUSES:
+        return None
+    aliased = _PHASE_ALIASES.get(value)
+    if aliased:
+        return aliased
+    logger.warning(f"LAUNCH-REPORT: unrecognised outreach phase {value!r} — not counted")
+    return None
+
+
+def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
+    """Pick phase from known keys, then fall back to status-shaped phase values."""
+    raw = (
+        outreach.get("outreach_phase")
+        or outreach.get("phase")
+        or outreach.get("current_phase")
+    )
+    phase = _normalize_phase(raw)
+    if phase:
+        return phase
+    return _normalize_phase(outreach.get("outreach_status"), allow_pending_aliases=False)
+
+
+def _normalize_channel(raw: Optional[str]) -> Optional[str]:
+    """Map communication channel/source variants onto call/sms/web columns."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+    if value in _CHANNEL_COLUMNS:
+        return _CHANNEL_COLUMNS[value]
+    mapped = _CHANNEL_COLUMNS.get(value) or _CHANNEL_ALIASES.get(value)
+    if mapped:
+        return mapped
+    logger.warning(f"LAUNCH-REPORT: unrecognised communication channel/source {value!r} — not counted")
+    return None
+
+
+def _extract_channel(comm: Dict[str, Any]) -> Optional[str]:
+    """Pick communication type from channel/source style keys."""
+    return (
+        _normalize_channel(comm.get("channel"))
+        or _normalize_channel(comm.get("source"))
+        or _normalize_channel(comm.get("communication_source"))
+        or _normalize_channel(comm.get("type"))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Postgres side
 # ---------------------------------------------------------------------------
@@ -285,6 +365,8 @@ def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str,
             data->>'feedback_type'        AS feedback_type,
             data->>'feedback_reason'      AS feedback_reason,
             data->>'feedback_at'          AS feedback_at,
+            data->>'first_attempted_at'   AS first_attempted_at,
+            data->>'first_completed_at'   AS first_completed_at,
             data->>'engage_completed_at'  AS engage_completed_at,
             data->>'engage_status'        AS engage_status,
             data->>'engage_interview_id'  AS engage_interview_id
@@ -398,8 +480,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         outreach = payload.get("outreach") or {}
         buckets[_bucket_status(outreach.get("outreach_status"))] += 1
 
-        phase = (outreach.get("outreach_phase") or "").strip().lower()
-        if phase in phases:
+        phase = _extract_phase(outreach)
+        if phase:
             phases[phase] += 1
 
         comms = payload.get("communications") or []
@@ -407,7 +489,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         sent_times: List[datetime.datetime] = []
         responded_times: List[datetime.datetime] = []
         for comm in comms:
-            column = _CHANNEL_COLUMNS.get((comm.get("channel") or "").strip().lower())
+            column = _extract_channel(comm)
             if column:
                 seen_channels.add(column)
             sent = _parse_iso(comm.get("sent_at"))
@@ -416,6 +498,16 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
             responded = _parse_iso(comm.get("response_at"))
             if responded:
                 responded_times.append(responded)
+
+        # Some pair-bot payloads expose a single channel/source at outreach level.
+        if not seen_channels and isinstance(outreach, dict):
+            fallback_channel = (
+                _normalize_channel(outreach.get("channel"))
+                or _normalize_channel(outreach.get("source"))
+                or _normalize_channel(outreach.get("communication_source"))
+            )
+            if fallback_channel:
+                seen_channels.add(fallback_channel)
 
         for column in seen_channels:
             channels[column] += 1
@@ -451,6 +543,8 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     submitted = rejected = 0
     time_to_feedback: List[float] = []
     sourced_at: List[datetime.datetime] = []
+    first_attempted_at: List[datetime.datetime] = []
+    first_completed_at: List[datetime.datetime] = []
 
     for row in rows:
         feedback_type = (row.get("feedback_type") or "").strip().lower()
@@ -464,6 +558,14 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if created:
             sourced_at.append(created)
 
+        attempted = _parse_iso(row.get("first_attempted_at"))
+        if attempted:
+            first_attempted_at.append(attempted)
+
+        completed = _parse_iso(row.get("first_completed_at")) or _parse_iso(row.get("engage_completed_at"))
+        if completed:
+            first_completed_at.append(completed)
+
         if feedback_type and has_reason:
             elapsed = _minutes_between(
                 _parse_iso(row.get("engage_completed_at")),
@@ -475,6 +577,8 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "total_sourced": len({r["candidate_id"] for r in rows}),
         "first_sourced_at": min(sourced_at) if sourced_at else None,
+        "first_attempted_at": min(first_attempted_at) if first_attempted_at else None,
+        "first_completed_at": min(first_completed_at) if first_completed_at else None,
         "submitted_candidates": submitted,
         "rejected_candidates": rejected,
         "time_to_feedback_minutes": _mean(time_to_feedback),
@@ -551,6 +655,9 @@ def _build_row(
         "in_progress": buckets["in_progress"],
         "completed": buckets["completed"],
         "partial_complete": buckets["partial_complete"],
+
+        "first_attempted_at": _edt(cand["first_attempted_at"]),
+        "first_completed_at": _edt(cand["first_completed_at"]),
 
         "time_to_first_response_minutes": outreach["time_to_first_response_minutes"],
         "launch_to_response_minutes": _minutes_between(launch_at, outreach["earliest_response_at"]),

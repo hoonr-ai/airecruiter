@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CalendarDays, Download, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
+import { ArrowLeft, CalendarDays, Download, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
 import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -42,6 +42,8 @@ interface LaunchReportRow {
   in_progress: number;
   completed: number;
   partial_complete: number;
+  first_attempted_at: string | null;
+  first_completed_at: string | null;
   time_to_first_response_minutes: number | null;
   launch_to_response_minutes: number | null;
   overall_response_time_minutes: number | null;
@@ -84,6 +86,18 @@ function yesterdayEastern(): string {
 
 /** ISO date-only → "Feb 24, 2026"; null/invalid → "—". */
 function formatDate(iso: string | null | undefined): string {
+  // Date-only strings are calendar values, not instants. Parse at noon UTC so
+  // rendering in America/New_York never rolls to the previous day.
+  if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const [y, m, d] = iso.split("-").map((v) => Number(v));
+    const safe = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    return safe.toLocaleDateString("en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  }
   const d = normalizeToUtcDate(iso);
   if (!d) return "—";
   return d.toLocaleDateString("en-US", {
@@ -220,6 +234,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Response",
     columns: [
+      { key: "first_attempted", label: "First Attempted", text: (r) => formatDateTime(r.first_attempted_at) },
+      { key: "first_completed", label: "First Completed", text: (r) => formatDateTime(r.first_completed_at) },
       { key: "tt_first_resp", label: "To First Response", numeric: true, text: (r) => formatDuration(r.time_to_first_response_minutes) },
       { key: "launch_to_resp", label: "Launch → Response", numeric: true, text: (r) => formatDuration(r.launch_to_response_minutes) },
       { key: "overall_resp", label: "Overall Response", numeric: true, text: (r) => formatDuration(r.overall_response_time_minutes) },
@@ -292,21 +308,25 @@ export default function LaunchReportPage() {
   // Computed once per mount: the report is historical, so re-deriving "today"
   // mid-session would let the max silently drift past midnight.
   const [maxDate] = useState<string>(yesterdayEastern);
-  const [date, setDate] = useState<string>(maxDate);
+  const [selectedDate, setSelectedDate] = useState<string>(maxDate);
+  const [requestedDate, setRequestedDate] = useState<string | null>(null);
   const [data, setData] = useState<LaunchReportData | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Bumped by Refresh to re-run the effect for an unchanged date.
-  const [reloadToken, setReloadToken] = useState(0);
 
-  // The spinner is turned ON by whatever triggers a load — initial state, a
-  // date change, or Refresh — so this effect only ever updates state after an
-  // await. Setting it synchronously here would cascade an extra render.
-  const requestReload = useCallback(() => {
+  const generateReport = useCallback(() => {
+    if (!selectedDate) {
+      setError("Please select a date first.");
+      return;
+    }
+    if (selectedDate > maxDate) {
+      setError("Today's report is not available yet. Please select a previous date.");
+      return;
+    }
     setIsLoading(true);
     setError(null);
-    setReloadToken((token) => token + 1);
-  }, []);
+    setRequestedDate(selectedDate);
+  }, [selectedDate, maxDate]);
 
   const downloadCsv = useCallback(() => {
     if (!data?.jobs.length) return;
@@ -320,13 +340,13 @@ export default function LaunchReportPage() {
   }, [data]);
 
   useEffect(() => {
-    if (isRoleLoading || !canView) return;
+    if (isRoleLoading || !canView || !requestedDate) return;
     // Guards against a slow response for an earlier date landing after a
     // newer one and overwriting it.
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.launchReport.get(date);
+        const res = await api.launchReport.get(requestedDate);
         if (cancelled) return;
         setData(res?.data ?? null);
         setError(null);
@@ -342,7 +362,7 @@ export default function LaunchReportPage() {
     return () => {
       cancelled = true;
     };
-  }, [isRoleLoading, canView, date, reloadToken]);
+  }, [isRoleLoading, canView, requestedDate]);
 
   const rows = useMemo(() => data?.jobs ?? [], [data]);
 
@@ -409,45 +429,43 @@ export default function LaunchReportPage() {
             <input
               id="report-date"
               type="date"
-              value={date}
+              value={selectedDate}
               max={maxDate}
               required
               // Clearing the field yields "" — fall back to the default date
               // rather than ignoring the event, so the input and state never
               // disagree about what is displayed.
               onChange={(e) => {
-                setIsLoading(true);
                 setError(null);
-                setDate(e.target.value || maxDate);
+                setSelectedDate(e.target.value || maxDate);
               }}
               className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
             />
           </label>
           <Button
             variant="outline"
+            onClick={generateReport}
+            disabled={isLoading}
+            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
+          >
+            Generate Report
+          </Button>
+          <Button
+            variant="outline"
             onClick={downloadCsv}
             disabled={isLoading || rows.length === 0}
-            title={rows.length === 0 ? "Nothing to export for this date" : "Download this report as CSV"}
+            title={rows.length === 0 ? "Generate a report first, then export CSV" : "Download this report as CSV"}
             className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
           >
             <Download className="h-4 w-4 text-slate-500" />
             Download CSV
-          </Button>
-          <Button
-            variant="outline"
-            onClick={requestReload}
-            disabled={isLoading}
-            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
-          >
-            <RefreshCw className={`h-4 w-4 text-slate-500 ${isLoading ? "animate-spin text-primary" : ""}`} />
-            Refresh
           </Button>
         </div>
       </div>
 
       <p className="text-[13px] text-slate-500 leading-relaxed max-w-[880px]">
         Jobs whose first PAIR launch happened on{" "}
-        <span className="font-semibold text-slate-700">{formatDate(data?.report_date ?? date)}</span>. Dates and times
+        <span className="font-semibold text-slate-700">{formatDate(data?.report_date ?? requestedDate ?? selectedDate)}</span>. Dates and times
         are Eastern (EDT/EST), so a job launched late in the evening belongs to that day rather than the next. Interview
         status, channel, phase and response columns are read live from PAIR Bot.
       </p>
@@ -463,7 +481,7 @@ export default function LaunchReportPage() {
             PAIR Bot answered for {data?.totals.outreach_detail_resolved ?? 0} of{" "}
             {data?.totals.outreach_detail_expected ?? 0} launched interviews. {partialRows}{" "}
             {partialRows === 1 ? "row has" : "rows have"} incomplete outreach columns — status, channel, phase and
-            response figures on those rows undercount. Refresh to retry.
+            response figures on those rows undercount. Generate report again to retry.
           </p>
         </Card>
       )}
@@ -520,7 +538,13 @@ export default function LaunchReportPage() {
               </tr>
             </thead>
             <tbody>
-              {isLoading ? (
+              {!requestedDate && !isLoading ? (
+                <tr>
+                  <td colSpan={FLAT_COLUMNS.length + 1} className="p-8 text-center text-[13px] text-slate-500">
+                    Select a date and click Generate Report.
+                  </td>
+                </tr>
+              ) : isLoading ? (
                 <tr>
                   <td colSpan={FLAT_COLUMNS.length + 1} className="p-8 text-center text-[13px] text-slate-500">
                     Loading launch report…
@@ -529,7 +553,7 @@ export default function LaunchReportPage() {
               ) : rows.length === 0 && !error ? (
                 <tr>
                   <td colSpan={FLAT_COLUMNS.length + 1} className="p-8 text-center text-[13px] text-slate-500">
-                    No jobs were launched on {formatDate(data?.report_date ?? date)}.
+                    No jobs were launched on {formatDate(data?.report_date ?? requestedDate ?? selectedDate)}.
                   </td>
                 </tr>
               ) : (
