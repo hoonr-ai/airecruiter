@@ -1991,8 +1991,6 @@ export default function AdminAnalyticsPage() {
               <span className="text-[12px] font-medium text-slate-400 whitespace-nowrap">
                 Showing {filteredTimeline.length} of{" "}
                 {data?.jobs_timeline_total || timelineRows.length} jobs
-                {(data?.jobs_timeline_total || 0) > timelineRows.length &&
-                  " (most recent 200)"}
               </span>
             </div>
           </div>
