@@ -330,6 +330,12 @@ def test_phase_distribution_falls_back_to_status_when_phase_missing():
     assert summary["phases"] == {"phase1": 0, "phase2": 1, "phase3": 0}
 
 
+def test_phase_distribution_does_not_promote_pending_status_to_phase1_when_phase_missing():
+    payload = {"outreach": {"outreach_status": "queued"}, "communications": []}
+    summary = lr._summarise_outreach([payload])
+    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0}
+
+
 def test_outstanding_feedback_never_goes_negative():
     """More feedback than completions (e.g. a candidate actioned before the
     webhook landed) must clamp at zero, not render as a negative backlog.

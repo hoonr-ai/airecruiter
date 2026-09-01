@@ -249,45 +249,16 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
 
                 # 2. Update sourced_candidates.data
                 now_iso = datetime.now(timezone.utc).isoformat()
-                existing_blob: Dict[str, Any] = {}
-                if target_candidate_id:
-                    cur.execute(
-                        """
-                        SELECT data
-                        FROM sourced_candidates
-                        WHERE candidate_id = %s
-                          AND (jobdiva_id = %s OR jobdiva_id = %s)
-                        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
-                        LIMIT 1
-                        """,
-                        (target_candidate_id, target_job_id, target_job_id),
-                    )
-                    existing_row = cur.fetchone()
-                    if existing_row and existing_row[0]:
-                        if isinstance(existing_row[0], dict):
-                            existing_blob = existing_row[0]
-                        elif isinstance(existing_row[0], str):
-                            try:
-                                parsed = json.loads(existing_row[0])
-                                existing_blob = parsed if isinstance(parsed, dict) else {}
-                            except Exception:
-                                existing_blob = {}
-
                 candidate_blob: Dict[str, Any] = {
                     "engage_status": effective_status,
                     "engage_updated_at": now_iso,
                     "engage_interview_id": str(payload.interview_id),
                     "engage_last_response": detail_payload,
                 }
-                # Immutable first-seen marker for interview attendance.
-                if not str(existing_blob.get("first_attempted_at") or "").strip():
-                    candidate_blob["first_attempted_at"] = now_iso
 
                 # Keep engage_completed_at fresh when webhook carries completion time.
                 if payload.completed_at:
                     candidate_blob["engage_completed_at"] = payload.completed_at
-                    if not str(existing_blob.get("first_completed_at") or "").strip():
-                        candidate_blob["first_completed_at"] = payload.completed_at
 
                 if pending_hf:
                     candidate_blob["engage_hard_filter_pending_count"] = pending_hf
@@ -303,12 +274,39 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 cur.execute(
                     """
                     UPDATE sourced_candidates
-                    SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                    SET data = (
+                            WITH merged AS (
+                                SELECT COALESCE(data, '{}'::jsonb) || %s::jsonb AS doc
+                            ),
+                            attempted AS (
+                                SELECT CASE
+                                    WHEN COALESCE(BTRIM(COALESCE(doc->>'first_attempted_at', '')), '') = '' THEN
+                                        jsonb_set(doc, '{first_attempted_at}', to_jsonb(%s::text), true)
+                                    ELSE doc
+                                END AS doc
+                                FROM merged
+                            )
+                            SELECT CASE
+                                WHEN %s IS NOT NULL
+                                  AND COALESCE(BTRIM(COALESCE(doc->>'first_completed_at', '')), '') = '' THEN
+                                    jsonb_set(doc, '{first_completed_at}', to_jsonb(%s::text), true)
+                                ELSE doc
+                            END
+                            FROM attempted
+                        ),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE candidate_id = %s
                       AND (jobdiva_id = %s OR jobdiva_id = %s)
                     """,
-                    (json.dumps(candidate_blob), target_candidate_id, target_job_id, target_job_id),
+                    (
+                        json.dumps(candidate_blob),
+                        now_iso,
+                        payload.completed_at,
+                        payload.completed_at,
+                        target_candidate_id,
+                        target_job_id,
+                        target_job_id,
+                    ),
                 )
                 
                 # Fallback if job_id mapping missing
@@ -316,11 +314,36 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     cur.execute(
                         """
                         UPDATE sourced_candidates
-                        SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                        SET data = (
+                                WITH merged AS (
+                                    SELECT COALESCE(data, '{}'::jsonb) || %s::jsonb AS doc
+                                ),
+                                attempted AS (
+                                    SELECT CASE
+                                        WHEN COALESCE(BTRIM(COALESCE(doc->>'first_attempted_at', '')), '') = '' THEN
+                                            jsonb_set(doc, '{first_attempted_at}', to_jsonb(%s::text), true)
+                                        ELSE doc
+                                    END AS doc
+                                    FROM merged
+                                )
+                                SELECT CASE
+                                    WHEN %s IS NOT NULL
+                                      AND COALESCE(BTRIM(COALESCE(doc->>'first_completed_at', '')), '') = '' THEN
+                                        jsonb_set(doc, '{first_completed_at}', to_jsonb(%s::text), true)
+                                    ELSE doc
+                                END
+                                FROM attempted
+                            ),
                             updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s
                         """,
-                        (json.dumps(candidate_blob), target_candidate_id),
+                        (
+                            json.dumps(candidate_blob),
+                            now_iso,
+                            payload.completed_at,
+                            payload.completed_at,
+                            target_candidate_id,
+                        ),
                     )
 
                 

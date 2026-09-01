@@ -179,6 +179,9 @@ def test_receive_interview_results_writes_scores_on_completed():
     assert blob["engage_status"] == "passed"
     assert blob["engage_score"] == 80.0
     assert blob["engage_total_score"] == 100.0
+    assert "first_attempted_at" not in blob
+    assert "first_completed_at" not in blob
+    assert any("jsonb_set(doc, '{first_attempted_at}'" in q for q in state["execute_queries"])
     assert state["commits"] == 1
     state["notify"].assert_called_once()
 

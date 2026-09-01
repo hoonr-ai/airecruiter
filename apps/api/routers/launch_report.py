@@ -226,13 +226,15 @@ def _bucket_status(raw: Optional[str]) -> str:
     return "partial_complete"
 
 
-def _normalize_phase(raw: Optional[str]) -> Optional[str]:
+def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3."""
     value = (raw or "").strip().lower()
     if not value:
         return None
     if value in ("phase1", "phase2", "phase3"):
         return value
+    if not allow_pending_aliases and value in _PENDING_STATUSES:
+        return None
     aliased = _PHASE_ALIASES.get(value)
     if aliased:
         return aliased
@@ -250,7 +252,7 @@ def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
     phase = _normalize_phase(raw)
     if phase:
         return phase
-    return _normalize_phase(outreach.get("outreach_status"))
+    return _normalize_phase(outreach.get("outreach_status"), allow_pending_aliases=False)
 
 
 def _normalize_channel(raw: Optional[str]) -> Optional[str]:
