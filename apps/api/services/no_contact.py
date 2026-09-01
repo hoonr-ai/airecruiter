@@ -30,15 +30,17 @@ toward the former.
 from __future__ import annotations
 
 import logging
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from rapidfuzz.distance import DamerauLevenshtein
 
 from services.company_match import (
+    _end_sort_key,  # noqa: F401 — re-exported for existing importers
     _entry_is_current,
+    _experience_lists,  # noqa: F401 — re-exported for existing importers
     _is_contiguous_sublist,
     collect_current_companies,
+    collect_last_companies,
     normalize_company_name,
 )
 
@@ -111,102 +113,11 @@ def matches_no_contact_company(
 
 
 # ── last (most recent past) employer ──────────────────────────────────────
-
-_MONTHS = {
-    m: i + 1
-    for i, m in enumerate(
-        ["jan", "feb", "mar", "apr", "may", "jun",
-         "jul", "aug", "sep", "oct", "nov", "dec"]
-    )
-}
-_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-_NUM_MONTH_RE = re.compile(r"\b(19|20)\d{2}[-/](\d{1,2})\b")
-
-
-def _end_sort_key(exp: Dict[str, Any]) -> Optional[Tuple[int, int]]:
-    """(year, month) parsed from an experience entry's end date, else None.
-
-    Handles the shapes seen across sources: "2024-05", "05/2024" (month first
-    is NOT assumed — only year-first numeric forms parse a month), "May 2024",
-    "2024". Unparseable → None (caller falls back to list order).
-    """
-    end_raw = str(
-        exp.get("end_date") or exp.get("endDate") or exp.get("to") or exp.get("end") or ""
-    ).strip().lower()
-    if not end_raw:
-        return None
-    year_m = _YEAR_RE.search(end_raw)
-    if not year_m:
-        return None
-    year = int(year_m.group(0))
-    month = 0
-    num_m = _NUM_MONTH_RE.search(end_raw)
-    if num_m and 1 <= int(num_m.group(2)) <= 12:
-        month = int(num_m.group(2))
-    else:
-        for name, idx in _MONTHS.items():
-            if name in end_raw:
-                month = idx
-                break
-    return (year, month)
-
-
-def _experience_lists(candidate: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
-    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
-    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
-    lists = []
-    for exp_list in [
-        data.get("company_experience") or enhanced.get("company_experience") or [],
-        data.get("exa_recent_companies") or enhanced.get("exa_recent_companies") or [],
-    ]:
-        if isinstance(exp_list, list) and exp_list:
-            lists.append([e for e in exp_list if isinstance(e, dict)])
-    return lists
-
-
-def collect_last_companies(candidate: Dict[str, Any]) -> List[str]:
-    """The candidate's LAST employer signals: flat previous-company fields,
-    plus the most recent non-current entry of each experience list (by parsed
-    end date; entries without dates fall back to list order, which every
-    source emits reverse-chronologically)."""
-    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
-    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
-
-    companies: List[str] = []
-    for c_str in [
-        data.get("previous_company"),
-        data.get("last_company"),
-        enhanced.get("previous_company"),
-        enhanced.get("last_company"),
-    ]:
-        if c_str and str(c_str).strip():
-            companies.append(str(c_str).strip())
-
-    for exp_list in _experience_lists(candidate):
-        past = [e for e in exp_list if not _entry_is_current(e)]
-        if not past:
-            continue
-        dated = [(key, e) for e in past if (key := _end_sort_key(e)) is not None]
-        top = max(dated, key=lambda pair: pair[0])[1] if dated else past[0]
-        comp = (
-            top.get("company")
-            or top.get("company_name")
-            or top.get("employer")
-            or top.get("name")
-        )
-        if comp and str(comp).strip():
-            companies.append(str(comp).strip())
-
-    seen = set()
-    out = []
-    for comp in companies:
-        key = comp.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(comp)
-    return out
-
+#
+# Moved to company_match.py once the hiring-client exclusion started
+# needing the same last-employer signal. Re-exported here so existing
+# `from services.no_contact import collect_last_companies` callers and
+# tests keep working.
 
 # ── candidate-level check + flag stamping ─────────────────────────────────
 

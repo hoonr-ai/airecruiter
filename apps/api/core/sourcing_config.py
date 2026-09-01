@@ -10,6 +10,8 @@ audit. Flip individual flags to widen the candidate funnel without
 giving up scoring or downstream filters.
 """
 
+import os as _os
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # #2 — Profile-only candidates
@@ -241,12 +243,61 @@ EXTERNAL_MIN_SCORE_EXEMPT_SOURCES = ("JobDiva-JobAgent", "JobDiva-Applicants")
 # trusted; the recruiter narrows via the UI chips).
 EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP = True
 
+# Scoring-time location veto for JobDiva-JobAgent rows. JobAgent results
+# follow the criteria/boolean the recruiter authored inside JobDiva — which
+# may deliberately reach beyond the job's radius (relocators, nearby metros)
+# — so a confirmed out-of-radius / state-mismatch must NOT zero their
+# match_score the way it does for machine-queried sources. False (default):
+# JobAgent rows keep their rubric score plus the out-of-radius badge and
+# distance, and the recruiter filters via the UI chips. True restores the
+# old hard-zero. Every other source keeps the location hard gate either way.
+JOBAGENT_LOCATION_HARD_VETO = False
+
 # High-level scoring for JobDiva-JobAgent results. The JobAgent criteria
 # are authored by recruiters inside JobDiva and its matcher pre-ranks the
 # results, so the expensive per-candidate LLM skills-match adds little —
 # skip it and score on the cheap signals (title/skills/location/rank floor).
 # The UI labels these rows "JobDiva agent search" with a high-level score.
 JOBAGENT_HIGH_LEVEL_SCORING = True
+
+# ─────────────────────────────────────────────────────────────────────────
+# Sample-first search flow (Step 5 "show me 2 per source before committing")
+# ─────────────────────────────────────────────────────────────────────────
+# When SearchCriteria.search_mode == "sample", each selected source probes a
+# small ranked pool (SAMPLE_MODE_POOL_SIZE), fully enriches + scores it, and
+# emits only the first `sample_per_source` rows that clear the normal quality
+# gates — so the recruiter can approve source quality before paying for the
+# full run. Pool > per-source cap because gate failures (score floor,
+# dedup, no-resume) must not leave a source looking empty when it isn't.
+SAMPLE_MODE_POOL_SIZE = int(_os.getenv("SAMPLE_MODE_POOL_SIZE", "8").strip() or "8")
+
+# ─────────────────────────────────────────────────────────────────────────
+# Per-candidate processing concurrency
+# ─────────────────────────────────────────────────────────────────────────
+# Width of the per-source processing fan-out. External sources
+# (Unipile/Exa/Dice) spend their time in profile fetch + LLM extraction +
+# (full mode) contact enrichment; JobDiva talent pools in resume fetch + LLM
+# extraction. Both were hard-coded at 5, which serialized 150-candidate pools
+# into >10-minute searches. The genuinely rate-limited stages keep their own
+# tighter bounds (JOBDIVA_RESUME_FETCH_CONCURRENCY below,
+# CANDIDATES_DETAIL_CONCURRENCY, the global LLM semaphore), so this outer
+# width mostly controls how many candidates are in flight per source.
+EXTERNAL_PROCESS_CONCURRENCY = int(
+    _os.getenv("EXTERNAL_PROCESS_CONCURRENCY", "12").strip() or "12"
+)
+JOBDIVA_ENRICH_CONCURRENCY = int(
+    _os.getenv("JOBDIVA_ENRICH_CONCURRENCY", "12").strip() or "12"
+)
+
+# Dedicated bound for JobDiva get_candidate_resume calls inside the
+# progressive enricher. The old Semaphore(5) implicitly bounded these; now
+# that the outer width is 12 we keep the JobDiva-facing fetch at the
+# historically safe width so the wider LLM fan-out can't burst JobDiva's
+# rate limiter (see CANDIDATES_DETAIL_CONCURRENCY history below).
+JOBDIVA_RESUME_FETCH_CONCURRENCY = int(
+    _os.getenv("JOBDIVA_RESUME_FETCH_CONCURRENCY", "5").strip() or "5"
+)
+
 
 # Per-search result cap for Unipile LinkedIn Recruiter searches. Protects
 # the attached LinkedIn accounts from rate/abuse flags; enforced inside

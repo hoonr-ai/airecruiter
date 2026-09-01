@@ -1,15 +1,25 @@
-"""Company-name matching for the "currently employed by the hiring client"
-exclusion.
+"""Company-name matching for the "employed by the hiring client" exclusion.
 
-Used in two places with the SAME semantics so search-time filtering and
-launch-time gating can't disagree:
+Used in three places with the SAME semantics so search-time filtering, the
+candidate-list flag and launch-time gating can't disagree:
 
   - sourcing (services/unified_candidate_search.py, services/unipile.py,
-    services/exa_service.py): drop/flag Exa + Unipile results whose CURRENT
+    services/exa_service.py): drop Exa + Unipile results whose CURRENT
     company is the hiring client, per the hard requirement that we never
     source a client's own employees;
+  - candidate list (`apply_client_conflict_flag`, stamped at the emit
+    choke-point in unified_candidate_search.finalize_candidate): the row
+    stays VISIBLE but greyed out and unselectable, carrying the reason, so a
+    recruiter can see why the person is off-limits instead of the row
+    silently vanishing;
   - launch (routers/engagement.py `is_candidate_excluded_from_pair`): final
     server-side gate before PAIR outreach.
+
+"Employed by" means employed TODAY. `employed_by_client` consults the last
+employer only as a FALLBACK, when no current-employer signal exists at all —
+many source rows carry a history with no "Present" entry, and there the most
+recent employer is the best available answer. Someone who left the client for
+a named current employer stays contactable.
 
 Matching is deliberately token-based, not substring-based: client "Meta"
 must match "Meta Platforms" but never "Metadata Solutions".
@@ -17,8 +27,11 @@ must match "Meta Platforms" but never "Metadata Solutions".
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 _LEGAL_NOISE_TOKENS = {
     "inc",
@@ -42,7 +55,15 @@ _LEGAL_NOISE_TOKENS = {
 }
 
 # Placeholder client names that must never drive an exclusion.
-_PLACEHOLDER_CLIENTS = {"external", "unknown", "n/a", "na", "none", "internal"}
+# "unknown customer" is the JobDiva sync's own fallback when a req carries no
+# customer (services/jobdiva.py: `str(raw_customer or "").title() or "Unknown
+# Customer"`). Without it here the normalized form is treated as a real client,
+# so a candidate whose company is literally "Unknown" token-matches it and gets
+# excluded as "Employed by Hiring Client".
+_PLACEHOLDER_CLIENTS = {
+    "external", "unknown", "n/a", "na", "none", "internal",
+    "unknown customer", "unknown client", "unknown company",
+}
 
 
 def normalize_company_name(name: str) -> str:
@@ -187,12 +208,206 @@ def collect_current_companies(candidate: Dict[str, Any]) -> List[str]:
     return out
 
 
+# ── last (most recent past) employer ──────────────────────────────────────
+#
+# Lives here rather than in no_contact.py because BOTH policies now need it:
+# the no-contact keyword list and the hiring-client exclusion each block on
+# a candidate's current OR last employer. no_contact.py re-exports these
+# names so its own import path keeps working.
+
+_MONTHS = {
+    m: i + 1
+    for i, m in enumerate(
+        ["jan", "feb", "mar", "apr", "may", "jun",
+         "jul", "aug", "sep", "oct", "nov", "dec"]
+    )
+}
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_NUM_MONTH_RE = re.compile(r"\b(19|20)\d{2}[-/](\d{1,2})\b")
+
+
+def _end_sort_key(exp: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """(year, month) parsed from an experience entry's end date, else None.
+
+    Handles the shapes seen across sources: "2024-05", "05/2024" (month first
+    is NOT assumed — only year-first numeric forms parse a month), "May 2024",
+    "2024". Unparseable → None (caller falls back to list order).
+    """
+    end_raw = str(
+        exp.get("end_date") or exp.get("endDate") or exp.get("to") or exp.get("end") or ""
+    ).strip().lower()
+    if not end_raw:
+        return None
+    year_m = _YEAR_RE.search(end_raw)
+    if not year_m:
+        return None
+    year = int(year_m.group(0))
+    month = 0
+    num_m = _NUM_MONTH_RE.search(end_raw)
+    if num_m and 1 <= int(num_m.group(2)) <= 12:
+        month = int(num_m.group(2))
+    else:
+        for name, idx in _MONTHS.items():
+            if name in end_raw:
+                month = idx
+                break
+    return (year, month)
+
+
+def _experience_lists(candidate: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
+    lists = []
+    for exp_list in [
+        data.get("company_experience") or enhanced.get("company_experience") or [],
+        data.get("exa_recent_companies") or enhanced.get("exa_recent_companies") or [],
+    ]:
+        if isinstance(exp_list, list) and exp_list:
+            lists.append([e for e in exp_list if isinstance(e, dict)])
+    return lists
+
+
+def collect_last_companies(candidate: Dict[str, Any]) -> List[str]:
+    """The candidate's LAST employer signals: flat previous-company fields,
+    plus the most recent non-current entry of each experience list (by parsed
+    end date; entries without dates fall back to list order, which every
+    source emits reverse-chronologically)."""
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
+
+    companies: List[str] = []
+    for c_str in [
+        data.get("previous_company"),
+        data.get("last_company"),
+        enhanced.get("previous_company"),
+        enhanced.get("last_company"),
+    ]:
+        if c_str and str(c_str).strip():
+            companies.append(str(c_str).strip())
+
+    for exp_list in _experience_lists(candidate):
+        past = [e for e in exp_list if not _entry_is_current(e)]
+        if not past:
+            continue
+        dated = [(key, e) for e in past if (key := _end_sort_key(e)) is not None]
+        top = max(dated, key=lambda pair: pair[0])[1] if dated else past[0]
+        comp = (
+            top.get("company")
+            or top.get("company_name")
+            or top.get("employer")
+            or top.get("name")
+        )
+        if comp and str(comp).strip():
+            companies.append(str(comp).strip())
+
+    seen = set()
+    out = []
+    for comp in companies:
+        key = comp.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(comp)
+    return out
+
+
 def currently_employed_by_client(candidate: Dict[str, Any], client_name: str) -> Optional[str]:
-    """The matching company string when any current-employer signal names
-    the hiring client, else None."""
+    """The matching company string when any CURRENT-employer signal names
+    the hiring client, else None.
+
+    Current-only by design: this is the search-time hard filter for external
+    sources, which DROPS the row outright (services/unified_candidate_search.py
+    `_drop_client_employees`). Dropping an ex-employee would hide someone we
+    still want a recruiter to see — the last-employer case is flagged instead,
+    via `employed_by_client` below.
+    """
     if is_placeholder_client(client_name):
         return None
     for comp in collect_current_companies(candidate):
         if is_same_company(comp, client_name):
             return comp
     return None
+
+
+def employed_by_client(
+    candidate: Dict[str, Any], client_name: str
+) -> Optional[Dict[str, str]]:
+    """{"company", "relation": "current"|"last"} when the candidate works at the
+    hiring client TODAY, else None.
+
+    The bar is still present employment. The last employer is consulted ONLY as
+    a fallback, when no current-employer signal exists at all — plenty of source
+    rows carry an employment history with no entry marked "Present", and there
+    the most recent employer is the best available answer to "where do they work
+    now?". It is a fallback, never a union:
+
+      current = Stripe, last = the client  → NOT a conflict. We know where they
+                                             work today, and it isn't the client.
+      current = (none),  last = the client  → conflict, relation "last".
+
+    So someone who genuinely left the client and has since joined a named
+    employer stays contactable, which is the intended behaviour — only the
+    people we cannot distinguish from present employees get flagged.
+    """
+    if is_placeholder_client(client_name):
+        return None
+    current = collect_current_companies(candidate)
+    for comp in current:
+        if is_same_company(comp, client_name):
+            return {"company": comp, "relation": "current"}
+    if current:
+        # A current employer is on file and it is not the client — done.
+        return None
+    for comp in collect_last_companies(candidate):
+        if is_same_company(comp, client_name):
+            return {"company": comp, "relation": "last"}
+    return None
+
+
+def apply_client_conflict_flag(candidate: Dict[str, Any], client_name: str) -> bool:
+    """Recompute and stamp `client_conflict` / `client_conflict_reason` /
+    `client_conflict_company` / `client_conflict_relation`. Returns the flag.
+
+    Authoritative in BOTH directions so read paths self-heal: a row that starts
+    matching after the job's customer is corrected gets flagged, and a stale
+    flag clears when the candidate is viewed against a different job — the
+    conflict is per-job, unlike the global no-contact list, so a flag left
+    behind from another req would be wrong.
+
+    Never raises: a matcher error leaves the existing flag untouched rather
+    than failing the search.
+    """
+    try:
+        hit = employed_by_client(candidate, client_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"client-conflict check failed (flag left as-is): {exc}")
+        return bool(candidate.get("client_conflict"))
+    if hit:
+        candidate["client_conflict"] = True
+        candidate["client_conflict_reason"] = client_conflict_reason(hit, client_name)
+        candidate["client_conflict_company"] = hit["company"]
+        candidate["client_conflict_relation"] = hit["relation"]
+        return True
+    if candidate.get("client_conflict"):
+        candidate["client_conflict"] = False
+        candidate.pop("client_conflict_reason", None)
+        candidate.pop("client_conflict_company", None)
+        candidate.pop("client_conflict_relation", None)
+    return False
+
+
+def client_conflict_reason(hit: Dict[str, str], client_name: str) -> str:
+    """Human-readable reason string for a `employed_by_client` hit.
+
+    One helper so the flag stamped at search time and the reason shown at the
+    launch gate can never drift apart.
+    """
+    if hit.get("relation") == "current":
+        return (
+            f"Current employer '{hit.get('company')}' is the hiring client "
+            f"({client_name})"
+        )
+    return (
+        f"No current employer on file; most recent employer "
+        f"'{hit.get('company')}' is the hiring client ({client_name})"
+    )

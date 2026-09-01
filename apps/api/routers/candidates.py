@@ -10,13 +10,14 @@ import httpx
 import re
 
 from services.ai_service import ai_service
-from services.jobdiva import jobdiva_service
+from services.jobdiva import jobdiva_service, jobdiva_profile_id
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
+from services.feedback_metrics import refresh_feedback_metrics_sync
 from services import contact_enrichment
 from utils.phone import normalize_phone
 from models import (
@@ -25,7 +26,7 @@ from models import (
 )
 from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
-from routers.jobs import _verify_job_access_by_id
+from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
@@ -425,7 +426,7 @@ async def _extract_candidate_gender_fields_with_ai(cand: Dict[str, Any]) -> Dict
 
 
 @router.post("/candidates/open-to-work-statuses")
-async def get_open_to_work_statuses(payload: Dict[str, Any]):
+async def get_open_to_work_statuses(payload: Dict[str, Any], user: UserIdentity = Depends(get_current_user)):
     """Poll-friendly read-only lookup for LinkedIn Open-to-Work status.
 
     Body: {"links": ["https://www.linkedin.com/in/...", ...]}
@@ -448,7 +449,7 @@ async def get_open_to_work_statuses(payload: Dict[str, Any]):
 
 
 @router.get("/candidates/open-to-work-diag")
-async def get_open_to_work_diag():
+async def get_open_to_work_diag(user: UserIdentity = Depends(get_current_user)):
     """Standalone diagnostic for the Apify OTW pipeline.
 
     GET it from a browser or curl to see:
@@ -603,6 +604,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                 "" if client_name.lower() in ("", "external", "unknown", "n/a")
                 else client_name
             ),
+            search_mode=(
+                "sample" if str(request.search_mode or "").strip().lower() == "sample"
+                else "full"
+            ),
+            # Clamp the preview size: above ~10 per source a "sample" costs
+            # more than it saves (pool + enrichment scale with it).
+            sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
+            assess_all_sources=bool(request.assess_all_sources),
         )
 
         # Execute unified search as a stream. Persist each candidate to
@@ -804,7 +813,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
 
 
 @router.get("/candidates/jobdiva/{job_id}/criteria-status")
-async def get_jobdiva_criteria_status(job_id: str):
+async def get_jobdiva_criteria_status(
+    job_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Lightweight pre-check for JobDiva AI matcher criteria.
 
     Used by Step-5 UI to warn recruiters *before* running sourcing if
@@ -818,6 +830,7 @@ async def get_jobdiva_criteria_status(job_id: str):
     matcher returned zero candidates" as the same recruiter-actionable
     state, so the Step-5 modal actually surfaces.
     """
+    _verify_job_access_by_id(job_id, user)
     try:
         result = await jobdiva_service.search_via_job_agent(
             job_id=job_id,
@@ -855,7 +868,10 @@ async def get_jobdiva_criteria_status(job_id: str):
         raise HTTPException(status_code=500, detail="Failed to check JobDiva criteria status")
 
 @router.post("/candidates/search/legacy")
-async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
+async def search_jobdiva_candidates_legacy(
+    request: CandidateSearchRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """
     Legacy search endpoint (preserved for backward compatibility)
 
@@ -865,11 +881,16 @@ async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
     TIER 2: TalentSearch Pool filtered by same criteria
 
     Supports both legacy format (combined skills array) and enhanced format (separate criteria).
+
+    Guarded exactly like its non-legacy twin `/candidates/search`: it burns
+    JobDiva API quota and returns candidate PII, so it can't stay open.
     """
     print(f"🔍 Enhanced multi-criteria search for job_id: {request.job_id}")
 
     if not request.job_id:
         return {"candidates": [], "message": "jobdiva_id required for candidate search"}
+
+    _verify_job_access_by_id(str(request.job_id), user)
 
     try:
         combined_results = []
@@ -1127,13 +1148,14 @@ async def get_job_candidates(
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT jobdiva_id, job_id, screening_level FROM monitored_jobs
+                    SELECT jobdiva_id, job_id, screening_level, customer_name FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
                 resolved_jobdiva_id = job_id_or_ref
                 job_screening_level = ""
+                job_customer_name = str(result[3] or "").strip() if result and len(result) > 3 else ""
                 if result:
                     resolved_jobdiva_id = result[0] or result[1]
                     resolved_numeric_job_id = result[1] or result[0]
@@ -1262,12 +1284,20 @@ async def get_job_candidates(
                         sc.resume_match_percentage as match_score,
                         sc.created_at,
                         sc.data,
+                        -- Employment history lives here, NOT in sc.data: the
+                        -- applicant sync writes `data` before resume extraction
+                        -- runs, and nothing back-fills it. Without this join the
+                        -- hiring-client flag below has nothing to match on and
+                        -- the row renders clean while the résumé says otherwise.
+                        cei.company_experience as cei_company_experience,
                         la.status as audit_status,
                         la.interview_id as audit_interview_id,
                         la.created_at as audit_created_at,
                         la.payload as audit_payload,
                         la.response as audit_response
                     FROM deduped_candidates sc
+                    LEFT JOIN candidate_enhanced_info cei
+                        ON cei.candidate_id = sc.candidate_id
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
                     ORDER BY sc.created_at DESC, sc.id DESC
@@ -1289,6 +1319,28 @@ async def get_job_candidates(
                     pass
 
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+
+            # Hiring-client conflict, recomputed on read rather than trusted
+            # from `data`: rows saved before the flag existed carry nothing, and
+            # the conflict is per-job, so a value persisted for another req must
+            # not be believed here. apply_client_conflict_flag is authoritative
+            # in both directions, so this both sets and clears.
+            #
+            # The joined history goes INSIDE the data blob, not alongside it:
+            # collect_current_companies reads company_experience from
+            # candidate["data"] whenever that is a dict, so a top-level copy
+            # would be silently ignored. The rankings page reads it from the
+            # same place, so this also fills in histories it was missing.
+            cei_exp = cand.pop("cei_company_experience", None)
+            if cei_exp and isinstance(data_blob, dict) and not data_blob.get("company_experience"):
+                data_blob["company_experience"] = cei_exp
+                cand["data"] = data_blob
+            try:
+                from services.company_match import apply_client_conflict_flag
+                apply_client_conflict_flag(cand, job_customer_name)
+            except Exception as _cc_err:  # noqa: BLE001 — never fail the list
+                logger.warning(f"client-conflict flag skipped for {cand.get('candidate_id')}: {_cc_err}")
+
             # Promote engage values from JSONB blob to top-level response fields.
             # These are persisted by engagement sync endpoints in sourced_candidates.data.
             if isinstance(data_blob, dict):
@@ -1464,8 +1516,10 @@ async def refresh_candidate_resume_match(
     job_id_or_ref: str,
     candidate_id: str,
     request: RefreshResumeMatchRequest,
+    user: UserIdentity = Depends(get_current_user),
 ):
     """Re-run resume matching for a single candidate and persist score details."""
+    _verify_job_access_by_id(job_id_or_ref, user)
     try:
         from psycopg2.extras import RealDictCursor
 
@@ -1589,11 +1643,23 @@ async def refresh_candidate_resume_match(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/candidates/save")
-async def save_candidates(request: CandidatesSaveRequest):
+async def save_candidates(
+    request: CandidatesSaveRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """
     Saves a batch of candidates to the sourced_candidates table.
     Always stores the alphanumeric jobdiva_id (e.g. '26-05172'), never the numeric job_id PK.
     """
+    # allow_not_found=True because `jobdiva_id` here is not always a real
+    # monitored job: components/sourced-candidates-view.tsx posts the
+    # sentinel "GENERAL_SOURCING" to park a candidate in the master pool
+    # with no job attached. Without the flag `_verify_job_access_by_id`
+    # 403s anything it can't find in monitored_jobs (see save_job_draft,
+    # which needs the same escape hatch for a not-yet-saved job).
+    # Authentication above is what closes the actual hole; for a job that
+    # *does* exist the membership check still applies in full.
+    _verify_job_access_by_id(str(request.jobdiva_id), user, allow_not_found=True)
     try:
         print(f"🔄 Saving {len(request.candidates)} candidates for job: {request.jobdiva_id}")
 
@@ -1844,6 +1910,15 @@ async def save_candidates(request: CandidatesSaveRequest):
                         else:
                             scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
 
+                        # For JobDiva-sourced rows candidate_id IS the JobDiva
+                        # profile id. Persist it explicitly so Launch PAIR links
+                        # the application to the existing profile instead of
+                        # making JobDiva mint a duplicate "Unknown Unknown" one
+                        # (routers/engagement.py `_resolve_link_candidate_id`).
+                        # Recomputed on every save, so it self-heals rows whose
+                        # blob predates this and survives the upsert either way.
+                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+
                         # Prepare candidate data with clean schema
                         candidate_data = {
                             "jobdiva_id": resolved_jobdiva_id,
@@ -1876,7 +1951,8 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 "matched_skills": scoring["matched_skills"],
                                 "missing_skills": scoring["missing_skills"],
                                 "explainability": scoring["explainability"],
-                                "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
+                                "enhanced_info": getattr(c, 'enhanced_info', None),  # Full LLM extraction data
+                                **({"jobdiva_candidate_id": jd_profile_id} if jd_profile_id else {}),
                             }),
                             "status": "sourced"
                         }
@@ -1902,7 +1978,27 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 resume_match_percentage = EXCLUDED.resume_match_percentage,
-                                data = EXCLUDED.data,
+                                -- Merge, never replace: preserve backend-owned keys the caller never
+                                -- sends (JobDiva profile link + engage bookkeeping). A blanket
+                                -- `data = EXCLUDED.data` erased them, costing a duplicate JobDiva
+                                -- profile and duplicate outreach on re-save.
+                                data = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                                       || COALESCE(EXCLUDED.data, '{}'::jsonb)
+                                       || COALESCE((
+                                            -- Copy the stored values VERBATIM. Do not route them through
+                                            -- jsonb_strip_nulls: it recurses, and engage_last_response.data
+                                            -- is legitimately null for failed launches (candidates.py:115).
+                                            -- jsonb_each is strict, so a NULL data column yields zero rows
+                                            -- and the COALESCE supplies '{}'.
+                                            SELECT jsonb_object_agg(e.k, e.v)
+                                            FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                            WHERE e.k IN (
+                                                'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                                'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                                'engage_last_response', 'engage_hard_filter_status',
+                                                'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                            )
+                                       ), '{}'::jsonb),
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
                         """, candidate_data)
@@ -2548,7 +2644,7 @@ async def enrich_candidate_contact(
 
 
 @router.patch("/candidates/{candidate_id:path}/phone")
-async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
+async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest, user: UserIdentity = Depends(get_current_user)):
     actual_candidate_id = request.candidate_id or candidate_id
     
     import urllib.parse
@@ -2558,6 +2654,12 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
     digit_count = sum(1 for ch in normalised if ch.isdigit())
     if digit_count < 7:
         raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
+
+    # jobdiva_id is optional on this model, so it can only narrow the check,
+    # not replace it. Authentication above is the real guard here; when the
+    # caller does name a job we also require access to it.
+    if request.jobdiva_id:
+        _verify_job_access_by_id(str(request.jobdiva_id), user)
 
     try:
         logger.info(f"update_candidate_phone called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}', phone='{normalised}'")
@@ -2595,7 +2697,7 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
 
 
 @router.patch("/candidates/phone")
-async def update_candidate_phone_body(request: UpdateCandidatePhoneRequest):
+async def update_candidate_phone_body(request: UpdateCandidatePhoneRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Body-based phone update endpoint to avoid URL/path encoding edge cases for
     candidate IDs containing reserved/non-ASCII characters.
@@ -2603,17 +2705,24 @@ async def update_candidate_phone_body(request: UpdateCandidatePhoneRequest):
     candidate_id = str(request.candidate_id or "").strip()
     if not candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
-    return await update_candidate_phone(candidate_id, request)
+    # Forward `user` explicitly — this is a direct Python call, not a
+    # FastAPI request, so the Depends() default would otherwise be passed
+    # through as the literal Depends object instead of a UserIdentity.
+    return await update_candidate_phone(candidate_id, request, user)
 
 
 @router.patch("/candidates/{candidate_id:path}/email")
-async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmailRequest):
+async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmailRequest, user: UserIdentity = Depends(get_current_user)):
     actual_candidate_id = request.candidate_id or candidate_id
 
     import urllib.parse
     actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
 
     email = _validate_email(request.email)
+
+    # Optional job scope — see the note in update_candidate_phone.
+    if request.jobdiva_id:
+        _verify_job_access_by_id(str(request.jobdiva_id), user)
 
     try:
         logger.info(f"update_candidate_email called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}'")
@@ -2651,7 +2760,7 @@ async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmai
 
 
 @router.patch("/candidates/email")
-async def update_candidate_email_body(request: UpdateCandidateEmailRequest):
+async def update_candidate_email_body(request: UpdateCandidateEmailRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Body-based email update endpoint to avoid URL/path encoding edge cases for
     candidate IDs containing reserved/non-ASCII characters.
@@ -2659,15 +2768,26 @@ async def update_candidate_email_body(request: UpdateCandidateEmailRequest):
     candidate_id = str(request.candidate_id or "").strip()
     if not candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
-    return await update_candidate_email(candidate_id, request)
+    # Forward `user` explicitly — see the note in update_candidate_phone_body.
+    return await update_candidate_email(candidate_id, request, user)
 
 
 @router.patch("/candidates/bulk-contacts")
-async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest):
+async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Bulk update candidate phone and email to avoid Nginx rate limits (503)
     when updating multiple candidates at once.
     """
+    # Per-item job scope, matching the singular phone/email routes. Checked
+    # for every item up front so a partially-authorised batch is rejected
+    # whole rather than applying the items the caller happened to own.
+    # `jobdiva_id` is optional on the item model, so as with the singular
+    # routes this can only narrow the check — authentication is the guard
+    # that actually closes the hole.
+    for item in request.updates:
+        if item.jobdiva_id:
+            _verify_job_access_by_id(str(item.jobdiva_id), user)
+
     try:
         conn = get_db_connection()
         updated_total = 0
@@ -2738,6 +2858,7 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest):
 
 @router.get("/candidates/list")
 async def get_all_candidates(
+    user: UserIdentity = Depends(get_current_user),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     search: Optional[str] = Query(None),
@@ -2754,7 +2875,15 @@ async def get_all_candidates(
     across the full table (~8k rows) without returning the whole set. Filter
     dropdowns source their options from `/candidates/filter-options` so they
     reflect the entire DB, not just the current page.
+
+    Authentication is required — this returns names, emails and phones for
+    the whole pool. When the caller narrows to one job we additionally check
+    they have access to it; the unscoped listing stays available to any
+    authenticated recruiter, which is the pre-existing product behaviour
+    (the Candidates page is a cross-job pool view).
     """
+    if job_id:
+        _verify_job_access_by_id(str(job_id), user)
     try:
         import services.sourced_candidates_storage as scs
         storage = scs.SourcedCandidatesStorage()
@@ -2788,7 +2917,7 @@ async def get_all_candidates(
 
 
 @router.get("/candidates/filter-options")
-async def get_candidate_filter_options():
+async def get_candidate_filter_options(user: UserIdentity = Depends(get_current_user)):
     """Distinct jobs/sources/locations used by the FE filter dropdowns.
 
     Returning DB-wide distinct values (not current-page) means filters still
@@ -2804,7 +2933,7 @@ async def get_candidate_filter_options():
         return {"status": "error", "jobs": [], "sources": [], "locations": [], "message": str(e)}
 
 @router.post("/candidates/enhanced-fetch")
-async def fetch_enhanced_candidates(request: Dict[str, str]):
+async def fetch_enhanced_candidates(request: Dict[str, str], user: UserIdentity = Depends(get_current_user)):
     """
     Enhanced candidate fetching using combined JobDiva API calls:
     - JobApplicantsDetail: Get job applicants
@@ -2837,7 +2966,7 @@ async def fetch_enhanced_candidates(request: Dict[str, str]):
         return {"status": "error", "candidates": [], "message": str(e)}
 
 @router.post("/candidates/{candidate_id:path}/update-resume")
-async def update_candidate_resume(candidate_id: str):
+async def update_candidate_resume(candidate_id: str, user: UserIdentity = Depends(get_current_user)):
     """Update resume text for an existing candidate using enhanced JobDiva integration."""
     try:
         print(f"🔄 Updating resume for candidate: {candidate_id}")
@@ -2860,7 +2989,7 @@ async def update_candidate_resume(candidate_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/candidates/{candidate_id:path}/resume")
-async def get_candidate_resume(candidate_id: str):
+async def get_candidate_resume(candidate_id: str, user: UserIdentity = Depends(get_current_user)):
     """
     Fetch individual candidate resume by candidate ID from JobDiva.
     Only returns real resumes - no auto-generated content.
@@ -2914,7 +3043,7 @@ async def get_candidate_resume(candidate_id: str):
         }
 
 @router.post("/candidates/analyze", response_model=CandidateAnalysisResponse)
-async def analyze_candidates(request: CandidateAnalysisRequest):
+async def analyze_candidates(request: CandidateAnalysisRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Batch analyzes candidates against JD using AI.
     """
@@ -2954,9 +3083,60 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
 # ---------------------------------------------------------------------------
 # Candidate Evaluation Report
 # ---------------------------------------------------------------------------
+def _verify_report_access_by_candidate(candidate_id: str, user: UserIdentity) -> None:
+    """Authorize an evaluation report when the caller gave no `job_id`.
+
+    `job_id` is an optional query param, so a `if job_id:` guard alone
+    would be trivially skippable: omit it and any authenticated recruiter
+    could pull any candidate's resume, contact details and full interview
+    transcript. Instead, resolve the jobs this candidate actually sits on
+    and require access to at least one of them — which is the same
+    authority the report itself is scoped by.
+
+    Fails closed: if no job can be resolved, there is nothing to authorize
+    against and the report would be empty anyway (the handler's own
+    fallback reads `sourced_candidates` for this candidate).
+    """
+    if user.is_admin:
+        return
+
+    refs: List[str] = []
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '5000ms'")
+                # Capped: this only runs on the no-job_id path (the UI always
+                # sends job_id), and each ref below costs one access lookup.
+                cur.execute(
+                    "SELECT DISTINCT jobdiva_id FROM sourced_candidates "
+                    "WHERE candidate_id = %s AND jobdiva_id IS NOT NULL LIMIT 10",
+                    (str(candidate_id),),
+                )
+                refs = [str(r[0]) for r in cur.fetchall() if r and r[0]]
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"evaluation-report access resolve failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    for ref in refs:
+        try:
+            _verify_job_access_by_id(ref, user)
+            return
+        except HTTPException:
+            continue
+
+    raise HTTPException(
+        status_code=403,
+        detail="Access denied. You are not assigned to any job for this candidate.",
+    )
+
+
 @router.get("/candidates/evaluation-report")
 @router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
+    user: UserIdentity = Depends(get_current_user),
     candidate_id: Optional[str] = None,
     job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
     # Allow candidate_id to be passed as a query param to bypass URL encoding issues on QA/Prod
@@ -2965,10 +3145,29 @@ async def get_candidate_evaluation_report(
     """
     Aggregate a full Candidate Evaluation Report from multiple data sources.
     Supports candidate_id in the path OR as a query parameter for Exa IDs.
+
+    Authentication is required — the report carries a candidate's resume,
+    contact details and full interview transcript.
+
+    NOTE for whoever fields the support ticket: this endpoint backs the
+    /jobs/{id}/report page, which is linked from recruiter "candidate
+    passed" emails and from the JobDiva candidate note PAIR writes on
+    Submit/Reject. Those links now require the opener to be signed in and
+    to have access to the job (admins, the job's assigned recruiters, their
+    team leads, or anyone when the job has no assignees — see
+    `verify_job_access`). That is intended, but it is a visible change for
+    anyone who used to open a report link while logged out.
     """
     candidate_id = q_candidate_id or candidate_id
     if not candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
+    if job_id:
+        _verify_job_access_by_id(str(job_id), user)
+    else:
+        # No job named — do NOT fall through unguarded. `job_id` is optional,
+        # so a bare `if job_id:` guard would be skippable by simply omitting
+        # it. Authorize against the jobs this candidate is on instead.
+        _verify_report_access_by_candidate(candidate_id, user)
     """
     Aggregate a full Candidate Evaluation Report from multiple data sources:
       - sourced_candidates      : basic profile, resume, match scores
@@ -3418,7 +3617,8 @@ async def get_candidate_evaluation_report(
 async def save_candidate_feedback(
     job_id_or_ref: str,
     candidate_id: str,
-    request: CandidateFeedbackRequest
+    request: CandidateFeedbackRequest,
+    user: UserIdentity = Depends(get_current_user),
 ):
     """
     Saves candidate feedback (Submit/Reject) and creates a JobDiva Note with:
@@ -3427,9 +3627,28 @@ async def save_candidate_feedback(
       - recruiterid: PAIR recruiter (JOBDIVA_PAIR_RECRUITER_ID env var)
       - link2AnOpenJob: numeric JobDiva job ID
       - note       : "Click Here to view the report."
+
+    Requires an authenticated recruiter with access to the job. This
+    endpoint shipped with no guard at all, and there is no global auth
+    middleware in this app — auth is per-endpoint. Unauthenticated it let
+    anyone write into JobDiva (a candidate note stamped with the PAIR
+    recruiter id, via `create_candidate_note`) and mutate
+    `sourced_candidates.data`, which drives the dashboard's FEEDBACK
+    COMPLETED and PAIR SUBMITS columns.
+
+    The job-access check is the same one already on
+    `GET /jobs/{id}/candidates` — the rank list this action is taken from —
+    so it grants exactly the set of users who can already see the
+    candidate. `verify_job_access` passes admins, the job's assigned
+    recruiters, their team leads, and any authenticated recruiter on a job
+    with no assignees.
     """
-    logger.info(f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: {request.feedback_type}")
-    
+    _verify_job_access_by_id(job_id_or_ref, user)
+    logger.info(
+        f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
+        f"{request.feedback_type} (by {user.email})"
+    )
+
     # 1. Map to JobDiva Action String
     action_string = ""
     if request.feedback_type == "Submit":
@@ -3595,10 +3814,37 @@ async def save_candidate_feedback(
     except Exception as e:
         logger.error(f"❌ Failed to persist feedback locally: {e}")
 
+    # 5. Write through to the dashboard's FEEDBACK COMPLETED and PAIR
+    #    SUBMITS columns now. Both are denormalized on monitored_jobs (the
+    #    dashboard is a single indexed SELECT and deliberately does no
+    #    aggregation), and their only writer used to be the 15-min
+    #    auto-sync cycle — so a recruiter's click took up to 15 minutes to
+    #    appear, and never appeared at all for jobs the sync skips
+    #    (closed/filled status, or a processing_status the cron doesn't
+    #    select). Recomputing here makes the recruiter's own action land on
+    #    the next dashboard load.
+    feedback_metrics = await asyncio.to_thread(
+        refresh_feedback_metrics_sync, str(app_job_ref or job_id_or_ref)
+    )
+    if feedback_metrics is not None:
+        # Drop this worker's cached /jobs/monitored payload so the fresh
+        # counts aren't hidden behind the 30s cache TTL.
+        try:
+            invalidate_monitored_jobs_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            f"📊 Job {app_job_ref}: feedback_completed="
+            f"{feedback_metrics['feedback_completed']} "
+            f"pair_submits={feedback_metrics['pair_submits']}"
+        )
+
     return {
         "status": "success",
         "jobdiva_sync": jobdiva_result.get("status"),
         "action_string": action_string,
         "jobdiva_candidate_id": jd_candidate_id,
         "jobdiva_job_ref": jd_job_ref,
+        "feedback_completed": (feedback_metrics or {}).get("feedback_completed"),
+        "pair_submits": (feedback_metrics or {}).get("pair_submits"),
     }

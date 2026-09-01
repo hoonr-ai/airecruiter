@@ -16,6 +16,7 @@ from core import OPENAI_API_KEY, DATABASE_URL, JOBDIVA_JOB_NOTES_UDF_ID
 from services.ai_service import ai_service
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
+from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_AGG_SQL
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
 from models import (
@@ -164,6 +165,15 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_inactive_notified_at TIMESTAMP NULL",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_external_subs INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS feedback_completed INTEGER DEFAULT 0",
+            # pair_submits: candidates a recruiter pressed Submit on inside
+            # PAIR. Each one is mirrored to JobDiva as a "PAIR Submit -
+            # Externally Submitted" candidate note. Reported alongside
+            # pair_external_subs — which is the JobDiva-verified count (a
+            # submittal to the job's contact whose candidate carries the
+            # PAIR Candidates=Pass qualification) — so the dashboard shows
+            # both what PAIR recorded and what JobDiva confirms. A gap
+            # between the two columns is a real signal, not a bug.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_submits INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS time_to_first_pass DOUBLE PRECISION",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_sourced INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resumes_shortlisted INTEGER DEFAULT 0",
@@ -260,11 +270,18 @@ async def init_monitored_jobs_schema() -> None:
 
 
 def _backfill_monitored_jobs_counters_sync() -> None:
-    """One-time backfill of the four denormalized counter columns.
+    """One-time backfill of the denormalized counter columns.
 
     Without this, immediately after deploy the dashboard would show zeros
     for candidates_sourced/launched/complete_submissions/pass_submissions
     until the next 15-min auto-sync cycle filled them in per-job.
+
+    `feedback_completed` and `pair_submits` are included here as well. The
+    per-job feedback counter was broken since it was written (see
+    `auto_assign_service._count_feedback_metrics`), so every row in the
+    table holds a stale 0 that no sync cycle would have corrected on its
+    own — this repairs all of them in one pass at boot. `pair_submits` is
+    new, so its column starts at 0 everywhere and needs the same pass.
 
     Lives OUTSIDE the schema init because the schema init has a tight 10s
     lifespan timeout — this aggregate can take 30-60s on a populated DB.
@@ -285,7 +302,9 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                         candidates_sourced   = COALESCE(sub.cs, 0),
                         candidates_launched  = COALESCE(sub.cl, 0),
                         complete_submissions = COALESCE(sub.cm, 0),
-                        pass_submissions     = COALESCE(sub.ps, 0)
+                        pass_submissions     = COALESCE(sub.ps, 0),
+                        feedback_completed   = COALESCE(sub.fb, 0),
+                        pair_submits         = COALESCE(sub.psub, 0)
                     FROM (
                         SELECT
                             m.job_id,
@@ -301,7 +320,12 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             COUNT(DISTINCT CASE
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
                                 THEN sc.candidate_id
-                            END) AS ps
+                            END) AS ps,
+                            """
+                    + FEEDBACK_COMPLETED_AGG_SQL
+                    + " AS fb, "
+                    + PAIR_SUBMITS_AGG_SQL
+                    + """ AS psub
                         FROM monitored_jobs m
                         LEFT JOIN sourced_candidates sc
                           ON (sc.jobdiva_id = m.jobdiva_id OR sc.jobdiva_id = m.job_id::text)
@@ -1741,6 +1765,7 @@ def _create_job_version_sync(job_id_or_ref: str) -> dict:
                 "pass_submissions": 0,
                 "resumes_shortlisted": 0,
                 "pair_external_subs": 0,
+                "pair_submits": 0,
                 "feedback_completed": 0,
                 "time_to_first_pass": None,
                 "is_archived": False,
@@ -2146,7 +2171,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, mj.screening_level, "
                 "mj.resumes_shortlisted, "
-                "mj.pair_external_subs, mj.feedback_completed, "
+                "mj.pair_external_subs, mj.pair_submits, mj.feedback_completed, "
                 "mj.candidates_sourced, mj.candidates_launched, "
                 "mj.complete_submissions, mj.pass_submissions, "
                 "mj.jobdiva_total_subs, "

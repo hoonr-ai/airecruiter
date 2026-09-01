@@ -31,7 +31,13 @@ from core.email import (
     resolve_app_base_url,
 )
 from services.gender_logic import normalize_gender_prediction, infer_gender_from_name_ai
-from services.jobdiva import jobdiva_service
+from services.jobdiva import (
+    jobdiva_service,
+    get_field as _jd_get_field,
+    _get_candidate_email as _jd_candidate_email,
+    _get_candidate_phone as _jd_candidate_phone,
+)
+from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
@@ -108,6 +114,76 @@ def _parse_json_list(val) -> list:
     return []
 
 
+def _fetch_stored_employer_signals(
+    conn, candidate_ids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Employer signals persisted OUTSIDE `sourced_candidates.data`.
+
+    The applicant sync writes `data` BEFORE any resume extraction runs (auto-
+    sync passes bypass_screening=True, which skips LLM enrichment entirely), so
+    on the auto-launch path that blob carries no employer fields at all. The
+    extracted employment history lands in `candidate_enhanced_info` instead —
+    a separate table, UNIQUE on candidate_id — and is only ever joined back in
+    memory at read time (`_attach_cached_enhanced_info`), never persisted.
+
+    The result was that the UI rendered "Bank Of America … Present" from the
+    hydrated blob while the launch gate, reading only `data`, matched against
+    an empty candidate and let the outreach through. Everything the gate reads
+    must come from the same view of the candidate the recruiter sees.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    # `c is not None` before str(): str(None) is the truthy literal "None",
+    # which would otherwise be sent to the DB as a candidate id.
+    ids = [str(c) for c in (candidate_ids or []) if c is not None and str(c).strip()]
+    if not ids:
+        return out
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT candidate_id, job_title, company_experience
+                FROM candidate_enhanced_info
+                WHERE candidate_id = ANY(%s)
+                """,
+                (ids,),
+            )
+            for row in cur.fetchall() or []:
+                out[str(row["candidate_id"])] = {
+                    "company_experience": row.get("company_experience") or [],
+                    "title": row.get("job_title") or "",
+                }
+    except Exception as exc:  # noqa: BLE001 — hydration must never block a launch
+        logger.warning(
+            "employer-signal hydration failed (exclusion gate may run blind): %s", exc
+        )
+    return out
+
+
+def _merge_employer_signals(
+    candidate: Dict[str, Any],
+    headline: str = "",
+    signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """`candidate` plus any employer signal it was missing, for the gate.
+
+    Copy-on-merge so the caller's stored blob is never mutated, and strictly
+    fill-if-absent — a value already on the row wins over the cached one.
+    `headline` comes from the sourced_candidates column (which the gate's
+    queries must select): `collect_current_companies` has an "… at X" parse
+    built for rows that carry the employer only in headline text, and it could
+    never fire at launch while that column went unread.
+    """
+    merged = dict(candidate) if isinstance(candidate, dict) else {}
+    if headline and not merged.get("headline"):
+        merged["headline"] = headline
+    signals = signals or {}
+    if signals.get("company_experience") and not merged.get("company_experience"):
+        merged["company_experience"] = signals["company_experience"]
+    if signals.get("title") and not merged.get("title"):
+        merged["title"] = signals["title"]
+    return merged
+
+
 def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
     """Check if a candidate should be excluded from PAIR outreach.
 
@@ -117,6 +193,11 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
       3. Offer Accepted
       4. Current Employee of the hiring client
       5. Current or LAST employer on the no-contact company list
+
+    Callers MUST pass a candidate hydrated via `_merge_employer_signals` —
+    a bare `sourced_candidates.data` blob can be missing every field checked
+    below, in which case this returns "not excluded" because it had nothing to
+    judge, not because the candidate is clean.
     """
     if not candidate or not isinstance(candidate, dict):
         return False, ""
@@ -168,17 +249,27 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     # rows often carry the employer only in headline text.
     from services.company_match import (
         collect_current_companies,
-        is_same_company,
+        employed_by_client,
+        is_placeholder_client,
         normalize_company_name,
     )
 
-    for comp in collect_current_companies(candidate):
+    current_companies = collect_current_companies(candidate)
+    for comp in current_companies:
         if "pyramid" in normalize_company_name(comp).split():
             return True, "Current Employee (Pyramid)"
-        # Match on whole-word tokens, not raw substrings: client "Meta"
-        # must match "Meta Platforms" but NOT "Metadata Solutions".
-        if is_same_company(comp, client_name):
+
+    # Works at the client TODAY. The last employer is consulted only when no
+    # current employer is on file at all (many source rows carry no "Present"
+    # entry) — a fallback, not a union, so someone who left the client for a
+    # named employer stays contactable. Matching is on whole-word tokens, not
+    # raw substrings: client "Meta" matches "Meta Platforms", never "Metadata
+    # Solutions".
+    client_hit = employed_by_client(candidate, client_name)
+    if client_hit:
+        if client_hit["relation"] == "current":
             return True, "Employed by Hiring Client"
+        return True, "Employed by Hiring Client (last known employer)"
 
     # No-contact companies (services/no_contact.py): current or LAST employer
     # on the code-managed list. Step 5 greys these rows out and /candidates/
@@ -192,6 +283,26 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     if nc_hit:
         return True, f"No-Contact Company ({nc_hit['keyword']})"
 
+    # Visibility for the failure mode that put a Bank of America employee into
+    # outreach for a Bank of America req: a real hiring client, but not one
+    # current-employer signal on the row, so the check above had nothing to
+    # match. Passing here means UNKNOWN, not clean. We still let the launch
+    # proceed (blocking would hold back every applicant synced before resume
+    # extraction runs), but it must not be silent — this was invisible until a
+    # recruiter happened to read a phone-screen notification.
+    if current_companies or not client_name or is_placeholder_client(client_name):
+        return False, ""
+    from services.company_match import collect_last_companies
+
+    if collect_last_companies(candidate):
+        return False, ""
+    logger.warning(
+        "client_conflict_check_blind candidate=%s client=%r — no current- or "
+        "last-employer signal on the stored row; hiring-client exclusion could "
+        "not be evaluated",
+        candidate.get("candidate_id") or candidate.get("id") or "?",
+        client_name,
+    )
     return False, ""
 
 
@@ -722,6 +833,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "ai_description": job_row.get("ai_description") or "",
                     "recruiter_notes": job_row.get("recruiter_notes") or "",
                     "is_l05": is_l05,
+                    "screening_level": job_row.get("screening_level") or "L1.5",
                 },
                 "rubric": rubric if rubric else {},
                 "pre_screen_questions": pre_screen_questions,
@@ -1130,11 +1242,27 @@ async def _wait_for_pairbot_creation(
     raise TimeoutError(f"Pairbot stream ended without creation_completed bulk_id={bulk_id}")
 
 
+# JobDiva's parser requires an email, so the provisioner mints one for
+# phone-only candidates. It is deterministic per candidate and
+# `_update_candidate_name` writes it through to JobDiva, which makes it a real
+# lookup key on re-provision — see the applicant index in
+# `_provision_batch_to_jobdiva`.
+_PAIR_SYNTHETIC_EMAIL_DOMAIN = "@no-email.jobdiva.local"
+
+
 def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[str, Any]) -> None:
     """Brief write to stamp jobdiva_candidate_id into sourced_candidates.data.
 
     Split out of _provision_candidate_to_jobdiva so the pool slot is held only
     for the UPDATE itself, never across the multi-second JobDiva HTTP calls.
+
+    ``cand_data`` MUST be the delta to merge, never a whole row blob. The UPDATE
+    has no ``jobdiva_id`` predicate — correct for the id, since a JobDiva profile
+    is person-level and the id is valid on every job's row for that person — so
+    passing a full blob would splat one job's match_score / engage_status /
+    enhanced_info onto every other job's row for the same candidate. That in turn
+    trips ``/engage/launch`` idempotency (``engage_status NOT IN ('', 'failed')``)
+    and permanently silences outreach on jobs the person was never contacted for.
     """
     conn = get_db_connection()
     try:
@@ -1160,12 +1288,29 @@ def _resolve_link_candidate_id(
     (whose internal id IS the JobDiva id). This prevents linking a non-JobDiva
     candidate's numeric internal id to an unrelated JobDiva profile.
     """
-    source_lower = str(source or "").lower()
-    is_trusted_jd_id = bool(
-        (cand_data or {}).get("jobdiva_candidate_id") or source_lower.startswith("jobdiva")
-    )
-    if existing_jd_id and str(existing_jd_id).isdigit() and is_trusted_jd_id:
-        return str(existing_jd_id)
+    # The id is trusted if it was explicitly persisted from a previous JobDiva interaction.
+    explicitly_stored_jd_id = str((cand_data or {}).get("jobdiva_candidate_id") or "")
+    if existing_jd_id and str(existing_jd_id).isdigit():
+        if existing_jd_id == explicitly_stored_jd_id:
+            return str(existing_jd_id)
+
+        # Fallback: if not explicitly stored, we can trust the internal numeric
+        # id when the candidate was sourced from JobDiva, because every JobDiva
+        # pool sets candidate_id from JobDiva's own response
+        # (`get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])` in
+        # services/jobdiva.py `_search_talent_pool` / `_search_with_job_agent` /
+        # `_get_all_job_applicants`).
+        #
+        # JobAgent is included deliberately. PR #493 excluded it on the premise
+        # that PAIR mints its own ids for JobAgent rows; the code does not — and
+        # the sourcing stream relies on the opposite, deduping all three pools
+        # against one shared `seen_ids` set and testing JobAgent ids against
+        # TalentSearch rows via `jobagent_matched_ids`
+        # (services/unified_candidate_search.py). Excluding JobAgent here is what
+        # made JobDiva mint a duplicate profile for every JobAgent launch.
+        if str(source or "").lower().startswith("jobdiva"):
+            return str(existing_jd_id)
+
     return None
 
 
@@ -1274,20 +1419,57 @@ async def _provision_batch_to_jobdiva(
             existing_applicants = await jobdiva_service.get_job_applicants_detail(jd_job_id)
             logger.info(f"✅ [{label}] Found {len(existing_applicants)} existing applicants in JobDiva")
 
-        # Build fast-lookup sets for dedup — keyed on normalised email, phone, and JD candidate ID
-        existing_jd_ids: set = {
-            str(a.get("candidateId") or a.get("CANDIDATEID") or "")
-            for a in existing_applicants
-        }
-        existing_emails: set = {
-            str(a.get("EMAIL") or a.get("email") or "").lower().strip()
-            for a in existing_applicants
-            if not str(a.get("EMAIL") or a.get("email") or "").lower().startswith("auto_")
-        }
-        existing_phones: set = {
-            "".join(ch for ch in str(a.get("PHONE") or a.get("phone") or "") if ch.isdigit())
-            for a in existing_applicants
-        }
+        # Build fast lookups for dedup, keyed on JD candidate id / normalised
+        # email / normalised phone. These are MAPS, not sets: on an email- or
+        # phone-only match we need the matching applicant's real JobDiva id so
+        # we can persist it (see the match branch below), otherwise the row
+        # stays without a `jobdiva_candidate_id` forever and /engage/re-provision
+        # re-attempts it on every run.
+        #
+        # Field extraction goes through the shared jobdiva.py helpers rather
+        # than a hand-rolled two-key read: JobDiva BI varies its casing and puts
+        # numbers in CELLPHONE / PHONE1..4 slots, so `a.get("PHONE")` alone
+        # yields an empty set and makes every candidate look new.
+        existing_jd_ids: set = set()
+        existing_emails: Dict[str, str] = {}
+        existing_phones: Dict[str, str] = {}
+        def _remember(index: Dict[str, str], key: str, jd_id: str) -> None:
+            """First writer wins, but a real id always beats a blank one.
+
+            JobDiva BI can emit a partial row for a person (no CANDIDATEID) ahead
+            of the full one; a plain `setdefault` would pin the blank and the
+            stamp-back below would learn nothing.
+            """
+            if key and not index.get(key):
+                index[key] = jd_id
+
+        for a in existing_applicants:
+            a_jd_id = str(_jd_get_field(a, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
+            if a_jd_id:
+                existing_jd_ids.add(a_jd_id)
+
+            a_email = str(_jd_candidate_email(a) or "").lower().strip()
+            # `auto_*@jobdiva.com` is JobDiva's own placeholder and is worthless as
+            # a key. Our `pair-…@no-email.jobdiva.local` is NOT: we mint it below
+            # it is deterministic per candidate, and `_update_candidate_name` writes
+            # it through to JobDiva — so it is the only handle we have on the
+            # phone-only cohort and must stay indexed.
+            if a_email and not a_email.startswith("auto_") and (
+                _PAIR_SYNTHETIC_EMAIL_DOMAIN in a_email or not is_placeholder_email(a_email)
+            ):
+                _remember(existing_emails, a_email, a_jd_id)
+
+            # Index the mobile-preferred number AND the plain PHONE field. Keying
+            # only on `_get_candidate_phone` would return the cell when both exist,
+            # losing the match for candidates whose stored number is the landline —
+            # a narrowing versus the `a.get("PHONE")` this replaced. Deliberately
+            # NOT every slot: a shared switchboard in PHONE3 would match an
+            # unrelated person and make us skip provisioning someone genuinely
+            # absent from JobDiva, which is worse than a duplicate.
+            for raw_phone in (_jd_candidate_phone(a), a.get("PHONE"), a.get("phone")):
+                a_phone = "".join(ch for ch in str(raw_phone or "") if ch.isdigit())
+                if len(a_phone) >= 7:
+                    _remember(existing_phones, a_phone, a_jd_id)
 
         # ── Phase 4: Provision each candidate (concurrent, semaphore-bounded)
         async def _provision_one(cand_id: str) -> str:
@@ -1306,16 +1488,18 @@ async def _provision_batch_to_jobdiva(
 
                 email = (row.get("email") or "").strip()
                 phone = (row.get("phone") or "").strip()
+                # Only trust an id that was explicitly stored as jobdiva_candidate_id.
+                # The PAIR internal cand_id for JobAgent candidates is NOT a real JobDiva
+                # profile id — using it as link_candidate_id causes JD to create a
+                # duplicate 'Unknown Unknown' profile instead of linking the real one.
                 existing_jd_id = str(cand_data.get("jobdiva_candidate_id") or "")
-                if not existing_jd_id and str(cand_id).isdigit():
-                    existing_jd_id = str(cand_id)
 
                 phone_norm = "".join(ch for ch in phone if ch.isdigit())
                 
                 # JobDiva parser absolutely requires an email address.
                 # If none is provided, generate a dummy one so the profile creates successfully.
                 if not email:
-                    email = f"pair-{phone_norm or cand_id}@no-email.jobdiva.local"
+                    email = f"pair-{phone_norm or cand_id}{_PAIR_SYNTHETIC_EMAIL_DOMAIN}"
 
                 email_lower = email.lower()
 
@@ -1335,10 +1519,22 @@ async def _provision_batch_to_jobdiva(
                         f"✅ [{label}] Candidate {cand_id} already in JobDiva "
                         f"(jcid={jcid_match} email={email_match} phone={phone_match})"
                     )
-                    # Stamp the JD id if it wasn't persisted yet
-                    if not cand_data.get("jobdiva_candidate_id") and existing_jd_id:
-                        cand_data["jobdiva_candidate_id"] = existing_jd_id
-                        _persist_jobdiva_candidate_id(cand_id, cand_data)
+                    # Persist the matched applicant's real JobDiva id if we don't
+                    # have one yet. The previous guard here read
+                    # `cand_data.get("jobdiva_candidate_id")` and `existing_jd_id`,
+                    # which are the same value — so it could never fire, and an
+                    # email/phone match learned nothing even though the id was
+                    # sitting right there in the applicant list.
+                    matched_jd_id = (
+                        existing_jd_id
+                        or existing_emails.get(email_lower, "")
+                        or existing_phones.get(phone_norm, "")
+                    )
+                    if matched_jd_id and not cand_data.get("jobdiva_candidate_id"):
+                        cand_data["jobdiva_candidate_id"] = matched_jd_id
+                        _persist_jobdiva_candidate_id(
+                            cand_id, {"jobdiva_candidate_id": matched_jd_id}
+                        )
                     return "skipped"
 
                 # ── Not found → create a new JobDiva application
@@ -1360,8 +1556,16 @@ async def _provision_batch_to_jobdiva(
                 # instead of spawning a duplicate "Unknown Unknown" applicant.
                 # If the linked id is stale/invalid, create_job_application_with_resume
                 # falls back to an email-based candidate lookup before creating anew.
+                # Pass the row's own id as the fallback. For a JobDiva-sourced
+                # row candidate_id IS the JobDiva profile id, and without this
+                # `_resolve_link_candidate_id` could only ever see the stored
+                # `jobdiva_candidate_id` — which is empty on a first launch and
+                # on any row saved before that key was persisted, so its
+                # source-aware carve-out was unreachable and every launch asked
+                # JobDiva to mint a new profile. Non-JobDiva sources are still
+                # rejected inside the resolver.
                 link_candidate_id = _resolve_link_candidate_id(
-                    row.get("source"), cand_data, existing_jd_id
+                    row.get("source"), cand_data, existing_jd_id or str(cand_id)
                 )
 
                 try:
@@ -1382,14 +1586,16 @@ async def _provision_batch_to_jobdiva(
                 if success and new_jd_id:
                     logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {new_jd_id}")
                     cand_data["jobdiva_candidate_id"] = new_jd_id
-                    _persist_jobdiva_candidate_id(cand_id, cand_data)
+                    _persist_jobdiva_candidate_id(
+                        cand_id, {"jobdiva_candidate_id": new_jd_id}
+                    )
                     # Add to in-memory sets so concurrent siblings don't re-create the same person.
                     # This covers both newly created AND pre-existing profiles that were linked.
                     existing_jd_ids.add(str(new_jd_id))
-                    if email_lower and not email_lower.startswith("auto_") and "@no-email.jobdiva.local" not in email_lower:
-                        existing_emails.add(email_lower)
+                    if email_lower and not email_lower.startswith("auto_") and not is_placeholder_email(email_lower):
+                        existing_emails[email_lower] = str(new_jd_id)
                     if phone_norm and len(phone_norm) >= 7:
-                        existing_phones.add(phone_norm)
+                        existing_phones[phone_norm] = str(new_jd_id)
                     return "success"
                 elif success:
                     # Linked to existing profile but JD returned no ID — treat as success
@@ -1564,7 +1770,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
                     _excl_cur.execute(
                         """
-                        SELECT candidate_id, data, name
+                        SELECT candidate_id, data, name, headline
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -1575,13 +1781,25 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                             str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
                         ),
                     )
-                    for _row in _excl_cur.fetchall() or []:
+                    _excl_rows = _excl_cur.fetchall() or []
+                    # Employment history lives in candidate_enhanced_info, not
+                    # in `data` — without this the gate matches an empty blob.
+                    _excl_signals = _fetch_stored_employer_signals(
+                        _excl_conn, [str(r[0]) for r in _excl_rows]
+                    )
+                    for _row in _excl_rows:
                         _cdata = _row[1] or {}
                         if isinstance(_cdata, str):
                             try:
                                 _cdata = json.loads(_cdata)
                             except Exception:
                                 _cdata = {}
+                        _cdata = _merge_employer_signals(
+                            _cdata,
+                            headline=str(_row[3] or ""),
+                            signals=_excl_signals.get(str(_row[0])),
+                        )
+                        _cdata.setdefault("candidate_id", str(_row[0]))
                         _is_excl, _excl_reason = is_candidate_excluded_from_pair(
                             _cdata, _excl_client
                         )
@@ -1816,8 +2034,10 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
-            # Prefer source_candidate_id (PAI-155 Pairbot echoes it). Fall back
-            # to email for older Pairbot responses / phone-only rows.
+            # Index Pairbot's creation_completed data[] by source_candidate_id
+            # (PAI-155: Pairbot always echoes it). candidate_email is never
+            # present in Pairbot response items, so the email index is only
+            # populated when Pairbot happens to include it (legacy/fallback).
             interview_by_source_id: Dict[str, Dict[str, Any]] = {}
             interview_by_email: Dict[str, Dict[str, Any]] = {}
             for item in data_list:
@@ -1830,19 +2050,30 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 if item_email and item_email not in interview_by_email:
                     interview_by_email[item_email] = item
 
-            # Position N in real_candidate_ids corresponds to position N in
-            # payload_obj.resumes (both built from the same selection in
-            # generate-payload), so we can recover the submitted identifiers
-            # per candidate without another DB lookup.
+            # Log any interviews Pairbot explicitly failed on its side.
+            failed_interviews_from_pairbot = response_data.get("failed_interviews") or []
+            if failed_interviews_from_pairbot:
+                failed_ids = [item.get("candidate_id") or item.get("source_candidate_id") or "?" for item in failed_interviews_from_pairbot]
+                logger.warning(
+                    "pairbot_failed_interviews bulk_id=%s count=%d sample=%s",
+                    response_data.get("bulk_id", "?"),
+                    len(failed_interviews_from_pairbot),
+                    failed_ids[:5],
+                )
+
+            # Build email lookup from the sent payload resumes (keyed by
+            # source_candidate_id == candidate_id).  Used as email fallback
+            # when Pairbot response items don't carry source_candidate_id.
+            # IMPORTANT: source_candidate_id in generate-payload is always set
+            # to the candidate's own candidate_id, so we look up by candidate_id
+            # directly — this is position-independent and alignment-safe after
+            # idempotency/exclusion filtering.
             payload_resumes = payload_obj.get("resumes") or []
-            submitted_source_id_by_idx: List[str] = [
-                str((r or {}).get("source_candidate_id") or "").strip()
+            candidate_id_to_email: Dict[str, str] = {
+                str(r.get("source_candidate_id") or "").strip(): str(r.get("email") or "").lower().strip()
                 for r in payload_resumes
-            ]
-            submitted_email_by_idx: List[str] = [
-                str((r or {}).get("email") or "").lower().strip()
-                for r in payload_resumes
-            ]
+                if isinstance(r, dict) and r.get("source_candidate_id")
+            }
 
             # ── TRIGGER PROVISIONING (JobDiva Application) ─────────────
             # Background-fire batch provisioning so it doesn't block the
@@ -1860,30 +2091,19 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 asyncio.create_task(_run_batch_provisioning())
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
-                submitted_source_id = (
-                    submitted_source_id_by_idx[idx]
-                    if idx < len(submitted_source_id_by_idx)
-                    else ""
-                )
-                submitted_email = (
-                    submitted_email_by_idx[idx]
-                    if idx < len(submitted_email_by_idx)
-                    else ""
-                )
+                # Direct lookup by candidate_id == source_candidate_id (always
+                # identical — see generate-payload).  Falls back to email index
+                # for legacy Pairbot responses that include candidate_email.
+                # NOTE: positional fallback (data_list[idx]) is intentionally
+                # absent — Pairbot may omit skipped candidates from data[], so a
+                # position-based grab would assign the wrong interview_id.
+                submitted_source_id = str(candidate_id)
+                submitted_email = candidate_id_to_email.get(str(candidate_id), "")
                 interview_info: Dict[str, Any] = {}
-                if submitted_source_id and submitted_source_id in interview_by_source_id:
+                if submitted_source_id in interview_by_source_id:
                     interview_info = interview_by_source_id.pop(submitted_source_id, {}) or {}
                 elif submitted_email:
                     interview_info = interview_by_email.pop(submitted_email, {}) or {}
-                # NOTE: The legacy positional fallback (data_list[idx]) has been
-                # intentionally removed. When the Bot API skips a candidate (e.g.
-                # missing email and phone) its response data[] is shorter than the
-                # submitted candidate list. Grabbing data_list[idx] in that case
-                # assigns a *different* candidate's interview_id to the skipped
-                # candidate, causing Curate to mark them as "sent" even though no
-                # interview was ever created for them. If the email lookup misses,
-                # interview_info stays {}, interview_id stays empty, and
-                # engage_status is correctly set to "failed".
 
                 interview_id = str(interview_info.get("interview_id") or "")
                 candidate_name = interview_info.get("candidate_name", "")
@@ -1939,6 +2159,17 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     "session_token": interview_info.get("session_token", ""),
                     "created_at": interview_info.get("created_at", "")
                 })
+
+            # Any items left in interview_by_source_id were created by Pairbot
+            # but couldn't be matched back to a submitted candidate_id.  This
+            # can happen if source_candidate_id was not echoed or was mutated.
+            if interview_by_source_id:
+                logger.warning(
+                    "pairbot_unmatched_created_interviews bulk_id=%s count=%d orphaned_ids=%s",
+                    response_data.get("bulk_id", "?"),
+                    len(interview_by_source_id),
+                    list(interview_by_source_id.keys())[:10],
+                )
         else:
             # Still log the failed attempt
             for candidate_id in request.real_candidate_ids:
@@ -2515,7 +2746,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
 
             cur.execute(
                 """
-                SELECT candidate_id, data
+                SELECT candidate_id, data, headline
                 FROM sourced_candidates
                 WHERE candidate_id = ANY(%s)
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -2544,13 +2775,29 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 (list(candidate_ids), str(job_id), str(job_id), str(job_id), str(job_id)),
             )
             eligible_ids = []
-            for r in cur.fetchall():
+            candidate_rows = cur.fetchall() or []
+            # This is the path that contacted a Bank of America employee for a
+            # Bank of America req: the applicant sync persists `data` before
+            # resume extraction, so every employer field the gate reads is
+            # absent from it. Hydrate from candidate_enhanced_info (+ the
+            # headline column) so the gate judges the same candidate the
+            # recruiter sees, not an empty row.
+            employer_signals = _fetch_stored_employer_signals(
+                conn, [str(r["candidate_id"]) for r in candidate_rows]
+            )
+            for r in candidate_rows:
                 c_data = r.get("data") or {}
                 if isinstance(c_data, str):
                     try:
                         c_data = json.loads(c_data)
                     except Exception:
                         c_data = {}
+                c_data = _merge_employer_signals(
+                    c_data,
+                    headline=str(r.get("headline") or ""),
+                    signals=employer_signals.get(str(r["candidate_id"])),
+                )
+                c_data.setdefault("candidate_id", str(r["candidate_id"]))
                 excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
                 if excluded:
                     logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", r["candidate_id"], job_id, reason)
@@ -2998,6 +3245,41 @@ async def _check_and_fire_candidate_passed_notification(
                         looks_informational or score_value is None or score_value < 0
                     )
                 is_scored_question = (not is_hard_filter) and (not is_info_only)
+
+                # Exclude the bot's closing sentence which is always scored 0.0/0.
+                # The ONLY reliable signal is total_score == 0 (explicitly sent as 0 by
+                # pairbot) — no real evaluation question is ever scored out of 0 (they are
+                # always out of 10.0).
+                # We intentionally do NOT check the answer text because newer pairbot
+                # versions populate the closing-sentence answer with the full thank-you
+                # paragraph, so checking for empty/"—" would miss it.
+                #
+                # Assumption (info-only): info-only questions (Q2,3,5-9) always carry
+                # a non-zero total_score in production. We have not observed total_score==0
+                # for any real info-only item in payload logs. The logger.warning below
+                # will surface any unexpected case if that assumption ever breaks.
+                #
+                # Intentional tradeoff (null total_score): we do NOT include
+                # total_value is None in the condition. A null total_score on a real
+                # scored question (e.g. a transient API omission) should surface in the
+                # email rather than be silently dropped. If pairbot sends null for the
+                # closing sentence, that item will pass through — that is the safer choice.
+                try:
+                    total_value = float(total) if total is not None else None
+                except (TypeError, ValueError):
+                    total_value = None
+                is_closing_sentence = (
+                    score_value == 0.0
+                    and total_value == 0.0
+                    and not is_hard_filter
+                )
+                if is_closing_sentence:
+                    logger.warning(
+                        "⏭️ Skipping item as bot closing sentence "
+                        "(score=%.1f, total=%.1f, q_order=%d): %.60r",
+                        score_value, total_value, q_order, q_text,
+                    )
+                    continue
 
                 screening_summary.append({
                     "question": q_text,

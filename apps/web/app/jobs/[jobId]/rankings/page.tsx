@@ -60,14 +60,15 @@ const formatDate = (dateStr: string) => {
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-GB', {
-      day: '2-digit',
-      month: '2-digit',
+    return date.toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      month: 'short',
+      day: 'numeric',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       hour12: true
-    }).toUpperCase();
+    });
   } catch {
     return dateStr;
   }
@@ -286,6 +287,14 @@ interface Candidate {
   engage_created_at?: string;
   availability?: string;
   created_at: string;
+  // Recomputed per-job on read by GET /jobs/{id}/candidates — the candidate
+  // works at the company this req is hiring for. relation "current" is an
+  // explicit present-day employer; "last" means no current employer was on
+  // file and their most recent one was the client.
+  client_conflict?: boolean;
+  client_conflict_reason?: string;
+  client_conflict_company?: string;
+  client_conflict_relation?: "current" | "last";
   data?: any;
 }
 
@@ -1360,13 +1369,33 @@ export default function CandidateRankingsPage() {
       };
       const merged = Array.from(new Set([...srcList(dst), ...srcList(src)]));
       if (merged.length) dst.sources = merged;
-      for (const f of ["phone", "location", "headline", "title", "profile_url", "linkedin_url", "image_url"]) {
+      for (const f of [
+        "phone", "location", "headline", "title", "profile_url", "linkedin_url", "image_url",
+        "engage_status", "engage_interview_id", "engage_score",
+        "audit_status", "audit_interview_id", "audit_created_at", "audit_payload", "audit_response"
+      ]) {
         if (!dst[f] && src[f]) dst[f] = src[f];
+      }
+      // Hiring-client conflict is sticky-true across the dedup merge: one row
+      // of the same person may carry the employment history another lacks, and
+      // the survivor must keep the flag rather than silently render clean.
+      if (src.client_conflict === true && dst.client_conflict !== true) {
+        dst.client_conflict = true;
+        dst.client_conflict_reason = src.client_conflict_reason;
+        dst.client_conflict_company = src.client_conflict_company;
+        dst.client_conflict_relation = src.client_conflict_relation;
       }
       const dEmail = String(dst.email || "");
       const sEmail = String(src.email || "");
       if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmail(dEmail) && !isPlaceholderEmail(sEmail)))) {
         dst.email = sEmail;
+      }
+      // Merge candidate data dictionary so nested fields like engage_status are preserved
+      if (src.data && typeof src.data === "object" && !Array.isArray(src.data)) {
+        dst.data = {
+          ...src.data,
+          ...(dst.data || {})
+        };
       }
       return dst;
     };
@@ -2219,6 +2248,19 @@ export default function CandidateRankingsPage() {
                           >
                             {candidate.name}
                           </Link>
+                          {candidate.client_conflict && (
+                            <span
+                              className="px-2 py-0.5 mb-1 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-orange-100 text-orange-700 border-orange-300"
+                              title={
+                                candidate.client_conflict_reason ||
+                                "Employed by the hiring client — should not be contacted"
+                              }
+                            >
+                              {candidate.client_conflict_relation === "last"
+                                ? "Client (Last Known)"
+                                : "Works at Client"}
+                            </span>
+                          )}
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center px-1 break-all whitespace-normal" title={candidate.email}>
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
                           </span>
