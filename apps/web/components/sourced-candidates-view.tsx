@@ -305,7 +305,10 @@ export function SourcedCandidatesView({
                       </p>
                     )}
                   </div>
-                  {candidate.match_score !== undefined && candidate.match_score > 0 && (
+                  {/* JobDiva-JobAgent rows are never shown as a % (agent
+                      results follow the recruiter's criteria in JobDiva). */}
+                  {candidate.source !== "JobDiva-JobAgent" &&
+                    candidate.match_score !== undefined && candidate.match_score > 0 && (
                     <span className={`px-2.5 py-1 rounded-full text-[12px] font-bold shadow-sm h-fit ${
                       candidate.match_score >= 80 ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 
                       candidate.match_score >= 60 ? 'bg-amber-100 text-amber-700 border border-amber-200' : 
