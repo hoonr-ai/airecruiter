@@ -56,6 +56,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             FROM monitored_jobs
             WHERE {cond}
             ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
+            LIMIT 2000
         """, params)
         rows = cur.fetchall()
 
