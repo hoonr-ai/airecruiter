@@ -36,6 +36,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,18 @@ def candidate_profile_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[
 
 # ── confidence + verification state ───────────────────────────────────────
 
+def stated_current_employer_text(candidate: Dict[str, Any]) -> str:
+    """The candidate's own interview answer to "which company do you currently
+    work for?" (persisted by the voice-agent webhook). One lookup shared by
+    the confidence check, the verification state, and freshness targeting so
+    their precedence can't drift. Checks the top-level key first, then the
+    stored `data` blob — matching services/no_contact.py."""
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    return str(
+        candidate.get("stated_current_employer") or data.get("stated_current_employer") or ""
+    ).strip()
+
+
 def has_confident_employer_signal(candidate: Dict[str, Any]) -> bool:
     """True when the candidate carries employer data we trust enough to skip
     the resume pass: a non-empty extracted `company_experience`, or an
@@ -148,38 +161,139 @@ def has_confident_employer_signal(candidate: Dict[str, Any]) -> bool:
             return True
     # The candidate's own interview answer (persisted by the voice-agent
     # webhook) is the strongest signal there is — no resume re-parse needed.
-    for stated in (data.get("stated_current_employer"), candidate.get("stated_current_employer")):
-        if stated and str(stated).strip():
-            return True
-    return False
+    return bool(stated_current_employer_text(candidate))
+
+
+_RESUME_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+
+def _parse_resume_ts(raw: Any) -> Optional[datetime]:
+    m = _RESUME_TS_RE.match(str(raw or "").strip())
+    if not m:
+        return None
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _stale_months_knob() -> int:
+    try:
+        from core import sourcing_config as _sc
+        return int(getattr(_sc, "EMPLOYER_STALE_RESUME_MONTHS", 12) or 0)
+    except Exception:  # noqa: BLE001
+        return 12
+
+
+def resume_is_stale(candidate: Dict[str, Any]) -> bool:
+    """True when the candidate's employer evidence rests on a resume whose
+    JobDiva timestamp (stamped as `resume_updated_at` by
+    `stamp_resume_freshness`) is older than EMPLOYER_STALE_RESUME_MONTHS.
+    No timestamp on the row → not stale (freshness is advisory; an absent
+    signal must not downgrade anyone)."""
+    months = _stale_months_knob()
+    if months <= 0:
+        return False
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    ts = _parse_resume_ts(
+        candidate.get("resume_updated_at") or data.get("resume_updated_at")
+    )
+    if ts is None:
+        return False
+    # 30.44 days/month keeps the knob's unit honest ("12 months" ≈ 365 days,
+    # not the 360 a flat *30 gives — which flagged sub-year resumes as stale).
+    return ts < datetime.now(timezone.utc) - timedelta(days=months * 30.44)
 
 
 def employer_verification_state(candidate: Dict[str, Any]) -> str:
     """How well we know this candidate's employer, after resolution:
 
-      'verified'     — structured current/last-employer signals exist (the
-                       gate judged real company names);
-      'profile_only' — only JobDiva's noisy profile lines exist (the gate
-                       ran its text fallback over them);
-      'unverified'   — nothing at all; the client/no-contact checks had
-                       nothing to judge. Passing the gate in this state means
-                       UNKNOWN, not clean.
+      'verified'       — structured current/last-employer signals exist (the
+                         gate judged real company names), or the candidate
+                         stated their employer in a PAIR interview;
+      'verified_stale' — structured signals exist, but the resume they were
+                         parsed from is older than EMPLOYER_STALE_RESUME_MONTHS
+                         — its "Present" may no longer be true;
+      'profile_only'   — only JobDiva's noisy profile lines exist (the gate
+                         ran its text fallback over them);
+      'unverified'     — nothing at all; the client/no-contact checks had
+                         nothing to judge. Passing the gate in this state
+                         means UNKNOWN, not clean.
     """
-    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
-    if str(
-        data.get("stated_current_employer") or candidate.get("stated_current_employer") or ""
-    ).strip():
+    if stated_current_employer_text(candidate):
+        # Their own words, given in an interview — never resume-stale.
         return "verified"
     try:
         from services.company_match import collect_current_companies, collect_last_companies
         if collect_current_companies(candidate) or collect_last_companies(candidate):
-            return "verified"
+            return "verified_stale" if resume_is_stale(candidate) else "verified"
     except Exception:  # noqa: BLE001 — classification must never raise
         pass
     cur, last = candidate_profile_texts(candidate)
     if cur or last:
         return "profile_only"
     return "unverified"
+
+
+async def stamp_resume_freshness(
+    candidates: List[Dict[str, Any]],
+    *,
+    service: Any = None,
+) -> None:
+    """Stamp `resume_updated_at` (JobDiva's latest resume timestamp) onto the
+    launch candidates whose employer evidence is resume-derived, so
+    `employer_verification_state` can call a years-old "Present" what it is.
+
+    Mutates the dicts in place; one batched CandidatesResumesDetail call per
+    launch. Targets only JobDiva rows with structured employer signals and no
+    interview-stated answer (stated answers don't age with the resume).
+    Fails open — freshness is advisory and must never block a launch.
+
+    Known limitation (accepted until extraction persists resume provenance):
+    the date is that of the resume JobDiva would select for parsing TODAY —
+    normally the one the stored signals came from, but a newer resume uploaded
+    after the parse (and never re-parsed, because the stored signals made the
+    candidate confident) is dated instead, masking stale evidence as fresh.
+    Closing this needs the extraction pipeline to persist the parsed resume's
+    id/date alongside company_experience.
+    """
+    if _stale_months_knob() <= 0:
+        return
+    targets: Dict[str, List[Dict[str, Any]]] = {}
+    for cand in candidates or []:
+        if not isinstance(cand, dict):
+            continue
+        cid = str(cand.get("candidate_id") or "").strip()
+        if not cid or not _is_jobdiva_row(cand):
+            continue
+        if cand.get("resume_updated_at"):
+            continue
+        if stated_current_employer_text(cand):
+            continue
+        if not has_confident_employer_signal(cand):
+            continue
+        targets.setdefault(cid, []).append(cand)
+    if not targets:
+        return
+    if service is None:
+        from services.jobdiva import jobdiva_service as service  # noqa: PLC0415
+    try:
+        dates = await service.fetch_resume_dates(list(targets.keys()))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resume-freshness check skipped (fetch failed): %s", exc)
+        return
+    stamped = 0
+    for cid, cands in targets.items():
+        ts = (dates or {}).get(cid)
+        if not ts:
+            continue
+        for cand in cands:
+            cand["resume_updated_at"] = ts
+            stamped += 1
+    logger.info(
+        "resume_freshness: %d launch candidate(s) checked, %d stamped with a resume date",
+        len(targets), stamped,
+    )
 
 
 # ── the resolution pass ───────────────────────────────────────────────────

@@ -549,3 +549,17 @@ except ValueError:
 EMPLOYER_QUESTION_ENABLED = _os.getenv(
     "EMPLOYER_QUESTION_ENABLED", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# A resume older than this many months makes its parsed "Present" weak
+# evidence: launch candidates whose employer signals rest on such a resume
+# classify as employer_verification "verified_stale" (surfaced in the launch
+# report next to unverified/profile_only — advisory, never blocking).
+# JobDiva's resume DATEUPDATED is fetched per launch (one batched
+# CandidatesResumesDetail call, services/employer_resolution.py
+# stamp_resume_freshness). 0 disables the freshness check entirely.
+try:
+    EMPLOYER_STALE_RESUME_MONTHS = int(
+        _os.getenv("EMPLOYER_STALE_RESUME_MONTHS", "12").strip() or "12"
+    )
+except ValueError:
+    EMPLOYER_STALE_RESUME_MONTHS = 12

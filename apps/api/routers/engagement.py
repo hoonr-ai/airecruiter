@@ -1927,10 +1927,36 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                         job_id_from_payload, _res_err,
                     )
 
+                _gate_rows = [
+                    (
+                        _cid,
+                        _cname,
+                        _merge_employer_signals(_cdata, signals=_resolved_signals[_cid])
+                        if _resolved_signals.get(_cid) else _cdata,
+                    )
+                    for _cid, _cname, _cdata in _gate_rows
+                ]
+                # Resume freshness (phase 3): stamp JobDiva's resume timestamp
+                # onto resume-verified candidates so a years-old "Present"
+                # classifies as verified_stale, not verified. Advisory only —
+                # never blocks; fails open.
+                try:
+                    from services.employer_resolution import stamp_resume_freshness
+                    # Hard 20s cap: freshness is advisory, and this fetch sits
+                    # on the launch path — a slow JobDiva must cost seconds,
+                    # not a batch-long stall (TimeoutError lands in the
+                    # except below and the launch proceeds unstamped).
+                    await asyncio.wait_for(
+                        stamp_resume_freshness([c for _, _, c in _gate_rows]),
+                        timeout=20.0,
+                    )
+                except Exception as _fresh_err:  # noqa: BLE001
+                    logger.warning(
+                        "resume-freshness check failed for job %s: %s",
+                        job_id_from_payload, _fresh_err,
+                    )
+
                 for _cid, _cname, _cdata in _gate_rows:
-                    _extra = _resolved_signals.get(_cid)
-                    if _extra:
-                        _cdata = _merge_employer_signals(_cdata, signals=_extra)
                     _is_excl, _excl_reason = is_candidate_excluded_from_pair(
                         _cdata, _excl_client
                     )
@@ -1953,11 +1979,16 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     if employer_verification_state is not None:
                         _emp_state = employer_verification_state(_cdata)
                         if _emp_state != "verified":
-                            unverified_employer_records.append({
+                            _unv_record = {
                                 "candidate_id": _cid,
                                 "name": _cname,
                                 "employer_verification": _emp_state,
-                            })
+                            }
+                            if _cdata.get("resume_updated_at"):
+                                _unv_record["resume_updated_at"] = str(
+                                    _cdata["resume_updated_at"]
+                                )
+                            unverified_employer_records.append(_unv_record)
                             logger.info(
                                 "launch_employer_unverified candidate=%s job=%s state=%s client=%r",
                                 _cid, job_id_from_payload, _emp_state, _excl_client,
@@ -2667,14 +2698,15 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # stream so the progress modal reports server skips too.
                     batch_excluded = res.get("excluded_candidates") or []
                     all_excluded.extend(batch_excluded)
-                    # Launched, but with an employer the resolution pass could
-                    # not verify — the client/no-contact checks had nothing to
-                    # judge. Surfaced so the modal can say so instead of the
-                    # old silent pass-through.
+                    # Candidates that passed the gate with weak/unverified
+                    # employer data. Aggregated only for SUCCESSFUL sends —
+                    # the modal presents this list as "launched", and a batch
+                    # whose Pairbot send failed launched nobody (those rows go
+                    # to failedCandidates instead; totals gate the same way).
                     batch_unverified = res.get("employer_unverified") or []
-                    all_employer_unverified.extend(batch_unverified)
 
                     if res.get("success"):
+                        all_employer_unverified.extend(batch_unverified)
                         rows = res.get("data") or []
                         # Only rows PAIR actually created an interview for count as
                         # "sent". Rows returned without an interview_id were written
@@ -2991,11 +3023,28 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                     job_id, res_err,
                 )
 
+        gate_rows = [
+            (
+                cid,
+                _merge_employer_signals(c_data, signals=resolved_signals[cid])
+                if resolved_signals.get(cid) else c_data,
+            )
+            for cid, c_data in gate_rows
+        ]
+        # Resume freshness (phase 3) — advisory classification only; fails open.
+        try:
+            from services.employer_resolution import stamp_resume_freshness
+            # Same 20s advisory cap as the manual launch site.
+            await asyncio.wait_for(
+                stamp_resume_freshness([c for _, c in gate_rows]), timeout=20.0
+            )
+        except Exception as fresh_err:  # noqa: BLE001
+            logger.warning(
+                "auto_launch resume-freshness check failed job_id=%s: %s", job_id, fresh_err
+            )
+
         unverified_count = 0
         for cid, c_data in gate_rows:
-            extra = resolved_signals.get(cid)
-            if extra:
-                c_data = _merge_employer_signals(c_data, signals=extra)
             excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
             if excluded:
                 logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", cid, job_id, reason)
@@ -3012,7 +3061,8 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
         if unverified_count:
             logger.warning(
                 "auto_launch_employer_unverified job_id=%s count=%d of %d eligible — "
-                "client/no-contact checks had nothing to judge for these",
+                "weak or unverified employer data (no history, JobDiva profile "
+                "only, or a stale resume); see per-candidate state logs above",
                 job_id, unverified_count, len(eligible_ids),
             )
 
