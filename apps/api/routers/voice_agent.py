@@ -20,9 +20,10 @@ from routers.engagement import (
     _check_and_fire_candidate_passed_notification,
 )
 from routers.hard_filter_utils import count_pending_hard_filters
-from routers.launch_report import _normalize_channel, _normalize_phase
+from services.outreach_normalization import normalize_channel, normalize_phase
 
 router = APIRouter(tags=["Voice Agent Integration"])
+
 
 
 # Questions stored verbatim often begin with "You ..." (declarative). When
@@ -265,8 +266,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
 
                 raw_phase = payload.outreach_phase or payload.phase
                 raw_channel = payload.outreach_channel or payload.channel
-                norm_phase = _normalize_phase(raw_phase)
-                norm_channel = _normalize_channel(raw_channel)
+                norm_phase = normalize_phase(raw_phase)
+                norm_channel = normalize_channel(raw_channel)
+
 
                 if norm_phase:
                     candidate_blob["phase"] = norm_phase
