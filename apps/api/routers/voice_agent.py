@@ -277,7 +277,6 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 # gate, the no-contact flag and /candidates/save all read
                 # stated_current_employer — and re-run the checks the launch
                 # may have run blind. Must never break webhook processing.
-                stated_answer = None
                 try:
                     from services.stated_employer import (
                         extract_stated_employer,
@@ -285,9 +284,31 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     )
                     stated = extract_stated_employer(detail_payload.get("transcriptions"))
                     if stated:
-                        stated_answer = stated
+                        # Stamp with the INTERVIEW's completion time when the
+                        # payload carries one (fall back to delivery time):
+                        # the propagation below orders answers by this stamp,
+                        # so a re-delivered webhook for an older interview
+                        # must not look newer than it is.
+                        stated_at = now_iso
+                        parsed_completed = None
+                        if payload.completed_at:
+                            try:
+                                parsed_completed = datetime.fromisoformat(
+                                    str(payload.completed_at).replace("Z", "+00:00")
+                                )
+                            except Exception:  # noqa: BLE001
+                                parsed_completed = None
+                        if parsed_completed is not None:
+                            # Normalize to UTC: the recency guard below is a
+                            # lexicographic string compare, so every stamp must
+                            # come from one clock in one format. A naive
+                            # completed_at is taken as UTC (PairBot's stamps
+                            # carry no zone).
+                            if parsed_completed.tzinfo is None:
+                                parsed_completed = parsed_completed.replace(tzinfo=timezone.utc)
+                            stated_at = parsed_completed.astimezone(timezone.utc).isoformat()
                         candidate_blob["stated_current_employer"] = stated
-                        candidate_blob["stated_employer_at"] = now_iso
+                        candidate_blob["stated_employer_at"] = stated_at
                         client_name = ""
                         if target_job_id:
                             cur.execute(
@@ -392,18 +413,35 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         ),
                     )
 
-                # Person-wide stated-employer propagation (phase 3): the
-                # answer is a fact about the PERSON, and for JobDiva rows
-                # candidate_id IS the person id — stamp it on the candidate's
-                # rows for every other job so their launch gates and
-                # no-contact flags see it too. The conflict string stays on
-                # this job's row only (it names this job's client). Guarded on
-                # value so repeat webhooks (in_progress → completed) don't
-                # rewrite rows, and non-fatal — outreach state must persist
-                # even if propagation fails.
-                if stated_answer and target_candidate_id:
-                    try:
-                        cur.execute(
+            conn.commit()
+
+            # Person-wide stated-employer propagation (phase 3): the answer is
+            # a fact about the PERSON, and for JobDiva rows candidate_id IS
+            # the person id — stamp it on the candidate's rows for every other
+            # job so their launch gates and no-contact flags see it too. The
+            # conflict string stays on this job's row only (it names this
+            # job's client).
+            #
+            # Runs in its OWN transaction AFTER the interview writes are
+            # committed: this multi-row update can deadlock or hit the pool's
+            # statement timeout against a concurrent same-person webhook or
+            # /candidates/save, and a swallowed error BEFORE the commit would
+            # poison the shared transaction — turning the commit into a
+            # silent ROLLBACK of the engage status itself.
+            #
+            # Guards: numeric JobDiva person ids only (candidate_id is
+            # person-scoped only for JobDiva rows — an identical id string
+            # from another source would stamp a different person); value
+            # inequality so repeat webhooks don't rewrite rows; and recency
+            # (stored stated_employer_at must be OLDER than this answer's) so
+            # a re-delivered webhook for an older interview can't overwrite a
+            # newer stated answer.
+            _stated_answer = candidate_blob.get("stated_current_employer")
+            _stated_at = str(candidate_blob.get("stated_employer_at") or "")
+            if _stated_answer and target_candidate_id and str(target_candidate_id).isdigit():
+                try:
+                    with conn.cursor() as prop_cur:
+                        prop_cur.execute(
                             """
                             UPDATE sourced_candidates
                             SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
@@ -411,28 +449,35 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                             WHERE candidate_id = %s
                               AND COALESCE(data->>'stated_current_employer', '')
                                   IS DISTINCT FROM %s
+                              AND COALESCE(data->>'stated_employer_at', '') < %s
                             """,
                             (
                                 json.dumps({
-                                    "stated_current_employer": stated_answer,
-                                    "stated_employer_at": now_iso,
+                                    "stated_current_employer": _stated_answer,
+                                    "stated_employer_at": _stated_at,
                                 }),
                                 str(target_candidate_id),
-                                stated_answer,
+                                _stated_answer,
+                                _stated_at,
                             ),
                         )
-                        if cur.rowcount:
-                            logger.info(
-                                "stated_employer_propagated candidate=%s rows=%d",
-                                target_candidate_id, cur.rowcount,
-                            )
-                    except Exception as _prop_err:  # noqa: BLE001
-                        logger.warning(
-                            "stated-employer propagation failed (webhook continues): %s",
-                            _prop_err,
+                        _prop_rows = prop_cur.rowcount
+                    conn.commit()
+                    if _prop_rows:
+                        logger.info(
+                            "stated_employer_propagated candidate=%s rows=%d",
+                            target_candidate_id, _prop_rows,
                         )
-
-            conn.commit()
+                except Exception as _prop_err:  # noqa: BLE001
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    logger.warning(
+                        "stated-employer propagation failed (interview writes "
+                        "already committed): %s",
+                        _prop_err,
+                    )
 
         # Check for pass condition and fire email if needed.
         check_status = effective_status.lower()

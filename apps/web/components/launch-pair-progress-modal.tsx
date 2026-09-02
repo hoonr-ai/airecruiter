@@ -10,6 +10,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import type { LaunchUnverifiedEmployer } from "@/hooks/use-engagement-flow";
 
 export type BatchStage = "save" | "engage";
 export type BatchStatus =
@@ -91,15 +92,10 @@ export interface LaunchPairProgress {
   // JobDiva job id these candidates belong to (column in the export CSV)
   jobIdForRelaunch?: string;
   // Launched, but the backend's employer checks (client employee /
-  // no-contact) had weak or no data to judge: "unverified" (nothing),
-  // "profile_only" (JobDiva profile lines only), or "verified_stale"
-  // (signals from a resume older than the staleness threshold).
-  employerUnverified: {
-    candidate_id: string;
-    name?: string;
-    employer_verification: string;
-    resume_updated_at?: string;
-  }[];
+  // no-contact) had weak or no data to judge — see LaunchUnverifiedEmployer
+  // in hooks/use-engagement-flow.ts, the single declaration of the shape the
+  // SSE stream delivers.
+  employerUnverified: LaunchUnverifiedEmployer[];
   // Finalization
   finalMessage?: string;
 }
@@ -425,8 +421,9 @@ export function LaunchPairProgressModal({
           <div className="rounded-lg border border-sky-200 bg-sky-50/70 p-3 space-y-2">
             <div className="flex items-center gap-2 text-[13px] font-semibold text-sky-800">
               <AlertCircle className="w-4 h-4 text-sky-600" />
-              {employerUnverified.length} launched with an unverified employer
-              — the client/no-contact checks had little or nothing to judge
+              {employerUnverified.length} launched with weak or unverified
+              employer data — no history, JobDiva profile only, or a stale
+              resume
             </div>
             <div className="text-[12px] text-sky-700">
               {employerUnverified

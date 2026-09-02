@@ -2827,17 +2827,25 @@ class JobDivaService:
         candidate_ids: List[str],
         chunk_size: int = 50,
     ) -> Dict[str, str]:
-        """Latest resume timestamp per candidate, via the batch
-        /apiv2/bi/CandidatesResumesDetail endpoint: {candidate_id: iso_ts}
-        where the value is the max DATEUPDATED/DATECREATED across the
-        candidate's resume records ("2026-06-18T02:07:36" shape — ISO-sortable,
-        so lexicographic max is correct).
+        """Timestamp of the resume the parsing pipeline would actually PARSE
+        for each candidate, via the batch /apiv2/bi/CandidatesResumesDetail
+        endpoint: {candidate_id: iso_ts}. Live-probed 2026-09-02: batch
+        records carry CANDIDATEID / RESUMEID / DATECREATED / DATEUPDATED /
+        DATE*DOWNLOADED.
+
+        Records are grouped per candidate and reduced with the SAME selection
+        the resume-text path uses (`_select_resume_record` — the resume the
+        employer signals were extracted from), stamped via `_resume_timestamp`.
+        Deliberately NOT a blanket max across all records: a JobDiva edit
+        touching some OLD resume must not mask the staleness of the resume the
+        signals actually came from.
 
         Feeds the launch-time resume-freshness check
-        (services/employer_resolution.py): a "Present" entry parsed out of a
-        years-old resume is weak evidence of current employment. Failures
-        degrade to {} / missing ids — freshness is advisory and must never
-        take a launch down.
+        (services/employer_resolution.py): advisory, never launch-blocking —
+        failures degrade to {} / missing ids. Chunks share one client, are
+        throttled by the same CANDIDATES_DETAIL_CONCURRENCY semaphore the
+        sibling fetchers use (JobDiva 429s concurrent BI bursts — see
+        _fetch_candidate_details_batch), and retry once on 429/5xx.
         """
         ids: List[str] = []
         seen_ids = set()
@@ -2855,42 +2863,61 @@ class JobDivaService:
 
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
-        out: Dict[str, str] = {}
-        for i in range(0, len(ids), chunk_size):
-            chunk = ids[i:i + chunk_size]
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(
-                        endpoint, params={"candidateIds": chunk}, headers=headers
-                    )
-                if response.status_code != 200:
+        chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        from core import sourcing_config as _sc_res
+        sem = asyncio.Semaphore(max(1, int(getattr(_sc_res, "CANDIDATES_DETAIL_CONCURRENCY", 1))))
+
+        async def _fetch_chunk(client: httpx.AsyncClient, chunk: List[str]) -> List[Dict[str, Any]]:
+            for attempt in range(2):
+                try:
+                    async with sem:
+                        response = await client.get(
+                            endpoint, params={"candidateIds": chunk}, headers=headers
+                        )
+                    if response.status_code == 200:
+                        data = response.json()
+                        payload = data.get("data") if isinstance(data, dict) else data
+                        if isinstance(payload, dict):
+                            payload = [payload]
+                        return [r for r in payload or [] if isinstance(r, dict)]
+                    if (response.status_code == 429 or response.status_code >= 500) and attempt == 0:
+                        await asyncio.sleep(2.0)
+                        continue
                     logger.warning(
                         "CandidatesResumesDetail chunk failed: %s - %s",
                         response.status_code, response.text[:200],
                     )
-                    continue
-                data = response.json()
-                payload = data.get("data") if isinstance(data, dict) else data
-                if isinstance(payload, dict):
-                    payload = [payload]
-                for record in payload or []:
-                    if not isinstance(record, dict):
+                    return []
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(2.0)
                         continue
-                    cid = get_field(record, ["CANDIDATEID", "candidateId"])
-                    if cid is None:
-                        continue
-                    ts = str(
-                        get_field(record, ["DATEUPDATED", "dateUpdated"])
-                        or get_field(record, ["DATECREATED", "dateCreated"])
-                        or ""
-                    ).strip()
-                    if not ts:
-                        continue
-                    key = str(cid)
-                    if ts > out.get(key, ""):
-                        out[key] = ts
-            except Exception as e:
-                logger.warning(f"CandidatesResumesDetail chunk error: {e}")
+                    logger.warning(f"CandidatesResumesDetail chunk error: {e}")
+                    return []
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                batches = await asyncio.gather(*[_fetch_chunk(client, c) for c in chunks])
+        except Exception as e:
+            logger.warning(f"CandidatesResumesDetail batch fetch failed: {e}")
+            return {}
+
+        by_candidate: Dict[str, List[Dict[str, Any]]] = {}
+        for batch in batches:
+            for record in batch:
+                cid = get_field(record, ["CANDIDATEID", "candidateId"])
+                if cid is not None:
+                    by_candidate.setdefault(str(cid), []).append(record)
+
+        out: Dict[str, str] = {}
+        for cid, records in by_candidate.items():
+            selected = self._select_resume_record(records)
+            if not selected:
+                continue
+            ts = self._resume_timestamp(selected)
+            if ts and ts != datetime.min:
+                out[cid] = ts.isoformat()
         return out
 
     async def get_candidate_details(self, candidate_id: str) -> Optional[Dict[str, Any]]:

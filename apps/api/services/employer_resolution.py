@@ -127,6 +127,18 @@ def candidate_profile_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[
 
 # ── confidence + verification state ───────────────────────────────────────
 
+def stated_current_employer_text(candidate: Dict[str, Any]) -> str:
+    """The candidate's own interview answer to "which company do you currently
+    work for?" (persisted by the voice-agent webhook). One lookup shared by
+    the confidence check, the verification state, and freshness targeting so
+    their precedence can't drift. Checks the top-level key first, then the
+    stored `data` blob — matching services/no_contact.py."""
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    return str(
+        candidate.get("stated_current_employer") or data.get("stated_current_employer") or ""
+    ).strip()
+
+
 def has_confident_employer_signal(candidate: Dict[str, Any]) -> bool:
     """True when the candidate carries employer data we trust enough to skip
     the resume pass: a non-empty extracted `company_experience`, or an
@@ -149,10 +161,7 @@ def has_confident_employer_signal(candidate: Dict[str, Any]) -> bool:
             return True
     # The candidate's own interview answer (persisted by the voice-agent
     # webhook) is the strongest signal there is — no resume re-parse needed.
-    for stated in (data.get("stated_current_employer"), candidate.get("stated_current_employer")):
-        if stated and str(stated).strip():
-            return True
-    return False
+    return bool(stated_current_employer_text(candidate))
 
 
 _RESUME_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
@@ -191,7 +200,9 @@ def resume_is_stale(candidate: Dict[str, Any]) -> bool:
     )
     if ts is None:
         return False
-    return ts < datetime.now(timezone.utc) - timedelta(days=months * 30)
+    # 30.44 days/month keeps the knob's unit honest ("12 months" ≈ 365 days,
+    # not the 360 a flat *30 gives — which flagged sub-year resumes as stale).
+    return ts < datetime.now(timezone.utc) - timedelta(days=months * 30.44)
 
 
 def employer_verification_state(candidate: Dict[str, Any]) -> str:
@@ -209,10 +220,7 @@ def employer_verification_state(candidate: Dict[str, Any]) -> str:
                          nothing to judge. Passing the gate in this state
                          means UNKNOWN, not clean.
     """
-    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
-    if str(
-        data.get("stated_current_employer") or candidate.get("stated_current_employer") or ""
-    ).strip():
+    if stated_current_employer_text(candidate):
         # Their own words, given in an interview — never resume-stale.
         return "verified"
     try:
@@ -240,6 +248,14 @@ async def stamp_resume_freshness(
     launch. Targets only JobDiva rows with structured employer signals and no
     interview-stated answer (stated answers don't age with the resume).
     Fails open — freshness is advisory and must never block a launch.
+
+    Known limitation (accepted until extraction persists resume provenance):
+    the date is that of the resume JobDiva would select for parsing TODAY —
+    normally the one the stored signals came from, but a newer resume uploaded
+    after the parse (and never re-parsed, because the stored signals made the
+    candidate confident) is dated instead, masking stale evidence as fresh.
+    Closing this needs the extraction pipeline to persist the parsed resume's
+    id/date alongside company_experience.
     """
     if _stale_months_knob() <= 0:
         return
@@ -252,10 +268,7 @@ async def stamp_resume_freshness(
             continue
         if cand.get("resume_updated_at"):
             continue
-        data = cand.get("data") if isinstance(cand.get("data"), dict) else cand
-        if str(
-            data.get("stated_current_employer") or cand.get("stated_current_employer") or ""
-        ).strip():
+        if stated_current_employer_text(cand):
             continue
         if not has_confident_employer_signal(cand):
             continue

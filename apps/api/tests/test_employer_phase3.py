@@ -118,12 +118,13 @@ def test_stamp_targets_only_resume_verified_jobdiva_rows():
 
 
 def test_stamp_skips_already_stamped_and_fails_open():
+    fresh_stamp = _iso_days_ago(10)
     pre_stamped = dict(VERIFIED, candidate_id="111", source="JobDiva-TalentSearch",
-                       resume_updated_at=_iso_days_ago(10))
+                       resume_updated_at=fresh_stamp)
     service = _FakeDates({"111": _iso_days_ago(900)})
     asyncio.run(stamp_resume_freshness([pre_stamped], service=service))
     assert service.calls == []  # nothing left to fetch
-    assert pre_stamped["resume_updated_at"] == pre_stamped["resume_updated_at"]
+    assert pre_stamped["resume_updated_at"] == fresh_stamp  # not overwritten
 
     class _Exploding:
         async def fetch_resume_dates(self, ids):
@@ -147,14 +148,21 @@ def test_stamp_disabled_by_knob(monkeypatch):
 
 # ── webhook: stated answer persists + propagates person-wide ───────────────
 
-def _run_webhook_with_transcriptions(transcriptions, client_name="Wells Fargo"):
+def _run_webhook_with_transcriptions(
+    transcriptions,
+    client_name="Wells Fargo",
+    audit_candidate_id="123456789",
+    completed_at=None,
+):
     """Drive receive_interview_results with a mocked DB. fetchone returns the
-    audit row first, then the monitored_jobs client row. Captures every
-    UPDATE's jsonb blob and query text."""
+    audit row first, then the monitored_jobs client row. `state["queries"]` is
+    an ordered event stream of normalized query texts with "<COMMIT>" markers,
+    so tests can assert transaction boundaries; blobs capture every
+    sourced_candidates UPDATE's jsonb payload in order."""
     from routers.voice_agent import VoiceAgentInterviewWebhook, receive_interview_results
 
     mock_cur = MagicMock()
-    mock_cur.fetchone.side_effect = [("cand-1", "job-1"), (client_name,)]
+    mock_cur.fetchone.side_effect = [(audit_candidate_id, "job-1"), (client_name,)]
     state = {"blobs": [], "queries": []}
 
     def _execute(query, params=None):
@@ -167,6 +175,7 @@ def _run_webhook_with_transcriptions(transcriptions, client_name="Wells Fargo"):
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
     mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    mock_conn.commit.side_effect = lambda: state["queries"].append("<COMMIT>")
 
     with patch(
         "routers.voice_agent._check_and_fire_candidate_passed_notification",
@@ -180,6 +189,7 @@ def _run_webhook_with_transcriptions(transcriptions, client_name="Wells Fargo"):
             candidate_score=80.0,
             total_score=100.0,
             hard_filter_status="passed",
+            completed_at=completed_at,
             transcriptions=transcriptions,
         )
         asyncio.run(receive_interview_results(payload))
@@ -187,20 +197,46 @@ def _run_webhook_with_transcriptions(transcriptions, client_name="Wells Fargo"):
 
 
 def test_webhook_persists_stated_answer_and_propagates():
-    state = _run_webhook_with_transcriptions([
-        {"question": EMPLOYER_QUESTION_TEXT, "answer": "I work at Cognizant"},
-    ])
+    state = _run_webhook_with_transcriptions(
+        [{"question": EMPLOYER_QUESTION_TEXT, "answer": "I work at Cognizant"}],
+        completed_at="2026-09-01T12:00:00",
+    )
     main_blob = state["blobs"][0]
     assert main_blob["stated_current_employer"] == "I work at Cognizant"
-    assert main_blob.get("stated_employer_at")
+    # stamped with the INTERVIEW's completion time (normalized to UTC — the
+    # recency guard string-compares, so one clock/one format), not delivery time
+    assert main_blob["stated_employer_at"] == "2026-09-01T12:00:00+00:00"
     assert "stated_employer_conflict" not in main_blob
     # person-wide propagation: a second UPDATE scoped by candidate only,
-    # guarded on the value, carrying ONLY the stated fields
+    # guarded on value inequality AND recency, carrying ONLY the stated fields
     prop_queries = [q for q in state["queries"] if "IS DISTINCT FROM" in q]
     assert len(prop_queries) == 1
     assert "jobdiva_id" not in prop_queries[0]
+    assert "stated_employer_at', '') <" in prop_queries[0]
     prop_blob = state["blobs"][-1]
     assert set(prop_blob.keys()) == {"stated_current_employer", "stated_employer_at"}
+    # transaction hygiene: the propagation UPDATE runs in its OWN transaction
+    # AFTER the interview writes commit — a propagation failure must never be
+    # able to roll back engage status.
+    first_commit = state["queries"].index("<COMMIT>")
+    prop_index = state["queries"].index(prop_queries[0])
+    assert prop_index > first_commit
+    assert state["queries"].count("<COMMIT>") == 2
+
+
+def test_webhook_propagation_skipped_for_non_jobdiva_candidate_id():
+    # candidate_id is person-scoped only for JobDiva rows (numeric ids); an
+    # external-source id must never fan out person-wide (an identical string
+    # from another source would be a DIFFERENT person).
+    state = _run_webhook_with_transcriptions(
+        [{"question": EMPLOYER_QUESTION_TEXT, "answer": "I work at Cognizant"}],
+        audit_candidate_id="AEMAAxyz123",
+    )
+    # the interviewed row still records the stated answer…
+    assert state["blobs"][0]["stated_current_employer"] == "I work at Cognizant"
+    # …but no person-wide propagation fires, and only the main commit happens
+    assert not [q for q in state["queries"] if "IS DISTINCT FROM" in q]
+    assert state["queries"].count("<COMMIT>") == 1
 
 
 def test_webhook_stamps_conflict_when_stated_employer_is_the_client():

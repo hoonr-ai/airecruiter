@@ -1942,7 +1942,14 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 # never blocks; fails open.
                 try:
                     from services.employer_resolution import stamp_resume_freshness
-                    await stamp_resume_freshness([c for _, _, c in _gate_rows])
+                    # Hard 20s cap: freshness is advisory, and this fetch sits
+                    # on the launch path — a slow JobDiva must cost seconds,
+                    # not a batch-long stall (TimeoutError lands in the
+                    # except below and the launch proceeds unstamped).
+                    await asyncio.wait_for(
+                        stamp_resume_freshness([c for _, _, c in _gate_rows]),
+                        timeout=20.0,
+                    )
                 except Exception as _fresh_err:  # noqa: BLE001
                     logger.warning(
                         "resume-freshness check failed for job %s: %s",
@@ -2691,14 +2698,15 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # stream so the progress modal reports server skips too.
                     batch_excluded = res.get("excluded_candidates") or []
                     all_excluded.extend(batch_excluded)
-                    # Launched, but with an employer the resolution pass could
-                    # not verify — the client/no-contact checks had nothing to
-                    # judge. Surfaced so the modal can say so instead of the
-                    # old silent pass-through.
+                    # Candidates that passed the gate with weak/unverified
+                    # employer data. Aggregated only for SUCCESSFUL sends —
+                    # the modal presents this list as "launched", and a batch
+                    # whose Pairbot send failed launched nobody (those rows go
+                    # to failedCandidates instead; totals gate the same way).
                     batch_unverified = res.get("employer_unverified") or []
-                    all_employer_unverified.extend(batch_unverified)
 
                     if res.get("success"):
+                        all_employer_unverified.extend(batch_unverified)
                         rows = res.get("data") or []
                         # Only rows PAIR actually created an interview for count as
                         # "sent". Rows returned without an interview_id were written
@@ -3026,7 +3034,10 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
         # Resume freshness (phase 3) — advisory classification only; fails open.
         try:
             from services.employer_resolution import stamp_resume_freshness
-            await stamp_resume_freshness([c for _, c in gate_rows])
+            # Same 20s advisory cap as the manual launch site.
+            await asyncio.wait_for(
+                stamp_resume_freshness([c for _, c in gate_rows]), timeout=20.0
+            )
         except Exception as fresh_err:  # noqa: BLE001
             logger.warning(
                 "auto_launch resume-freshness check failed job_id=%s: %s", job_id, fresh_err
@@ -3050,7 +3061,8 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
         if unverified_count:
             logger.warning(
                 "auto_launch_employer_unverified job_id=%s count=%d of %d eligible — "
-                "client/no-contact checks had nothing to judge for these",
+                "weak or unverified employer data (no history, JobDiva profile "
+                "only, or a stale resume); see per-candidate state logs above",
                 job_id, unverified_count, len(eligible_ids),
             )
 
