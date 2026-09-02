@@ -38,6 +38,8 @@ from routers._helpers import (
     _parse_posted_date,
     _parse_recruiter_emails,
 )
+from services.outreach_normalization import normalize_channel, normalize_phase
+
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
 logger = logging.getLogger(__name__)
@@ -228,18 +230,7 @@ def _bucket_status(raw: Optional[str]) -> str:
 
 def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3."""
-    value = (raw or "").strip().lower()
-    if not value:
-        return None
-    if value in ("phase1", "phase2", "phase3"):
-        return value
-    if not allow_pending_aliases and value in _PENDING_STATUSES:
-        return None
-    aliased = _PHASE_ALIASES.get(value)
-    if aliased:
-        return aliased
-    logger.warning(f"LAUNCH-REPORT: unrecognised outreach phase {value!r} — not counted")
-    return None
+    return normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
 
 
 def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
@@ -257,16 +248,8 @@ def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
 
 def _normalize_channel(raw: Optional[str]) -> Optional[str]:
     """Map communication channel/source variants onto call/sms/web columns."""
-    value = (raw or "").strip().lower()
-    if not value:
-        return None
-    if value in _CHANNEL_COLUMNS:
-        return _CHANNEL_COLUMNS[value]
-    mapped = _CHANNEL_COLUMNS.get(value) or _CHANNEL_ALIASES.get(value)
-    if mapped:
-        return mapped
-    logger.warning(f"LAUNCH-REPORT: unrecognised communication channel/source {value!r} — not counted")
-    return None
+    return normalize_channel(raw)
+
 
 
 def _extract_channel(comm: Dict[str, Any]) -> Optional[str]:

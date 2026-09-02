@@ -20,8 +20,11 @@ from routers.engagement import (
     _check_and_fire_candidate_passed_notification,
 )
 from routers.hard_filter_utils import count_pending_hard_filters
+from services.outreach_normalization import normalize_channel, normalize_phase
 
 router = APIRouter(tags=["Voice Agent Integration"])
+
+
 
 # Questions stored verbatim often begin with "You ..." (declarative). When
 # spoken aloud by the screener, prepending a soft hedge — "Let's say you ..." —
@@ -142,6 +145,11 @@ class VoiceAgentInterviewWebhook(BaseModel):
     completed_at: Optional[str] = None
     transcriptions: Optional[List[TranscriptionItem]] = None
     hard_filter_results: Optional[List[HardFilterResultItem]] = None
+    phase: Optional[str] = None
+    outreach_phase: Optional[str] = None
+    channel: Optional[str] = None
+    outreach_channel: Optional[str] = None
+
 
 
 def _normalized_webhook_status(status: Optional[str]) -> str:
@@ -255,6 +263,20 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     "engage_interview_id": str(payload.interview_id),
                     "engage_last_response": detail_payload,
                 }
+
+                raw_phase = payload.outreach_phase or payload.phase
+                raw_channel = payload.outreach_channel or payload.channel
+                norm_phase = normalize_phase(raw_phase)
+                norm_channel = normalize_channel(raw_channel)
+
+
+                if norm_phase:
+                    candidate_blob["phase"] = norm_phase
+                    candidate_blob["outreach_phase"] = norm_phase
+                if norm_channel:
+                    candidate_blob["channel"] = norm_channel
+                    candidate_blob["outreach_channel"] = norm_channel
+
 
                 # Keep engage_completed_at fresh when webhook carries completion time.
                 if payload.completed_at:
