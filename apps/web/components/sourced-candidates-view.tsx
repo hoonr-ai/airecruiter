@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { AssessModal } from "@/components/AssessModal";
+import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE, authFetch } from "@/lib/api";
 
@@ -18,6 +19,7 @@ import {
   Mail,
   MessageSquare,
   FileText,
+  Ban,
   MapPin,
   Briefcase,
 } from "lucide-react";
@@ -73,6 +75,11 @@ export function SourcedCandidatesView({
   const [engageError, setEngageError] = useState<string | null>(null);
   const [engageApiResponse, setEngageApiResponse] = useState<any>(null);
   const [engageCandidateIds, setEngageCandidateIds] = useState<string[]>([]);
+
+  // Stop-outreach state. The row carries no phone (SourcedCandidate has no
+  // such field), so only candidate_id and email go across — the backend fills
+  // in the number from the candidate's record before calling pair-bot.
+  const [stopOutreachCandidate, setStopOutreachCandidate] = useState<StopOutreachCandidate | null>(null);
 
   // Assess state
   const [isAssessModalOpen, setIsAssessModalOpen] = useState(false);
@@ -401,6 +408,21 @@ export function SourcedCandidatesView({
                     <FileText className="w-3.5 h-3.5 mr-1.5" />
                     Assess
                   </Button>
+
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setStopOutreachCandidate({
+                      candidate_id: candidate.candidate_id || candidate.id,
+                      name: candidate.name,
+                      email: candidate.email,
+                    })}
+                    className="h-8 px-3 border-red-200 text-red-600 hover:bg-red-50"
+                    title="Stop contacting this candidate on every channel"
+                  >
+                    <Ban className="w-3.5 h-3.5 mr-1.5" />
+                    Stop
+                  </Button>
                   
                   <span className="text-xs text-gray-400 ml-auto">
                     {candidate.source}
@@ -437,6 +459,12 @@ export function SourcedCandidatesView({
         successData={engageApiResponse}
       />
 
+      <StopOutreachModal
+        open={Boolean(stopOutreachCandidate)}
+        candidate={stopOutreachCandidate}
+        onClose={() => setStopOutreachCandidate(null)}
+      />
+
       {/* Assess Modal */}
       <AssessModal
         open={isAssessModalOpen}
@@ -447,6 +475,8 @@ export function SourcedCandidatesView({
         }}
         interviewId={selectedAssessInterviewId}
         candidateName={selectedAssessCandidate?.name || ''}
+        candidateId={selectedAssessCandidate?.candidate_id || selectedAssessCandidate?.id}
+        candidateEmail={selectedAssessCandidate?.email}
       />
     </div>
   );
