@@ -485,3 +485,57 @@ try:
     )
 except ValueError:
     EXA_SOURCING_CONTACT_LIFETIME_CAP = 100
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Launch-time employer resolution (services/employer_resolution.py)
+# ─────────────────────────────────────────────────────────────────────────
+# Policy (2026-09-02): whenever a candidate reaching a PAIR launch has no
+# confident employer data (no extracted company_experience and no explicit
+# current_company), fetch their resume and parse it BEFORE outreach — every
+# time — and attach JobDiva's CandidatesProfileDetail work history as
+# corroboration. JobDiva exposes no structured employer field anywhere else
+# (live-probed 2026-09-02), so without this the client-employee and
+# no-contact gates run blind on most JobDiva rows.
+EMPLOYER_RESOLUTION_ENABLED = _os.getenv(
+    "EMPLOYER_RESOLUTION_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# Concurrent resume parses per launch. The extraction pipeline is
+# resume-hash cached, so repeat candidates cost nothing; this bounds the
+# fresh-parse burst against the LLM.
+try:
+    EMPLOYER_RESOLUTION_CONCURRENCY = int(
+        _os.getenv("EMPLOYER_RESOLUTION_CONCURRENCY", "6").strip() or "6"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_CONCURRENCY = 6
+
+# Per-candidate ceiling on one resume parse (crisp + extract LLM calls).
+try:
+    EMPLOYER_RESOLUTION_PER_CANDIDATE_TIMEOUT_S = float(
+        _os.getenv("EMPLOYER_RESOLUTION_PER_CANDIDATE_TIMEOUT_S", "45").strip() or "45"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_PER_CANDIDATE_TIMEOUT_S = 45.0
+
+# Overall wall-clock budget for the resolution pass of ONE launch. Parses
+# that don't start before the budget runs out are skipped (the launch
+# proceeds on stored signals and reports those candidates as
+# employer-unverified); anything parsed is persisted, so the next launch
+# starts warmer.
+try:
+    EMPLOYER_RESOLUTION_BUDGET_S = float(
+        _os.getenv("EMPLOYER_RESOLUTION_BUDGET_S", "180").strip() or "180"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_BUDGET_S = 180.0
+
+# Hard cap on candidates resolved per launch (defence against a pathological
+# batch; normal launches are ≤ LAUNCH_BATCH_SIZE anyway).
+try:
+    EMPLOYER_RESOLUTION_MAX_CANDIDATES = int(
+        _os.getenv("EMPLOYER_RESOLUTION_MAX_CANDIDATES", "300").strip() or "300"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_MAX_CANDIDATES = 300

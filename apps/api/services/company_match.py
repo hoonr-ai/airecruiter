@@ -106,6 +106,27 @@ def is_same_company(company: str, client_name: str) -> bool:
     )
 
 
+def client_appears_in_text(text: str, client_name: str) -> bool:
+    """One-directional containment for NOISY free-text employer lines
+    (JobDiva CandidatesProfileDetail EXPERIENCE.DETAILS — resume fragments
+    with structured dates, attached at launch as jobdiva_profile_experience).
+
+    True only when the client's full token run appears contiguously in the
+    text ("Bank of America" ⊂ "SAS Programmer | Bank of America, Charlotte").
+    Deliberately NEVER the reverse of is_same_company: a fragment like
+    "India" must not match a client whose name merely contains that word —
+    these lines are sentences, not company names, so text-⊂-client would
+    manufacture conflicts out of stray words.
+    """
+    if is_placeholder_client(client_name):
+        return False
+    text_tokens = normalize_company_name(text).split()
+    client_tokens = normalize_company_name(client_name).split()
+    if not text_tokens or not client_tokens:
+        return False
+    return _is_contiguous_sublist(client_tokens, text_tokens)
+
+
 # LinkedIn headline shapes: "Senior Engineer at Google", "PM @ Stripe",
 # "Data Engineer at Meta | ex-Amazon". The company chunk ends at the first
 # separator; a leading "the" is dropped ("Engineer at the Home Depot").

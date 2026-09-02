@@ -2730,6 +2730,98 @@ class JobDivaService:
             )
         return out
 
+    async def fetch_resume_texts(
+        self, candidate_ids: List[str], concurrency: int = 8
+    ) -> Dict[str, str]:
+        """Public wrapper over `_fetch_resume_text_batch` (auth included) for
+        callers outside the search pipeline — the launch-time employer
+        resolution pass fetches resumes for candidates whose stored rows carry
+        none. Returns {candidate_id: resume_text}; failures yield ""."""
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+        token = await self.authenticate()
+        if not token:
+            logger.warning("fetch_resume_texts: JobDiva authentication failed")
+            return {}
+        return await self._fetch_resume_text_batch(token, ids, concurrency=concurrency)
+
+    async def fetch_candidate_profiles_batch(
+        self,
+        candidate_ids: List[str],
+        chunk_size: int = 40,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Batch-fetch /apiv2/bi/CandidatesProfileDetail records keyed by ID.
+
+        Live-probed 2026-09-02: same shape as CandidatesDetail PLUS
+        `EDUCATION` and `EXPERIENCE` — JobDiva's own resume parse, e.g.
+        [{"DATE": "08/2023 - 11/2024", "DETAILS": "Data Engineer | Walmart,
+        Atlanta, USA", "DBID": "7"}]. The DATE ranges are structured and
+        reliable; DETAILS is whatever line the parser latched onto (sometimes
+        the employer header, sometimes a description fragment), and coverage
+        is partial (~27% of a probed sample) — so callers treat this as
+        corroboration/fallback for employer checks, never a primary source.
+        A 40-id batch returned in ~1s, so one call per launch is cheap.
+
+        Failures degrade to {} / missing ids — this feeds a launch-path
+        gate and must never take a launch down.
+        """
+        ids: List[str] = []
+        seen_ids = set()
+        for cid in candidate_ids or []:
+            s = str(cid).strip()
+            if s and s not in seen_ids:
+                seen_ids.add(s)
+                ids.append(s)
+        if not ids:
+            return {}
+        token = await self.authenticate()
+        if not token:
+            logger.warning("fetch_candidate_profiles_batch: JobDiva authentication failed")
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesProfileDetail"
+        results: Dict[str, Dict[str, Any]] = {}
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i:i + chunk_size]
+            for attempt in range(2):
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.get(
+                            endpoint, params={"candidateIds": chunk}, headers=headers
+                        )
+                    if response.status_code == 200:
+                        data = response.json()
+                        payload = data.get("data") if isinstance(data, dict) else data
+                        if isinstance(payload, dict):
+                            payload = [payload]
+                        for record in payload or []:
+                            if not isinstance(record, dict):
+                                continue
+                            cid = get_field(record, ["ID", "id", "candidateId", "CANDIDATEID"])
+                            if cid is not None:
+                                results[str(cid)] = record
+                        break
+                    if (response.status_code == 429 or response.status_code >= 500) and attempt == 0:
+                        await asyncio.sleep(2.0)
+                        continue
+                    logger.warning(
+                        "CandidatesProfileDetail chunk failed: %s - %s",
+                        response.status_code, response.text[:200],
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(2.0)
+                        continue
+                    logger.warning(f"CandidatesProfileDetail chunk error: {e}")
+        logger.info(
+            "CandidatesProfileDetail: %d id(s) requested, %d record(s) returned",
+            len(ids), len(results),
+        )
+        return results
+
     async def get_candidate_details(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed candidate information using /apiv2/bi/CandidatesDetail endpoint."""
         token = await self.authenticate()
