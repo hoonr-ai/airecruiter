@@ -41,7 +41,7 @@ def test_compute_jobs_timeline_recruiter_emails():
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
     mock_cursor.fetchall.return_value = [
-        ("job1", "jd1", "Title", "Cust", "01/01/2026", now, now, now, False, "OPEN", 5, 5, 5, "camp1", '["test@example.com", "other@example.com"]')
+        ("job1", "jd1", "Title", "Cust", "01/01/2026", now, now, now, False, "Reason", "OPEN", 5, 5, 5, "camp1", '["test@example.com", "other@example.com"]')
     ]
     
     result = _compute_jobs_timeline(mock_conn, scope=None)
