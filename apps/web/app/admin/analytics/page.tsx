@@ -501,7 +501,7 @@ export default function AdminAnalyticsPage() {
     if (timelineFilter !== "All" && job.pair_status !== timelineFilter)
       return false;
     if (!timelineQuery) return true;
-    const recruiterMatch = job.recruiter_emails?.some(e => e.toLowerCase().includes(timelineQuery)) ?? false;
+    const recruiterMatch = job.recruiter_emails?.some(e => e.includes(timelineQuery)) ?? false;
     return (
       job.title.toLowerCase().includes(timelineQuery) ||
       job.jobdiva_id.toLowerCase().includes(timelineQuery) ||

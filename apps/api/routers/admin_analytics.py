@@ -129,8 +129,8 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             "candidates_sourced": int(sourced or 0),
             "candidates_launched": launched_count,
             "jobdiva_submittals": jobdiva_subs,
-            "campaign_id": campaign_id,
-            "recruiter_emails": _parse_recruiter_emails(raw_recruiter_emails) if raw_recruiter_emails else []
+            "campaign_id": str(campaign_id or "") or None,
+            "recruiter_emails": _parse_recruiter_emails(raw_recruiter_emails)
         })
 
     return {"rows": timeline, "total": total_jobs}
