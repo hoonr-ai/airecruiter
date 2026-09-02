@@ -33,11 +33,36 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
     the viewer's local timezone and dates can shift by a day.
     """
     cond, params = _mj_filter(scope)
+    dedup_key = "COALESCE(jobdiva_id, job_id::text)"
     with conn.cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) FROM monitored_jobs WHERE {cond}", params)
+        cur.execute(f"SELECT COUNT(DISTINCT {dedup_key}) FROM monitored_jobs WHERE {cond}", params)
         total_jobs = int(cur.fetchone()[0] or 0)
 
         cur.execute(f"""
+            WITH deduped AS (
+                SELECT
+                    job_id,
+                    jobdiva_id,
+                    enhanced_title,
+                    title,
+                    customer_name,
+                    posted_date,
+                    created_at,
+                    pair_launched_at,
+                    outreach_stopped_at,
+                    is_archived,
+                    status,
+                    candidates_sourced,
+                    candidates_launched,
+                    jobdiva_total_subs,
+                    campaign_id,
+                    ROW_NUMBER() OVER(
+                        PARTITION BY {dedup_key}
+                        ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
+                    ) as rn
+                FROM monitored_jobs
+                WHERE {cond}
+            )
             SELECT
                 job_id,
                 jobdiva_id,
@@ -53,8 +78,8 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                 {_int('candidates_launched')},
                 {_int('jobdiva_total_subs')},
                 campaign_id
-            FROM monitored_jobs
-            WHERE {cond}
+            FROM deduped
+            WHERE rn = 1
             ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
             LIMIT 2000
         """, params)
