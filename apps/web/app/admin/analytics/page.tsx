@@ -305,6 +305,8 @@ export default function AdminAnalyticsPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<PairStatusFilter>("All");
+  const [timelineStartDate, setTimelineStartDate] = useState("");
+  const [timelineEndDate, setTimelineEndDate] = useState("");
   const [showAllTimeline, setShowAllTimeline] = useState(false);
   const [liveAccounts, setLiveAccounts] = useState<LinkedInAccount[] | null>(
     null,
@@ -514,6 +516,16 @@ export default function AdminAnalyticsPage() {
   const filteredTimeline = timelineRows.filter((job) => {
     if (timelineFilter !== "All" && job.pair_status !== timelineFilter)
       return false;
+
+    if (timelineStartDate) {
+      const jobDate = job.pair_launched_at || job.added_to_curate_at || job.created_at;
+      if (!jobDate || jobDate < timelineStartDate) return false;
+    }
+    if (timelineEndDate) {
+      const jobDate = job.pair_launched_at || job.added_to_curate_at || job.created_at;
+      if (!jobDate || jobDate > timelineEndDate + "T23:59:59") return false;
+    }
+
     if (!timelineQuery) return true;
     const recruiterMatch = job.recruiter_emails?.some(e => e.includes(timelineQuery)) ?? false;
     return (
@@ -1979,6 +1991,27 @@ export default function AdminAnalyticsPage() {
                   }}
                   placeholder="Search title, ref or client..."
                   className="h-8 w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
+                <input
+                  type="date"
+                  value={timelineStartDate}
+                  onChange={(e) => {
+                    setTimelineStartDate(e.target.value);
+                    setShowAllTimeline(false);
+                  }}
+                  className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+                <span className="text-slate-300 text-[12px] font-medium">-</span>
+                <input
+                  type="date"
+                  value={timelineEndDate}
+                  onChange={(e) => {
+                    setTimelineEndDate(e.target.value);
+                    setShowAllTimeline(false);
+                  }}
+                  className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
               </div>
               <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5">
