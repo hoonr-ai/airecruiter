@@ -46,6 +46,7 @@ interface Job {
   pairExternalSubs: number;
   feedbackCompleted: number;
   timeToFirstPass: number;
+  archiveReason?: string | null;
 }
 
 type SortField = keyof Job;
@@ -260,8 +261,9 @@ export default function DashboardPage() {
           pairExternalSubs: details.pair_external_subs || 0,
           feedbackCompleted: details.feedback_completed || 0,
           timeToFirstPass: parseFloat(details.time_to_first_pass) || 0,
+          archiveReason: details.archive_reason || null,
         };
-      }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
       setAllJobs(jobs);
       allJobsCountRef.current = jobs.length;
@@ -624,10 +626,17 @@ export default function DashboardPage() {
                     </Link>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-r border-slate-100/50 z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] text-center min-w-[220px]">
-                    <div className="flex items-center justify-center gap-2">
-                      <span className="text-[13.5px] font-semibold text-slate-900">{highlight(job.title)}</span>
-                      {job.pairStatus === 'Unpublished' && (
-                        <span className="text-[11px] text-slate-400 font-medium">(draft)</span>
+                    <div className="flex flex-col items-center justify-center gap-0.5">
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="text-[13.5px] font-semibold text-slate-900">{highlight(job.title)}</span>
+                        {job.pairStatus === 'Unpublished' && (
+                          <span className="text-[11px] text-slate-400 font-medium">(draft)</span>
+                        )}
+                      </div>
+                      {activeTab === "archived" && (
+                        <div className="text-[11px] text-slate-500 font-medium bg-slate-100/70 px-2 py-0.5 rounded-sm mt-1 max-w-[200px] truncate" title={job.archiveReason || "—"}>
+                          Reason: {job.archiveReason || "—"}
+                        </div>
                       )}
                     </div>
                   </td>
