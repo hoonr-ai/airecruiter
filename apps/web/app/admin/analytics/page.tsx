@@ -2097,9 +2097,9 @@ export default function AdminAnalyticsPage() {
                     </td>
                     <td className="py-3.5 px-6">
                       {job.recruiter_emails?.length ? (
-                        <div className="flex flex-col gap-1 max-w-[250px]">
+                        <div className="flex flex-col gap-1 max-w-[250px] max-h-[64px] overflow-y-auto pr-1">
                           {job.recruiter_emails.map((email, i) => (
-                            <div key={i} className="text-slate-600 text-[13px] break-all" title={email}>
+                            <div key={i} className="text-slate-600 text-[13px] break-words" title={email}>
                               {email}
                             </div>
                           ))}
