@@ -25,3 +25,27 @@ def test_compute_jobs_timeline_removes_200_limit():
     import re
     assert not re.search(r"LIMIT\s+200\b", query), "Query should not be hard-limited to 200 records"
     assert re.search(r"LIMIT\s+2000\b", query), "Query should be bounded to 2000 records to prevent scalability issues"
+
+def test_compute_jobs_timeline_recruiter_emails():
+    """
+    Test that recruiter_emails are properly parsed and included in the timeline rows.
+    """
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    
+    # Mock total count return
+    mock_cursor.fetchone.return_value = (1,)
+    
+    # Mock data rows
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    mock_cursor.fetchall.return_value = [
+        ("job1", "jd1", "Title", "Cust", "01/01/2026", now, now, now, False, "OPEN", 5, 5, 5, "camp1", '["test@example.com", "other@example.com"]')
+    ]
+    
+    result = _compute_jobs_timeline(mock_conn, scope=None)
+    
+    assert len(result["rows"]) == 1
+    row = result["rows"][0]
+    assert row["recruiter_emails"] == ["test@example.com", "other@example.com"]

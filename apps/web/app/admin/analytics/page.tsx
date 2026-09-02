@@ -74,6 +74,7 @@ interface JobTimelineEntry {
   candidates_launched: number;
   jobdiva_submittals?: number;
   campaign_id: string | null;
+  recruiter_emails?: string[];
 }
 
 interface LaunchSpeed {
@@ -500,10 +501,12 @@ export default function AdminAnalyticsPage() {
     if (timelineFilter !== "All" && job.pair_status !== timelineFilter)
       return false;
     if (!timelineQuery) return true;
+    const recruiterMatch = job.recruiter_emails?.some(e => e.includes(timelineQuery)) ?? false;
     return (
       job.title.toLowerCase().includes(timelineQuery) ||
       job.jobdiva_id.toLowerCase().includes(timelineQuery) ||
-      job.customer_name.toLowerCase().includes(timelineQuery)
+      job.customer_name.toLowerCase().includes(timelineQuery) ||
+      recruiterMatch
     );
   });
   const visibleTimeline = showAllTimeline
@@ -791,12 +794,13 @@ export default function AdminAnalyticsPage() {
 
     const lines = [
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
       ...filteredTimeline.map((job) =>
         [
           escapeCsvField(job.title),
           escapeCsvField(job.jobdiva_id),
           escapeCsvField(job.customer_name),
+          escapeCsvField(job.recruiter_emails?.join(", ") || ""),
           escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
           escapeCsvField(formatDateTime(job.added_to_curate_at)),
           escapeCsvField(formatDateTime(job.curate_launched_at)),
@@ -2004,6 +2008,7 @@ export default function AdminAnalyticsPage() {
               <tr className="font-bold text-slate-500 text-[12.5px]">
                 <th className="py-3 px-6 sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">Job</th>
                 <th className="py-3 px-6">Client</th>
+                <th className="py-3 px-6">Recruiter Emails</th>
                 <th className="py-3 px-6">Posted (JobDiva)</th>
                 <th className="py-3 px-6">Added (PAIR)</th>
                 <th className="py-3 px-6">Launched (PAIR)</th>
@@ -2021,6 +2026,9 @@ export default function AdminAnalyticsPage() {
                     <td className="py-4 px-6 sticky left-0 z-10 bg-white shadow-[1px_0_0_0_#e2e8f0]">
                       <div className="h-4 w-44 bg-slate-100 animate-pulse rounded" />
                       <div className="h-3 w-20 bg-slate-100 animate-pulse rounded mt-1.5" />
+                    </td>
+                    <td className="py-4 px-6">
+                      <div className="h-4 w-24 bg-slate-100 animate-pulse rounded" />
                     </td>
                     <td className="py-4 px-6">
                       <div className="h-4 w-24 bg-slate-100 animate-pulse rounded" />
@@ -2086,6 +2094,19 @@ export default function AdminAnalyticsPage() {
                       >
                         {job.customer_name}
                       </div>
+                    </td>
+                    <td className="py-3.5 px-6">
+                      {job.recruiter_emails?.length ? (
+                        <div className="flex flex-col gap-1 max-w-[200px]">
+                          {job.recruiter_emails.map((email, i) => (
+                            <div key={i} className="text-slate-600 truncate text-[13px]" title={email}>
+                              {email}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-slate-600">—</div>
+                      )}
                     </td>
                     <td className="py-3.5 px-6 whitespace-nowrap">
                       {job.jobdiva_posted_on ? (
