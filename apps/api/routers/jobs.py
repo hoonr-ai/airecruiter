@@ -2169,7 +2169,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             select_sql = (
                 "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.recruiter_emails, mj.status, "
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
-                "mj.processing_status, mj.is_archived, mj.screening_level, "
+                "mj.processing_status, mj.is_archived, mj.archive_reason, mj.screening_level, "
                 "mj.resumes_shortlisted, "
                 "mj.pair_external_subs, mj.pair_submits, mj.feedback_completed, "
                 "mj.candidates_sourced, mj.candidates_launched, "
