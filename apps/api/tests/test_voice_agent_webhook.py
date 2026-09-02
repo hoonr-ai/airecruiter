@@ -411,3 +411,23 @@ def test_real_skipped_scored_question_is_not_excluded():
         "question_order": 10,   # Q10+ → is_scored_question = True
     }
     assert _is_closing_sentence(item) is False
+
+
+def test_voice_agent_webhook_persists_phase_and_channel():
+    """Verify webhook normalizes and persists phase and channel into sourced_candidates.data."""
+    with _mock_webhook_db(audit_row=("cand-10130", "26-26927")) as state:
+        payload = VoiceAgentInterviewWebhook(
+            interview_id="10130",
+            status="in_progress",
+            outreach_phase="phase3",
+            channel="call",
+        )
+        asyncio.run(receive_interview_results(payload))
+
+    blob = state["blobs"][-1]
+    assert blob["engage_status"] == "in_progress"
+    assert blob["phase"] == "phase3"
+    assert blob["outreach_phase"] == "phase3"
+    assert blob["channel"] == "call"
+    assert blob["outreach_channel"] == "call"
+
