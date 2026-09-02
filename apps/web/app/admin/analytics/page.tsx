@@ -26,6 +26,7 @@ import {
   UsersRound,
   BadgeCheck,
   ClipboardCheck,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
@@ -305,6 +306,8 @@ export default function AdminAnalyticsPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<PairStatusFilter>("All");
+  const [timelineStartDate, setTimelineStartDate] = useState("");
+  const [timelineEndDate, setTimelineEndDate] = useState("");
   const [showAllTimeline, setShowAllTimeline] = useState(false);
   const [liveAccounts, setLiveAccounts] = useState<LinkedInAccount[] | null>(
     null,
@@ -514,6 +517,29 @@ export default function AdminAnalyticsPage() {
   const filteredTimeline = timelineRows.filter((job) => {
     if (timelineFilter !== "All" && job.pair_status !== timelineFilter)
       return false;
+
+    if (timelineStartDate || timelineEndDate) {
+      const jobDateIso = job.curate_launched_at || job.added_to_curate_at;
+      if (!jobDateIso) return false;
+
+      // Ensure start is not strictly after end
+      if (timelineStartDate && timelineEndDate && timelineStartDate > timelineEndDate) {
+        return false;
+      }
+
+      const d = new Date(jobDateIso);
+      const formatter = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/New_York",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+      const jobDateET = formatter.format(d);
+
+      if (timelineStartDate && jobDateET < timelineStartDate) return false;
+      if (timelineEndDate && jobDateET > timelineEndDate) return false;
+    }
+
     if (!timelineQuery) return true;
     const recruiterMatch = job.recruiter_emails?.some(e => e.includes(timelineQuery)) ?? false;
     return (
@@ -1980,6 +2006,43 @@ export default function AdminAnalyticsPage() {
                   placeholder="Search title, ref or client..."
                   className="h-8 w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
                 />
+              </div>
+              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
+                <input
+                  type="date"
+                  aria-label="Start date filter"
+                  value={timelineStartDate}
+                  onChange={(e) => {
+                    setTimelineStartDate(e.target.value);
+                    setShowAllTimeline(false);
+                  }}
+                  className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+                <span className="text-slate-300 text-[12px] font-medium">-</span>
+                <input
+                  type="date"
+                  aria-label="End date filter"
+                  value={timelineEndDate}
+                  onChange={(e) => {
+                    setTimelineEndDate(e.target.value);
+                    setShowAllTimeline(false);
+                  }}
+                  className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+                {(timelineStartDate || timelineEndDate) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTimelineStartDate("");
+                      setTimelineEndDate("");
+                      setShowAllTimeline(false);
+                    }}
+                    className="p-1 hover:bg-slate-100 rounded-md text-slate-400 hover:text-slate-600 transition-colors mr-0.5"
+                    aria-label="Clear date filter"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
               <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5">
                 {PAIR_STATUS_FILTERS.map((filterOption) => (
