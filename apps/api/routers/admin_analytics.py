@@ -56,6 +56,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                     candidates_launched,
                     jobdiva_total_subs,
                     campaign_id,
+                    recruiter_emails,
                     ROW_NUMBER() OVER(
                         PARTITION BY {dedup_key}
                         ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
@@ -77,7 +78,8 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                 {_int('candidates_sourced')},
                 {_int('candidates_launched')},
                 {_int('jobdiva_total_subs')},
-                campaign_id
+                campaign_id,
+                recruiter_emails
             FROM deduped
             WHERE rn = 1
             ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
@@ -88,7 +90,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
     timeline = []
     for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
          launched_at, stopped_at, is_archived, status, sourced, launched_count,
-         jobdiva_subs, campaign_id) in rows:
+         jobdiva_subs, campaign_id, raw_recruiter_emails) in rows:
         posted_on = _parse_posted_date(posted_raw)
         lag_days = None
         if launched_at is not None and posted_on is not None:
@@ -125,10 +127,12 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             "jobdiva_status": str(status or ""),
             "pair_status": pair_status,
             "candidates_sourced": int(sourced or 0),
-            "candidates_launched": int(launched_count or 0),
-            "jobdiva_submittals": int(jobdiva_subs or 0),
-            "campaign_id": str(campaign_id or "") or None,
+            "candidates_launched": launched_count,
+            "jobdiva_submittals": jobdiva_subs,
+            "campaign_id": campaign_id,
+            "recruiter_emails": _parse_recruiter_emails(raw_recruiter_emails) if raw_recruiter_emails else []
         })
+
     return {"rows": timeline, "total": total_jobs}
 
 
