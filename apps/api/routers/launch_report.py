@@ -460,8 +460,13 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     first_contact_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
-        outreach = payload.get("outreach") or {}
-        buckets[_bucket_status(outreach.get("outreach_status"))] += 1
+        outreach = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else payload
+        status_raw = (
+            outreach.get("outreach_status")
+            or outreach.get("status")
+            or payload.get("status")
+        )
+        buckets[_bucket_status(status_raw)] += 1
 
         phase = _extract_phase(outreach)
         if phase:
@@ -485,7 +490,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         # Some pair-bot payloads expose a single channel/source at outreach level.
         if not seen_channels and isinstance(outreach, dict):
             fallback_channel = (
-                _normalize_channel(outreach.get("channel"))
+                _normalize_channel(outreach.get("outreach_channel"))
+                or _normalize_channel(outreach.get("channel"))
                 or _normalize_channel(outreach.get("source"))
                 or _normalize_channel(outreach.get("communication_source"))
             )

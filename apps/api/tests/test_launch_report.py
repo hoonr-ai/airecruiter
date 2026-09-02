@@ -598,3 +598,22 @@ def test_query_rows_render_both_timestamp_shapes_in_eastern(pg_conn):
     assert v1["pair_published_at"] == "2026-08-20T08:00:00-04:00"   # IST string
     assert v2["pair_published_at"] == "2026-08-27T14:00:00-04:00"   # NOW() timestamp
     assert v2["version"] == 2
+
+
+def test_summarise_outreach_flat_payload_with_outreach_channel():
+    """Flat PairBot webhook payload must properly resolve status, phase and channel."""
+    flat_payload = {
+        "interview_id": "10144",
+        "jobdiva_id": "26-26878",
+        "status": "completed",
+        "phase": "Phase 3",
+        "outreach_phase": "phase3",
+        "channel": "Web",
+        "outreach_channel": "web",
+        "completed_at": "2026-09-02T14:18:42.509867",
+    }
+    summary = lr._summarise_outreach([flat_payload])
+    assert summary["buckets"]["completed"] == 1
+    assert summary["phases"]["phase3"] == 1
+    assert summary["channels"]["web"] == 1
+
