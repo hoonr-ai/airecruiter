@@ -48,12 +48,18 @@ interface TeamFormState {
 
 const EMPTY_FORM: TeamFormState = { name: "", lead_emails: "", member_emails: "" };
 
-/** ISO datetime → "Feb 24, 2026"; null/invalid → "—". */
+/** ISO datetime → "02/24/2026"; null/invalid → "—". */
 const formatDate = (iso: string | null | undefined): string => {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "2-digit", day: "2-digit", year: "numeric",
+  });
+  const parts = formatter.formatToParts(d);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${p.month}/${p.day}/${p.year}`;
 };
 
 export default function AdminTeamsPage() {
