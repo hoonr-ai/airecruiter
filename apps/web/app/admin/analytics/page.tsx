@@ -260,6 +260,20 @@ const renderLagChip = (lag: number | null) => {
   );
 };
 
+const renderArchivedBadge = (job: JobTimelineEntry) => {
+  const isArchived = job.is_archived;
+  const badgeClass = isArchived
+    ? "bg-slate-100 text-slate-500 border border-slate-200"
+    : "bg-emerald-50 text-emerald-700 border border-emerald-200";
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase ${badgeClass}`}
+    >
+      {isArchived ? "Archived" : "Active"}
+    </span>
+  );
+};
+
 const renderPairStatusBadge = (status: JobTimelineEntry["pair_status"]) => {
   const badgeClass =
     status === "Active"
@@ -794,7 +808,7 @@ export default function AdminAnalyticsPage() {
 
     const lines = [
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
       ...filteredTimeline.map((job) =>
         [
           escapeCsvField(job.title),
@@ -812,6 +826,7 @@ export default function AdminAnalyticsPage() {
                 ? "n/a"
                 : String(job.posted_to_launch_days),
           ),
+          escapeCsvField(job.is_archived ? "Archived" : "Active"),
           escapeCsvField(job.pair_status),
           job.candidates_sourced,
           job.candidates_launched,
@@ -2013,6 +2028,7 @@ export default function AdminAnalyticsPage() {
                 <th className="py-3 px-6">Added (PAIR)</th>
                 <th className="py-3 px-6">Launched (PAIR)</th>
                 <th className="py-3 px-6 text-center">Lag</th>
+                <th className="py-3 px-6 text-center">Active / Archived Jobs</th>
                 <th className="py-3 px-6 text-center">PAIR Status</th>
                 <th className="py-3 px-6 text-center">Sourced</th>
                 <th className="py-3 px-6 text-center">Launched</th>
@@ -2049,6 +2065,9 @@ export default function AdminAnalyticsPage() {
                       <div className="h-5 w-16 bg-slate-100 animate-pulse rounded-full mx-auto" />
                     </td>
                     <td className="py-4 px-6 text-center">
+                      <div className="h-5 w-16 bg-slate-100 animate-pulse rounded-full mx-auto" />
+                    </td>
+                    <td className="py-4 px-6 text-center">
                       <div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" />
                     </td>
                     <td className="py-4 px-6 text-center">
@@ -2062,7 +2081,7 @@ export default function AdminAnalyticsPage() {
               ) : filteredTimeline.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={12}
                     className="py-12 text-center text-slate-400 text-[13px]"
                   >
                     {timelineRows.length === 0
@@ -2129,6 +2148,9 @@ export default function AdminAnalyticsPage() {
                     </td>
                     <td className="py-3.5 px-6 text-center whitespace-nowrap">
                       {renderLagChip(job.posted_to_launch_days)}
+                    </td>
+                    <td className="py-3.5 px-6 text-center">
+                      {renderArchivedBadge(job)}
                     </td>
                     <td className="py-3.5 px-6 text-center">
                       {renderPairStatusBadge(job.pair_status)}
