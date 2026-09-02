@@ -49,3 +49,4 @@ def test_compute_jobs_timeline_recruiter_emails():
     assert len(result["rows"]) == 1
     row = result["rows"][0]
     assert row["recruiter_emails"] == ["test@example.com", "other@example.com"]
+    assert row["archive_reason"] == "Reason"

@@ -2175,7 +2175,7 @@ export default function AdminAnalyticsPage() {
                       {job.is_archived && (
                         <div
                           className="mt-1.5 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500 max-w-full"
-                          title={job.archive_reason || "No reason provided"}
+                          title={job.archive_reason || "—"}
                         >
                           Reason: <span className="truncate ml-1">{job.archive_reason || "—"}</span>
                         </div>
