@@ -51,6 +51,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                     pair_launched_at,
                     outreach_stopped_at,
                     is_archived,
+                    archive_reason,
                     status,
                     candidates_sourced,
                     candidates_launched,
@@ -74,6 +75,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                 ({_ts('pair_launched_at')}) AT TIME ZONE 'UTC' AS pair_launched_at,
                 ({_ts('outreach_stopped_at')}) AT TIME ZONE 'UTC' AS outreach_stopped_at,
                 COALESCE(is_archived, FALSE) AS is_archived,
+                archive_reason,
                 status,
                 {_int('candidates_sourced')},
                 {_int('candidates_launched')},
@@ -89,7 +91,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
 
     timeline = []
     for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
-         launched_at, stopped_at, is_archived, status, sourced, launched_count,
+         launched_at, stopped_at, is_archived, archive_reason, status, sourced, launched_count,
          jobdiva_subs, campaign_id, raw_recruiter_emails) in rows:
         posted_on = _parse_posted_date(posted_raw)
         lag_days = None
@@ -124,6 +126,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             "outreach_stopped_at": _iso(stopped_at),
             "posted_to_launch_days": lag_days,
             "is_archived": bool(is_archived),
+            "archive_reason": archive_reason,
             "jobdiva_status": str(status or ""),
             "pair_status": pair_status,
             "candidates_sourced": int(sourced or 0),
