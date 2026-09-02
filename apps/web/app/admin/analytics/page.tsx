@@ -162,7 +162,7 @@ const PAIR_STATUS_FILTERS = [
 ] as const;
 type PairStatusFilter = (typeof PAIR_STATUS_FILTERS)[number];
 
-/** ISO date/datetime → "Feb 24, 2026"; null/invalid → "—". */
+/** ISO date/datetime → "02/24/2026"; null/invalid → "—". */
 const formatDate = (iso: string | null | undefined): string => {
   if (!iso) return "—";
   const d = /^\d{4}-\d{2}-\d{2}$/.test(iso)
@@ -171,25 +171,27 @@ const formatDate = (iso: string | null | undefined): string => {
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", {
     timeZone: "America/New_York",
-    month: "short",
-    day: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     year: "numeric",
   });
 };
 
-/** ISO date/datetime → "Feb 24, 2026, 10:30 AM EST"; null/invalid → "—". */
+/** ISO date/datetime → "02/24/2026 10:30:05 EST"; null/invalid → "—". */
 const formatDateTime = (iso: string | null | undefined): string => {
   const date = normalizeToUtcDate(iso);
   if (!date) return "—";
   return date.toLocaleString("en-US", {
     timeZone: "America/New_York",
-    month: "short",
-    day: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
     timeZoneName: "short"
-  });
+  }).replace(",", "");
 };
 
 /** ISO Monday date → "Jun 1". */
