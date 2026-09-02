@@ -371,7 +371,7 @@ def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any
     if not job_keys:
         return {}
     sql = """
-        SELECT jobdiva_id, interview_id, candidate_id, created_at
+        SELECT jobdiva_id, interview_id, candidate_id, created_at, response
         FROM engage_interview_audit
         WHERE jobdiva_id = ANY(%s)
           AND NULLIF(interview_id, '') IS NOT NULL
@@ -461,16 +461,14 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
-        # Merge payload and nested outreach dict (outreach dict keys take precedence)
-        # so status, phase, and channel fallbacks are fully symmetric regardless of
-        # whether PairBot nests outreach, sends flat keys, or mixes both.
         merged = {**payload, **outreach_dict}
 
         status_raw = (
             merged.get("outreach_status")
             or merged.get("status")
         )
-        buckets[_bucket_status(status_raw)] += 1
+        if status_raw:
+            buckets[_bucket_status(status_raw)] += 1
 
         phase = _extract_phase(merged)
         if phase:
@@ -559,9 +557,9 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if completed:
             first_completed_at.append(completed)
 
-        if feedback_type and has_reason:
+        if feedback_type in ("submit", "reject") and (completed or attempted):
             elapsed = _minutes_between(
-                _parse_iso(row.get("engage_completed_at")),
+                completed or attempted,
                 _parse_iso(row.get("feedback_at")),
             )
             if elapsed is not None:
@@ -585,11 +583,62 @@ def _build_row(
     outreach_by_interview: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     cand = _summarise_candidates(candidate_rows)
-    payloads = [
-        outreach_by_interview[str(a["interview_id"])]
-        for a in audit_rows
-        if str(a["interview_id"]) in outreach_by_interview
-    ]
+
+    cand_by_interview = {
+        str(c["engage_interview_id"]): c
+        for c in candidate_rows
+        if c.get("engage_interview_id")
+    }
+
+    payloads = []
+    for a in audit_rows:
+        iid = str(a.get("interview_id") or "")
+        if not iid:
+            continue
+
+        # Layer 1: Local DB Candidate Row (populated by Voice Agent webhooks)
+        cand_data = cand_by_interview.get(iid) or {}
+        cand_fallback = {}
+        if cand_data.get("engage_status"):
+            cand_fallback["outreach_status"] = cand_data["engage_status"]
+        raw_p = cand_data.get("outreach_phase") or cand_data.get("phase")
+        if raw_p:
+            cand_fallback["outreach_phase"] = raw_p
+        raw_c = cand_data.get("outreach_channel") or cand_data.get("channel")
+        if raw_c:
+            cand_fallback["outreach_channel"] = raw_c
+        if cand_data.get("first_attempted_at"):
+            cand_fallback["first_attempted_at"] = cand_data["first_attempted_at"]
+        raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
+        if raw_comp:
+            cand_fallback["first_completed_at"] = raw_comp
+
+        # Layer 2: Local DB Audit Row Response (populated during launch & webhooks)
+        raw_resp = a.get("response")
+        audit_fallback = {}
+        if isinstance(raw_resp, dict):
+            audit_fallback = raw_resp
+        elif isinstance(raw_resp, str) and raw_resp.strip():
+            try:
+                audit_fallback = json.loads(raw_resp)
+            except Exception:
+                audit_fallback = {}
+
+        # Layer 3: Live PairBot HTTP API Response
+        live_api = outreach_by_interview.get(iid) or {}
+
+        # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
+        # Non-null values from higher layers override lower layers
+        merged_payload = {**cand_fallback}
+        for source in (audit_fallback, live_api):
+            if isinstance(source, dict):
+                for k, v in source.items():
+                    if v is not None:
+                        merged_payload[k] = v
+
+        if merged_payload:
+            payloads.append(merged_payload)
+
     outreach = _summarise_outreach(payloads)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
