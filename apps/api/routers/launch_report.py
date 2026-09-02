@@ -460,19 +460,23 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     first_contact_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
-        outreach = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else payload
+        outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+        # Merge payload and nested outreach dict (outreach dict keys take precedence)
+        # so status, phase, and channel fallbacks are fully symmetric regardless of
+        # whether PairBot nests outreach, sends flat keys, or mixes both.
+        merged = {**payload, **outreach_dict}
+
         status_raw = (
-            outreach.get("outreach_status")
-            or outreach.get("status")
-            or payload.get("status")
+            merged.get("outreach_status")
+            or merged.get("status")
         )
         buckets[_bucket_status(status_raw)] += 1
 
-        phase = _extract_phase(outreach)
+        phase = _extract_phase(merged)
         if phase:
             phases[phase] += 1
 
-        comms = payload.get("communications") or []
+        comms = payload.get("communications") or merged.get("communications") or []
         seen_channels = set()
         sent_times: List[datetime.datetime] = []
         responded_times: List[datetime.datetime] = []
@@ -488,12 +492,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 responded_times.append(responded)
 
         # Some pair-bot payloads expose a single channel/source at outreach level.
-        if not seen_channels and isinstance(outreach, dict):
+        if not seen_channels:
             fallback_channel = (
-                _normalize_channel(outreach.get("outreach_channel"))
-                or _normalize_channel(outreach.get("channel"))
-                or _normalize_channel(outreach.get("source"))
-                or _normalize_channel(outreach.get("communication_source"))
+                _normalize_channel(merged.get("outreach_channel"))
+                or _normalize_channel(merged.get("channel"))
+                or _normalize_channel(merged.get("source"))
+                or _normalize_channel(merged.get("communication_source"))
             )
             if fallback_channel:
                 seen_channels.add(fallback_channel)

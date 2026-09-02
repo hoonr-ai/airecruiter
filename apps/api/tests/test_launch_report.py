@@ -617,3 +617,17 @@ def test_summarise_outreach_flat_payload_with_outreach_channel():
     assert summary["phases"]["phase3"] == 1
     assert summary["channels"]["web"] == 1
 
+
+def test_summarise_outreach_mixed_nested_flat_payload():
+    """Mixed nested outreach status and flat phase/channel must resolve symmetrically."""
+    mixed_payload = {
+        "outreach": {"outreach_status": "completed"},
+        "outreach_phase": "phase3",
+        "outreach_channel": "web",
+    }
+    summary = lr._summarise_outreach([mixed_payload])
+    assert summary["buckets"]["completed"] == 1
+    assert summary["phases"]["phase3"] == 1
+    assert summary["channels"]["web"] == 1
+
+
