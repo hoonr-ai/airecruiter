@@ -121,18 +121,46 @@ def matches_no_contact_company(
 
 # ── candidate-level check + flag stamping ─────────────────────────────────
 
+def _stated_current_employer(candidate: Dict[str, Any]) -> str:
+    """The candidate's own interview answer to "which company do you currently
+    work for?" (persisted by the voice-agent webhook as
+    data.stated_current_employer). Free text — only ever matched with the
+    keyword scan, whose keyword-⊂-text direction is safe for sentences."""
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    return str(
+        candidate.get("stated_current_employer") or data.get("stated_current_employer") or ""
+    ).strip()
+
+
 def check_no_contact(
     candidate: Dict[str, Any], keywords: Optional[List[str]] = None
 ) -> Optional[Dict[str, str]]:
-    """{"company", "keyword", "relation": "current"|"last"} when the candidate's
-    current or last employer matches the no-contact list, else None."""
+    """{"company", "keyword", "relation"} when the candidate's employer matches
+    the no-contact list, else None. Relations, strongest first:
+
+      "stated"    — the candidate SAID so in a PAIR interview;
+      "current"   — a current employer-of-record signal matches;
+      "placement" — currently placed AT a listed company via a vendor
+                    (end_client on a current experience entry);
+      "last"      — most recent past employer matches (fallback signal).
+    """
     kws = keywords if keywords is not None else get_no_contact_companies()
     if not kws:
         return None
+    stated = _stated_current_employer(candidate)
+    if stated:
+        kw = matches_no_contact_company(stated, kws)
+        if kw:
+            return {"company": stated[:120], "keyword": kw, "relation": "stated"}
     for comp in collect_current_companies(candidate):
         kw = matches_no_contact_company(comp, kws)
         if kw:
             return {"company": comp, "keyword": kw, "relation": "current"}
+    from services.company_match import collect_current_end_clients
+    for comp in collect_current_end_clients(candidate):
+        kw = matches_no_contact_company(comp, kws)
+        if kw:
+            return {"company": comp, "keyword": kw, "relation": "placement"}
     for comp in collect_last_companies(candidate):
         kw = matches_no_contact_company(comp, kws)
         if kw:
@@ -155,10 +183,16 @@ def apply_no_contact_flag(candidate: Dict[str, Any]) -> bool:
         logger.warning(f"no_contact check failed (flag left as-is): {exc}")
         return bool(candidate.get("no_contact"))
     if hit:
-        relation = "Current" if hit["relation"] == "current" else "Last"
+        relation_phrases = {
+            "current": "Current employer",
+            "last": "Last employer",
+            "placement": "Current placement (end client)",
+            "stated": "Stated current employer (interview answer)",
+        }
+        phrase = relation_phrases.get(hit["relation"], "Employer")
         candidate["no_contact"] = True
         candidate["no_contact_reason"] = (
-            f"{relation} employer '{hit['company']}' is on the no-contact list"
+            f"{phrase} '{hit['company']}' is on the no-contact list"
             f" ({hit['keyword']})"
         )
         candidate["no_contact_company"] = hit["keyword"]

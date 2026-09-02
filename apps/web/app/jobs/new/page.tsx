@@ -7525,6 +7525,11 @@ function NewJobPageContent() {
     // offer extended, …) — the server may know company data the FE's own
     // pre-filter (hardFilterSkipIds) couldn't see.
     let serverExcluded: { candidate_id: string; name?: string; reason: string }[] = [];
+    // Candidates that LAUNCHED with an employer the backend couldn't verify —
+    // the client-employee / no-contact checks had nothing to judge for them
+    // (no resume, no parsed history). Surfaced so the recruiter knows the
+    // company checks ran blind for these, instead of the old silent pass.
+    let serverUnverifiedEmployer: { candidate_id: string; name?: string; employer_verification: string }[] = [];
     // Ids of candidates whose save batch succeeded — the single launch call
     // below engages exactly these (in order).
     const savedCandidateIds: string[] = [];
@@ -7842,6 +7847,7 @@ function NewJobPageContent() {
                 })
                 .filter(Boolean);
               serverExcluded = evt.excluded_candidates || [];
+              serverUnverifiedEmployer = evt.employer_unverified || [];
             }
           }
         );
@@ -7926,6 +7932,13 @@ function NewJobPageContent() {
           .slice(0, 3)
           .map((e) => e.reason)
           .join(", ")})`,
+        "info",
+      );
+    }
+
+    if (serverUnverifiedEmployer.length > 0) {
+      showToast(
+        `${serverUnverifiedEmployer.length} candidate${serverUnverifiedEmployer.length === 1 ? "" : "s"} launched with an unverified employer — the client/no-contact checks had nothing to judge (no resume or work history on file)`,
         "info",
       );
     }

@@ -539,3 +539,13 @@ try:
     )
 except ValueError:
     EMPLOYER_RESOLUTION_MAX_CANDIDATES = 300
+
+# Ask every PAIR interview "which company do you currently work for?" (one
+# extra pre-screen question appended at payload build; see
+# services/stated_employer.py). The answer comes back on the PairBot webhook,
+# is persisted as data.stated_current_employer, and re-runs the no-contact +
+# hiring-client checks — the post-launch backstop for candidates whose
+# employer the launch-time resolution pass could not verify.
+EMPLOYER_QUESTION_ENABLED = _os.getenv(
+    "EMPLOYER_QUESTION_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}

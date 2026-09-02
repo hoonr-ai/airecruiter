@@ -171,6 +171,43 @@ def _entry_is_current(exp: Dict[str, Any]) -> bool:
     )
 
 
+def _entry_end_raw(exp: Dict[str, Any]) -> str:
+    return str(
+        exp.get("end_date") or exp.get("endDate") or exp.get("to") or exp.get("end") or ""
+    ).strip()
+
+
+def _current_entries(exp_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The entries of one experience list that describe employment TODAY.
+
+    List-aware tightening of `_entry_is_current` (kept above for its existing
+    importers): that helper reads ANY entry with a missing end date as
+    current, so an LLM omission on a decade-old job manufactured a "current
+    employer" and a false client-conflict/no-contact hit. Here:
+
+      - explicit markers always win (is_current/current True, or an end text
+        containing "present"/"current"); explicit False always loses;
+      - a missing end date counts as current ONLY for the FIRST entry —
+        every source emits reverse-chronologically, so an undated entry
+        deeper in the list is an unknown, not an ongoing job.
+    """
+    entries = [e for e in exp_list if isinstance(e, dict)]
+    out: List[Dict[str, Any]] = []
+    for idx, exp in enumerate(entries):
+        if exp.get("is_current") is False or exp.get("current") is False:
+            continue
+        end_raw = _entry_end_raw(exp).lower()
+        if (
+            exp.get("is_current") is True
+            or exp.get("current") is True
+            or "present" in end_raw
+            or "current" in end_raw
+            or (not end_raw and idx == 0)
+        ):
+            out.append(exp)
+    return out
+
+
 def collect_current_companies(candidate: Dict[str, Any]) -> List[str]:
     """Every signal of the candidate's CURRENT employer available on a
     stored/sourced candidate row, across all sources:
@@ -201,16 +238,15 @@ def collect_current_companies(candidate: Dict[str, Any]) -> List[str]:
     ]:
         if not isinstance(exp_list, list):
             continue
-        for exp in exp_list:
-            if isinstance(exp, dict) and _entry_is_current(exp):
-                comp = (
-                    exp.get("company")
-                    or exp.get("company_name")
-                    or exp.get("employer")
-                    or exp.get("name")
-                )
-                if comp and str(comp).strip():
-                    companies.append(str(comp).strip())
+        for exp in _current_entries(exp_list):
+            comp = (
+                exp.get("company")
+                or exp.get("company_name")
+                or exp.get("employer")
+                or exp.get("name")
+            )
+            if comp and str(comp).strip():
+                companies.append(str(comp).strip())
 
     for headline_field in [data.get("headline"), data.get("title"), candidate.get("headline"), candidate.get("title")]:
         parsed = extract_company_from_headline(str(headline_field or ""))
@@ -221,6 +257,40 @@ def collect_current_companies(candidate: Dict[str, Any]) -> List[str]:
     seen = set()
     out = []
     for comp in companies:
+        key = comp.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(comp)
+    return out
+
+
+def collect_current_end_clients(candidate: Dict[str, Any]) -> List[str]:
+    """END-CLIENT signals from CURRENT experience entries only: the company a
+    consultant is placed AT, when the resume names both an employer of record
+    and the client it serves ("Client: Walmart", "TCS – deployed at Walmart").
+    The extraction prompt writes these as `end_client` on company_experience
+    entries. Current-only by design — a finished project at a company is not
+    a placement conflict, but someone on-site at the client TODAY is, even
+    though their employer of record is a vendor."""
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
+
+    clients: List[str] = []
+    for exp_list in [
+        data.get("company_experience") or enhanced.get("company_experience") or [],
+        data.get("exa_recent_companies") or enhanced.get("exa_recent_companies") or [],
+    ]:
+        if not isinstance(exp_list, list):
+            continue
+        for exp in _current_entries(exp_list):
+            ec = exp.get("end_client") or exp.get("endClient")
+            if ec and str(ec).strip():
+                clients.append(str(ec).strip())
+
+    seen = set()
+    out = []
+    for comp in clients:
         key = comp.lower()
         if key in seen:
             continue
@@ -307,7 +377,8 @@ def collect_last_companies(candidate: Dict[str, Any]) -> List[str]:
             companies.append(str(c_str).strip())
 
     for exp_list in _experience_lists(candidate):
-        past = [e for e in exp_list if not _entry_is_current(e)]
+        current_ids = {id(e) for e in _current_entries(exp_list)}
+        past = [e for e in exp_list if id(e) not in current_ids]
         if not past:
             continue
         dated = [(key, e) for e in past if (key := _end_sort_key(e)) is not None]
@@ -347,6 +418,11 @@ def currently_employed_by_client(candidate: Dict[str, Any], client_name: str) ->
     for comp in collect_current_companies(candidate):
         if is_same_company(comp, client_name):
             return comp
+    # Placement counts too: a consultant on-site at the client through a
+    # vendor is the client's worker for sourcing purposes.
+    for comp in collect_current_end_clients(candidate):
+        if is_same_company(comp, client_name):
+            return comp
     return None
 
 
@@ -376,6 +452,12 @@ def employed_by_client(
     for comp in current:
         if is_same_company(comp, client_name):
             return {"company": comp, "relation": "current"}
+    # Placement: currently working AT the client through a vendor/employer of
+    # record. A named current employer does NOT clear this rung — employed by
+    # TCS, deployed at the client, is still on-site at the client today.
+    for comp in collect_current_end_clients(candidate):
+        if is_same_company(comp, client_name):
+            return {"company": comp, "relation": "placement"}
     if current:
         # A current employer is on file and it is not the client — done.
         return None
@@ -427,6 +509,11 @@ def client_conflict_reason(hit: Dict[str, str], client_name: str) -> str:
         return (
             f"Current employer '{hit.get('company')}' is the hiring client "
             f"({client_name})"
+        )
+    if hit.get("relation") == "placement":
+        return (
+            f"Currently placed at the hiring client ({client_name}) — "
+            f"end client '{hit.get('company')}'"
         )
     return (
         f"No current employer on file; most recent employer "
