@@ -22,6 +22,7 @@ than failing the report.
 """
 import asyncio
 import datetime
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -352,7 +353,11 @@ def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str,
             data->>'first_completed_at'   AS first_completed_at,
             data->>'engage_completed_at'  AS engage_completed_at,
             data->>'engage_status'        AS engage_status,
-            data->>'engage_interview_id'  AS engage_interview_id
+            data->>'engage_interview_id'  AS engage_interview_id,
+            data->>'phase'                AS phase,
+            data->>'outreach_phase'       AS outreach_phase,
+            data->>'channel'              AS channel,
+            data->>'outreach_channel'     AS outreach_channel
         FROM sourced_candidates
         WHERE jobdiva_id = ANY(%s)
     """
@@ -467,8 +472,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
             merged.get("outreach_status")
             or merged.get("status")
         )
-        if status_raw:
-            buckets[_bucket_status(status_raw)] += 1
+        buckets[_bucket_status(status_raw)] += 1
 
         phase = _extract_phase(merged)
         if phase:
@@ -557,9 +561,9 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if completed:
             first_completed_at.append(completed)
 
-        if feedback_type in ("submit", "reject") and (completed or attempted):
+        if feedback_type and has_reason:
             elapsed = _minutes_between(
-                completed or attempted,
+                _parse_iso(row.get("engage_completed_at")),
                 _parse_iso(row.get("feedback_at")),
             )
             if elapsed is not None:
