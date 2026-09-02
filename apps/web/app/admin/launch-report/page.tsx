@@ -84,43 +84,46 @@ function yesterdayEastern(): string {
   return yesterday.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 }
 
-/** ISO date-only → "Feb 24, 2026"; null/invalid → "—". */
+/** ISO date-only → "02/24/2026"; null/invalid → "—". */
 function formatDate(iso: string | null | undefined): string {
   // Date-only strings are calendar values, not instants. Parse at noon UTC so
   // rendering in America/New_York never rolls to the previous day.
   if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
     const [y, m, d] = iso.split("-").map((v) => Number(v));
     const safe = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-    return safe.toLocaleDateString("en-US", {
+    const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
+      month: "2-digit", day: "2-digit", year: "numeric",
     });
+    const parts = formatter.formatToParts(safe);
+    const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+    return `${p.month}/${p.day}/${p.year}`;
   }
   const d = normalizeToUtcDate(iso);
   if (!d) return "—";
-  return d.toLocaleDateString("en-US", {
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
+    month: "2-digit", day: "2-digit", year: "numeric",
   });
+  const parts = formatter.formatToParts(d);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${p.month}/${p.day}/${p.year}`;
 }
 
-/** ISO datetime → "Feb 24, 2026, 10:30 AM EST"; null/invalid → "—". */
+/** ISO datetime → "02/24/2026 10:30:05 EST"; null/invalid → "—". */
 function formatDateTime(iso: string | null | undefined): string {
   const d = normalizeToUtcDate(iso);
   if (!d) return "—";
-  return d.toLocaleString("en-US", {
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
+    month: "2-digit", day: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false, timeZoneName: "short",
   });
+  const parts = formatter.formatToParts(d);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  const hr = p.hour === '24' ? '00' : p.hour;
+  return `${p.month}/${p.day}/${p.year} ${hr}:${p.minute}:${p.second} ${p.timeZoneName}`;
 }
 
 /** Minutes → "45m" / "1h 22m" / "2d 3h"; null → "—". */

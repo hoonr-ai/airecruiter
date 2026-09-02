@@ -169,29 +169,29 @@ const formatDate = (iso: string | null | undefined): string => {
     ? new Date(`${iso}T00:00:00`)
     : new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-US", {
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    month: "2-digit",
-    day: "2-digit",
-    year: "numeric",
+    month: "2-digit", day: "2-digit", year: "numeric",
   });
+  const parts = formatter.formatToParts(d);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${p.month}/${p.day}/${p.year}`;
 };
 
 /** ISO date/datetime → "02/24/2026 10:30:05 EST"; null/invalid → "—". */
 const formatDateTime = (iso: string | null | undefined): string => {
   const date = normalizeToUtcDate(iso);
   if (!date) return "—";
-  return date.toLocaleString("en-US", {
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    month: "2-digit",
-    day: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-    timeZoneName: "short"
-  }).replace(",", "");
+    month: "2-digit", day: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false, timeZoneName: "short"
+  });
+  const parts = formatter.formatToParts(date);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  const hr = p.hour === '24' ? '00' : p.hour;
+  return `${p.month}/${p.day}/${p.year} ${hr}:${p.minute}:${p.second} ${p.timeZoneName}`;
 };
 
 /** ISO Monday date → "Jun 1". */
