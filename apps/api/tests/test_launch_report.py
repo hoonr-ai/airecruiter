@@ -631,3 +631,28 @@ def test_summarise_outreach_mixed_nested_flat_payload():
     assert summary["channels"]["web"] == 1
 
 
+def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys():
+    """When PairBot live API is missing channel/phase or empty, candidate DB fallback populates the report."""
+    job = _job(1)
+    cand_rows = [
+        {
+            "engage_interview_id": "10144",
+            "candidate_id": "cand_1",
+            "engage_status": "completed",
+            "outreach_phase": "phase3",
+            "outreach_channel": "web",
+            "first_completed_at": "2026-09-02T14:18:42.509867",
+        }
+    ]
+    audit_rows = [{"interview_id": "10144", "response": None}]
+    # PairBot live HTTP API returns partial response without channel/phase
+    outreach_by_interview = {"10144": {"outreach_status": "completed"}}
+
+    row = lr._build_row(job, cand_rows, audit_rows, outreach_by_interview)
+
+    assert row["completed"] == 1
+    assert row["web"] == 1
+    assert row["phase3"] == 1
+
+
+
