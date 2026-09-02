@@ -432,6 +432,7 @@ export default function LaunchReportPage() {
             <input
               id="report-date"
               type="date"
+              lang="en-US"
               value={selectedDate}
               max={maxDate}
               required
