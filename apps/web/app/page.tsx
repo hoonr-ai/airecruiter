@@ -263,7 +263,7 @@ export default function DashboardPage() {
           timeToFirstPass: parseFloat(details.time_to_first_pass) || 0,
           archiveReason: details.archive_reason || null,
         };
-      }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
       setAllJobs(jobs);
       allJobsCountRef.current = jobs.length;
