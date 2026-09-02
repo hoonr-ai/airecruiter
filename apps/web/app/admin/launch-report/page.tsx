@@ -432,6 +432,9 @@ export default function LaunchReportPage() {
             <input
               id="report-date"
               type="date"
+              // Deliberately override <html lang="en"> to force MM/DD/YYYY in Chromium/Firefox.
+              // Note: Safari ignores this and falls back to OS locale (accepted limitation for Admin tools).
+              lang="en-US"
               value={selectedDate}
               max={maxDate}
               required
