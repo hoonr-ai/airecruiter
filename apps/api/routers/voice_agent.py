@@ -277,6 +277,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 # gate, the no-contact flag and /candidates/save all read
                 # stated_current_employer — and re-run the checks the launch
                 # may have run blind. Must never break webhook processing.
+                stated_answer = None
                 try:
                     from services.stated_employer import (
                         extract_stated_employer,
@@ -284,6 +285,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     )
                     stated = extract_stated_employer(detail_payload.get("transcriptions"))
                     if stated:
+                        stated_answer = stated
                         candidate_blob["stated_current_employer"] = stated
                         candidate_blob["stated_employer_at"] = now_iso
                         client_name = ""
@@ -390,7 +392,46 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         ),
                     )
 
-                
+                # Person-wide stated-employer propagation (phase 3): the
+                # answer is a fact about the PERSON, and for JobDiva rows
+                # candidate_id IS the person id — stamp it on the candidate's
+                # rows for every other job so their launch gates and
+                # no-contact flags see it too. The conflict string stays on
+                # this job's row only (it names this job's client). Guarded on
+                # value so repeat webhooks (in_progress → completed) don't
+                # rewrite rows, and non-fatal — outreach state must persist
+                # even if propagation fails.
+                if stated_answer and target_candidate_id:
+                    try:
+                        cur.execute(
+                            """
+                            UPDATE sourced_candidates
+                            SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE candidate_id = %s
+                              AND COALESCE(data->>'stated_current_employer', '')
+                                  IS DISTINCT FROM %s
+                            """,
+                            (
+                                json.dumps({
+                                    "stated_current_employer": stated_answer,
+                                    "stated_employer_at": now_iso,
+                                }),
+                                str(target_candidate_id),
+                                stated_answer,
+                            ),
+                        )
+                        if cur.rowcount:
+                            logger.info(
+                                "stated_employer_propagated candidate=%s rows=%d",
+                                target_candidate_id, cur.rowcount,
+                            )
+                    except Exception as _prop_err:  # noqa: BLE001
+                        logger.warning(
+                            "stated-employer propagation failed (webhook continues): %s",
+                            _prop_err,
+                        )
+
             conn.commit()
 
         # Check for pass condition and fire email if needed.

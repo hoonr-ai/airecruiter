@@ -36,6 +36,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -154,32 +155,132 @@ def has_confident_employer_signal(candidate: Dict[str, Any]) -> bool:
     return False
 
 
+_RESUME_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+
+def _parse_resume_ts(raw: Any) -> Optional[datetime]:
+    m = _RESUME_TS_RE.match(str(raw or "").strip())
+    if not m:
+        return None
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _stale_months_knob() -> int:
+    try:
+        from core import sourcing_config as _sc
+        return int(getattr(_sc, "EMPLOYER_STALE_RESUME_MONTHS", 12) or 0)
+    except Exception:  # noqa: BLE001
+        return 12
+
+
+def resume_is_stale(candidate: Dict[str, Any]) -> bool:
+    """True when the candidate's employer evidence rests on a resume whose
+    JobDiva timestamp (stamped as `resume_updated_at` by
+    `stamp_resume_freshness`) is older than EMPLOYER_STALE_RESUME_MONTHS.
+    No timestamp on the row → not stale (freshness is advisory; an absent
+    signal must not downgrade anyone)."""
+    months = _stale_months_knob()
+    if months <= 0:
+        return False
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    ts = _parse_resume_ts(
+        candidate.get("resume_updated_at") or data.get("resume_updated_at")
+    )
+    if ts is None:
+        return False
+    return ts < datetime.now(timezone.utc) - timedelta(days=months * 30)
+
+
 def employer_verification_state(candidate: Dict[str, Any]) -> str:
     """How well we know this candidate's employer, after resolution:
 
-      'verified'     — structured current/last-employer signals exist (the
-                       gate judged real company names);
-      'profile_only' — only JobDiva's noisy profile lines exist (the gate
-                       ran its text fallback over them);
-      'unverified'   — nothing at all; the client/no-contact checks had
-                       nothing to judge. Passing the gate in this state means
-                       UNKNOWN, not clean.
+      'verified'       — structured current/last-employer signals exist (the
+                         gate judged real company names), or the candidate
+                         stated their employer in a PAIR interview;
+      'verified_stale' — structured signals exist, but the resume they were
+                         parsed from is older than EMPLOYER_STALE_RESUME_MONTHS
+                         — its "Present" may no longer be true;
+      'profile_only'   — only JobDiva's noisy profile lines exist (the gate
+                         ran its text fallback over them);
+      'unverified'     — nothing at all; the client/no-contact checks had
+                         nothing to judge. Passing the gate in this state
+                         means UNKNOWN, not clean.
     """
     data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
     if str(
         data.get("stated_current_employer") or candidate.get("stated_current_employer") or ""
     ).strip():
+        # Their own words, given in an interview — never resume-stale.
         return "verified"
     try:
         from services.company_match import collect_current_companies, collect_last_companies
         if collect_current_companies(candidate) or collect_last_companies(candidate):
-            return "verified"
+            return "verified_stale" if resume_is_stale(candidate) else "verified"
     except Exception:  # noqa: BLE001 — classification must never raise
         pass
     cur, last = candidate_profile_texts(candidate)
     if cur or last:
         return "profile_only"
     return "unverified"
+
+
+async def stamp_resume_freshness(
+    candidates: List[Dict[str, Any]],
+    *,
+    service: Any = None,
+) -> None:
+    """Stamp `resume_updated_at` (JobDiva's latest resume timestamp) onto the
+    launch candidates whose employer evidence is resume-derived, so
+    `employer_verification_state` can call a years-old "Present" what it is.
+
+    Mutates the dicts in place; one batched CandidatesResumesDetail call per
+    launch. Targets only JobDiva rows with structured employer signals and no
+    interview-stated answer (stated answers don't age with the resume).
+    Fails open — freshness is advisory and must never block a launch.
+    """
+    if _stale_months_knob() <= 0:
+        return
+    targets: Dict[str, List[Dict[str, Any]]] = {}
+    for cand in candidates or []:
+        if not isinstance(cand, dict):
+            continue
+        cid = str(cand.get("candidate_id") or "").strip()
+        if not cid or not _is_jobdiva_row(cand):
+            continue
+        if cand.get("resume_updated_at"):
+            continue
+        data = cand.get("data") if isinstance(cand.get("data"), dict) else cand
+        if str(
+            data.get("stated_current_employer") or cand.get("stated_current_employer") or ""
+        ).strip():
+            continue
+        if not has_confident_employer_signal(cand):
+            continue
+        targets.setdefault(cid, []).append(cand)
+    if not targets:
+        return
+    if service is None:
+        from services.jobdiva import jobdiva_service as service  # noqa: PLC0415
+    try:
+        dates = await service.fetch_resume_dates(list(targets.keys()))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resume-freshness check skipped (fetch failed): %s", exc)
+        return
+    stamped = 0
+    for cid, cands in targets.items():
+        ts = (dates or {}).get(cid)
+        if not ts:
+            continue
+        for cand in cands:
+            cand["resume_updated_at"] = ts
+            stamped += 1
+    logger.info(
+        "resume_freshness: %d launch candidate(s) checked, %d stamped with a resume date",
+        len(targets), stamped,
+    )
 
 
 # ── the resolution pass ───────────────────────────────────────────────────

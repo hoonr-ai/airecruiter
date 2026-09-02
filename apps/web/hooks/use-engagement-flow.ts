@@ -78,13 +78,15 @@ export type LaunchExcludedCandidate = {
 };
 
 // A candidate who LAUNCHED, but whose employer the backend's resolution pass
-// could not verify (no resume, no parsed history, no JobDiva profile lines) —
-// the client-employee / no-contact checks had nothing to judge for them.
-// "profile_only" means only JobDiva's noisy profile lines existed.
+// could not fully verify — the client-employee / no-contact checks had weak
+// or no data to judge for them. "profile_only" means only JobDiva's noisy
+// profile lines existed; "verified_stale" means the signals came from a
+// resume older than the staleness threshold (its "Present" may be outdated).
 export type LaunchUnverifiedEmployer = {
   candidate_id: string;
   name?: string;
-  employer_verification: string; // "unverified" | "profile_only"
+  employer_verification: string; // "unverified" | "profile_only" | "verified_stale"
+  resume_updated_at?: string;
 };
 
 export type LaunchEvent =

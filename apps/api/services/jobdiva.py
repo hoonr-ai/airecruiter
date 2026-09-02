@@ -2822,6 +2822,77 @@ class JobDivaService:
         )
         return results
 
+    async def fetch_resume_dates(
+        self,
+        candidate_ids: List[str],
+        chunk_size: int = 50,
+    ) -> Dict[str, str]:
+        """Latest resume timestamp per candidate, via the batch
+        /apiv2/bi/CandidatesResumesDetail endpoint: {candidate_id: iso_ts}
+        where the value is the max DATEUPDATED/DATECREATED across the
+        candidate's resume records ("2026-06-18T02:07:36" shape — ISO-sortable,
+        so lexicographic max is correct).
+
+        Feeds the launch-time resume-freshness check
+        (services/employer_resolution.py): a "Present" entry parsed out of a
+        years-old resume is weak evidence of current employment. Failures
+        degrade to {} / missing ids — freshness is advisory and must never
+        take a launch down.
+        """
+        ids: List[str] = []
+        seen_ids = set()
+        for cid in candidate_ids or []:
+            s = str(cid).strip()
+            if s and s not in seen_ids:
+                seen_ids.add(s)
+                ids.append(s)
+        if not ids:
+            return {}
+        token = await self.authenticate()
+        if not token:
+            logger.warning("fetch_resume_dates: JobDiva authentication failed")
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
+        out: Dict[str, str] = {}
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i:i + chunk_size]
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(
+                        endpoint, params={"candidateIds": chunk}, headers=headers
+                    )
+                if response.status_code != 200:
+                    logger.warning(
+                        "CandidatesResumesDetail chunk failed: %s - %s",
+                        response.status_code, response.text[:200],
+                    )
+                    continue
+                data = response.json()
+                payload = data.get("data") if isinstance(data, dict) else data
+                if isinstance(payload, dict):
+                    payload = [payload]
+                for record in payload or []:
+                    if not isinstance(record, dict):
+                        continue
+                    cid = get_field(record, ["CANDIDATEID", "candidateId"])
+                    if cid is None:
+                        continue
+                    ts = str(
+                        get_field(record, ["DATEUPDATED", "dateUpdated"])
+                        or get_field(record, ["DATECREATED", "dateCreated"])
+                        or ""
+                    ).strip()
+                    if not ts:
+                        continue
+                    key = str(cid)
+                    if ts > out.get(key, ""):
+                        out[key] = ts
+            except Exception as e:
+                logger.warning(f"CandidatesResumesDetail chunk error: {e}")
+        return out
+
     async def get_candidate_details(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed candidate information using /apiv2/bi/CandidatesDetail endpoint."""
         token = await self.authenticate()

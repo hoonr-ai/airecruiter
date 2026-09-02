@@ -1927,10 +1927,29 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                         job_id_from_payload, _res_err,
                     )
 
+                _gate_rows = [
+                    (
+                        _cid,
+                        _cname,
+                        _merge_employer_signals(_cdata, signals=_resolved_signals[_cid])
+                        if _resolved_signals.get(_cid) else _cdata,
+                    )
+                    for _cid, _cname, _cdata in _gate_rows
+                ]
+                # Resume freshness (phase 3): stamp JobDiva's resume timestamp
+                # onto resume-verified candidates so a years-old "Present"
+                # classifies as verified_stale, not verified. Advisory only —
+                # never blocks; fails open.
+                try:
+                    from services.employer_resolution import stamp_resume_freshness
+                    await stamp_resume_freshness([c for _, _, c in _gate_rows])
+                except Exception as _fresh_err:  # noqa: BLE001
+                    logger.warning(
+                        "resume-freshness check failed for job %s: %s",
+                        job_id_from_payload, _fresh_err,
+                    )
+
                 for _cid, _cname, _cdata in _gate_rows:
-                    _extra = _resolved_signals.get(_cid)
-                    if _extra:
-                        _cdata = _merge_employer_signals(_cdata, signals=_extra)
                     _is_excl, _excl_reason = is_candidate_excluded_from_pair(
                         _cdata, _excl_client
                     )
@@ -1953,11 +1972,16 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     if employer_verification_state is not None:
                         _emp_state = employer_verification_state(_cdata)
                         if _emp_state != "verified":
-                            unverified_employer_records.append({
+                            _unv_record = {
                                 "candidate_id": _cid,
                                 "name": _cname,
                                 "employer_verification": _emp_state,
-                            })
+                            }
+                            if _cdata.get("resume_updated_at"):
+                                _unv_record["resume_updated_at"] = str(
+                                    _cdata["resume_updated_at"]
+                                )
+                            unverified_employer_records.append(_unv_record)
                             logger.info(
                                 "launch_employer_unverified candidate=%s job=%s state=%s client=%r",
                                 _cid, job_id_from_payload, _emp_state, _excl_client,
@@ -2991,11 +3015,25 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                     job_id, res_err,
                 )
 
+        gate_rows = [
+            (
+                cid,
+                _merge_employer_signals(c_data, signals=resolved_signals[cid])
+                if resolved_signals.get(cid) else c_data,
+            )
+            for cid, c_data in gate_rows
+        ]
+        # Resume freshness (phase 3) — advisory classification only; fails open.
+        try:
+            from services.employer_resolution import stamp_resume_freshness
+            await stamp_resume_freshness([c for _, c in gate_rows])
+        except Exception as fresh_err:  # noqa: BLE001
+            logger.warning(
+                "auto_launch resume-freshness check failed job_id=%s: %s", job_id, fresh_err
+            )
+
         unverified_count = 0
         for cid, c_data in gate_rows:
-            extra = resolved_signals.get(cid)
-            if extra:
-                c_data = _merge_employer_signals(c_data, signals=extra)
             excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
             if excluded:
                 logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", cid, job_id, reason)

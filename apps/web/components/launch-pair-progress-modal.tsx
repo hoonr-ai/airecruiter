@@ -90,6 +90,16 @@ export interface LaunchPairProgress {
   failedCandidates: LaunchFailedCandidate[];
   // JobDiva job id these candidates belong to (column in the export CSV)
   jobIdForRelaunch?: string;
+  // Launched, but the backend's employer checks (client employee /
+  // no-contact) had weak or no data to judge: "unverified" (nothing),
+  // "profile_only" (JobDiva profile lines only), or "verified_stale"
+  // (signals from a resume older than the staleness threshold).
+  employerUnverified: {
+    candidate_id: string;
+    name?: string;
+    employer_verification: string;
+    resume_updated_at?: string;
+  }[];
   // Finalization
   finalMessage?: string;
 }
@@ -114,6 +124,7 @@ export const initialLaunchProgress: LaunchPairProgress = {
   totalEngaged: 0,
   totalFailedBatches: 0,
   failedCandidates: [],
+  employerUnverified: [],
 };
 
 interface LaunchPairProgressModalProps {
@@ -136,6 +147,16 @@ function StageIcon({ status }: { status: BatchStatus }) {
     return <Loader2 className="w-4 h-4 text-[#6366f1] animate-spin" />;
   }
   return <div className="w-4 h-4 rounded-full border-2 border-slate-200" />;
+}
+
+function employerStateLabel(state: string, resumeDate?: string): string {
+  if (state === "verified_stale") {
+    return resumeDate
+      ? `stale resume (${resumeDate.slice(0, 10)})`
+      : "stale resume";
+  }
+  if (state === "profile_only") return "JobDiva profile only";
+  return "no employer data";
 }
 
 function batchLabel(b: LaunchBatchInfo): string {
@@ -179,6 +200,7 @@ export function LaunchPairProgressModal({
     totalEngaged,
     totalFailedBatches,
     failedCandidates,
+    employerUnverified,
     jobIdForRelaunch,
     finalMessage,
   } = progress;
@@ -393,6 +415,34 @@ export function LaunchPairProgressModal({
                   : ""}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Launched, but the backend's company checks (client employee /
+            no-contact) had weak or no employer data to judge — informational,
+            these candidates DID launch. */}
+        {employerUnverified.length > 0 && (
+          <div className="rounded-lg border border-sky-200 bg-sky-50/70 p-3 space-y-2">
+            <div className="flex items-center gap-2 text-[13px] font-semibold text-sky-800">
+              <AlertCircle className="w-4 h-4 text-sky-600" />
+              {employerUnverified.length} launched with an unverified employer
+              — the client/no-contact checks had little or nothing to judge
+            </div>
+            <div className="text-[12px] text-sky-700">
+              {employerUnverified
+                .slice(0, 5)
+                .map(
+                  (c) =>
+                    `${c.name || c.candidate_id} (${employerStateLabel(
+                      c.employer_verification,
+                      c.resume_updated_at
+                    )})`
+                )
+                .join(", ")}
+              {employerUnverified.length > 5
+                ? ` +${employerUnverified.length - 5} more`
+                : ""}
+            </div>
           </div>
         )}
 

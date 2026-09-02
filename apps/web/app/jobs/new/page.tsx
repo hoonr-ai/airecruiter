@@ -7529,7 +7529,7 @@ function NewJobPageContent() {
     // the client-employee / no-contact checks had nothing to judge for them
     // (no resume, no parsed history). Surfaced so the recruiter knows the
     // company checks ran blind for these, instead of the old silent pass.
-    let serverUnverifiedEmployer: { candidate_id: string; name?: string; employer_verification: string }[] = [];
+    let serverUnverifiedEmployer: { candidate_id: string; name?: string; employer_verification: string; resume_updated_at?: string }[] = [];
     // Ids of candidates whose save batch succeeded — the single launch call
     // below engages exactly these (in order).
     const savedCandidateIds: string[] = [];
@@ -7945,6 +7945,7 @@ function NewJobPageContent() {
 
     setLaunchProgress(prev => ({
       ...prev,
+      employerUnverified: serverUnverifiedEmployer,
       phase: totalFailedBatches === 0 ? "completed" : (totalHandled > 0 ? "completed" : "failed"),
       totalSaved,
       totalEngaged,
