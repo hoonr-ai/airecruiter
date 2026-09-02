@@ -82,7 +82,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                 recruiter_emails
             FROM deduped
             WHERE rn = 1
-            ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
+            ORDER BY is_archived ASC, COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
             LIMIT 2000
         """, params)
         rows = cur.fetchall()
