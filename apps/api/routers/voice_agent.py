@@ -271,6 +271,50 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     if payload.hard_filter_status:
                         candidate_blob["engage_hard_filter_status"] = payload.hard_filter_status
 
+                # Employer backstop (2026-09-02): the launch payload asks every
+                # candidate where they work now (services/stated_employer.py).
+                # Persist the answer as a durable employer signal — the launch
+                # gate, the no-contact flag and /candidates/save all read
+                # stated_current_employer — and re-run the checks the launch
+                # may have run blind. Must never break webhook processing.
+                try:
+                    from services.stated_employer import (
+                        extract_stated_employer,
+                        stated_employer_conflict,
+                    )
+                    stated = extract_stated_employer(detail_payload.get("transcriptions"))
+                    if stated:
+                        candidate_blob["stated_current_employer"] = stated
+                        candidate_blob["stated_employer_at"] = now_iso
+                        client_name = ""
+                        if target_job_id:
+                            cur.execute(
+                                """
+                                SELECT customer_name FROM monitored_jobs
+                                WHERE jobdiva_id = %s OR job_id = %s
+                                LIMIT 1
+                                """,
+                                (str(target_job_id), str(target_job_id)),
+                            )
+                            client_row = cur.fetchone()
+                            client_name = (
+                                str(client_row[0]) if client_row and client_row[0] else ""
+                            )
+                        conflict = stated_employer_conflict(stated, client_name)
+                        if conflict:
+                            candidate_blob["stated_employer_conflict"] = conflict
+                            logger.warning(
+                                "post_interview_employer_conflict interview=%s candidate=%s "
+                                "job=%s reason=%s stated=%r",
+                                payload.interview_id, target_candidate_id, target_job_id,
+                                conflict, stated[:120],
+                            )
+                except Exception as _stated_err:  # noqa: BLE001
+                    logger.warning(
+                        "stated-employer backstop failed (webhook continues): %s",
+                        _stated_err,
+                    )
+
                 cur.execute(
                     """
                     UPDATE sourced_candidates

@@ -146,6 +146,11 @@ def has_confident_employer_signal(candidate: Dict[str, Any]) -> bool:
     for flat in (data.get("current_company"), enhanced.get("current_company")):
         if flat and str(flat).strip():
             return True
+    # The candidate's own interview answer (persisted by the voice-agent
+    # webhook) is the strongest signal there is — no resume re-parse needed.
+    for stated in (data.get("stated_current_employer"), candidate.get("stated_current_employer")):
+        if stated and str(stated).strip():
+            return True
     return False
 
 
@@ -160,6 +165,11 @@ def employer_verification_state(candidate: Dict[str, Any]) -> str:
                        nothing to judge. Passing the gate in this state means
                        UNKNOWN, not clean.
     """
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    if str(
+        data.get("stated_current_employer") or candidate.get("stated_current_employer") or ""
+    ).strip():
+        return "verified"
     try:
         from services.company_match import collect_current_companies, collect_last_companies
         if collect_current_companies(candidate) or collect_last_companies(candidate):

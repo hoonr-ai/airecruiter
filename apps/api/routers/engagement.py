@@ -264,6 +264,22 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         if "pyramid" in normalize_company_name(comp).split():
             return True, "Current Employee (Pyramid)"
 
+    # The candidate's own interview answer to "which company do you currently
+    # work for?" (persisted by the voice-agent webhook as
+    # stated_current_employer). Their own words beat every extracted signal,
+    # so this runs even when a structured current employer is on file. Free
+    # text — matched one-directionally only (client ⊂ answer). The no-contact
+    # side of the same answer is handled inside check_no_contact below.
+    stated_text = str(
+        data.get("stated_current_employer")
+        or candidate.get("stated_current_employer")
+        or ""
+    ).strip()
+    if stated_text and client_name and not is_placeholder_client(client_name):
+        from services.company_match import client_appears_in_text
+        if client_appears_in_text(stated_text, client_name):
+            return True, "Employed by Hiring Client (stated in interview)"
+
     # Works at the client TODAY. The last employer is consulted only when no
     # current employer is on file at all (many source rows carry no "Present"
     # entry) — a fallback, not a union, so someone who left the client for a
@@ -274,6 +290,8 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     if client_hit:
         if client_hit["relation"] == "current":
             return True, "Employed by Hiring Client"
+        if client_hit["relation"] == "placement":
+            return True, "Placed at Hiring Client (current engagement)"
         return True, "Employed by Hiring Client (last known employer)"
 
     # No-contact companies (services/no_contact.py): current or LAST employer
@@ -348,7 +366,12 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         return False, ""
     from services.company_match import collect_last_companies
 
-    if collect_last_companies(candidate) or profile_current_texts or profile_last_texts:
+    if (
+        collect_last_companies(candidate)
+        or profile_current_texts
+        or profile_last_texts
+        or stated_text
+    ):
         return False, ""
     logger.warning(
         "client_conflict_check_blind candidate=%s client=%r — no current- or "
@@ -852,6 +875,18 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                 fallback_job_title=(job_row.get("enhanced_title") or job_row.get("title") or request.job_id),
                 boolean_mode=is_l05,
             )
+            # Employer backstop (2026-09-02): every interview asks where the
+            # candidate works NOW. The answer returns on the PairBot webhook
+            # (routers/voice_agent.py), persists as stated_current_employer,
+            # and re-runs the no-contact + hiring-client checks — the last
+            # line of defense for candidates launched employer-unverified.
+            # Appended post-sanitize in the PAIR schema shape; category
+            # "logistics" so L0.5 boolean rewriting preserves it verbatim.
+            try:
+                from services.stated_employer import append_employer_question
+                pre_screen_questions = append_employer_question(pre_screen_questions)
+            except Exception as _q_err:  # noqa: BLE001
+                logger.warning(f"employer question injection skipped: {_q_err}")
 
         cur.close()
         conn.close()
@@ -2475,9 +2510,10 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "batch_size": batch_size,
         })
 
-        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0}
+        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0, "employer_unverified": 0}
         all_skipped: List[str] = []
         all_excluded: List[Dict[str, str]] = []
+        all_employer_unverified: List[Dict[str, str]] = []
         failed_candidate_ids: List[str] = []
         aborted = False
         side_effects_fired = {"done": False}
@@ -2631,6 +2667,12 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # stream so the progress modal reports server skips too.
                     batch_excluded = res.get("excluded_candidates") or []
                     all_excluded.extend(batch_excluded)
+                    # Launched, but with an employer the resolution pass could
+                    # not verify — the client/no-contact checks had nothing to
+                    # judge. Surfaced so the modal can say so instead of the
+                    # old silent pass-through.
+                    batch_unverified = res.get("employer_unverified") or []
+                    all_employer_unverified.extend(batch_unverified)
 
                     if res.get("success"):
                         rows = res.get("data") or []
@@ -2644,6 +2686,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         totals["already_sent"] += len(skipped)
                         totals["no_interview"] += no_interview
                         totals["excluded"] += len(batch_excluded)
+                        totals["employer_unverified"] += len(batch_unverified)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
@@ -2652,6 +2695,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                             "no_interview": no_interview,
                             "already_sent": len(skipped),
                             "excluded": len(batch_excluded),
+                            "employer_unverified": len(batch_unverified),
                             "bulk_id": res.get("bulk_id"),
                         })
                     else:
@@ -2708,6 +2752,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "totals": totals,
             "skipped_already_sent": all_skipped,
             "excluded_candidates": all_excluded,
+            "employer_unverified": all_employer_unverified,
             "failed_candidate_ids": failed_candidate_ids,
         })
 
