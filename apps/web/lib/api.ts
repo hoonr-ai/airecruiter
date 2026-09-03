@@ -203,6 +203,7 @@ export const api = {
       req<any>(`/jobs/external/create`, { method: "POST", body }),
     getDraft: (jobId: string) => req<any>(`/jobs/${jobId}/draft`),
     getMonitoredData: (jobId: string) => req<any>(`/jobs/${jobId}/monitored-data`),
+    getOutreachStats: (jobId: string) => req<any>(`/jobs/${jobId}/outreach-stats`),
     updateBasicInfo: (jobId: string, body: unknown) =>
       req<any>(`/jobs/${jobId}/basic-info`, { method: "PUT", body }),
   },

@@ -28,6 +28,7 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
+from routers.launch_report import _fetch_all_outreach, _summarise_outreach
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1614,6 +1615,49 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
     except Exception as e:
         logger.error(f"Save Requirements Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save requirements: {str(e)}")
+
+@router.get("/jobs/{job_id_or_ref}/outreach-stats")
+async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
+    """
+    Fetches live outreach statistics from pair-bot for all candidates launched on a specific job.
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    
+
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT jobdiva_id, job_id FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s
+                LIMIT 1
+            """, (job_id_or_ref, job_id_or_ref))
+            result = cur.fetchone()
+            if not result:
+                return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
+            
+            # Note: We rely on Python's 'or' treating an empty string as falsy here.
+            # This ensures that if jobdiva_id is '', we fall back to job_id instead
+            # of querying engage_interview_audit with jobdiva_id='' (which would pool
+            # candidates from all jobs missing a JobDiva reference).
+            resolved_jobdiva_id = result[0] or result[1]
+            resolved_numeric_job_id = result[1] or result[0]
+            
+            cur.execute("""
+                SELECT DISTINCT interview_id FROM engage_interview_audit
+                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                  AND COALESCE(NULLIF(interview_id, ''), '') <> ''
+            """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
+            interview_ids = [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+    if not interview_ids:
+        return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
+        
+    payloads_dict = await _fetch_all_outreach(interview_ids)
+    return _summarise_outreach(list(payloads_dict.values()))
 
 @router.get("/jobs/{job_id}/monitored-data")
 async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):
