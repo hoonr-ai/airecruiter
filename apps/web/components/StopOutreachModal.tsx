@@ -11,7 +11,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useOutreachOptOut,
@@ -35,6 +34,13 @@ import {
 //    across every product anyway.
 // 3. It reads the current suppression state on open, so a contact who is
 //    already stopped offers Resume instead of a second, pointless Stop.
+//
+// Scope is pair-only and not configurable here: no `scope` is sent, which
+// pair-bot reads as "curate". Opting a candidate out of every Hoonr product is
+// a decision about what they meant, not a checkbox a recruiter should tick on
+// their behalf — and where a channel physically cannot be scoped (today all
+// three share one Twilio pool and one EMAIL_FROM) pair-bot enforces it across
+// tenants anyway and says so in the message this modal renders verbatim.
 
 export interface StopOutreachCandidate {
   candidate_id?: string;
@@ -69,7 +75,6 @@ export function StopOutreachModal({
   const { stopOutreach, resumeOutreach, getOptOutStatus } = useOutreachOptOut();
 
   const [reason, setReason] = useState("");
-  const [allProducts, setAllProducts] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<OptOutResult | null>(null);
@@ -98,7 +103,6 @@ export function StopOutreachModal({
     setOpenedKey(candidateKey);
     if (open) {
       setReason("");
-      setAllProducts(false);
       setError(null);
       setResult(null);
       setStatus(null);
@@ -150,7 +154,15 @@ export function StopOutreachModal({
         phone: phone || undefined,
         interviewId,
         reason: reason.trim() || undefined,
-        scope: allProducts ? "global" : undefined,
+        // scope deliberately omitted: pair-bot reads that as "curate", so a
+        // stop from pair suppresses pair's outreach only. Opting a candidate
+        // out of every Hoonr product is not a call a recruiter should be
+        // making on their behalf from this screen — a candidate done hearing
+        // about pair roles has not necessarily finished with hoonr's, and
+        // guessing wrong loses a real candidate. Where a channel cannot be
+        // scoped (today all three share a Twilio pool and one EMAIL_FROM),
+        // pair-bot enforces it across tenants regardless and says so in the
+        // message we render.
       });
       setResult(res);
       onChanged?.();
@@ -159,7 +171,7 @@ export function StopOutreachModal({
     } finally {
       setSubmitting(false);
     }
-  }, [candidate, candidateKey, email, phone, interviewId, reason, allProducts, onChanged, stopOutreach]);
+  }, [candidate, candidateKey, email, phone, interviewId, reason, onChanged, stopOutreach]);
 
   const handleResume = useCallback(async () => {
     if (!candidate) return;
@@ -194,7 +206,7 @@ export function StopOutreachModal({
               ? "Result from PAIR Bot"
               : alreadySuppressed
                 ? `${name} is already suppressed. Resume only if they asked to hear from us again — it clears the block but does not restart the cancelled campaign.`
-                : `Stops every email, SMS and call to ${name} — on every interview they have. Queued messages and calls are cancelled.`}
+                : `Stops pair's email, SMS and calls to ${name} — on every interview they have. Queued messages and calls are cancelled.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -280,25 +292,6 @@ export function StopOutreachModal({
                 thing anyone asks if the candidate escalates.
               </p>
             </div>
-
-            {!alreadySuppressed ? (
-              <label className="flex items-start gap-2.5 cursor-pointer">
-                <Checkbox
-                  checked={allProducts}
-                  onCheckedChange={(v) => setAllProducts(v === true)}
-                  className="mt-0.5"
-                />
-                <span className="text-sm text-slate-700">
-                  They do not want to hear from <strong>any</strong> Hoonr product
-                  <span className="block text-xs text-slate-500">
-                    Leave unchecked to stop pair&apos;s outreach only. Either way,
-                    PAIR Bot will tell you if a channel had to be stopped
-                    everywhere — all products currently send from the same phone
-                    numbers and email address.
-                  </span>
-                </span>
-              </label>
-            ) : null}
 
             {error ? (
               <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3">
