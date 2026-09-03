@@ -1760,12 +1760,11 @@ export default function CandidateRankingsPage() {
           </Button>
         </div>
 
-        {/* Metric Cards Grid */}
         <div className="flex flex-col border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden">
           {/* Row 1: Pipeline Overview */}
-          <div className="flex items-center gap-12 p-5 bg-slate-50/50">
-            <div className="flex gap-12 w-full">
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-1/3 border-r border-slate-200 pr-12">
+          <div className="p-5 bg-slate-50/50">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
                 {isInitialLoading ? (
                   <>
                     <Skeleton className="h-5 w-48 bg-slate-100" />
@@ -1784,7 +1783,7 @@ export default function CandidateRankingsPage() {
                   </>
                 )}
               </div>
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-1/3 border-r border-slate-200 pr-12">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
                 {isInitialLoading ? (
                   <Skeleton className="h-5 w-48 bg-slate-100" />
                 ) : (
@@ -1794,7 +1793,7 @@ export default function CandidateRankingsPage() {
                   </div>
                 )}
               </div>
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-1/3">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
                 {isInitialLoading ? (
                   <>
                     <Skeleton className="h-5 w-48 bg-slate-100" />
@@ -1817,9 +1816,9 @@ export default function CandidateRankingsPage() {
           </div>
 
           {/* Row 2: Outreach Stats */}
-          <div className="border-t border-slate-200 p-5 flex items-start gap-12">
-            <div className="flex gap-12 w-full">
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-1/3 border-r border-slate-200 pr-12">
+          <div className="border-t border-slate-200 p-5">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
                 {isInitialLoading || !statsLoaded ? (
                   <StatsGroupSkeleton count={3} />
                 ) : (
@@ -1840,7 +1839,7 @@ export default function CandidateRankingsPage() {
                 )}
               </div>
 
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-1/3 border-r border-slate-200 pr-12">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
                 {isInitialLoading || !statsLoaded ? (
                   <StatsGroupSkeleton count={2} />
                 ) : (
@@ -1857,7 +1856,7 @@ export default function CandidateRankingsPage() {
                 )}
               </div>
 
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-1/3">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
                 {isInitialLoading || !statsLoaded ? (
                   <StatsGroupSkeleton count={3} />
                 ) : (
