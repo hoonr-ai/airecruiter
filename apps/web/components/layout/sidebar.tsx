@@ -95,19 +95,14 @@ export function Sidebar() {
 
             {/* Role identity chip — team leads see "Team Lead" instead of
                 recruiter/admin, per the team management spec. */}
-            {!isLoading && (isAdmin || isTeamLead) && (
+            {!isLoading && !isAdmin && isTeamLead && (
                 <div className="mt-4 px-4">
                     <span
-                        className={cn(
-                            "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ring-inset",
-                            isAdmin
-                                ? "bg-slate-100 text-slate-600 ring-slate-200"
-                                : "bg-indigo-50 text-indigo-700 ring-indigo-200"
-                        )}
-                        title={!isAdmin && teamName ? `Team: ${teamName}` : undefined}
+                        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ring-inset bg-indigo-50 text-indigo-700 ring-indigo-200"
+                        title={teamName ? `Team: ${teamName}` : undefined}
                     >
-                        {isAdmin ? "Admin" : "Team Lead"}
-                        {!isAdmin && teamName ? <span className="font-medium text-indigo-500">· {teamName}</span> : null}
+                        Team Lead
+                        {teamName ? <span className="font-medium text-indigo-500">· {teamName}</span> : null}
                     </span>
                 </div>
             )}
