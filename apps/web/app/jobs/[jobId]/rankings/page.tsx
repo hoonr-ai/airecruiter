@@ -1633,6 +1633,9 @@ export default function CandidateRankingsPage() {
       console.error("Error fetching ranking data:", error);
     } finally {
       setIsLoading(false);
+      // Guarantee the stats skeleton is never stuck, even if an earlier call threw
+      // before the inner stats try/finally had a chance to run.
+      setStatsLoaded(true);
     }
   };
 
