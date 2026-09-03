@@ -415,7 +415,7 @@ async def _fetch_outreach_status(
             res = await client.get(f"/api/interviews/{interview_id}/outreach-status")
             res.raise_for_status()
             payload = res.json()
-            if isinstance(payload, dict) and payload.get("success") is True and "data" in payload:
+            if isinstance(payload, dict) and payload.get("success") is True and isinstance(payload.get("data"), dict):
                 return payload["data"]
             return payload
         except Exception as exc:
