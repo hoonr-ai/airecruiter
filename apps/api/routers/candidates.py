@@ -27,6 +27,7 @@ from models import (
 from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
+from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
@@ -1330,6 +1331,40 @@ async def get_job_candidates(
         finally:
             conn.close()
 
+        # Collect interview IDs for live fallback.
+        # Uses a short best-effort timeout so a slow/unavailable pair-bot API
+        # never stalls the candidate list endpoint; on timeout we fall back
+        # gracefully to local DB data (audit table / sourced_candidates.data).
+        interview_ids = []
+        for cand in candidates:
+            cand_data = cand.get("data")
+            if cand_data and isinstance(cand_data, str):
+                try:
+                    cand_data = json.loads(cand_data)
+                except Exception:
+                    pass
+            dblob = cand_data if isinstance(cand_data, dict) else {}
+            iid = dblob.get("engage_interview_id") or cand.get("audit_interview_id")
+            if iid and str(iid).strip():
+                interview_ids.append(str(iid).strip())
+
+        interview_ids = sorted(set(interview_ids))  # set() already returns an iterable; list() is redundant
+        try:
+            payloads_dict = (
+                await asyncio.wait_for(
+                    _fetch_all_outreach(interview_ids),
+                    timeout=3.0,  # best-effort: never stall the hot read path
+                )
+                if interview_ids
+                else {}
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"CANDIDATES: live outreach lookup timed out after 3s "
+                f"for {len(interview_ids)} interviews — falling back to local DB data"
+            )
+            payloads_dict = {}
+
         # Handle the data field (it might be a string or a dict)
         for cand in candidates:
             if cand.get("data") and isinstance(cand["data"], str):
@@ -1387,12 +1422,28 @@ async def get_job_candidates(
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
-            # Read-side fallback: audit table is authoritative when candidate
-            # blob doesn't yet have engage status/interview id.
-            if not cand.get("engage_status") and cand.get("audit_status"):
-                cand["engage_status"] = cand.get("audit_status")
+            from routers.launch_report import build_merged_outreach_payload
+            iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
+            raw_live_api = payloads_dict.get(iid_str) if iid_str else None
+            
+            merged = build_merged_outreach_payload(
+                cand, 
+                cand.get("audit_response"), 
+                cand.get("audit_status"), 
+                raw_live_api
+            )
+            
+            outreach_status = merged.get("outreach_status") or merged.get("status")
+            if outreach_status:
+                cand["engage_status"] = outreach_status
                 if isinstance(data_blob, dict):
-                    data_blob["engage_status"] = cand.get("audit_status")
+                    data_blob["engage_status"] = outreach_status
+                    
+            first_completed_at = merged.get("first_completed_at")
+            if first_completed_at:
+                cand["engage_completed_at"] = first_completed_at
+                if isinstance(data_blob, dict):
+                    data_blob["engage_completed_at"] = first_completed_at
 
             if not cand.get("engage_interview_id") and cand.get("audit_interview_id"):
                 cand["engage_interview_id"] = cand.get("audit_interview_id")

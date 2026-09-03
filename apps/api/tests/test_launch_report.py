@@ -325,15 +325,27 @@ def test_phase_distribution_normalizes_phase_variants():
 
 
 def test_summarise_outreach_passed_failed_sub_buckets():
+    failed_payload = _outreach("failed")
+    failed_payload["score"] = 50  # Candidate engaged and failed
     payloads = [
         _outreach("passed"),
-        _outreach("failed"),
+        failed_payload,
         _outreach("completed"),
     ]
     summary = lr._summarise_outreach(payloads)
     assert summary["buckets"]["passed"] == 1
     assert summary["buckets"]["failed"] == 1
     assert summary["buckets"]["completed"] == 3
+
+
+def test_summarise_outreach_unengaged_failed_buckets_as_pending():
+    # Failed status without any score/response/phase should be bucketed as pending.
+    # A candidate who got an outreach_phase is considered to have been contacted;
+    # we use a flat payload with no phase to simulate a never-contacted scenario.
+    payload = {"outreach": {"outreach_status": "failed"}, "communications": []}
+    summary = lr._summarise_outreach([payload])
+    assert summary["buckets"]["pending"] == 1
+    assert summary["buckets"]["failed"] == 0
 
 
 

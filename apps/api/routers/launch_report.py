@@ -455,8 +455,16 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
 
 def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[str, Any], live_api: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Merge outreach data from 3 layers (Candidate DB -> Audit DB -> Live API)
-    with non-null values from higher layers overriding lower layers.
+    Merge outreach data from 3 layers with the *last layer winning*:
+      Candidate DB (lowest priority) → Audit DB → Live API (highest priority).
+
+    This means live_api fields override everything, which is intentional: the
+    live pair-bot response is the ground truth for a candidate's current outreach
+    state. Local DB fields serve as a best-effort fallback when the API is
+    unavailable or returns no data for an interview.
+
+    Callers that need first-available semantics should use the individual layers
+    directly before calling this helper.
     """
     merged_payload = {**cand_fallback}
     for source in (audit_fallback, live_api):
@@ -465,6 +473,61 @@ def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[
                 if v is not None:
                     merged_payload[k] = v
     return merged_payload
+
+
+def build_merged_outreach_payload(
+    cand_data: Dict[str, Any],
+    audit_response: Any,
+    audit_status: Optional[str],
+    raw_live_api: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Constructs the merged outreach payload from the 3 fallback layers:
+    Candidate DB -> Audit DB -> Live API.
+    """
+    # Layer 1: Local DB Candidate Row
+    cand_fallback = {}
+    if cand_data.get("engage_status"):
+        cand_fallback["outreach_status"] = cand_data["engage_status"]
+    raw_p = cand_data.get("outreach_phase") or cand_data.get("phase")
+    if raw_p:
+        cand_fallback["outreach_phase"] = raw_p
+    raw_c = cand_data.get("outreach_channel") or cand_data.get("channel")
+    if raw_c:
+        cand_fallback["outreach_channel"] = raw_c
+    if cand_data.get("first_attempted_at"):
+        cand_fallback["first_attempted_at"] = cand_data["first_attempted_at"]
+    raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
+    if raw_comp:
+        cand_fallback["first_completed_at"] = raw_comp
+
+    # Layer 2: Local DB Audit Row Response
+    audit_fallback = {}
+    if isinstance(audit_response, dict):
+        audit_fallback = dict(audit_response)
+    elif isinstance(audit_response, str) and audit_response.strip():
+        try:
+            import json
+            audit_fallback = json.loads(audit_response)
+        except Exception as e:
+            logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
+            audit_fallback = {}
+            
+    if audit_status:
+        if "outreach_status" not in audit_fallback:
+            audit_fallback["outreach_status"] = audit_status
+        if "status" not in audit_fallback:
+            audit_fallback["status"] = audit_status
+
+    # Layer 3: Live PairBot HTTP API Response
+    # Unwrap nested `outreach` key from live API payload if present
+    if isinstance(raw_live_api, dict) and isinstance(raw_live_api.get("outreach"), dict):
+        live_api: Optional[Dict[str, Any]] = {**raw_live_api, **raw_live_api["outreach"]}
+    else:
+        live_api = raw_live_api
+
+    # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
+    return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
 def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -489,13 +552,38 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
             merged.get("outreach_status")
             or merged.get("status")
         )
+        normalized_status = (status_raw or "").strip().lower()
+
+        # Candidates marked as failed/rejected who never actually engaged/attended
+        # the interview across phases should be classified as pending.
+        # Engagement signals: any recorded score, completion timestamp, a comms
+        # response, OR a known phase beyond the initial dispatch (outreach_phase
+        # being set means pair-bot already routed this candidate to a call/SMS phase).
+        if normalized_status in ("failed", "fail", "rejected"):
+            comms = payload.get("communications") or merged.get("communications") or []
+            phase_raw = (
+                merged.get("outreach_phase")
+                or merged.get("phase")
+                or merged.get("current_phase")
+            )
+            has_engaged = (
+                merged.get("candidate_score") is not None
+                or merged.get("score") is not None
+                or merged.get("engage_score") is not None
+                or merged.get("first_completed_at") is not None
+                or bool(phase_raw)  # phase2/phase3 implies contact was made
+                or any(comm.get("response_at") for comm in comms if isinstance(comm, dict))
+            )
+            if not has_engaged:
+                status_raw = "pending"
+                normalized_status = "pending"
+
         buckets[_bucket_status(status_raw)] += 1
 
         # Passed/Failed are sub-buckets within "completed".
         # _bucket_status already maps pass/fail → "completed", so we
         # read the raw status directly to classify the sub-bucket without
         # double-incrementing the completed counter.
-        normalized_status = (status_raw or "").strip().lower()
         if normalized_status in ("passed", "pass"):
             buckets["passed"] += 1
         elif normalized_status in ("failed", "fail"):
@@ -627,39 +715,17 @@ def _build_row(
         if not iid:
             continue
 
-        # Layer 1: Local DB Candidate Row (populated by Voice Agent webhooks)
         cand_data = cand_by_interview.get(iid) or {}
-        cand_fallback = {}
-        if cand_data.get("engage_status"):
-            cand_fallback["outreach_status"] = cand_data["engage_status"]
-        raw_p = cand_data.get("outreach_phase") or cand_data.get("phase")
-        if raw_p:
-            cand_fallback["outreach_phase"] = raw_p
-        raw_c = cand_data.get("outreach_channel") or cand_data.get("channel")
-        if raw_c:
-            cand_fallback["outreach_channel"] = raw_c
-        if cand_data.get("first_attempted_at"):
-            cand_fallback["first_attempted_at"] = cand_data["first_attempted_at"]
-        raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
-        if raw_comp:
-            cand_fallback["first_completed_at"] = raw_comp
-
-        # Layer 2: Local DB Audit Row Response (populated during launch & webhooks)
         raw_resp = a.get("response")
-        audit_fallback = {}
-        if isinstance(raw_resp, dict):
-            audit_fallback = raw_resp
-        elif isinstance(raw_resp, str) and raw_resp.strip():
-            try:
-                audit_fallback = json.loads(raw_resp)
-            except Exception:
-                audit_fallback = {}
+        audit_status = a.get("status")
+        live_api = outreach_by_interview.get(iid)
 
-        # Layer 3: Live PairBot HTTP API Response
-        live_api = outreach_by_interview.get(iid) or {}
-
-        # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
-        merged_payload = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+        merged_payload = build_merged_outreach_payload(
+            cand_data,
+            raw_resp,
+            audit_status,
+            live_api
+        )
 
         if merged_payload:
             payloads.append(merged_payload)
