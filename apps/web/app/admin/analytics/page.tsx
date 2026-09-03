@@ -2219,10 +2219,7 @@ export default function AdminAnalyticsPage() {
                         </div>
                       </td>
                       <td className="py-3.5 px-6">
-                        <div
-                          className="font-semibold text-slate-800"
-                          title={job.title}
-                        >
+                        <div className="font-semibold text-slate-800 break-words">
                           {job.title}
                         </div>
                         {job.is_archived && (
@@ -2238,7 +2235,7 @@ export default function AdminAnalyticsPage() {
                         )}
                       </td>
                       <td className="py-3.5 px-6 text-slate-600">
-                        <div title={job.customer_name}>
+                        <div className="break-words">
                           {job.customer_name}
                         </div>
                       </td>
