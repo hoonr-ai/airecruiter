@@ -2012,6 +2012,7 @@ export default function AdminAnalyticsPage() {
                 />
               </div>
               <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
+                <span className="text-[12px] font-medium text-slate-500 pl-2">From:</span>
                 <input
                   type="date"
                   aria-label="Start date filter"
@@ -2022,7 +2023,7 @@ export default function AdminAnalyticsPage() {
                   }}
                   className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
-                <span className="text-slate-300 text-[12px] font-medium">-</span>
+                <span className="text-[12px] font-medium text-slate-500 pl-1">To:</span>
                 <input
                   type="date"
                   aria-label="End date filter"
