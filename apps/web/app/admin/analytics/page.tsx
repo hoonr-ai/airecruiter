@@ -2024,13 +2024,13 @@ export default function AdminAnalyticsPage() {
                     setShowAllTimeline(false);
                   }}
                   placeholder="Search title, ref or client..."
-                  className="h-8 w-64 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
+                  className="h-8 w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
                 />
               </div>
               <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm shrink-0">
                 <label
                   htmlFor="timelineStartDate"
-                  className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer"
+                  className="text-[12px] font-medium text-slate-500 pl-1.5 cursor-pointer"
                 >
                   From:
                 </label>
@@ -2043,11 +2043,11 @@ export default function AdminAnalyticsPage() {
                     setTimelineStartDate(e.target.value);
                     setShowAllTimeline(false);
                   }}
-                  className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className="h-7 w-[110px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-1 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
                 <label
                   htmlFor="timelineEndDate"
-                  className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer"
+                  className="text-[12px] font-medium text-slate-500 pl-1 cursor-pointer"
                 >
                   To:
                 </label>
@@ -2060,7 +2060,7 @@ export default function AdminAnalyticsPage() {
                     setTimelineEndDate(e.target.value);
                     setShowAllTimeline(false);
                   }}
-                  className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className="h-7 w-[110px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-1 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
                 {(timelineStartDate || timelineEndDate) && (
                   <button
