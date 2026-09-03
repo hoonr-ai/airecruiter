@@ -475,6 +475,61 @@ def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[
     return merged_payload
 
 
+def build_merged_outreach_payload(
+    cand_data: Dict[str, Any],
+    audit_response: Any,
+    audit_status: Optional[str],
+    raw_live_api: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Constructs the merged outreach payload from the 3 fallback layers:
+    Candidate DB -> Audit DB -> Live API.
+    """
+    # Layer 1: Local DB Candidate Row
+    cand_fallback = {}
+    if cand_data.get("engage_status"):
+        cand_fallback["outreach_status"] = cand_data["engage_status"]
+    raw_p = cand_data.get("outreach_phase") or cand_data.get("phase")
+    if raw_p:
+        cand_fallback["outreach_phase"] = raw_p
+    raw_c = cand_data.get("outreach_channel") or cand_data.get("channel")
+    if raw_c:
+        cand_fallback["outreach_channel"] = raw_c
+    if cand_data.get("first_attempted_at"):
+        cand_fallback["first_attempted_at"] = cand_data["first_attempted_at"]
+    raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
+    if raw_comp:
+        cand_fallback["first_completed_at"] = raw_comp
+
+    # Layer 2: Local DB Audit Row Response
+    audit_fallback = {}
+    if isinstance(audit_response, dict):
+        audit_fallback = dict(audit_response)
+    elif isinstance(audit_response, str) and audit_response.strip():
+        try:
+            import json
+            audit_fallback = json.loads(audit_response)
+        except Exception as e:
+            logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
+            audit_fallback = {}
+            
+    if audit_status:
+        if "outreach_status" not in audit_fallback:
+            audit_fallback["outreach_status"] = audit_status
+        if "status" not in audit_fallback:
+            audit_fallback["status"] = audit_status
+
+    # Layer 3: Live PairBot HTTP API Response
+    # Unwrap nested `outreach` key from live API payload if present
+    if isinstance(raw_live_api, dict) and isinstance(raw_live_api.get("outreach"), dict):
+        live_api: Optional[Dict[str, Any]] = {**raw_live_api, **raw_live_api["outreach"]}
+    else:
+        live_api = raw_live_api
+
+    # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
+    return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+
+
 def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
@@ -660,39 +715,17 @@ def _build_row(
         if not iid:
             continue
 
-        # Layer 1: Local DB Candidate Row (populated by Voice Agent webhooks)
         cand_data = cand_by_interview.get(iid) or {}
-        cand_fallback = {}
-        if cand_data.get("engage_status"):
-            cand_fallback["outreach_status"] = cand_data["engage_status"]
-        raw_p = cand_data.get("outreach_phase") or cand_data.get("phase")
-        if raw_p:
-            cand_fallback["outreach_phase"] = raw_p
-        raw_c = cand_data.get("outreach_channel") or cand_data.get("channel")
-        if raw_c:
-            cand_fallback["outreach_channel"] = raw_c
-        if cand_data.get("first_attempted_at"):
-            cand_fallback["first_attempted_at"] = cand_data["first_attempted_at"]
-        raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
-        if raw_comp:
-            cand_fallback["first_completed_at"] = raw_comp
-
-        # Layer 2: Local DB Audit Row Response (populated during launch & webhooks)
         raw_resp = a.get("response")
-        audit_fallback = {}
-        if isinstance(raw_resp, dict):
-            audit_fallback = raw_resp
-        elif isinstance(raw_resp, str) and raw_resp.strip():
-            try:
-                audit_fallback = json.loads(raw_resp)
-            except Exception:
-                audit_fallback = {}
+        audit_status = a.get("status")
+        live_api = outreach_by_interview.get(iid)
 
-        # Layer 3: Live PairBot HTTP API Response
-        live_api = outreach_by_interview.get(iid) or {}
-
-        # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
-        merged_payload = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+        merged_payload = build_merged_outreach_payload(
+            cand_data,
+            raw_resp,
+            audit_status,
+            live_api
+        )
 
         if merged_payload:
             payloads.append(merged_payload)

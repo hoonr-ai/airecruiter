@@ -1422,41 +1422,16 @@ async def get_job_candidates(
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
-            # 3-layer Read-side fallback: local candidate data -> local audit data -> live API.
-            cand_fallback = {}
-            if cand.get("engage_status"):
-                cand_fallback["outreach_status"] = cand.get("engage_status")
-            if cand.get("engage_completed_at"):
-                cand_fallback["first_completed_at"] = cand.get("engage_completed_at")
-
-            audit_fallback = {}
-            raw_resp = cand.get("audit_response")
-            if isinstance(raw_resp, dict):
-                audit_fallback = dict(raw_resp)
-            elif isinstance(raw_resp, str) and raw_resp.strip():
-                try:
-                    audit_fallback = json.loads(raw_resp)
-                except Exception as e:
-                    logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
-            
-            if cand.get("audit_status"):
-                if "outreach_status" not in audit_fallback:
-                    audit_fallback["outreach_status"] = cand.get("audit_status")
-                if "status" not in audit_fallback:
-                    audit_fallback["status"] = cand.get("audit_status")
-                    
+            from routers.launch_report import build_merged_outreach_payload
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
-            # Unwrap nested `outreach` key from live API payload — pair-bot can return
-            # { "outreach": { "outreach_status": ..., ... }, ... }.
-            # _summarise_outreach in launch_report.py already does this; we must
-            # mirror it here so merge_outreach_payloads sees the flat key/values.
-            if isinstance(raw_live_api, dict) and isinstance(raw_live_api.get("outreach"), dict):
-                live_api: Optional[Dict] = {**raw_live_api, **raw_live_api["outreach"]}
-            else:
-                live_api = raw_live_api
-
-            merged = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+            
+            merged = build_merged_outreach_payload(
+                cand, 
+                cand.get("audit_response"), 
+                cand.get("audit_status"), 
+                raw_live_api
+            )
             
             outreach_status = merged.get("outreach_status") or merged.get("status")
             if outreach_status:
