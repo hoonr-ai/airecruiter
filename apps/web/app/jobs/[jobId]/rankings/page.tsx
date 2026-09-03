@@ -2656,7 +2656,7 @@ export default function CandidateRankingsPage() {
                                   {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
                                 </div>
                                 {feedbackReasons[candidate.id] && (
-                                  <div className="text-xs text-slate-600 font-medium max-w-[160px] text-center leading-snug line-clamp-2 break-words px-2.5 py-1.5 bg-slate-50/80 rounded-md border border-slate-200/60 shadow-sm" title={feedbackReasons[candidate.id]}>
+                                  <div className="text-xs text-slate-600 font-medium max-w-[160px] text-center leading-snug line-clamp-2 whitespace-normal break-words px-2.5 py-1.5 bg-slate-50/80 rounded-md border border-slate-200/60 shadow-sm" title={feedbackReasons[candidate.id]}>
                                     {feedbackReasons[candidate.id]}
                                   </div>
                                 )}
