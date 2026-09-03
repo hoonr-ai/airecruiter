@@ -521,6 +521,7 @@ export default function CandidateRankingsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [outreachStats, setOutreachStats] = useState<OutreachStats | null>(null);
+  const [statsLoaded, setStatsLoaded] = useState(false);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
   const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
@@ -1567,6 +1568,8 @@ export default function CandidateRankingsPage() {
     setInvalidContactCount(0);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
+    setOutreachStats(null);
+    setStatsLoaded(false);
     try {
       const apiBase = API_BASE;
 
@@ -1609,6 +1612,8 @@ export default function CandidateRankingsPage() {
         }
       } catch (e) {
         console.warn("Failed to fetch outreach stats:", e);
+      } finally {
+        setStatsLoaded(true);
       }
 
       // B5: parallel fetch step-3 criteria so the applied-filters panel can
@@ -1801,7 +1806,7 @@ export default function CandidateRankingsPage() {
         <div className="border-t border-slate-100 pt-5 flex flex-wrap gap-x-8 gap-y-4">
           <div className="flex gap-8 border-r border-slate-200 pr-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !outreachStats ? (
+              {isInitialLoading || !statsLoaded ? (
                 <StatsGroupSkeleton count={3} />
               ) : (
                 <>
@@ -1819,7 +1824,7 @@ export default function CandidateRankingsPage() {
             </div>
 
             <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !outreachStats ? (
+              {isInitialLoading || !statsLoaded ? (
                 <StatsGroupSkeleton count={2} />
               ) : (
                 <>
@@ -1836,7 +1841,7 @@ export default function CandidateRankingsPage() {
 
           <div className="flex gap-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !outreachStats ? (
+              {isInitialLoading || !statsLoaded ? (
                 <StatsGroupSkeleton count={3} />
               ) : (
                 <>
