@@ -34,6 +34,7 @@ import sqlalchemy
 from sqlalchemy import text
 
 from core.config import DATABASE_URL, SUPABASE_DB_URL
+from utils.pii import mask_email, mask_phone
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,13 @@ def _get_engine() -> sqlalchemy.engine.Engine:
             pool_pre_ping=True,
             pool_recycle=1800,
             connect_args={"connect_timeout": 5},
+            # Without this, SQLAlchemy appends "[parameters: (...)]" to every
+            # DBAPI error string — which for this module means a candidate's
+            # email and phone. That string is logged, stored in
+            # outreach_opt_out_audit.local_result, AND returned to the browser
+            # as local.error, so masking the log arguments alone would not
+            # cover it. The statement and the driver's own message survive.
+            hide_parameters=True,
         )
     return _ENGINE
 
@@ -216,8 +224,15 @@ def suppress_contact_locally(
     report that truthfully even if this bookkeeping fails.
     """
     result = {
+        # True when a row was newly INSERTed / UPDATEd by THIS call.
         "dnc_phone_added": False,
         "candidates_stopped": 0,
+        # True when the contact is suppressed here once this call is done,
+        # whether or not this call is what did it. Callers deciding what to
+        # tell the recruiter want this one: an idempotent re-click, or a
+        # candidate already on the imported DNC list, changes no rows and
+        # would otherwise look indistinguishable from a failed write.
+        "locally_suppressed": False,
         "phone": None,
         "email": None,
         "error": None,
@@ -229,7 +244,9 @@ def suppress_contact_locally(
         phone_norm = normalize_phone(phone)
         result["phone"] = phone_norm
         if phone and not phone_norm:
-            logger.warning("opt_out_local_phone_unnormalizable phone=%r", phone)
+            logger.warning(
+                "opt_out_local_phone_unnormalizable phone=%s", mask_phone(phone)
+            )
     email_norm = (email or "").strip().lower() or None
     result["email"] = email_norm
 
@@ -277,16 +294,42 @@ def suppress_contact_locally(
                 params,
             )
             result["candidates_stopped"] = stopped.rowcount or 0
+
+            # Read back the resulting state rather than inferring it from the
+            # rowcounts above. Both writes are no-ops when the contact was
+            # already suppressed, and "no rows changed" must not be reported as
+            # "not suppressed".
+            listed = False
+            if phone_norm:
+                listed = bool(
+                    conn.execute(
+                        text("SELECT 1 FROM dnc_list WHERE phone = :phone LIMIT 1"),
+                        {"phone": phone_norm},
+                    ).fetchone()
+                )
+            stamped = conn.execute(
+                text(
+                    "SELECT 1 FROM sourced_candidates "
+                    "WHERE dnc_stopped_at IS NOT NULL AND ("
+                    + " OR ".join(clauses)
+                    + ") LIMIT 1"
+                ),
+                params,
+            ).fetchone()
+            result["locally_suppressed"] = bool(listed or stamped)
     except Exception as e:  # noqa: BLE001 — bookkeeping must not mask the stop
         logger.error(f"suppress_contact_locally failed: {e}", exc_info=True)
         result["error"] = str(e)
         return result
 
     invalidate_dnc_cache()
+    # Masked: the full values are already in dnc_list / outreach_opt_out_audit,
+    # which are row-access-controlled. See utils/pii.py.
     logger.info(
-        "opt_out_local_suppressed phone=%s email=%s dnc_added=%s stopped=%s by=%s",
-        phone_norm, email_norm, result["dnc_phone_added"],
-        result["candidates_stopped"], created_by,
+        "opt_out_local_suppressed phone=%s email=%s dnc_added=%s stopped=%s "
+        "suppressed=%s by=%s",
+        mask_phone(phone_norm), mask_email(email_norm), result["dnc_phone_added"],
+        result["candidates_stopped"], result["locally_suppressed"], created_by,
     )
     return result
 
@@ -366,7 +409,7 @@ def release_contact_locally(
             if phone_norm and result["dnc_phone_retained_other_source"]:
                 logger.info(
                     "opt_out_local_release_blocked phone=%s reason=dnc_other_source",
-                    phone_norm,
+                    mask_phone(phone_norm),
                 )
             else:
                 released = conn.execute(
@@ -387,7 +430,7 @@ def release_contact_locally(
     invalidate_dnc_cache()
     logger.info(
         "opt_out_local_released phone=%s email=%s dnc_removed=%s released=%s by=%s",
-        phone_norm, email_norm, result["dnc_phone_removed"],
+        mask_phone(phone_norm), mask_email(email_norm), result["dnc_phone_removed"],
         result["candidates_released"], created_by,
     )
     return result

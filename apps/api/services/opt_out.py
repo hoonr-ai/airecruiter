@@ -1,7 +1,8 @@
 """pair-bot do-not-contact client.
 
-Thin async wrapper over pair-bot's three opt-out endpoints, documented in
-../../../OPT_OUT_API.md:
+Thin async wrapper over pair-bot's three opt-out endpoints. The contract is
+documented in OPT_OUT_API.md, owned by the pair-bot team and not vendored into
+this repo:
 
     POST /api/candidates/opt-out   suppress + cancel queued outreach
     POST /api/candidates/opt-in    lift a suppression

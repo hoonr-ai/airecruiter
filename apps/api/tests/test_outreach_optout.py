@@ -75,7 +75,12 @@ def calls(monkeypatch):
 
     def fake_suppress(**kwargs):
         recorded["suppress"].append(kwargs)
-        return {"dnc_phone_added": True, "candidates_stopped": 2, "error": None}
+        return {
+            "dnc_phone_added": True,
+            "candidates_stopped": 2,
+            "locally_suppressed": True,
+            "error": None,
+        }
 
     def fake_release(**kwargs):
         recorded["release"].append(kwargs)
@@ -224,8 +229,107 @@ def test_opt_out_unreachable_pairbot_still_suppresses_locally(client, calls, mon
     assert "retry" in detail.lower()
     # pair cannot cancel the queued sends, but it can refuse to add more — and
     # the recruiter is told exactly that rather than a bare failure.
+    # The default fake reports a successful local write, so the claim is earned.
     assert len(calls["suppress"]) == 1
     assert "no new outreach will be launched" in detail
+
+
+def test_unreachable_pairbot_does_not_claim_a_suppression_it_did_not_make(
+    client, calls, monkeypatch
+):
+    """The interview_id-only path has nothing to write locally: the local DNC
+    list is keyed on contact details. Claiming "marked do-not-contact in pair"
+    here would read as a partial success and invite the recruiter to treat a
+    candidate who is still being called as handled."""
+
+    async def unreachable(**kwargs):
+        raise PairBotOptOutError("connection refused")
+
+    monkeypatch.setattr(mod, "pairbot_opt_out", unreachable)
+    monkeypatch.setattr(
+        mod, "suppress_contact_locally",
+        lambda **kw: {
+            "dnc_phone_added": False,
+            "candidates_stopped": 0,
+            "locally_suppressed": False,
+            "error": "no normalizable phone or email",
+        },
+    )
+    res = client.post("/api/v1/outreach/opt-out", json={"interview_id": 7})
+    assert res.status_code == 502
+    detail = res.json()["detail"]
+    assert "still being contacted" in detail
+    assert "marked do-not-contact" not in detail
+
+
+def test_unreachable_pairbot_reports_failed_local_write_honestly(
+    client, calls, monkeypatch
+):
+    async def unreachable(**kwargs):
+        raise PairBotOptOutError("connection refused")
+
+    monkeypatch.setattr(mod, "pairbot_opt_out", unreachable)
+    monkeypatch.setattr(
+        mod, "suppress_contact_locally",
+        lambda **kw: {
+            "dnc_phone_added": False,
+            "candidates_stopped": 0,
+            "locally_suppressed": False,
+            "error": "db down",
+        },
+    )
+    res = client.post(
+        "/api/v1/outreach/opt-out", json={"email": "a@b.com", "phone": "5105908688"}
+    )
+    assert res.status_code == 502
+    assert "marked do-not-contact" not in res.json()["detail"]
+
+
+def test_opt_in_unreachable_pairbot_keeps_the_shared_status_mapping(
+    client, calls, monkeypatch
+):
+    """opt-in routes through the same _pairbot_http_error helper as opt-out, so
+    a 403 collapses to 401 on both."""
+
+    async def forbidden(**kwargs):
+        raise PairBotOptOutError("missing api key", status_code=403)
+
+    monkeypatch.setattr(mod, "pairbot_opt_in", forbidden)
+    res = client.post("/api/v1/outreach/opt-in", json={"email": "a@b.com"})
+    assert res.status_code == 401
+    assert not calls["release"]
+
+
+def test_email_is_lowercased_before_going_upstream(client, calls):
+    client.post("/api/v1/outreach/opt-out", json={"email": "  AhMay02@Gmail.COM "})
+    # pair-bot normalizes case itself, but sending the canonical form means the
+    # two sides agree regardless of what the recruiter's row happened to hold.
+    assert calls["opt_out"][0]["email"] == "ahmay02@gmail.com"
+
+
+def test_unreachable_pairbot_credits_an_already_standing_local_suppression(
+    client, calls, monkeypatch
+):
+    """A second click, or a candidate already on the imported DNC list, changes
+    no rows. "Nothing was suppressed" would be wrong — they are suppressed
+    here; it is only pair-bot's queued sends that are unaccounted for."""
+
+    async def unreachable(**kwargs):
+        raise PairBotOptOutError("connection refused")
+
+    monkeypatch.setattr(mod, "pairbot_opt_out", unreachable)
+    monkeypatch.setattr(
+        mod, "suppress_contact_locally",
+        lambda **kw: {
+            "dnc_phone_added": False,
+            "candidates_stopped": 0,
+            "locally_suppressed": True,
+            "error": None,
+        },
+    )
+    res = client.post("/api/v1/outreach/opt-out", json={"phone": "5105908688"})
+    assert res.status_code == 502
+    assert "marked do-not-contact in pair" in res.json()["detail"]
 
 
 def test_opt_out_bad_api_key_surfaces_as_401(client, calls, monkeypatch):
@@ -240,7 +344,12 @@ def test_opt_out_bad_api_key_surfaces_as_401(client, calls, monkeypatch):
 
 def test_opt_out_survives_local_write_failure(client, calls, monkeypatch):
     def broken(**kwargs):
-        return {"dnc_phone_added": False, "candidates_stopped": 0, "error": "db down"}
+        return {
+            "dnc_phone_added": False,
+            "candidates_stopped": 0,
+            "locally_suppressed": False,
+            "error": "db down",
+        }
 
     monkeypatch.setattr(mod, "suppress_contact_locally", broken)
     res = client.post("/api/v1/outreach/opt-out", json={"email": "a@b.com"})

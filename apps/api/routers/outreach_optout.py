@@ -4,8 +4,10 @@ pair launches the outreach (POST /api/bulk-interviews) but, before this
 router, only pair-bot could stop it, and only through pair-bot's own
 dashboard. A recruiter in pair who heard "stop contacting me" had to leave
 pair, find the candidate in pair-bot and click a second button — and if they
-didn't, the automated reminder *calls* kept going. See ../../../OPT_OUT_API.md
-for pair-bot's side of the contract.
+didn't, the automated reminder *calls* kept going. pair-bot's side of the
+contract is documented in OPT_OUT_API.md, which the pair-bot team owns and is
+not vendored here — ask them for the current copy rather than trusting a stale
+one.
 
 Two writes happen per stop, and both matter:
 
@@ -44,6 +46,7 @@ from services.dnc_storage import (
     release_contact_locally,
     suppress_contact_locally,
 )
+from utils.pii import mask_email, mask_phone
 from services.opt_out import (
     PairBotOptOutError,
     normalize_channels,
@@ -114,7 +117,7 @@ def _resolve_contact(candidate_id: str) -> Dict[str, Optional[str]]:
                 )
                 row = cur.fetchone()
             if row:
-                out["email"] = (row[0] or "").strip() or None
+                out["email"] = (row[0] or "").strip().lower() or None
                 out["phone"] = (row[1] or "").strip() or None
                 out["name"] = (row[2] or "").strip() or None
         finally:
@@ -135,9 +138,15 @@ def _merge_identifiers(
     stored there as two separate identities, and a suppression recorded against
     only the address will not match a Twilio STOP that later arrives carrying
     only the number.
+
+    The address is lower-cased here, not just trimmed. pair-bot documents that
+    it normalizes case server-side, and dnc_storage lower-cases for its own
+    matching — but sending the canonical form means the two sides agree no
+    matter what the caller typed, instead of relying on that promise for the
+    half of the write that stops the actual sending.
     """
     resolved = {
-        "email": (email or "").strip() or None,
+        "email": (email or "").strip().lower() or None,
         "phone": (phone or "").strip() or None,
         "name": None,
     }
@@ -149,21 +158,53 @@ def _merge_identifiers(
     return resolved
 
 
-def _pairbot_http_error(e: PairBotOptOutError, local_note: str = "") -> HTTPException:
+def _pairbot_http_error(
+    e: PairBotOptOutError,
+    unreachable_prefix: str,
+    extra_note: str = "",
+) -> HTTPException:
     """Translate a pair-bot failure into a status the recruiter can act on.
 
     A 4xx is a request the caller can fix and means nothing was suppressed
-    anywhere. Anything else (5xx, timeout, DNS) means the stop did not reach
+    anywhere. Anything else (5xx, timeout, DNS) means the call did not reach
     pair-bot and must be retried — 502, never 500, so it is not confused with
     a bug in pair.
+
+    401/403 collapse to 401 so the browser's own auth handling kicks in rather
+    than rendering a "forbidden" a recruiter cannot act on: a rejected M2M key
+    is an ops problem, not a permissions one.
     """
     if e.status_code and 400 <= e.status_code < 500:
         status = 401 if e.status_code in (401, 403) else e.status_code
         return HTTPException(status_code=status, detail=e.message)
-    detail = f"Could not stop outreach at pair-bot: {e.message}. Please retry."
-    if local_note:
-        detail = f"{detail} {local_note}"
+    detail = f"{unreachable_prefix}: {e.message}."
+    if extra_note:
+        detail = f"{detail} {extra_note}"
     return HTTPException(status_code=502, detail=detail)
+
+
+def _local_fallback_note(local: Dict[str, Any]) -> str:
+    """What to tell the recruiter about the local half when pair-bot is down.
+
+    Only claim a local suppression when one was actually recorded. There are
+    two ways it is not: an interview_id-only request (this endpoint accepts
+    one, but the local DNC list is keyed on contact details, so
+    suppress_contact_locally has nothing to write), or a failed write. Saying
+    "marked do-not-contact in pair" in either case reads as a partial success
+    and invites the recruiter to treat a candidate who is still being called as
+    handled — the exact failure this feature exists to prevent.
+    """
+    recorded = not local.get("error") and local.get("locally_suppressed")
+    if recorded:
+        return (
+            "The candidate has been marked do-not-contact in pair, so no new "
+            "outreach will be launched, but already-queued messages and calls "
+            "were not cancelled — please retry."
+        )
+    return (
+        "Nothing was suppressed on either side — this candidate is still "
+        "being contacted. Retry, and escalate if it keeps failing."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,11 +267,7 @@ async def stop_outreach(
             local = suppress_contact_locally(
                 phone=phone, email=email, reason=reason, created_by=actor
             )
-            note = (
-                "The candidate has been marked do-not-contact in pair, so no new "
-                "outreach will be launched, but already-queued messages and calls "
-                "were not cancelled."
-            )
+            note = _local_fallback_note(local)
         record_opt_out_audit(
             action="opt-out",
             email=email,
@@ -245,7 +282,9 @@ async def stop_outreach(
             pairbot_response={"status_code": e.status_code, "error": e.message, **e.payload},
             local_result=local,
         )
-        raise _pairbot_http_error(e, note) from e
+        raise _pairbot_http_error(
+            e, "Could not stop outreach at pair-bot", note
+        ) from e
 
     local = suppress_contact_locally(
         phone=phone, email=email, reason=reason, created_by=actor
@@ -264,9 +303,11 @@ async def stop_outreach(
         pairbot_response=pairbot_response,
         local_result=local,
     )
+    # Contact details masked (utils/pii.py); the audit row holds the full
+    # values for anyone tracing a specific case.
     logger.info(
         "opt_out_ok by=%s candidate_id=%s email=%s phone=%s cancelled=%s interviews=%s",
-        actor, request.candidate_id, email, phone,
+        actor, request.candidate_id, mask_email(email), mask_phone(phone),
         (pairbot_response.get("data") or {}).get("cancelled"),
         (pairbot_response.get("data") or {}).get("interview_ids"),
     )
@@ -338,15 +379,10 @@ async def resume_outreach(
             pairbot_response={"status_code": e.status_code, "error": e.message, **e.payload},
             local_result={"skipped": "pair-bot rejected the opt-in; suppression left in place"},
         )
-        if e.status_code and 400 <= e.status_code < 500:
-            status = 401 if e.status_code in (401, 403) else e.status_code
-            raise HTTPException(status_code=status, detail=e.message) from e
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"Could not resume outreach at pair-bot: {e.message}. The candidate "
-                "is still suppressed everywhere. Please retry."
-            ),
+        raise _pairbot_http_error(
+            e,
+            "Could not resume outreach at pair-bot",
+            "The candidate is still suppressed everywhere. Please retry.",
         ) from e
 
     local = release_contact_locally(phone=phone, email=email, created_by=actor)
@@ -364,7 +400,10 @@ async def resume_outreach(
         pairbot_response=pairbot_response,
         local_result=local,
     )
-    logger.info("opt_in_ok by=%s email=%s phone=%s", actor, email, phone)
+    logger.info(
+        "opt_in_ok by=%s email=%s phone=%s",
+        actor, mask_email(email), mask_phone(phone),
+    )
 
     message = pairbot_response.get("message") or "Suppression lifted."
     if local.get("dnc_phone_retained_other_source"):

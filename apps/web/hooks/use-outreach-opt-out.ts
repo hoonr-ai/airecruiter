@@ -7,7 +7,8 @@ import { logger } from "@/lib/logger";
 
 // Do-not-contact calls against pair's own backend, which forwards to pair-bot
 // and mirrors the suppression into pair's local DNC list. See
-// apps/api/routers/outreach_optout.py and ../../OPT_OUT_API.md.
+// apps/api/routers/outreach_optout.py, whose docstring carries the rationale.
+// pair-bot's own contract lives in OPT_OUT_API.md, owned by the pair-bot team.
 //
 // These deliberately do NOT go through lib/api's `req`, which flattens a
 // failure into `Error("422 /path: {\"detail\":\"…\"}")`. The message the
@@ -42,7 +43,12 @@ export type OptOutResult = {
   local?: {
     dnc_phone_added?: boolean;
     candidates_stopped?: number;
+    // True when the contact is suppressed in pair once the call is done,
+    // whether or not this call is what did it (an idempotent re-click changes
+    // no rows). The backend keys its recruiter-facing wording on this.
+    locally_suppressed?: boolean;
     dnc_phone_removed?: boolean;
+    dnc_phone_retained_other_source?: boolean;
     candidates_released?: number;
     error?: string | null;
   };
