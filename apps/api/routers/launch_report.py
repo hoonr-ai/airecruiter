@@ -453,6 +453,20 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     return fetched
 
 
+def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[str, Any], live_api: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge outreach data from 3 layers (Candidate DB -> Audit DB -> Live API)
+    with non-null values from higher layers overriding lower layers.
+    """
+    merged_payload = {**cand_fallback}
+    for source in (audit_fallback, live_api):
+        if isinstance(source, dict):
+            for k, v in source.items():
+                if v is not None:
+                    merged_payload[k] = v
+    return merged_payload
+
+
 def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
@@ -645,13 +659,7 @@ def _build_row(
         live_api = outreach_by_interview.get(iid) or {}
 
         # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
-        # Non-null values from higher layers override lower layers
-        merged_payload = {**cand_fallback}
-        for source in (audit_fallback, live_api):
-            if isinstance(source, dict):
-                for k, v in source.items():
-                    if v is not None:
-                        merged_payload[k] = v
+        merged_payload = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
         if merged_payload:
             payloads.append(merged_payload)
