@@ -2160,9 +2160,9 @@ export default function AdminAnalyticsPage() {
                 visibleTimeline.map((job) => (
                   <tr
                     key={job.job_id || job.jobdiva_id}
-                    className="hover:bg-[#f6f8fb] transition-colors group"
+                    className={`hover:bg-[#f6f8fb] transition-colors group ${job.is_archived ? "bg-slate-50" : "bg-white"}`}
                   >
-                    <td className="py-3.5 px-6 sticky left-0 z-10 bg-white group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]">
+                    <td className={`py-3.5 px-6 sticky left-0 z-10 ${job.is_archived ? "bg-slate-50" : "bg-white"} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]`}>
                       <div
                         className="font-semibold text-slate-800 max-w-[260px] truncate"
                         title={job.title}
