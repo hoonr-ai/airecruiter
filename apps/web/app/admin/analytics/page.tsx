@@ -2012,7 +2012,9 @@ export default function AdminAnalyticsPage() {
                 />
               </div>
               <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
+                <label htmlFor="timelineStartDate" className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer">From:</label>
                 <input
+                  id="timelineStartDate"
                   type="date"
                   aria-label="Start date filter"
                   value={timelineStartDate}
@@ -2022,8 +2024,9 @@ export default function AdminAnalyticsPage() {
                   }}
                   className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
-                <span className="text-slate-300 text-[12px] font-medium">-</span>
+                <label htmlFor="timelineEndDate" className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer">To:</label>
                 <input
+                  id="timelineEndDate"
                   type="date"
                   aria-label="End date filter"
                   value={timelineEndDate}
