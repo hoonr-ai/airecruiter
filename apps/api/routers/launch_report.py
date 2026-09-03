@@ -548,10 +548,13 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
         merged = {**payload, **outreach_dict}
 
-        status_raw = (
-            merged.get("outreach_status")
-            or merged.get("status")
-        )
+        # If the payload came wrapped with an "outreach" dict (like from the UI or candidates API),
+        # we strictly avoid falling back to the top-level `payload["status"]` (which is the candidate's
+        # resume-screening status). If it's a flat payload, `payload["status"]` IS the outreach status.
+        if "outreach" in payload:
+            status_raw = merged.get("outreach_status") or outreach_dict.get("status")
+        else:
+            status_raw = merged.get("outreach_status") or merged.get("status")
         normalized_status = (status_raw or "").strip().lower()
 
         # Candidates marked as failed/rejected who never actually engaged/attended
