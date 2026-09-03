@@ -55,6 +55,7 @@ import { StopOutreachModal, type StopOutreachCandidate } from "@/components/Stop
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
+import { cn } from "@/lib/utils";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
