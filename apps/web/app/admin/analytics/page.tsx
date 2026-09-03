@@ -174,10 +174,12 @@ const formatDate = (iso: string | null | undefined): string => {
   if (Number.isNaN(d.getTime())) return "—";
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    month: "2-digit", day: "2-digit", year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
   });
   const parts = formatter.formatToParts(d);
-  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
   return `${p.month}/${p.day}/${p.year}`;
 };
 
@@ -187,13 +189,18 @@ const formatDateTime = (iso: string | null | undefined): string => {
   if (!date) return "—";
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    month: "2-digit", day: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false, timeZoneName: "short"
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
   });
   const parts = formatter.formatToParts(date);
-  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
-  const hr = p.hour === '24' ? '00' : p.hour;
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+  const hr = p.hour === "24" ? "00" : p.hour;
   return `${p.month}/${p.day}/${p.year} ${hr}:${p.minute}:${p.second} ${p.timeZoneName}`;
 };
 
@@ -524,7 +531,11 @@ export default function AdminAnalyticsPage() {
       if (!jobDateIso) return false;
 
       // Ensure start is not strictly after end
-      if (timelineStartDate && timelineEndDate && timelineStartDate > timelineEndDate) {
+      if (
+        timelineStartDate &&
+        timelineEndDate &&
+        timelineStartDate > timelineEndDate
+      ) {
         return false;
       }
 
@@ -542,7 +553,8 @@ export default function AdminAnalyticsPage() {
     }
 
     if (!timelineQuery) return true;
-    const recruiterMatch = job.recruiter_emails?.some(e => e.includes(timelineQuery)) ?? false;
+    const recruiterMatch =
+      job.recruiter_emails?.some((e) => e.includes(timelineQuery)) ?? false;
     return (
       job.title.toLowerCase().includes(timelineQuery) ||
       job.jobdiva_id.toLowerCase().includes(timelineQuery) ||
@@ -1286,7 +1298,9 @@ export default function AdminAnalyticsPage() {
                 what PAIR recorded, and what JobDiva confirms. */}
             <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
               <div className="flex items-center justify-between">
-                <span className="text-[13px] font-semibold text-slate-500">PAIR Submits</span>
+                <span className="text-[13px] font-semibold text-slate-500">
+                  PAIR Submits
+                </span>
                 <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
                   <BadgeCheck className="w-4 h-4" />
                 </div>
@@ -1299,7 +1313,9 @@ export default function AdminAnalyticsPage() {
                     {(submissionMetrics.pair_submits ?? 0).toLocaleString()}
                   </div>
                 )}
-                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">recruiter pressed Submit in PAIR</div>
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">
+                  recruiter pressed Submit in PAIR
+                </div>
               </div>
             </div>
 
@@ -2012,7 +2028,12 @@ export default function AdminAnalyticsPage() {
                 />
               </div>
               <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
-                <label htmlFor="timelineStartDate" className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer">From:</label>
+                <label
+                  htmlFor="timelineStartDate"
+                  className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer"
+                >
+                  From:
+                </label>
                 <input
                   id="timelineStartDate"
                   type="date"
@@ -2024,7 +2045,12 @@ export default function AdminAnalyticsPage() {
                   }}
                   className="h-7 w-[125px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-2 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
-                <label htmlFor="timelineEndDate" className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer">To:</label>
+                <label
+                  htmlFor="timelineEndDate"
+                  className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer"
+                >
+                  To:
+                </label>
                 <input
                   id="timelineEndDate"
                   type="date"
@@ -2091,7 +2117,13 @@ export default function AdminAnalyticsPage() {
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
               <tr className="font-bold text-slate-500 text-[12.5px]">
-                <th className="py-3 px-4 w-12 text-center sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">#</th>
+                <th
+                  scope="col"
+                  aria-label="Row Number"
+                  className="py-3 px-4 w-12 text-center sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]"
+                >
+                  #
+                </th>
                 <th className="py-3 px-6">JobDiva ID</th>
                 <th className="py-3 px-6 min-w-[200px]">Job Title</th>
                 <th className="py-3 px-6">Client</th>
@@ -2100,7 +2132,9 @@ export default function AdminAnalyticsPage() {
                 <th className="py-3 px-6">Added (PAIR)</th>
                 <th className="py-3 px-6">Launched (PAIR)</th>
                 <th className="py-3 px-6 text-center">Lag</th>
-                <th className="py-3 px-6 text-center">Active / Archived Jobs</th>
+                <th className="py-3 px-6 text-center">
+                  Active / Archived Jobs
+                </th>
                 <th className="py-3 px-6 text-center">PAIR Status</th>
                 <th className="py-3 px-6 text-center">Sourced</th>
                 <th className="py-3 px-6 text-center">Launched</th>
@@ -2174,7 +2208,9 @@ export default function AdminAnalyticsPage() {
                       key={job.job_id || job.jobdiva_id}
                       className={`hover:bg-[#f6f8fb] transition-colors group ${rowBg}`}
                     >
-                      <td className={`py-3.5 px-4 sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0] text-center text-slate-500 font-medium`}>
+                      <td
+                        className={`py-3.5 px-4 w-12 sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0] text-center text-slate-500 font-medium`}
+                      >
                         {i + 1}
                       </td>
                       <td className="py-3.5 px-6">
@@ -2194,69 +2230,76 @@ export default function AdminAnalyticsPage() {
                             className="mt-1.5 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500 max-w-full"
                             title={job.archive_reason || "—"}
                           >
-                            Reason: <span className="truncate ml-1">{job.archive_reason || "—"}</span>
+                            Reason:{" "}
+                            <span className="truncate ml-1">
+                              {job.archive_reason || "—"}
+                            </span>
                           </div>
                         )}
                       </td>
                       <td className="py-3.5 px-6 text-slate-600">
-                      <div
-                        className="max-w-[160px] truncate"
-                        title={job.customer_name}
-                      >
-                        {job.customer_name}
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-6">
-                      {job.recruiter_emails?.length ? (
-                        <div className="flex flex-col gap-1 max-w-[250px] max-h-[64px] overflow-y-auto pr-1">
-                          {job.recruiter_emails.map((email, i) => (
-                            <div key={i} className="text-slate-600 text-[13px] break-words" title={email}>
-                              {email}
-                            </div>
-                          ))}
+                        <div
+                          className="max-w-[160px] truncate"
+                          title={job.customer_name}
+                        >
+                          {job.customer_name}
                         </div>
-                      ) : (
-                        <div className="text-slate-600">—</div>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-6 whitespace-nowrap">
-                      {job.jobdiva_posted_on ? (
-                        <span className="text-slate-700">
-                          {formatDate(job.jobdiva_posted_on)}
-                        </span>
-                      ) : job.posted_date_raw ? (
-                        <span className="text-slate-500">
-                          {job.posted_date_raw}
-                        </span>
-                      ) : (
-                        <span className="text-slate-300">—</span>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-6 whitespace-nowrap">
-                      {renderDateCell(job.added_to_curate_at)}
-                    </td>
-                    <td className="py-3.5 px-6 whitespace-nowrap">
-                      {renderDateCell(job.curate_launched_at)}
-                    </td>
-                    <td className="py-3.5 px-6 text-center whitespace-nowrap">
-                      {renderLagChip(job.posted_to_launch_days)}
-                    </td>
-                    <td className="py-3.5 px-6 text-center">
-                      {renderArchivedBadge(job)}
-                    </td>
-                    <td className="py-3.5 px-6 text-center">
-                      {renderPairStatusBadge(job.pair_status)}
-                    </td>
-                    <td className="py-3.5 px-6 text-center font-bold text-slate-800">
-                      {job.candidates_sourced.toLocaleString()}
-                    </td>
-                    <td className="py-3.5 px-6 text-center font-bold text-primary">
-                      {job.candidates_launched.toLocaleString()}
-                    </td>
-                    <td className="py-3.5 px-6 text-center font-bold text-amber-600">
-                      {(job.jobdiva_submittals ?? 0).toLocaleString()}
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="py-3.5 px-6">
+                        {job.recruiter_emails?.length ? (
+                          <div className="flex flex-col gap-1 max-w-[250px] max-h-[64px] overflow-y-auto pr-1">
+                            {job.recruiter_emails.map((email, i) => (
+                              <div
+                                key={i}
+                                className="text-slate-600 text-[13px] break-words"
+                                title={email}
+                              >
+                                {email}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-slate-600">—</div>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-6 whitespace-nowrap">
+                        {job.jobdiva_posted_on ? (
+                          <span className="text-slate-700">
+                            {formatDate(job.jobdiva_posted_on)}
+                          </span>
+                        ) : job.posted_date_raw ? (
+                          <span className="text-slate-500">
+                            {job.posted_date_raw}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-6 whitespace-nowrap">
+                        {renderDateCell(job.added_to_curate_at)}
+                      </td>
+                      <td className="py-3.5 px-6 whitespace-nowrap">
+                        {renderDateCell(job.curate_launched_at)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderLagChip(job.posted_to_launch_days)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center">
+                        {renderArchivedBadge(job)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center">
+                        {renderPairStatusBadge(job.pair_status)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center font-bold text-slate-800">
+                        {job.candidates_sourced.toLocaleString()}
+                      </td>
+                      <td className="py-3.5 px-6 text-center font-bold text-primary">
+                        {job.candidates_launched.toLocaleString()}
+                      </td>
+                      <td className="py-3.5 px-6 text-center font-bold text-amber-600">
+                        {(job.jobdiva_submittals ?? 0).toLocaleString()}
+                      </td>
+                    </tr>
                   );
                 })
               )}
