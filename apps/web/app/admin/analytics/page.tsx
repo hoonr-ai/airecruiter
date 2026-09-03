@@ -2157,12 +2157,14 @@ export default function AdminAnalyticsPage() {
                   </td>
                 </tr>
               ) : (
-                visibleTimeline.map((job) => (
-                  <tr
-                    key={job.job_id || job.jobdiva_id}
-                    className="hover:bg-[#f6f8fb] transition-colors group"
-                  >
-                    <td className="py-3.5 px-6 sticky left-0 z-10 bg-white group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]">
+                visibleTimeline.map((job) => {
+                  const rowBg = job.is_archived ? "bg-slate-50" : "bg-white";
+                  return (
+                    <tr
+                      key={job.job_id || job.jobdiva_id}
+                      className={`hover:bg-[#f6f8fb] transition-colors group ${rowBg}`}
+                    >
+                      <td className={`py-3.5 px-6 sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]`}>
                       <div
                         className="font-semibold text-slate-800 max-w-[260px] truncate"
                         title={job.title}
@@ -2240,7 +2242,8 @@ export default function AdminAnalyticsPage() {
                       {(job.jobdiva_submittals ?? 0).toLocaleString()}
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
