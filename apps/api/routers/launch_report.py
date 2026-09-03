@@ -414,7 +414,10 @@ async def _fetch_outreach_status(
         try:
             res = await client.get(f"/api/interviews/{interview_id}/outreach-status")
             res.raise_for_status()
-            return res.json()
+            payload = res.json()
+            if isinstance(payload, dict) and payload.get("success") is True and "data" in payload:
+                return payload["data"]
+            return payload
         except Exception as exc:
             logger.warning(f"LAUNCH-REPORT: outreach-status failed for interview {interview_id}: {exc}")
             return None
