@@ -52,7 +52,7 @@ import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
@@ -253,23 +253,6 @@ interface AppliedCriterion {
   category?: string;
 }
 
-interface Candidate {
-  id: number;
-  jobdiva_id?: string;
-  jobdiva_candidate_id?: string;
-  candidate_id?: string;
-  engage_interview_id?: string;
-  name: string;
-  email: string;
-  phone?: string;
-  location?: string;
-  work_location?: string;
-  work_city?: string;
-  work_state?: string;
-  headline?: string;
-  job_title?: string;
-}
-
 interface OutreachStats {
   buckets: {
     pending: number;
@@ -286,6 +269,21 @@ interface OutreachStats {
   };
 }
 
+interface Candidate {
+  id: number;
+  jobdiva_id?: string;
+  jobdiva_candidate_id?: string;
+  candidate_id?: string;
+  engage_interview_id?: string;
+  name: string;
+  email: string;
+  phone?: string;
+  location?: string;
+  work_location?: string;
+  work_city?: string;
+  work_state?: string;
+  headline?: string;
+  job_title?: string;
   image_url?: string;
   profile_url?: string;
   source: string;
