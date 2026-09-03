@@ -457,7 +457,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     sent — a candidate SMS'd three times counts once, which is what a recruiter
     reading "SMS: 12" expects.
     """
-    buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0}
+    buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}
     phases = {"phase1": 0, "phase2": 0, "phase3": 0}
     channels = {"call": 0, "sms": 0, "web": 0}
     first_response_minutes: List[float] = []
@@ -473,6 +473,16 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
             or merged.get("status")
         )
         buckets[_bucket_status(status_raw)] += 1
+
+        # Passed/Failed are sub-buckets within "completed".
+        # _bucket_status already maps pass/fail → "completed", so we
+        # read the raw status directly to classify the sub-bucket without
+        # double-incrementing the completed counter.
+        normalized_status = (status_raw or "").strip().lower()
+        if normalized_status in ("passed", "pass"):
+            buckets["passed"] += 1
+        elif normalized_status in ("failed", "fail"):
+            buckets["failed"] += 1
 
         phase = _extract_phase(merged)
         if phase:

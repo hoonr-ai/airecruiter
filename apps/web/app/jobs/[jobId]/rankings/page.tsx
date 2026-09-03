@@ -496,6 +496,7 @@ export default function CandidateRankingsPage() {
   const [invalidContactCount, setInvalidContactCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [outreachStats, setOutreachStats] = useState<any>(null);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
   const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
@@ -1625,6 +1626,16 @@ export default function CandidateRankingsPage() {
         }
       }
 
+      // Parallel fetch outreach stats (non-blocking — slow pair-bot calls won't delay the main list)
+      try {
+        const statsData = await api.jobs.getOutreachStats(jobId as string);
+        if (statsData) {
+          setOutreachStats(statsData);
+        }
+      } catch (e) {
+        console.warn("Failed to fetch outreach stats:", e);
+      }
+
       // B5: parallel fetch step-3 criteria so the applied-filters panel can
       // render priority + required/preferred chips next to sourcing filters.
       try {
@@ -1720,8 +1731,9 @@ export default function CandidateRankingsPage() {
       )}
 
       {/* Rankings Page Header matching the premium UI */}
-      <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between shadow-sm mb-6 gap-6">
-        <div className="flex flex-col gap-2">
+      <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col shadow-sm mb-6 gap-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="flex flex-col gap-2">
           <div className="flex items-center gap-3">
             {isInitialLoading ? (
               <Skeleton className="h-8 w-64 rounded bg-slate-100" />
@@ -1810,6 +1822,76 @@ export default function CandidateRankingsPage() {
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
           </Button>
+        </div>
+        </div>
+
+        {/* B5: Outreach Stats Row */}
+        <div className="border-t border-slate-100 pt-5 flex flex-wrap gap-x-8 gap-y-4">
+          <div className="flex gap-8 border-r border-slate-200 pr-8">
+            <div className="flex flex-col gap-3 text-sm text-slate-600">
+              {isInitialLoading || !outreachStats ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Pending: <strong className="text-slate-900 ml-1">{outreachStats?.buckets?.pending ?? "—"}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> In Progress: <strong className="text-slate-900 ml-1">{outreachStats?.buckets?.in_progress ?? "—"}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Completed: <strong className="text-slate-900 ml-1">{outreachStats?.buckets?.completed ?? "—"}</strong>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-3 text-sm text-slate-600">
+              {isInitialLoading || !outreachStats ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-emerald-300"></div> Passed: <strong className="text-emerald-700 ml-1">{outreachStats?.buckets?.passed ?? "—"}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-rose-300"></div> Failed: <strong className="text-rose-700 ml-1">{outreachStats?.buckets?.failed ?? "—"}</strong>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="flex gap-8">
+            <div className="flex flex-col gap-3 text-sm text-slate-600">
+              {isInitialLoading || !outreachStats ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 1: <strong className="text-indigo-700 ml-1">{outreachStats?.phases?.phase1 ?? "—"}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 2: <strong className="text-indigo-700 ml-1">{outreachStats?.phases?.phase2 ?? "—"}</strong>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 3: <strong className="text-indigo-700 ml-1">{outreachStats?.phases?.phase3 ?? "—"}</strong>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
