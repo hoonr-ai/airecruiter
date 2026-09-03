@@ -95,7 +95,7 @@ export function Sidebar() {
 
             {/* Role identity chip — team leads see "Team Lead" instead of
                 recruiter/admin, per the team management spec. */}
-            {!isLoading && !isAdmin && isTeamLead && (
+            {!isLoading && isTeamLead && (
                 <div className="mt-4 px-4">
                     <span
                         className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ring-inset bg-indigo-50 text-indigo-700 ring-indigo-200"
