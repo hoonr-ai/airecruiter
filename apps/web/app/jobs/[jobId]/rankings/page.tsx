@@ -526,6 +526,7 @@ export default function CandidateRankingsPage() {
   const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
+  const [feedbackReasons, setFeedbackReasons] = useState<Record<string, string>>({});
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
@@ -549,17 +550,19 @@ export default function CandidateRankingsPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (actionCandidateId && rejectReason) {
+    const trimmedReason = rejectReason?.trim() || "";
+    if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
       try {
         await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
-          reason: rejectReason
+          reason: trimmedReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
       } catch (error) {
         console.error('Error syncing rejection:', error);
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        setToast({ message: "Failed to save rejection reason", type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
@@ -1497,12 +1500,17 @@ export default function CandidateRankingsPage() {
 
     const pageRows = candData.candidates;
     const pageFeedbacks: Record<string, string> = {};
+    const pageFeedbackReasons: Record<string, string> = {};
     pageRows.forEach((c: any) => {
       if (c.data?.feedback_type) {
         pageFeedbacks[c.id] = c.data.feedback_type;
       }
+      if (c.data?.feedback_reason) {
+        pageFeedbackReasons[c.id] = c.data.feedback_reason;
+      }
     });
     setFeedbacks(prev => ({ ...prev, ...pageFeedbacks }));
+    setFeedbackReasons(prev => ({ ...prev, ...pageFeedbackReasons }));
 
     const launchedCount = Number(candData?.launched_count);
     if (Number.isFinite(launchedCount)) {
@@ -1562,6 +1570,7 @@ export default function CandidateRankingsPage() {
     setIsLoadingMore(false);
     setCandidates([]);
     setFeedbacks({});
+    setFeedbackReasons({});
     setCandidateTotalCount(0);
     setLaunchedRowCount(0);
     setDuplicateCount(0);
@@ -2642,8 +2651,15 @@ export default function CandidateRankingsPage() {
                               </SelectContent>
                             </Select>
                             {feedbacks[candidate.id] && (
-                              <div className={`text-[9px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                              <div className="flex flex-col items-center gap-1 mt-1">
+                                <div className={`text-[9px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
+                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                                </div>
+                                {feedbackReasons[candidate.id] && (
+                                  <div className="text-[9px] text-slate-500 font-medium max-w-[140px] text-center leading-tight truncate px-1" title={feedbackReasons[candidate.id]}>
+                                    {feedbackReasons[candidate.id]}
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
