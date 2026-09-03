@@ -2091,7 +2091,9 @@ export default function AdminAnalyticsPage() {
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
               <tr className="font-bold text-slate-500 text-[12.5px]">
-                <th className="py-3 px-6 sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">Job</th>
+                <th className="py-3 px-4 w-12 text-center sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">#</th>
+                <th className="py-3 px-6">JobDiva ID</th>
+                <th className="py-3 px-6 min-w-[200px]">Job Title</th>
                 <th className="py-3 px-6">Client</th>
                 <th className="py-3 px-6">Recruiter Emails</th>
                 <th className="py-3 px-6">Posted (JobDiva)</th>
@@ -2109,9 +2111,14 @@ export default function AdminAnalyticsPage() {
               {isLoading ? (
                 [1, 2, 3, 4].map((i) => (
                   <tr key={i}>
-                    <td className="py-4 px-6 sticky left-0 z-10 bg-white shadow-[1px_0_0_0_#e2e8f0]">
+                    <td className="py-4 px-4 sticky left-0 z-10 bg-white shadow-[1px_0_0_0_#e2e8f0] text-center">
+                      <div className="h-4 w-4 bg-slate-100 animate-pulse rounded mx-auto" />
+                    </td>
+                    <td className="py-4 px-6">
+                      <div className="h-4 w-20 bg-slate-100 animate-pulse rounded" />
+                    </td>
+                    <td className="py-4 px-6">
                       <div className="h-4 w-44 bg-slate-100 animate-pulse rounded" />
-                      <div className="h-3 w-20 bg-slate-100 animate-pulse rounded mt-1.5" />
                     </td>
                     <td className="py-4 px-6">
                       <div className="h-4 w-24 bg-slate-100 animate-pulse rounded" />
@@ -2151,7 +2158,7 @@ export default function AdminAnalyticsPage() {
               ) : filteredTimeline.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={12}
+                    colSpan={14}
                     className="py-12 text-center text-slate-400 text-[13px]"
                   >
                     {timelineRows.length === 0
@@ -2160,33 +2167,38 @@ export default function AdminAnalyticsPage() {
                   </td>
                 </tr>
               ) : (
-                visibleTimeline.map((job) => {
+                visibleTimeline.map((job, i) => {
                   const rowBg = job.is_archived ? "bg-slate-50" : "bg-white";
                   return (
                     <tr
                       key={job.job_id || job.jobdiva_id}
                       className={`hover:bg-[#f6f8fb] transition-colors group ${rowBg}`}
                     >
-                      <td className={`py-3.5 px-6 sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]`}>
-                      <div
-                        className="font-semibold text-slate-800 max-w-[260px] truncate"
-                        title={job.title}
-                      >
-                        {job.title}
-                      </div>
-                      <div className="font-mono text-xs text-slate-400 mt-0.5">
-                        {job.jobdiva_id || "—"}
-                      </div>
-                      {job.is_archived && (
-                        <div
-                          className="mt-1.5 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500 max-w-full"
-                          title={job.archive_reason || "—"}
-                        >
-                          Reason: <span className="truncate ml-1">{job.archive_reason || "—"}</span>
+                      <td className={`py-3.5 px-4 sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0] text-center text-slate-500 font-medium`}>
+                        {i + 1}
+                      </td>
+                      <td className="py-3.5 px-6">
+                        <div className="font-mono text-sm text-slate-600">
+                          {job.jobdiva_id || "—"}
                         </div>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-6 text-slate-600">
+                      </td>
+                      <td className="py-3.5 px-6">
+                        <div
+                          className="font-semibold text-slate-800 max-w-[260px] truncate"
+                          title={job.title}
+                        >
+                          {job.title}
+                        </div>
+                        {job.is_archived && (
+                          <div
+                            className="mt-1.5 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500 max-w-full"
+                            title={job.archive_reason || "—"}
+                          >
+                            Reason: <span className="truncate ml-1">{job.archive_reason || "—"}</span>
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-6 text-slate-600">
                       <div
                         className="max-w-[160px] truncate"
                         title={job.customer_name}
