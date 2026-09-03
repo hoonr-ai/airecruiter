@@ -2120,12 +2120,16 @@ export default function AdminAnalyticsPage() {
                 <th
                   scope="col"
                   aria-label="Row Number"
-                  className="py-3 px-4 w-12 text-center sticky left-0 z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]"
+                  className="py-3 px-4 w-[50px] min-w-[50px] max-w-[50px] text-center sticky left-0 z-30 bg-slate-50"
                 >
                   #
                 </th>
-                <th className="py-3 px-6">JobDiva ID</th>
-                <th className="py-3 px-6 min-w-[200px]">Job Title</th>
+                <th className="py-3 px-6 w-[130px] min-w-[130px] max-w-[130px] sticky left-[50px] z-30 bg-slate-50">
+                  JobDiva ID
+                </th>
+                <th className="py-3 px-6 w-[280px] min-w-[280px] max-w-[280px] sticky left-[180px] z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">
+                  Job Title
+                </th>
                 <th className="py-3 px-6">Client</th>
                 <th className="py-3 px-6">Recruiter Emails</th>
                 <th className="py-3 px-6">Posted (JobDiva)</th>
@@ -2145,13 +2149,13 @@ export default function AdminAnalyticsPage() {
               {isLoading ? (
                 [1, 2, 3, 4].map((i) => (
                   <tr key={i}>
-                    <td className="py-4 px-4 sticky left-0 z-10 bg-white shadow-[1px_0_0_0_#e2e8f0] text-center">
+                    <td className="py-4 px-4 w-[50px] min-w-[50px] max-w-[50px] sticky left-0 z-10 bg-white text-center">
                       <div className="h-4 w-4 bg-slate-100 animate-pulse rounded mx-auto" />
                     </td>
-                    <td className="py-4 px-6">
+                    <td className="py-4 px-6 w-[130px] min-w-[130px] max-w-[130px] sticky left-[50px] z-10 bg-white">
                       <div className="h-4 w-20 bg-slate-100 animate-pulse rounded" />
                     </td>
-                    <td className="py-4 px-6">
+                    <td className="py-4 px-6 w-[280px] min-w-[280px] max-w-[280px] sticky left-[180px] z-10 bg-white shadow-[1px_0_0_0_#e2e8f0]">
                       <div className="h-4 w-44 bg-slate-100 animate-pulse rounded" />
                     </td>
                     <td className="py-4 px-6">
@@ -2209,16 +2213,20 @@ export default function AdminAnalyticsPage() {
                       className={`hover:bg-[#f6f8fb] transition-colors group ${rowBg}`}
                     >
                       <td
-                        className={`py-3.5 px-4 w-12 sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0] text-center text-slate-500 font-medium`}
+                        className={`py-3.5 px-4 w-[50px] min-w-[50px] max-w-[50px] sticky left-0 z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors text-center text-slate-500 font-medium`}
                       >
                         {i + 1}
                       </td>
-                      <td className="py-3.5 px-6 whitespace-nowrap">
+                      <td
+                        className={`py-3.5 px-6 w-[130px] min-w-[130px] max-w-[130px] sticky left-[50px] z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors whitespace-nowrap`}
+                      >
                         <div className="font-mono text-sm text-slate-600">
                           {job.jobdiva_id || "—"}
                         </div>
                       </td>
-                      <td className="py-3.5 px-6">
+                      <td
+                        className={`py-3.5 px-6 w-[280px] min-w-[280px] max-w-[280px] sticky left-[180px] z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]`}
+                      >
                         <div className="font-semibold text-slate-800 break-words">
                           {job.title}
                         </div>
