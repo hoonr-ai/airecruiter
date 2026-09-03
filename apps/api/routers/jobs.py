@@ -28,6 +28,7 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
+from routers.launch_report import _fetch_all_outreach, _summarise_outreach
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1622,7 +1623,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
     """
     _verify_job_access_by_id(job_id_or_ref, user)
     
-    from routers.launch_report import _fetch_all_outreach, _summarise_outreach
+
     
     conn = get_db_connection()
     try:
@@ -1636,6 +1637,10 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             if not result:
                 return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
             
+            # Note: We rely on Python's 'or' treating an empty string as falsy here.
+            # This ensures that if jobdiva_id is '', we fall back to job_id instead
+            # of querying engage_interview_audit with jobdiva_id='' (which would pool
+            # candidates from all jobs missing a JobDiva reference).
             resolved_jobdiva_id = result[0] or result[1]
             resolved_numeric_job_id = result[1] or result[0]
             

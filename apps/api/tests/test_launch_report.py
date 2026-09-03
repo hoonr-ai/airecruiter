@@ -324,6 +324,19 @@ def test_phase_distribution_normalizes_phase_variants():
     assert lr._summarise_outreach(payloads)["phases"] == {"phase1": 3, "phase2": 1, "phase3": 1}
 
 
+def test_summarise_outreach_passed_failed_sub_buckets():
+    payloads = [
+        _outreach("passed"),
+        _outreach("failed"),
+        _outreach("completed"),
+    ]
+    summary = lr._summarise_outreach(payloads)
+    assert summary["buckets"]["passed"] == 1
+    assert summary["buckets"]["failed"] == 1
+    assert summary["buckets"]["completed"] == 3
+
+
+
 def test_phase_distribution_falls_back_to_status_when_phase_missing():
     payload = {"outreach": {"outreach_status": "phase2"}, "communications": []}
     summary = lr._summarise_outreach([payload])

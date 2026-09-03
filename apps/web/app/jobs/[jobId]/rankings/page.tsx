@@ -268,6 +268,24 @@ interface Candidate {
   work_state?: string;
   headline?: string;
   job_title?: string;
+}
+
+interface OutreachStats {
+  buckets: {
+    pending: number;
+    in_progress: number;
+    completed: number;
+    partial_complete: number;
+    passed: number;
+    failed: number;
+  };
+  phases: {
+    phase1: number;
+    phase2: number;
+    phase3: number;
+  };
+}
+
   image_url?: string;
   profile_url?: string;
   source: string;
@@ -467,6 +485,14 @@ function HardFilterHoverCard({
   );
 }
 
+const StatsGroupSkeleton = ({ count = 3 }: { count?: number }) => (
+  <>
+    {Array.from({ length: count }).map((_, i) => (
+      <Skeleton key={i} className="h-5 w-48 bg-slate-100" />
+    ))}
+  </>
+);
+
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
@@ -496,7 +522,7 @@ export default function CandidateRankingsPage() {
   const [invalidContactCount, setInvalidContactCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  const [outreachStats, setOutreachStats] = useState<any>(null);
+  const [outreachStats, setOutreachStats] = useState<OutreachStats | null>(null);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
   const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
@@ -1830,11 +1856,7 @@ export default function CandidateRankingsPage() {
           <div className="flex gap-8 border-r border-slate-200 pr-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
               {isInitialLoading || !outreachStats ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                </>
+                <StatsGroupSkeleton count={3} />
               ) : (
                 <>
                   <div className="flex items-center gap-2">
@@ -1852,10 +1874,7 @@ export default function CandidateRankingsPage() {
 
             <div className="flex flex-col gap-3 text-sm text-slate-600">
               {isInitialLoading || !outreachStats ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                </>
+                <StatsGroupSkeleton count={2} />
               ) : (
                 <>
                   <div className="flex items-center gap-2">
@@ -1872,11 +1891,7 @@ export default function CandidateRankingsPage() {
           <div className="flex gap-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
               {isInitialLoading || !outreachStats ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                </>
+                <StatsGroupSkeleton count={3} />
               ) : (
                 <>
                   <div className="flex items-center gap-2">

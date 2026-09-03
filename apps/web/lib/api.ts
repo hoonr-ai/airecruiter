@@ -201,7 +201,6 @@ export const api = {
       req<any>(`/jobs/${jobId}/publish`, { method: "POST", body }),
     createExternal: (body: unknown) =>
       req<any>(`/jobs/external/create`, { method: "POST", body }),
-    saveRequirements: (jobId: string, data: any) => req<any>(`/jobs/${jobId}/requirements`, { method: "POST", body: JSON.stringify(data) }),
     getDraft: (jobId: string) => req<any>(`/jobs/${jobId}/draft`),
     getMonitoredData: (jobId: string) => req<any>(`/jobs/${jobId}/monitored-data`),
     getOutreachStats: (jobId: string) => req<any>(`/jobs/${jobId}/outreach-stats`),
