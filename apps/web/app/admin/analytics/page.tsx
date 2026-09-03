@@ -2220,7 +2220,10 @@ export default function AdminAnalyticsPage() {
                       <td
                         className={`py-3.5 px-6 w-[130px] min-w-[130px] max-w-[130px] sticky left-[50px] z-10 ${rowBg} group-hover:bg-[#f6f8fb] transition-colors whitespace-nowrap`}
                       >
-                        <div className="font-mono text-sm text-slate-600">
+                        <div 
+                          className="font-mono text-sm text-slate-600 overflow-hidden truncate"
+                          title={job.jobdiva_id || "—"}
+                        >
                           {job.jobdiva_id || "—"}
                         </div>
                       </td>
