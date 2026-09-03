@@ -28,7 +28,7 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
-from routers.launch_report import _fetch_all_outreach, _summarise_outreach
+from routers.launch_report import _fetch_all_outreach, _summarise_outreach, merge_outreach_payloads
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1686,7 +1686,8 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
     })
     payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
 
-    # Merge live pair-bot HTTP response with local database fallback (matching launch_report.py).
+    # Merge live pair-bot HTTP response with local database fallback (matching launch_report.py
+    # fallback order, though here we collapse to one row per candidate before merging).
     # If live API returns data for an interview, live API is authoritative.
     # If live API fails, 404s, or times out, local audit/candidate fallback prevents data loss.
     merged_payloads = []
@@ -1694,12 +1695,11 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         iid = str(row[0] or "").strip()
         status_val = row[1]
         raw_resp = row[2]
-        sc_status = row[3]
         sc_phase = row[4]
 
         cand_fallback = {}
-        if sc_status:
-            cand_fallback["outreach_status"] = sc_status
+        if status_val:
+            cand_fallback["outreach_status"] = status_val
         if sc_phase:
             cand_fallback["outreach_phase"] = sc_phase
 
@@ -1709,7 +1709,8 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         elif isinstance(raw_resp, str) and raw_resp.strip():
             try:
                 audit_fallback = json.loads(raw_resp)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
                 audit_fallback = {}
 
         if status_val:
@@ -1720,12 +1721,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
 
         live_api = payloads_dict.get(iid) if iid else None
 
-        merged = {**cand_fallback}
-        for source in (audit_fallback, live_api):
-            if isinstance(source, dict):
-                for k, v in source.items():
-                    if v is not None:
-                        merged[k] = v
+        merged = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
         if merged:
             merged_payloads.append(merged)
