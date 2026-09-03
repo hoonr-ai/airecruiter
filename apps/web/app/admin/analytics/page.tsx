@@ -2043,7 +2043,7 @@ export default function AdminAnalyticsPage() {
                     setTimelineStartDate(e.target.value);
                     setShowAllTimeline(false);
                   }}
-                  className="h-7 w-[105px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-1 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className="h-7 w-[110px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-1 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
                 <label
                   htmlFor="timelineEndDate"
@@ -2060,7 +2060,7 @@ export default function AdminAnalyticsPage() {
                     setTimelineEndDate(e.target.value);
                     setShowAllTimeline(false);
                   }}
-                  className="h-7 w-[105px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-1 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  className="h-7 w-[110px] rounded-md hover:bg-slate-50 transition-colors bg-transparent px-1 text-[12.5px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
                 {(timelineStartDate || timelineEndDate) && (
                   <button
