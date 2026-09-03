@@ -550,19 +550,19 @@ export default function CandidateRankingsPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (actionCandidateId && rejectReason) {
+    const trimmedReason = rejectReason?.trim() || "";
+    if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
       try {
         await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
-          reason: rejectReason
+          reason: trimmedReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: rejectReason }));
+        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
       } catch (error) {
         console.error('Error syncing rejection:', error);
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: rejectReason }));
+        setToast({ message: "Failed to save rejection reason", type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
