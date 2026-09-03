@@ -484,13 +484,6 @@ function HardFilterHoverCard({
   );
 }
 
-const StatsGroupSkeleton = ({ count = 3 }: { count?: number }) => (
-  <>
-    {Array.from({ length: count }).map((_, i) => (
-      <Skeleton key={i} className="h-5 w-48 bg-slate-100" />
-    ))}
-  </>
-);
 
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
@@ -1721,18 +1714,17 @@ export default function CandidateRankingsPage() {
       )}
 
       {/* Rankings Page Header matching the premium UI */}
-      <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col shadow-sm mb-6 gap-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-3">
-            {isInitialLoading ? (
-              <Skeleton className="h-8 w-64 rounded bg-slate-100" />
-            ) : (
-              <>
-                <Medal className="w-8 h-8 text-indigo-600" />
-                <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
-                  {job?.title}
-                  <span className="text-slate-500 font-medium text-lg">
+      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-8 shadow-sm">
+        <div className="flex justify-between items-start mb-6">
+          <div className="flex items-start gap-4">
+            <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100/50">
+              <Medal className="w-8 h-8 text-indigo-600" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
+                {isInitialLoading ? <Skeleton className="h-8 w-64 bg-slate-100" /> : job?.title}
+                {!isInitialLoading && (
+                  <span className="text-slate-500 font-medium text-lg flex items-center">
                     ({job?.jobdiva_id || job?.job_id || jobId})
                     {(job?.jobdiva_numeric_id || job?.jobdiva_id) && (
                       <a
@@ -1740,137 +1732,115 @@ export default function CandidateRankingsPage() {
                         target="_blank"
                         rel="noopener noreferrer"
                         title="Open job in JobDiva"
-                        className="inline-flex items-center text-indigo-600 ml-1.5 align-middle hover:text-indigo-800"
+                        className="inline-flex items-center text-indigo-600 ml-1.5 hover:text-indigo-800 transition-colors"
                       >
                         <ExternalLink className="w-4 h-4" />
                       </a>
                     )}
                   </span>
-                </h2>
-              </>
-            )}
-          </div>
-          <div className="text-base text-slate-500 font-medium pl-[44px]">Candidate Rank List</div>
-        </div>
-
-        <div className="flex items-center gap-8">
-          <div className="flex gap-8 border-r border-slate-200 pr-8">
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-56 bg-slate-100" />
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{launchedRowCount}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{!job?.openings ? "—" : job.openings}</strong>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-32 bg-slate-100" />
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className="flex flex-col gap-3 text-sm text-slate-600 pl-4 border-l border-slate-200">
-              {isInitialLoading ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Invalid Contacts: <strong className="text-slate-900 ml-1">{invalidContactCount}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Duplicate Candidates: <strong className="text-slate-900 ml-1">{duplicateCount}</strong>
-                  </div>
-                </>
-              )}
+                )}
+              </h2>
+              <div className="text-sm text-slate-500 font-medium mt-1">Candidate Rank List</div>
             </div>
           </div>
           <Button
             variant="outline"
-            className="w-10 h-10 p-0 flex items-center justify-center text-slate-500 hover:text-slate-800 rounded-lg"
+            className="w-10 h-10 p-0 flex items-center justify-center text-slate-500 hover:bg-slate-50 hover:text-slate-900 rounded-lg transition-colors border-slate-200 shadow-sm"
             onClick={fetchData}
             disabled={isLoading}
           >
-            <RefreshCw className={`w-5 h-5 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
           </Button>
         </div>
-        </div>
 
-        {/* B5: Outreach Stats Row */}
-        <div className="border-t border-slate-100 pt-5 flex flex-wrap gap-x-8 gap-y-4">
-          <div className="flex gap-8 border-r border-slate-200 pr-8">
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !statsLoaded ? (
-                <StatsGroupSkeleton count={3} />
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Pending: <strong className="text-slate-900 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.pending ?? "—"}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> In Progress: <strong className="text-slate-900 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.in_progress ?? "—"}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Completed: <strong className="text-slate-900 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.completed ?? "—"}</strong>
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !statsLoaded ? (
-                <StatsGroupSkeleton count={2} />
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-emerald-300"></div> Passed: <strong className="text-emerald-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.passed ?? "—"}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-rose-300"></div> Failed: <strong className="text-rose-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.failed ?? "—"}</strong>
-                  </div>
-                </>
-              )}
+        {/* Metric Cards Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          
+          {/* Card 1: Funnel Overview */}
+          <div className="bg-slate-50/70 rounded-xl p-4 border border-slate-100/60">
+            <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Pipeline Overview</h3>
+            <div className="space-y-2.5">
+              <div className="flex justify-between items-center text-[14px]">
+                <span className="text-slate-600 font-medium">Candidates Launched</span>
+                <strong className="text-slate-900">{isInitialLoading ? <Skeleton className="h-4 w-8 inline-block" /> : launchedRowCount}</strong>
+              </div>
+              <div className="flex justify-between items-center text-[14px]">
+                <span className="text-slate-600 font-medium">Total Openings</span>
+                <strong className="text-slate-900">{isInitialLoading ? <Skeleton className="h-4 w-8 inline-block" /> : (!job?.openings ? "—" : job.openings)}</strong>
+              </div>
             </div>
           </div>
 
-          <div className="flex gap-8">
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !statsLoaded ? (
-                <StatsGroupSkeleton count={3} />
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 1: <strong className="text-indigo-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase1 ?? "—"}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 2: <strong className="text-indigo-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase2 ?? "—"}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 3: <strong className="text-indigo-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase3 ?? "—"}</strong>
-                  </div>
-                </>
-              )}
+          {/* Card 2: Outreach Engagement */}
+          <div className="bg-slate-50/70 rounded-xl p-4 border border-slate-100/60">
+            <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Active Engagement</h3>
+            <div className="space-y-2.5">
+              <div className="flex justify-between items-center text-[14px]">
+                <span className="flex items-center gap-2 text-slate-600 font-medium"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Pending</span>
+                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? "—" : outreachStats.buckets?.pending ?? "0")}</strong>
+              </div>
+              <div className="flex justify-between items-center text-[14px]">
+                <span className="flex items-center gap-2 text-slate-600 font-medium"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>In Progress</span>
+                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? "—" : outreachStats.buckets?.in_progress ?? "0")}</strong>
+              </div>
+              <div className="flex justify-between items-center text-[14px]">
+                <span className="flex items-center gap-2 text-slate-600 font-medium"><div className="w-1.5 h-1.5 rounded-full bg-slate-400"></div>Completed</span>
+                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? "—" : outreachStats.buckets?.completed ?? "0")}</strong>
+              </div>
             </div>
           </div>
+
+          {/* Card 3: Outcomes */}
+          <div className="bg-slate-50/70 rounded-xl p-4 border border-slate-100/60 flex flex-col justify-center">
+            <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Final Outcomes</h3>
+            <div className="space-y-2.5">
+              <div className="flex justify-between items-center bg-emerald-50/80 px-3 py-2 rounded-lg border border-emerald-100/60">
+                <span className="flex items-center gap-2 text-emerald-700 text-[14px] font-semibold"><div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>Passed</span>
+                <strong className="text-emerald-700 text-lg">{isInitialLoading || !statsLoaded ? <Skeleton className="h-5 w-8 inline-block bg-emerald-100" /> : (!outreachStats ? "—" : outreachStats.buckets?.passed ?? "0")}</strong>
+              </div>
+              <div className="flex justify-between items-center bg-rose-50/80 px-3 py-2 rounded-lg border border-rose-100/60">
+                <span className="flex items-center gap-2 text-rose-700 text-[14px] font-semibold"><div className="w-1.5 h-1.5 rounded-full bg-rose-400"></div>Failed</span>
+                <strong className="text-rose-700 text-lg">{isInitialLoading || !statsLoaded ? <Skeleton className="h-5 w-8 inline-block bg-rose-100" /> : (!outreachStats ? "—" : outreachStats.buckets?.failed ?? "0")}</strong>
+              </div>
+            </div>
+          </div>
+
+          {/* Card 4: Quality & Phases */}
+          <div className="bg-slate-50/70 rounded-xl p-4 border border-slate-100/60">
+            <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Phases & Quality</h3>
+            <div className="flex gap-5">
+              <div className="flex-1 space-y-2.5">
+                <div className="flex justify-between items-center text-[13px]">
+                  <span className="text-slate-500 font-medium">Phase 1</span>
+                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? "—" : outreachStats.phases?.phase1 ?? "0")}</strong>
+                </div>
+                <div className="flex justify-between items-center text-[13px]">
+                  <span className="text-slate-500 font-medium">Phase 2</span>
+                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? "—" : outreachStats.phases?.phase2 ?? "0")}</strong>
+                </div>
+                <div className="flex justify-between items-center text-[13px]">
+                  <span className="text-slate-500 font-medium">Phase 3</span>
+                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? "—" : outreachStats.phases?.phase3 ?? "0")}</strong>
+                </div>
+              </div>
+              <div className="w-px bg-slate-200"></div>
+              <div className="flex-1 space-y-2.5">
+                <div className="flex justify-between items-center text-[13px]">
+                  <span className="text-slate-500 font-medium">Invalid</span>
+                  <strong className="text-slate-700">{isInitialLoading ? <Skeleton className="h-4 w-6 inline-block" /> : invalidContactCount}</strong>
+                </div>
+                <div className="flex justify-between items-center text-[13px]">
+                  <span className="text-slate-500 font-medium">Dupe</span>
+                  <strong className="text-slate-700">{isInitialLoading ? <Skeleton className="h-4 w-6 inline-block" /> : duplicateCount}</strong>
+                </div>
+                <div className="flex justify-between items-center text-[13px]">
+                  <span className="text-slate-500 font-medium" title="Max Allowed Submittals">Max Sub</span>
+                  <strong className="text-slate-700">{isInitialLoading ? <Skeleton className="h-4 w-6 inline-block" /> : (!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals)}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+          
         </div>
       </div>
 
