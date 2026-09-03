@@ -669,3 +669,42 @@ def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys(
 
 
 
+
+# ---------------------------------------------------------------------------
+# outreach status fetching
+# ---------------------------------------------------------------------------
+import asyncio
+
+class MockResponse:
+    def __init__(self, json_data):
+        self._json_data = json_data
+    def json(self):
+        return self._json_data
+    def raise_for_status(self):
+        pass
+
+class MockClient:
+    def __init__(self, json_data):
+        self.json_data = json_data
+    async def get(self, url):
+        return MockResponse(self.json_data)
+
+def test_fetch_outreach_status_unwraps_apiresponse_envelope():
+    async def _test():
+        client = MockClient({"success": True, "data": {"outreach_status": "pass", "outreach_phase": "phase2"}})
+        semaphore = asyncio.Semaphore(1)
+        deadline = asyncio.get_running_loop().time() + 60.0
+        
+        result = await lr._fetch_outreach_status(client, semaphore, deadline, "123")
+        assert result == {"outreach_status": "pass", "outreach_phase": "phase2"}
+    asyncio.run(_test())
+
+def test_fetch_outreach_status_handles_legacy_unwrapped_payload():
+    async def _test():
+        client = MockClient({"outreach_status": "pass", "outreach_phase": "phase2"})
+        semaphore = asyncio.Semaphore(1)
+        deadline = asyncio.get_running_loop().time() + 60.0
+        
+        result = await lr._fetch_outreach_status(client, semaphore, deadline, "123")
+        assert result == {"outreach_status": "pass", "outreach_phase": "phase2"}
+    asyncio.run(_test())
