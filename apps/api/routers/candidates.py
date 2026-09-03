@@ -1331,7 +1331,10 @@ async def get_job_candidates(
         finally:
             conn.close()
 
-        # Collect interview IDs for live fallback
+        # Collect interview IDs for live fallback.
+        # Uses a short best-effort timeout so a slow/unavailable pair-bot API
+        # never stalls the candidate list endpoint; on timeout we fall back
+        # gracefully to local DB data (audit table / sourced_candidates.data).
         interview_ids = []
         for cand in candidates:
             cand_data = cand.get("data")
@@ -1344,9 +1347,23 @@ async def get_job_candidates(
             iid = dblob.get("engage_interview_id") or cand.get("audit_interview_id")
             if iid and str(iid).strip():
                 interview_ids.append(str(iid).strip())
-        
-        interview_ids = sorted(list(set(interview_ids)))
-        payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
+
+        interview_ids = sorted(set(interview_ids))  # set() already returns an iterable; list() is redundant
+        try:
+            payloads_dict = (
+                await asyncio.wait_for(
+                    _fetch_all_outreach(interview_ids),
+                    timeout=3.0,  # best-effort: never stall the hot read path
+                )
+                if interview_ids
+                else {}
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"CANDIDATES: live outreach lookup timed out after 3s "
+                f"for {len(interview_ids)} interviews — falling back to local DB data"
+            )
+            payloads_dict = {}
 
         # Handle the data field (it might be a string or a dict)
         for cand in candidates:
@@ -1429,8 +1446,16 @@ async def get_job_candidates(
                     audit_fallback["status"] = cand.get("audit_status")
                     
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
-            live_api = payloads_dict.get(iid_str) if iid_str else None
-            
+            raw_live_api = payloads_dict.get(iid_str) if iid_str else None
+            # Unwrap nested `outreach` key from live API payload — pair-bot can return
+            # { "outreach": { "outreach_status": ..., ... }, ... }.
+            # _summarise_outreach in launch_report.py already does this; we must
+            # mirror it here so merge_outreach_payloads sees the flat key/values.
+            if isinstance(raw_live_api, dict) and isinstance(raw_live_api.get("outreach"), dict):
+                live_api: Optional[Dict] = {**raw_live_api, **raw_live_api["outreach"]}
+            else:
+                live_api = raw_live_api
+
             merged = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
             
             outreach_status = merged.get("outreach_status") or merged.get("status")

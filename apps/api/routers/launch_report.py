@@ -455,8 +455,16 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
 
 def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[str, Any], live_api: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Merge outreach data from 3 layers (Candidate DB -> Audit DB -> Live API)
-    with non-null values from higher layers overriding lower layers.
+    Merge outreach data from 3 layers with the *last layer winning*:
+      Candidate DB (lowest priority) → Audit DB → Live API (highest priority).
+
+    This means live_api fields override everything, which is intentional: the
+    live pair-bot response is the ground truth for a candidate's current outreach
+    state. Local DB fields serve as a best-effort fallback when the API is
+    unavailable or returns no data for an interview.
+
+    Callers that need first-available semantics should use the individual layers
+    directly before calling this helper.
     """
     merged_payload = {**cand_fallback}
     for source in (audit_fallback, live_api):
@@ -493,13 +501,22 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         # Candidates marked as failed/rejected who never actually engaged/attended
         # the interview across phases should be classified as pending.
+        # Engagement signals: any recorded score, completion timestamp, a comms
+        # response, OR a known phase beyond the initial dispatch (outreach_phase
+        # being set means pair-bot already routed this candidate to a call/SMS phase).
         if normalized_status in ("failed", "fail", "rejected"):
             comms = payload.get("communications") or merged.get("communications") or []
+            phase_raw = (
+                merged.get("outreach_phase")
+                or merged.get("phase")
+                or merged.get("current_phase")
+            )
             has_engaged = (
                 merged.get("candidate_score") is not None
                 or merged.get("score") is not None
                 or merged.get("engage_score") is not None
                 or merged.get("first_completed_at") is not None
+                or bool(phase_raw)  # phase2/phase3 implies contact was made
                 or any(comm.get("response_at") for comm in comms if isinstance(comm, dict))
             )
             if not has_engaged:

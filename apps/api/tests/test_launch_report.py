@@ -339,11 +339,11 @@ def test_summarise_outreach_passed_failed_sub_buckets():
 
 
 def test_summarise_outreach_unengaged_failed_buckets_as_pending():
-    # Failed status without any score/response should be bucketed as pending
-    payloads = [
-        _outreach("failed"),
-    ]
-    summary = lr._summarise_outreach(payloads)
+    # Failed status without any score/response/phase should be bucketed as pending.
+    # A candidate who got an outreach_phase is considered to have been contacted;
+    # we use a flat payload with no phase to simulate a never-contacted scenario.
+    payload = {"outreach": {"outreach_status": "failed"}, "communications": []}
+    summary = lr._summarise_outreach([payload])
     assert summary["buckets"]["pending"] == 1
     assert summary["buckets"]["failed"] == 0
 
