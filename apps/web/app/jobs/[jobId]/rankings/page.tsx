@@ -2652,11 +2652,11 @@ export default function CandidateRankingsPage() {
                             </Select>
                             {feedbacks[candidate.id] && (
                               <div className="flex flex-col items-center gap-2 mt-2">
-                                <div className={`text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3.5 h-3.5" /> Submitted</> : <><X className="w-3.5 h-3.5" /> Rejected</>}
+                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
+                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
                                 </div>
                                 {feedbackReasons[candidate.id] && (
-                                  <div className="text-[10px] text-slate-600 font-medium max-w-[160px] text-center leading-snug break-words px-2.5 py-1.5 bg-slate-50/80 rounded-md border border-slate-200/60 shadow-sm" title={feedbackReasons[candidate.id]}>
+                                  <div className="text-xs text-slate-600 font-medium max-w-[160px] text-center leading-snug line-clamp-2 break-words px-2.5 py-1.5 bg-slate-50/80 rounded-md border border-slate-200/60 shadow-sm" title={feedbackReasons[candidate.id]}>
                                     {feedbackReasons[candidate.id]}
                                   </div>
                                 )}
