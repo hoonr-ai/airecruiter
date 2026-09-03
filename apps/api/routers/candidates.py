@@ -27,6 +27,7 @@ from models import (
 from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
+from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
@@ -1330,6 +1331,23 @@ async def get_job_candidates(
         finally:
             conn.close()
 
+        # Collect interview IDs for live fallback
+        interview_ids = []
+        for cand in candidates:
+            cand_data = cand.get("data")
+            if cand_data and isinstance(cand_data, str):
+                try:
+                    cand_data = json.loads(cand_data)
+                except Exception:
+                    pass
+            dblob = cand_data if isinstance(cand_data, dict) else {}
+            iid = dblob.get("engage_interview_id") or cand.get("audit_interview_id")
+            if iid and str(iid).strip():
+                interview_ids.append(str(iid).strip())
+        
+        interview_ids = sorted(list(set(interview_ids)))
+        payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
+
         # Handle the data field (it might be a string or a dict)
         for cand in candidates:
             if cand.get("data") and isinstance(cand["data"], str):
@@ -1387,12 +1405,45 @@ async def get_job_candidates(
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
-            # Read-side fallback: audit table is authoritative when candidate
-            # blob doesn't yet have engage status/interview id.
-            if not cand.get("engage_status") and cand.get("audit_status"):
-                cand["engage_status"] = cand.get("audit_status")
+            # 3-layer Read-side fallback: local candidate data -> local audit data -> live API.
+            cand_fallback = {}
+            if cand.get("engage_status"):
+                cand_fallback["outreach_status"] = cand.get("engage_status")
+            if cand.get("engage_completed_at"):
+                cand_fallback["first_completed_at"] = cand.get("engage_completed_at")
+
+            audit_fallback = {}
+            raw_resp = cand.get("audit_response")
+            if isinstance(raw_resp, dict):
+                audit_fallback = dict(raw_resp)
+            elif isinstance(raw_resp, str) and raw_resp.strip():
+                try:
+                    audit_fallback = json.loads(raw_resp)
+                except Exception as e:
+                    logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
+            
+            if cand.get("audit_status"):
+                if "outreach_status" not in audit_fallback:
+                    audit_fallback["outreach_status"] = cand.get("audit_status")
+                if "status" not in audit_fallback:
+                    audit_fallback["status"] = cand.get("audit_status")
+                    
+            iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
+            live_api = payloads_dict.get(iid_str) if iid_str else None
+            
+            merged = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+            
+            outreach_status = merged.get("outreach_status") or merged.get("status")
+            if outreach_status:
+                cand["engage_status"] = outreach_status
                 if isinstance(data_blob, dict):
-                    data_blob["engage_status"] = cand.get("audit_status")
+                    data_blob["engage_status"] = outreach_status
+                    
+            first_completed_at = merged.get("first_completed_at")
+            if first_completed_at:
+                cand["engage_completed_at"] = first_completed_at
+                if isinstance(data_blob, dict):
+                    data_blob["engage_completed_at"] = first_completed_at
 
             if not cand.get("engage_interview_id") and cand.get("audit_interview_id"):
                 cand["engage_interview_id"] = cand.get("audit_interview_id")
