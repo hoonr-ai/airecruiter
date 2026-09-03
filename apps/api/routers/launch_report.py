@@ -489,13 +489,29 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
             merged.get("outreach_status")
             or merged.get("status")
         )
+        normalized_status = (status_raw or "").strip().lower()
+
+        # Candidates marked as failed/rejected who never actually engaged/attended
+        # the interview across phases should be classified as pending.
+        if normalized_status in ("failed", "fail", "rejected"):
+            comms = payload.get("communications") or merged.get("communications") or []
+            has_engaged = (
+                merged.get("candidate_score") is not None
+                or merged.get("score") is not None
+                or merged.get("engage_score") is not None
+                or merged.get("first_completed_at") is not None
+                or any(comm.get("response_at") for comm in comms if isinstance(comm, dict))
+            )
+            if not has_engaged:
+                status_raw = "pending"
+                normalized_status = "pending"
+
         buckets[_bucket_status(status_raw)] += 1
 
         # Passed/Failed are sub-buckets within "completed".
         # _bucket_status already maps pass/fail → "completed", so we
         # read the raw status directly to classify the sub-bucket without
         # double-incrementing the completed counter.
-        normalized_status = (status_raw or "").strip().lower()
         if normalized_status in ("passed", "pass"):
             buckets["passed"] += 1
         elif normalized_status in ("failed", "fail"):
