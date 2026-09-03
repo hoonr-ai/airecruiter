@@ -69,6 +69,7 @@ interface JobTimelineEntry {
   outreach_stopped_at: string | null;
   posted_to_launch_days: number | null;
   is_archived: boolean;
+  archive_reason?: string | null;
   jobdiva_status: string;
   pair_status: "Active" | "Inactive" | "Unpublished";
   candidates_sourced: number;
@@ -769,7 +770,7 @@ export default function AdminAnalyticsPage() {
       ),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
       ...(data.jobs_timeline || []).map((job) =>
         [
           escapeCsvField(job.title),
@@ -787,6 +788,8 @@ export default function AdminAnalyticsPage() {
                 ? "n/a"
                 : String(job.posted_to_launch_days),
           ),
+          escapeCsvField(job.is_archived ? "Archived" : "Active"),
+          escapeCsvField(job.archive_reason || ""),
           escapeCsvField(job.pair_status),
           job.candidates_sourced,
           job.candidates_launched,
@@ -834,7 +837,7 @@ export default function AdminAnalyticsPage() {
 
     const lines = [
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
       ...filteredTimeline.map((job) =>
         [
           escapeCsvField(job.title),
@@ -853,6 +856,7 @@ export default function AdminAnalyticsPage() {
                 : String(job.posted_to_launch_days),
           ),
           escapeCsvField(job.is_archived ? "Archived" : "Active"),
+          escapeCsvField(job.archive_reason || ""),
           escapeCsvField(job.pair_status),
           job.candidates_sourced,
           job.candidates_launched,
@@ -2168,6 +2172,14 @@ export default function AdminAnalyticsPage() {
                       <div className="font-mono text-xs text-slate-400 mt-0.5">
                         {job.jobdiva_id || "—"}
                       </div>
+                      {job.is_archived && (
+                        <div
+                          className="mt-1.5 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500 max-w-full"
+                          title={job.archive_reason || "—"}
+                        >
+                          Reason: <span className="truncate ml-1">{job.archive_reason || "—"}</span>
+                        </div>
+                      )}
                     </td>
                     <td className="py-3.5 px-6 text-slate-600">
                       <div
