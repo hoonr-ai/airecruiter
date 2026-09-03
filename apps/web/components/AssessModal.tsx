@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { StopOutreachModal } from "@/components/StopOutreachModal";
 import {
   CheckCircle2,
   XCircle,
@@ -27,6 +28,7 @@ import {
   User,
   Bot,
   Download,
+  Ban,
 } from "lucide-react";
 
 interface AssessModalProps {
@@ -34,6 +36,12 @@ interface AssessModalProps {
   onClose: () => void;
   interviewId: string | null;
   candidateName: string;
+  // Optional: lets the Stop-outreach action on the Outreach tab suppress the
+  // contact rather than only the interview. Without them the interview id
+  // alone is used, which pair-bot resolves the contact details from.
+  candidateId?: string;
+  candidateEmail?: string;
+  candidatePhone?: string;
 }
 
 interface AssessmentData {
@@ -48,11 +56,15 @@ export function AssessModal({
   onClose,
   interviewId,
   candidateName,
+  candidateId,
+  candidateEmail,
+  candidatePhone,
 }: AssessModalProps) {
   const [data, setData] = useState<AssessmentData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [stopOutreachOpen, setStopOutreachOpen] = useState(false);
 
   useEffect(() => {
     if (open && interviewId) {
@@ -165,6 +177,7 @@ export function AssessModal({
   }
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[740px] max-h-[85vh] p-0 overflow-hidden">
         {/* Header */}
@@ -595,6 +608,15 @@ export function AssessModal({
                             {data.outreach.outreach?.outreach_status || "—"}
                           </span>
                         </p>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setStopOutreachOpen(true)}
+                          className="mt-3 h-8 px-3 border-red-200 text-red-600 hover:bg-red-50 font-semibold text-[11px]"
+                        >
+                          <Ban className="w-3.5 h-3.5 mr-1.5" />
+                          Stop outreach
+                        </Button>
                       </div>
 
                       {/* Communication timeline */}
@@ -685,5 +707,21 @@ export function AssessModal({
         ) : null}
       </DialogContent>
     </Dialog>
+
+    {/* Sibling, not nested: two Radix dialogs inside one another fight over
+        the focus trap, and the confirm step needs the focus. */}
+    <StopOutreachModal
+      open={stopOutreachOpen}
+      candidate={{
+        candidate_id: candidateId,
+        name: candidateName,
+        email: candidateEmail,
+        phone: candidatePhone,
+        interview_id: interviewId ?? undefined,
+      }}
+      onClose={() => setStopOutreachOpen(false)}
+      onChanged={fetchAssessmentData}
+    />
+    </>
   );
 }

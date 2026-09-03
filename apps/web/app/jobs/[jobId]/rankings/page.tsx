@@ -25,7 +25,8 @@ import {
   Zap,
   Check,
   X,
-  Activity
+  Activity,
+  Ban
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +51,7 @@ import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
+import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
 import { API_BASE, authFetch } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -910,6 +912,8 @@ export default function CandidateRankingsPage() {
   const [refreshingResumeMatchIds, setRefreshingResumeMatchIds] = useState<Set<string>>(new Set());
   const [candidateProfileUrls, setCandidateProfileUrls] = useState<Record<string, string>>({});
 
+  const [stopOutreachCandidate, setStopOutreachCandidate] = useState<StopOutreachCandidate | null>(null);
+
   const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
   const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
   const [pendingScreenCandidate, setPendingScreenCandidate] = useState<Candidate | null>(null);
@@ -1244,6 +1248,20 @@ export default function CandidateRankingsPage() {
   const handleEmailCandidate = (candidate: Candidate) => {
     setSelectedCandidateForEmail(candidate);
     setMessageModalOpen(true);
+  };
+
+  // "Stop outreach" — the recruiter-side half of the do-not-contact flow.
+  // The modal reads the current suppression state and confirms before it acts:
+  // the stop cancels queued sends across every interview the candidate has and
+  // is not undone in one click.
+  const handleStopOutreach = (candidate: Candidate) => {
+    setStopOutreachCandidate({
+      candidate_id: String(candidate.candidate_id || candidate.id || ""),
+      name: candidate.name,
+      email: candidate.email,
+      phone: candidate.phone,
+      interview_id: candidate.engage_interview_id,
+    });
   };
 
   const handleSmsCandidate = (candidate: Candidate) => {
@@ -2537,6 +2555,15 @@ export default function CandidateRankingsPage() {
                               <Send className="w-3.5 h-3.5 mr-1" />
                               SMS
                             </Button>
+                            <Button
+                              size="sm"
+                              className="h-8 px-3 bg-white border border-red-200 text-red-600 hover:bg-red-600 hover:text-white font-bold text-[11px] rounded-md shadow-sm transition-all duration-200"
+                              onClick={() => handleStopOutreach(candidate)}
+                              title="Stop contacting this candidate on every channel"
+                            >
+                              <Ban className="w-3.5 h-3.5 mr-1" />
+                              Stop
+                            </Button>
                           </div>
                         </TableCell>
 
@@ -2640,6 +2667,15 @@ export default function CandidateRankingsPage() {
           }}
         />
       )}
+
+      <StopOutreachModal
+        open={Boolean(stopOutreachCandidate)}
+        candidate={stopOutreachCandidate}
+        onClose={() => setStopOutreachCandidate(null)}
+        // No refetch: nothing this table renders changes on a stop (there is no
+        // suppression column), and fetchData() resets the rows and the
+        // recruiter's scroll position. The modal shows the outcome itself.
+      />
 
       <EngageWizardModal
         open={isScreenModalOpen}
