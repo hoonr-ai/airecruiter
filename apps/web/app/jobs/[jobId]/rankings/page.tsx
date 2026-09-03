@@ -521,6 +521,7 @@ export default function CandidateRankingsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [outreachStats, setOutreachStats] = useState<OutreachStats | null>(null);
+  const [statsLoaded, setStatsLoaded] = useState(false);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
   const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
@@ -1567,6 +1568,8 @@ export default function CandidateRankingsPage() {
     setInvalidContactCount(0);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
+    setOutreachStats(null);
+    setStatsLoaded(false);
     try {
       const apiBase = API_BASE;
 
@@ -1609,6 +1612,8 @@ export default function CandidateRankingsPage() {
         }
       } catch (e) {
         console.warn("Failed to fetch outreach stats:", e);
+      } finally {
+        setStatsLoaded(true);
       }
 
       // B5: parallel fetch step-3 criteria so the applied-filters panel can
@@ -1628,6 +1633,9 @@ export default function CandidateRankingsPage() {
       console.error("Error fetching ranking data:", error);
     } finally {
       setIsLoading(false);
+      // Guarantee the stats skeleton is never stuck, even if an earlier call threw
+      // before the inner stats try/finally had a chance to run.
+      setStatsLoaded(true);
     }
   };
 
@@ -1801,33 +1809,33 @@ export default function CandidateRankingsPage() {
         <div className="border-t border-slate-100 pt-5 flex flex-wrap gap-x-8 gap-y-4">
           <div className="flex gap-8 border-r border-slate-200 pr-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !outreachStats ? (
+              {isInitialLoading || !statsLoaded ? (
                 <StatsGroupSkeleton count={3} />
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Pending: <strong className="text-slate-900 ml-1">{outreachStats?.buckets?.pending ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Pending: <strong className="text-slate-900 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.pending ?? "—"}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> In Progress: <strong className="text-slate-900 ml-1">{outreachStats?.buckets?.in_progress ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> In Progress: <strong className="text-slate-900 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.in_progress ?? "—"}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Completed: <strong className="text-slate-900 ml-1">{outreachStats?.buckets?.completed ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Completed: <strong className="text-slate-900 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.completed ?? "—"}</strong>
                   </div>
                 </>
               )}
             </div>
 
             <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !outreachStats ? (
+              {isInitialLoading || !statsLoaded ? (
                 <StatsGroupSkeleton count={2} />
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-emerald-300"></div> Passed: <strong className="text-emerald-700 ml-1">{outreachStats?.buckets?.passed ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-emerald-300"></div> Passed: <strong className="text-emerald-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.passed ?? "—"}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-rose-300"></div> Failed: <strong className="text-rose-700 ml-1">{outreachStats?.buckets?.failed ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-rose-300"></div> Failed: <strong className="text-rose-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.failed ?? "—"}</strong>
                   </div>
                 </>
               )}
@@ -1836,18 +1844,18 @@ export default function CandidateRankingsPage() {
 
           <div className="flex gap-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading || !outreachStats ? (
+              {isInitialLoading || !statsLoaded ? (
                 <StatsGroupSkeleton count={3} />
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 1: <strong className="text-indigo-700 ml-1">{outreachStats?.phases?.phase1 ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 1: <strong className="text-indigo-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase1 ?? "—"}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 2: <strong className="text-indigo-700 ml-1">{outreachStats?.phases?.phase2 ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 2: <strong className="text-indigo-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase2 ?? "—"}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 3: <strong className="text-indigo-700 ml-1">{outreachStats?.phases?.phase3 ?? "—"}</strong>
+                    <div className="w-2 h-2 rounded-full bg-indigo-300"></div> Phase 3: <strong className="text-indigo-700 ml-1">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase3 ?? "—"}</strong>
                   </div>
                 </>
               )}
