@@ -2027,10 +2027,10 @@ export default function AdminAnalyticsPage() {
                   className="h-8 w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
                 />
               </div>
-              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm shrink-0">
+              <div className="flex items-center gap-0.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm shrink-0">
                 <label
                   htmlFor="timelineStartDate"
-                  className="text-[12px] font-medium text-slate-500 pl-1.5 cursor-pointer"
+                  className="text-[12px] font-medium text-slate-500 pl-1 cursor-pointer"
                 >
                   From:
                 </label>
@@ -2047,7 +2047,7 @@ export default function AdminAnalyticsPage() {
                 />
                 <label
                   htmlFor="timelineEndDate"
-                  className="text-[12px] font-medium text-slate-500 pl-1 cursor-pointer"
+                  className="text-[12px] font-medium text-slate-500 pl-0.5 cursor-pointer"
                 >
                   To:
                 </label>
