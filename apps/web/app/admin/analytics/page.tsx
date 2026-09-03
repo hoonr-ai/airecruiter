@@ -2213,16 +2213,13 @@ export default function AdminAnalyticsPage() {
                       >
                         {i + 1}
                       </td>
-                      <td className="py-3.5 px-6">
+                      <td className="py-3.5 px-6 whitespace-nowrap">
                         <div className="font-mono text-sm text-slate-600">
                           {job.jobdiva_id || "—"}
                         </div>
                       </td>
                       <td className="py-3.5 px-6">
-                        <div
-                          className="font-semibold text-slate-800 max-w-[260px] truncate"
-                          title={job.title}
-                        >
+                        <div className="font-semibold text-slate-800 break-words">
                           {job.title}
                         </div>
                         {job.is_archived && (
@@ -2238,10 +2235,7 @@ export default function AdminAnalyticsPage() {
                         )}
                       </td>
                       <td className="py-3.5 px-6 text-slate-600">
-                        <div
-                          className="max-w-[160px] truncate"
-                          title={job.customer_name}
-                        >
+                        <div className="break-words">
                           {job.customer_name}
                         </div>
                       </td>
