@@ -135,3 +135,10 @@
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
+
+@utility hide-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

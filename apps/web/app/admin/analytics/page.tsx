@@ -2013,8 +2013,8 @@ export default function AdminAnalyticsPage() {
                 JobDiva posting → PAIR launch lifecycle, most recent first
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="relative">
+            <div className="flex items-center gap-3 overflow-x-auto pb-1 hide-scrollbar">
+              <div className="relative shrink-0">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
@@ -2024,10 +2024,10 @@ export default function AdminAnalyticsPage() {
                     setShowAllTimeline(false);
                   }}
                   placeholder="Search title, ref or client..."
-                  className="h-8 w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
+                  className="h-8 w-64 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
                 />
               </div>
-              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
+              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm shrink-0">
                 <label
                   htmlFor="timelineStartDate"
                   className="text-[12px] font-medium text-slate-500 pl-2 cursor-pointer"
@@ -2077,7 +2077,7 @@ export default function AdminAnalyticsPage() {
                   </button>
                 )}
               </div>
-              <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5">
+              <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5 shrink-0">
                 {PAIR_STATUS_FILTERS.map((filterOption) => (
                   <button
                     key={filterOption}
@@ -2100,12 +2100,12 @@ export default function AdminAnalyticsPage() {
                 variant="outline"
                 onClick={exportTimelineToCSV}
                 disabled={isLoading || filteredTimeline.length === 0}
-                className="flex items-center gap-2 h-8 px-3 border-slate-200 text-slate-700 font-semibold text-[12px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
+                className="flex shrink-0 items-center gap-2 h-8 px-3 border-slate-200 text-slate-700 font-semibold text-[12px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
               >
                 <Download className="h-3.5 w-3.5 text-slate-500" />
                 Export CSV
               </Button>
-              <span className="text-[12px] font-medium text-slate-400 whitespace-nowrap">
+              <span className="shrink-0 text-[12px] font-medium text-slate-400 whitespace-nowrap">
                 Showing {filteredTimeline.length} of{" "}
                 {data?.jobs_timeline_total || timelineRows.length} jobs
               </span>
