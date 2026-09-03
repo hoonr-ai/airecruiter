@@ -52,7 +52,7 @@ import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
@@ -253,23 +253,6 @@ interface AppliedCriterion {
   category?: string;
 }
 
-interface Candidate {
-  id: number;
-  jobdiva_id?: string;
-  jobdiva_candidate_id?: string;
-  candidate_id?: string;
-  engage_interview_id?: string;
-  name: string;
-  email: string;
-  phone?: string;
-  location?: string;
-  work_location?: string;
-  work_city?: string;
-  work_state?: string;
-  headline?: string;
-  job_title?: string;
-}
-
 interface OutreachStats {
   buckets: {
     pending: number;
@@ -286,6 +269,21 @@ interface OutreachStats {
   };
 }
 
+interface Candidate {
+  id: number;
+  jobdiva_id?: string;
+  jobdiva_candidate_id?: string;
+  candidate_id?: string;
+  engage_interview_id?: string;
+  name: string;
+  email: string;
+  phone?: string;
+  location?: string;
+  work_location?: string;
+  work_city?: string;
+  work_state?: string;
+  headline?: string;
+  job_title?: string;
   image_url?: string;
   profile_url?: string;
   source: string;
@@ -536,18 +534,8 @@ export default function CandidateRankingsPage() {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       try {
-        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ feedback_type: 'Submit' })
-        });
-
-        if (response.ok) {
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-        } else {
-          console.error('Failed to sync submission with JobDiva');
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-        }
+        await api.candidates.feedback(jobId as string, String(actionCandidateId), { feedback_type: 'Submit' });
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
       } catch (error) {
         console.error('Error syncing submission:', error);
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
@@ -563,21 +551,11 @@ export default function CandidateRankingsPage() {
     if (actionCandidateId && rejectReason) {
       setSyncingCandidateId(actionCandidateId);
       try {
-        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            feedback_type: 'Reject',
-            reason: rejectReason
-          })
+        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+          feedback_type: 'Reject',
+          reason: rejectReason
         });
-
-        if (response.ok) {
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        } else {
-          console.error('Failed to sync rejection with JobDiva');
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        }
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
       } catch (error) {
         console.error('Error syncing rejection:', error);
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
@@ -1070,38 +1048,20 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidate_id: candidateKey,
-          jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
-          source: candidate.source || undefined,
-          linkedin_url: linkedinUrl,
-          full_name: candidate.name || undefined,
-          company_name:
-            candidate.data?.company_name ||
-            candidate.data?.company?.name ||
-            candidate.data?.enhanced_info?.current_company ||
-            undefined,
-          email: candidate.email || undefined,
-          phone: candidate.phone || undefined,
-        }),
+      const payload = await api.candidates.enrichContact({
+        candidate_id: candidateKey,
+        jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
+        source: candidate.source || undefined,
+        linkedin_url: linkedinUrl,
+        full_name: candidate.name || undefined,
+        company_name:
+          candidate.data?.company_name ||
+          candidate.data?.company?.name ||
+          candidate.data?.enhanced_info?.current_company ||
+          undefined,
+        email: candidate.email || undefined,
+        phone: candidate.phone || undefined,
       });
-
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg = payload?.detail || `ZoomInfo call failed (${res.status})`;
-        setEnrichStatusByCandidateId(prev => ({
-          ...prev,
-          [candidateKey]: {
-            type: "error",
-            message: msg,
-          },
-        }));
-        pushToast(msg, "error");
-        return;
-      }
 
       const nextPhone = payload?.phone || candidate.phone || "";
       const nextEmail = payload?.email || candidate.email || "";
@@ -1313,17 +1273,9 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await authFetch(
-        `${API_BASE}/jobs/${jobId}/candidates/${encodeURIComponent(candidateKey)}/refresh-resume-match`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ source: candidate.source || undefined }),
-        }
-      );
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || payload?.status !== "success") {
-        throw new Error(payload?.detail || payload?.message || `Refresh failed (${res.status})`);
+      const payload = await api.jobs.refreshResumeMatch(jobId as string, candidateKey, { source: candidate.source || undefined });
+      if (payload?.status !== "success") {
+        throw new Error(payload?.detail || payload?.message || `Refresh failed`);
       }
 
       setCandidates(prev =>
@@ -1534,13 +1486,11 @@ export default function CandidateRankingsPage() {
   }, []);
 
   const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean) => {
-    const apiBase = API_BASE;
     const query = new URLSearchParams({
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
-    const candRes = await authFetch(`${apiBase}/jobs/${jobId}/candidates?${query.toString()}`);
-    const candData = await candRes.json();
+    const candData = await api.jobs.getCandidates(jobId as string, query.toString());
 
     if (candData.status !== "success" || !Array.isArray(candData.candidates)) return;
 
@@ -1621,8 +1571,7 @@ export default function CandidateRankingsPage() {
       const apiBase = API_BASE;
 
       // Fetch job details
-      const jobRes = await authFetch(`${apiBase}/jobs/${jobId}/monitored-data`);
-      const jobData = await jobRes.json();
+      const jobData = await api.jobs.getMonitoredData(jobId as string);
 
       // Handle both { data: { ... } } and flat { ... } structures
       const data = jobData.data || jobData;
@@ -1665,12 +1614,9 @@ export default function CandidateRankingsPage() {
       // B5: parallel fetch step-3 criteria so the applied-filters panel can
       // render priority + required/preferred chips next to sourcing filters.
       try {
-        const critRes = await authFetch(`${apiBase}/api/jobs/${jobId}/criteria`);
-        if (critRes.ok) {
-          const critData = await critRes.json();
-          if (Array.isArray(critData?.criteria)) {
-            setCriteriaList(critData.criteria);
-          }
+        const critData = await api.jobs.getCriteria(jobId as string);
+        if (critData && Array.isArray(critData.criteria)) {
+          setCriteriaList(critData.criteria);
         }
       } catch (e) {
         // Non-fatal: panel just hides the criteria column when unavailable.
@@ -2805,15 +2751,10 @@ export default function CandidateRankingsPage() {
 
           if (picked && picked !== cand.phone) {
             try {
-              // Passing candidate_id in the body bypasses strict URL path decoders on QA
-              await authFetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  phone: picked,
-                  jobdiva_id: cand.jobdiva_id || String(jobId || ""),
-                  candidate_id: cid
-                }),
+              await api.candidates.updatePhone(cid, {
+                phone: picked,
+                jobdiva_id: cand.jobdiva_id || String(jobId || ""),
+                candidate_id: cid
               });
             } catch (err) {
               console.error("Failed to save phone number:", err);
