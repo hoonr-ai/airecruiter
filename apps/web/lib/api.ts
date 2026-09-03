@@ -206,6 +206,11 @@ export const api = {
     getOutreachStats: (jobId: string) => req<any>(`/jobs/${jobId}/outreach-stats`),
     updateBasicInfo: (jobId: string, body: unknown) =>
       req<any>(`/jobs/${jobId}/basic-info`, { method: "PUT", body }),
+    getCandidates: (jobId: string, query?: string) =>
+      req<any>(`/jobs/${jobId}/candidates${query ? `?${query}` : ""}`),
+    refreshResumeMatch: (jobId: string, candidateId: string, body: unknown) =>
+      req<any>(`/jobs/${jobId}/candidates/${encodeURIComponent(candidateId)}/refresh-resume-match`, { method: "POST", body }),
+    getCriteria: (jobId: string) => req<any>(`/api/jobs/${jobId}/criteria`),
   },
   candidates: {
     save: (body: unknown) =>
@@ -216,6 +221,12 @@ export const api = {
       req<any>(`/candidates/analyze`, { method: "POST", body }),
     // Streaming endpoint — callers need the raw Response for a ReadableStream.
     searchStreamUrl: `${API_BASE}/candidates/search`,
+    feedback: (jobId: string, candidateId: string, body: unknown) =>
+      req<any>(`/jobs/${jobId}/candidates/${candidateId}/feedback`, { method: "POST", body }),
+    enrichContact: (body: unknown) =>
+      req<any>(`/candidates/enrich-contact`, { method: "POST", body }),
+    updatePhone: (candidateId: string, body: unknown) =>
+      req<any>(`/candidates/${encodeURIComponent(candidateId)}/phone`, { method: "PATCH", body }),
   },
   manualCandidates: {
     add: (jobRef: string, body: unknown) =>
