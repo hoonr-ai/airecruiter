@@ -484,7 +484,6 @@ function HardFilterHoverCard({
   );
 }
 
-
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
@@ -1777,15 +1776,15 @@ export default function CandidateRankingsPage() {
             <div className="space-y-2.5">
               <div className="flex justify-between items-center text-[14px]">
                 <span className="flex items-center gap-2 text-slate-600 font-medium"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Pending</span>
-                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? "—" : outreachStats.buckets?.pending ?? "0")}</strong>
+                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.pending ?? 0)}</strong>
               </div>
               <div className="flex justify-between items-center text-[14px]">
                 <span className="flex items-center gap-2 text-slate-600 font-medium"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>In Progress</span>
-                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? "—" : outreachStats.buckets?.in_progress ?? "0")}</strong>
+                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.in_progress ?? 0)}</strong>
               </div>
               <div className="flex justify-between items-center text-[14px]">
                 <span className="flex items-center gap-2 text-slate-600 font-medium"><div className="w-1.5 h-1.5 rounded-full bg-slate-400"></div>Completed</span>
-                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? "—" : outreachStats.buckets?.completed ?? "0")}</strong>
+                <strong className="text-slate-900">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-8 inline-block" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.completed ?? 0)}</strong>
               </div>
             </div>
           </div>
@@ -1796,11 +1795,11 @@ export default function CandidateRankingsPage() {
             <div className="space-y-2.5">
               <div className="flex justify-between items-center bg-emerald-50/80 px-3 py-2 rounded-lg border border-emerald-100/60">
                 <span className="flex items-center gap-2 text-emerald-700 text-[14px] font-semibold"><div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>Passed</span>
-                <strong className="text-emerald-700 text-lg">{isInitialLoading || !statsLoaded ? <Skeleton className="h-5 w-8 inline-block bg-emerald-100" /> : (!outreachStats ? "—" : outreachStats.buckets?.passed ?? "0")}</strong>
+                <strong className="text-emerald-700 text-lg">{isInitialLoading || !statsLoaded ? <Skeleton className="h-5 w-8 inline-block bg-emerald-100" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.passed ?? 0)}</strong>
               </div>
               <div className="flex justify-between items-center bg-rose-50/80 px-3 py-2 rounded-lg border border-rose-100/60">
                 <span className="flex items-center gap-2 text-rose-700 text-[14px] font-semibold"><div className="w-1.5 h-1.5 rounded-full bg-rose-400"></div>Failed</span>
-                <strong className="text-rose-700 text-lg">{isInitialLoading || !statsLoaded ? <Skeleton className="h-5 w-8 inline-block bg-rose-100" /> : (!outreachStats ? "—" : outreachStats.buckets?.failed ?? "0")}</strong>
+                <strong className="text-rose-700 text-lg">{isInitialLoading || !statsLoaded ? <Skeleton className="h-5 w-8 inline-block bg-rose-100" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.failed ?? 0)}</strong>
               </div>
             </div>
           </div>
@@ -1812,15 +1811,15 @@ export default function CandidateRankingsPage() {
               <div className="flex-1 space-y-2.5">
                 <div className="flex justify-between items-center text-[13px]">
                   <span className="text-slate-500 font-medium">Phase 1</span>
-                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? "—" : outreachStats.phases?.phase1 ?? "0")}</strong>
+                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase1 ?? 0)}</strong>
                 </div>
                 <div className="flex justify-between items-center text-[13px]">
                   <span className="text-slate-500 font-medium">Phase 2</span>
-                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? "—" : outreachStats.phases?.phase2 ?? "0")}</strong>
+                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase2 ?? 0)}</strong>
                 </div>
                 <div className="flex justify-between items-center text-[13px]">
                   <span className="text-slate-500 font-medium">Phase 3</span>
-                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? "—" : outreachStats.phases?.phase3 ?? "0")}</strong>
+                  <strong className="text-indigo-600">{isInitialLoading || !statsLoaded ? <Skeleton className="h-4 w-6 inline-block" /> : (!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase3 ?? 0)}</strong>
                 </div>
               </div>
               <div className="w-px bg-slate-200"></div>
