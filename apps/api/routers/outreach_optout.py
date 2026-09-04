@@ -34,12 +34,14 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from core.auth import UserIdentity, get_current_user
 from routers._helpers import get_db_connection
+from routers.jobs import _verify_job_access_by_id
 from services.dnc_storage import (
     local_suppression_status,
     record_opt_out_audit,
@@ -64,6 +66,7 @@ router = APIRouter(prefix="/api/v1/outreach", tags=["Outreach Opt-Out"])
 # Request models
 # ---------------------------------------------------------------------------
 class OptOutRequest(BaseModel):
+    job_id: Optional[str] = None
     # Any one of these four identifies the person. candidate_id is pair's own
     # key and is not something pair-bot understands — we resolve it to contact
     # details below.
@@ -81,6 +84,7 @@ class OptOutRequest(BaseModel):
 
 
 class OptInRequest(BaseModel):
+    job_id: Optional[str] = None
     candidate_id: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
@@ -227,6 +231,11 @@ async def stop_outreach(
     local suppression before failing — pair may not be able to stop the queued
     sends, but it can at least refuse to add more.
     """
+    if request.job_id:
+        _verify_job_access_by_id(request.job_id, user)
+    else:
+        raise HTTPException(status_code=403, detail="job_id is required to stop outreach.")
+
     contact = _merge_identifiers(request.candidate_id, request.email, request.phone)
     email, phone = contact["email"], contact["phone"]
 
@@ -264,11 +273,15 @@ async def stop_outreach(
         local: Dict[str, Any] = {}
         note = ""
         if e.retryable:
-            local = suppress_contact_locally(
+            local = await asyncio.to_thread(
+                suppress_contact_locally,
                 phone=phone, email=email, reason=reason, created_by=actor
             )
+            if local.get("error") == "no normalizable phone or email":
+                local["error"] = None
             note = _local_fallback_note(local)
-        record_opt_out_audit(
+        await asyncio.to_thread(
+            record_opt_out_audit,
             action="opt-out",
             email=email,
             phone=phone,
@@ -286,10 +299,15 @@ async def stop_outreach(
             e, "Could not stop outreach at pair-bot", note
         ) from e
 
-    local = suppress_contact_locally(
+    local = await asyncio.to_thread(
+        suppress_contact_locally,
         phone=phone, email=email, reason=reason, created_by=actor
     )
-    record_opt_out_audit(
+    if local.get("error") == "no normalizable phone or email":
+        local["error"] = None
+
+    await asyncio.to_thread(
+        record_opt_out_audit,
         action="opt-out",
         email=email,
         phone=phone,
@@ -347,6 +365,11 @@ async def resume_outreach(
     campaign someone had stopped is a deliberate act, not a side effect of
     clearing a flag.
     """
+    if request.job_id:
+        _verify_job_access_by_id(request.job_id, user)
+    else:
+        raise HTTPException(status_code=403, detail="job_id is required to resume outreach.")
+
     contact = _merge_identifiers(request.candidate_id, request.email, request.phone)
     email, phone = contact["email"], contact["phone"]
 
@@ -365,7 +388,8 @@ async def resume_outreach(
             email=email, phone=phone, reason=upstream_reason, scope=request.scope
         )
     except PairBotOptOutError as e:
-        record_opt_out_audit(
+        await asyncio.to_thread(
+            record_opt_out_audit,
             action="opt-in",
             email=email,
             phone=phone,
@@ -385,8 +409,12 @@ async def resume_outreach(
             "The candidate is still suppressed everywhere. Please retry.",
         ) from e
 
-    local = release_contact_locally(phone=phone, email=email, created_by=actor)
-    record_opt_out_audit(
+    local = await asyncio.to_thread(release_contact_locally, phone=phone, email=email, created_by=actor)
+    if local.get("error") == "no normalizable phone or email":
+        local["error"] = None
+
+    await asyncio.to_thread(
+        record_opt_out_audit,
         action="opt-in",
         email=email,
         phone=phone,
@@ -427,6 +455,7 @@ async def resume_outreach(
 # ---------------------------------------------------------------------------
 @router.get("/opt-out")
 async def outreach_opt_out_status(
+    job_id: Optional[str] = Query(default=None),
     candidate_id: Optional[str] = Query(default=None),
     email: Optional[str] = Query(default=None),
     phone: Optional[str] = Query(default=None),
@@ -445,6 +474,11 @@ async def outreach_opt_out_status(
     local half of the answer is still worth showing, and this endpoint is read
     on a page load where a hard failure would just render an empty panel.
     """
+    if job_id:
+        _verify_job_access_by_id(job_id, user)
+    elif not user.is_admin and not user.is_team_lead:
+        raise HTTPException(status_code=403, detail="job_id is required to check status.")
+
     contact = _merge_identifiers(candidate_id, email, phone)
     r_email, r_phone = contact["email"], contact["phone"]
 
@@ -461,11 +495,15 @@ async def outreach_opt_out_status(
         )
     except PairBotOptOutError as e:
         pairbot = {"error": e.message, "status_code": e.status_code}
+        
+    local = await asyncio.to_thread(local_suppression_status, phone=r_phone, email=r_email)
+    if local.get("error") == "no normalizable phone or email":
+        local["error"] = None
 
     return {
         "success": True,
         "email": r_email,
         "phone": r_phone,
         "pairbot": pairbot,
-        "local": local_suppression_status(phone=r_phone, email=r_email),
+        "local": local,
     }

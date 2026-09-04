@@ -17,6 +17,7 @@ import { logger } from "@/lib/logger";
 // says the queued calls were NOT cancelled and the stop must be retried).
 
 export type OptOutInput = {
+  jobId?: string;
   candidateId?: string;
   email?: string;
   phone?: string;
@@ -96,6 +97,7 @@ export function useOutreachOptOut() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        job_id: input.jobId,
         candidate_id: input.candidateId,
         email: input.email,
         phone: input.phone,
@@ -113,6 +115,7 @@ export function useOutreachOptOut() {
   }, []);
 
   const resumeOutreach = useCallback(async (input: {
+    jobId?: string;
     candidateId?: string;
     email?: string;
     phone?: string;
@@ -123,6 +126,7 @@ export function useOutreachOptOut() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        job_id: input.jobId,
         candidate_id: input.candidateId,
         email: input.email,
         phone: input.phone,
@@ -138,12 +142,14 @@ export function useOutreachOptOut() {
   }, []);
 
   const getOptOutStatus = useCallback(async (input: {
+    jobId?: string;
     candidateId?: string;
     email?: string;
     phone?: string;
     interviewId?: number;
   }): Promise<OptOutStatusResult> => {
     const params = new URLSearchParams();
+    if (input.jobId) params.set("job_id", input.jobId);
     if (input.candidateId) params.set("candidate_id", input.candidateId);
     if (input.email) params.set("email", input.email);
     if (input.phone) params.set("phone", input.phone);

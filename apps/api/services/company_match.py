@@ -84,7 +84,7 @@ def _is_contiguous_sublist(needle: List[str], haystack: List[str]) -> bool:
 
 def is_placeholder_client(client_name: str) -> bool:
     norm = normalize_company_name(client_name)
-    return not norm or len(norm) < 3 or norm in _PLACEHOLDER_CLIENTS
+    return not norm or norm in _PLACEHOLDER_CLIENTS
 
 
 def is_same_company(company: str, client_name: str) -> bool:
