@@ -783,7 +783,7 @@ export default function AdminAnalyticsPage() {
       ),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback Submitted At",
       ...(data.jobs_timeline || []).map((job) =>
         [
           escapeCsvField(job.title),
@@ -851,7 +851,7 @@ export default function AdminAnalyticsPage() {
 
     const lines = [
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback At",
+      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback Submitted At",
       ...filteredTimeline.map((job) =>
         [
           escapeCsvField(job.title),
@@ -2146,7 +2146,7 @@ export default function AdminAnalyticsPage() {
                 <th className="py-3 px-6 text-center">Sourced</th>
                 <th className="py-3 px-6 text-center">Launched</th>
                 <th className="py-3 px-6 text-center">Submittals</th>
-                <th className="py-3 px-6 whitespace-nowrap">First Feedback At</th>
+                <th className="py-3 px-6 whitespace-nowrap">First Feedback Submitted At</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-[13px]">
