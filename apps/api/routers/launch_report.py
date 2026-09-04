@@ -507,7 +507,6 @@ def build_merged_outreach_payload(
         audit_fallback = dict(audit_response)
     elif isinstance(audit_response, str) and audit_response.strip():
         try:
-            import json
             audit_fallback = json.loads(audit_response)
         except Exception as e:
             logger.warning(f"Failed to decode audit response JSON for candidate: {e}")

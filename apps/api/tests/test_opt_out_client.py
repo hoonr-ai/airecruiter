@@ -156,6 +156,24 @@ def test_server_error_is_retryable(monkeypatch):
     assert exc.value.retryable is True
 
 
+def test_rate_limited_response_is_retryable(monkeypatch):
+    """A 429 means pair-bot is backpressuring us, not that the request is
+    malformed — it must fall into the same local-DNC safety net as a 5xx."""
+    _install(monkeypatch, lambda _s: _json_response(429, {"detail": "rate limited"}))
+    with pytest.raises(PairBotOptOutError) as exc:
+        _run(pairbot_opt_out(email="a@b.com"))
+    assert exc.value.status_code == 429
+    assert exc.value.retryable is True
+
+
+def test_request_timeout_response_is_retryable(monkeypatch):
+    _install(monkeypatch, lambda _s: _json_response(408, {"detail": "request timeout"}))
+    with pytest.raises(PairBotOptOutError) as exc:
+        _run(pairbot_opt_out(email="a@b.com"))
+    assert exc.value.status_code == 408
+    assert exc.value.retryable is True
+
+
 def test_transport_error_is_retryable_with_no_status(monkeypatch):
     def boom(_s):
         raise httpx.ConnectTimeout("timed out")

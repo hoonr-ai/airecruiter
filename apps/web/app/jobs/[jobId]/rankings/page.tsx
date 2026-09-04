@@ -26,7 +26,8 @@ import {
   Check,
   X,
   Activity,
-  Ban
+  Ban,
+  AlertTriangle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1827,66 +1828,73 @@ export default function CandidateRankingsPage() {
 
           {/* Row 2: Outreach Stats */}
           <div className="border-t border-slate-200 p-5">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
-                {isInitialLoading || !statsLoaded ? (
-                  <StatsGroupSkeleton count={3} />
-                ) : (
-                  <>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Pending:</span>
-                      <strong className="text-slate-900">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.pending ?? 0}</strong>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>In Progress:</span>
-                      <strong className="text-slate-900">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.in_progress ?? 0}</strong>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Completed:</span>
-                      <strong className="text-slate-900">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.completed ?? 0}</strong>
-                    </div>
-                  </>
-                )}
+            {statsLoaded && !outreachStats ? (
+              <div className="flex items-center gap-2 text-[13px] text-rose-600 font-medium">
+                <AlertTriangle className="w-4 h-4" />
+                Couldn&apos;t load live outreach stats. Showing last known counts may be unavailable — try refreshing.
               </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={3} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Pending:</span>
+                        <strong className="text-slate-900">{outreachStats!.buckets?.pending ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>In Progress:</span>
+                        <strong className="text-slate-900">{outreachStats!.buckets?.in_progress ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Completed:</span>
+                        <strong className="text-slate-900">{outreachStats!.buckets?.completed ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
 
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
-                {isInitialLoading || !statsLoaded ? (
-                  <StatsGroupSkeleton count={2} />
-                ) : (
-                  <>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>Passed:</span>
-                      <strong className="text-emerald-700">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.passed ?? 0}</strong>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-rose-400"></div>Failed:</span>
-                      <strong className="text-rose-700">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.buckets?.failed ?? 0}</strong>
-                    </div>
-                  </>
-                )}
-              </div>
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={2} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>Passed:</span>
+                        <strong className="text-emerald-700">{outreachStats!.buckets?.passed ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-rose-400"></div>Failed:</span>
+                        <strong className="text-rose-700">{outreachStats!.buckets?.failed ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
 
-              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
-                {isInitialLoading || !statsLoaded ? (
-                  <StatsGroupSkeleton count={3} />
-                ) : (
-                  <>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 1:</span>
-                      <strong className="text-indigo-600">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase1 ?? 0}</strong>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 2:</span>
-                      <strong className="text-indigo-600">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase2 ?? 0}</strong>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 3:</span>
-                      <strong className="text-indigo-600">{!outreachStats ? <span className="text-rose-500 font-normal">Failed</span> : outreachStats.phases?.phase3 ?? 0}</strong>
-                    </div>
-                  </>
-                )}
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={3} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 1:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase1 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 2:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase2 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 3:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase3 ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </div>

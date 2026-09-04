@@ -1872,8 +1872,6 @@ async def save_candidates(
         for idx, c in enumerate(selected_candidates):
             print(f"   Selected Candidate {idx+1}: {c.name} (ID: {c.candidate_id}, Source: {c.source})")
 
-        import json
-
         saved_count = 0
         # Ids that actually got a sourced_candidates row this request. The FE
         # must engage ONLY these: an id sent to /engage/launch without a row
@@ -2191,8 +2189,7 @@ async def save_candidates(
     except HTTPException:
         raise
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error saving candidates: {e}")
+        logger.error(f"Error saving candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
