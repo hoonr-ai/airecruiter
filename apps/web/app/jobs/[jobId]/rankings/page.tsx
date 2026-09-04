@@ -544,8 +544,7 @@ export default function CandidateRankingsPage() {
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
       } catch (error) {
         console.error('Error syncing submission:', error);
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
+        setToast({ message: "Failed to save submission", type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);

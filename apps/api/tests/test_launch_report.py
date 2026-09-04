@@ -453,6 +453,27 @@ def test_time_to_source_runs_from_pair_published():
     assert lr._build_row(job, candidates, [], {})["time_to_source_minutes"] == 1440.0
 
 
+def test_first_feedback_at_earliest_wins():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "feedback_at": "2026-08-27T10:00:00Z"},
+        {"candidate_id": "c2", "feedback_at": "2026-08-26T10:00:00Z"},
+        {"candidate_id": "c3"},  # no feedback
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    # EDT offset from UTC is -04:00, so 10:00 UTC = 06:00 EDT
+    assert row["first_feedback_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_first_feedback_at_is_none_when_no_feedback():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1"},
+        {"candidate_id": "c2"},
+    ]
+    assert lr._build_row(job, candidates, [], {})["first_feedback_at"] is None
+
+
 # ---------------------------------------------------------------------------
 # Job versions
 # ---------------------------------------------------------------------------

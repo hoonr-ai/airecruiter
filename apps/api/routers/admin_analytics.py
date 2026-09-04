@@ -93,7 +93,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                 ft.first_feedback_at
             FROM deduped d
             LEFT JOIN feedback_times ft
-              ON ft.jobdiva_id = COALESCE(NULLIF(d.jobdiva_id, ''), d.job_id::text)
+              ON ft.jobdiva_id = d.jobdiva_id OR ft.jobdiva_id = d.job_id::text
             WHERE d.rn = 1
             ORDER BY d.is_archived ASC, COALESCE({_ts('d.pair_launched_at')}, {_ts('d.created_at')}) DESC NULLS LAST
             LIMIT 2000

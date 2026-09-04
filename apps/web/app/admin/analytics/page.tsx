@@ -2203,7 +2203,7 @@ export default function AdminAnalyticsPage() {
               ) : filteredTimeline.length === 0 ? (
                 <tr>
                   <td
-                  colSpan={15}
+                    colSpan={15}
                     className="py-12 text-center text-slate-400 text-[13px]"
                   >
                     {timelineRows.length === 0
