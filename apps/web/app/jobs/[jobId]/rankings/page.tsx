@@ -2679,11 +2679,24 @@ export default function CandidateRankingsPage() {
                                     {feedbackReasons[candidate.id]}
                                   </div>
                                 )}
-                                {feedbackTimes[candidate.id] && (
-                                  <div className="text-[10px] text-slate-400 font-medium text-center whitespace-nowrap" title={feedbackTimes[candidate.id]}>
-                                    {new Date(feedbackTimes[candidate.id]).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                  </div>
-                                )}
+                                {feedbackTimes[candidate.id] && (() => {
+                                  const d = new Date(feedbackTimes[candidate.id]);
+                                  if (isNaN(d.getTime())) return null;
+                                  const fmt = new Intl.DateTimeFormat('en-US', {
+                                    timeZone: 'America/New_York',
+                                    month: '2-digit', day: '2-digit', year: 'numeric',
+                                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                    hour12: false, timeZoneName: 'short',
+                                  });
+                                  const parts = Object.fromEntries(fmt.formatToParts(d).map(x => [x.type, x.value]));
+                                  const hr = parts.hour === '24' ? '00' : parts.hour;
+                                  const label = `${parts.month}/${parts.day}/${parts.year} ${hr}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
+                                  return (
+                                    <div className="text-[10px] text-slate-400 font-medium text-center whitespace-nowrap" title={feedbackTimes[candidate.id]}>
+                                      {label}
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             )}
                           </div>

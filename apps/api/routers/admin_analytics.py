@@ -64,27 +64,38 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
                     ) as rn
                 FROM monitored_jobs
                 WHERE {cond}
+            ),
+            feedback_times AS (
+                SELECT
+                    jobdiva_id,
+                    MIN(NULLIF(data->>'feedback_at', '')) AS first_feedback_at
+                FROM sourced_candidates
+                WHERE data->>'feedback_at' IS NOT NULL
+                GROUP BY jobdiva_id
             )
             SELECT
-                job_id,
-                jobdiva_id,
-                COALESCE(NULLIF(TRIM(enhanced_title), ''), NULLIF(TRIM(title), ''), 'Untitled') AS title,
-                COALESCE(NULLIF(TRIM(customer_name), ''), 'Unknown') AS customer_name,
-                posted_date,
-                ({_ts('created_at')}) AT TIME ZONE 'UTC' AS created_at,
-                ({_ts('pair_launched_at')}) AT TIME ZONE 'UTC' AS pair_launched_at,
-                ({_ts('outreach_stopped_at')}) AT TIME ZONE 'UTC' AS outreach_stopped_at,
-                COALESCE(is_archived, FALSE) AS is_archived,
-                archive_reason,
-                status,
-                {_int('candidates_sourced')},
-                {_int('candidates_launched')},
-                {_int('jobdiva_total_subs')},
-                campaign_id,
-                recruiter_emails
-            FROM deduped
-            WHERE rn = 1
-            ORDER BY is_archived ASC, COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
+                d.job_id,
+                d.jobdiva_id,
+                COALESCE(NULLIF(TRIM(d.enhanced_title), ''), NULLIF(TRIM(d.title), ''), 'Untitled') AS title,
+                COALESCE(NULLIF(TRIM(d.customer_name), ''), 'Unknown') AS customer_name,
+                d.posted_date,
+                ({_ts('d.created_at')}) AT TIME ZONE 'UTC' AS created_at,
+                ({_ts('d.pair_launched_at')}) AT TIME ZONE 'UTC' AS pair_launched_at,
+                ({_ts('d.outreach_stopped_at')}) AT TIME ZONE 'UTC' AS outreach_stopped_at,
+                COALESCE(d.is_archived, FALSE) AS is_archived,
+                d.archive_reason,
+                d.status,
+                {_int('d.candidates_sourced')},
+                {_int('d.candidates_launched')},
+                {_int('d.jobdiva_total_subs')},
+                d.campaign_id,
+                d.recruiter_emails,
+                ft.first_feedback_at
+            FROM deduped d
+            LEFT JOIN feedback_times ft
+              ON ft.jobdiva_id = COALESCE(NULLIF(d.jobdiva_id, ''), d.job_id::text)
+            WHERE d.rn = 1
+            ORDER BY d.is_archived ASC, COALESCE({_ts('d.pair_launched_at')}, {_ts('d.created_at')}) DESC NULLS LAST
             LIMIT 2000
         """, params)
         rows = cur.fetchall()
@@ -92,7 +103,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
     timeline = []
     for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
          launched_at, stopped_at, is_archived, archive_reason, status, sourced, launched_count,
-         jobdiva_subs, campaign_id, raw_recruiter_emails) in rows:
+         jobdiva_subs, campaign_id, raw_recruiter_emails, first_feedback_at) in rows:
         posted_on = _parse_posted_date(posted_raw)
         lag_days = None
         if launched_at is not None and posted_on is not None:
@@ -133,7 +144,8 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             "candidates_launched": launched_count,
             "jobdiva_submittals": jobdiva_subs,
             "campaign_id": str(campaign_id or "") or None,
-            "recruiter_emails": _parse_recruiter_emails(raw_recruiter_emails)
+            "recruiter_emails": _parse_recruiter_emails(raw_recruiter_emails),
+            "first_feedback_at": str(first_feedback_at) if first_feedback_at else None,
         })
 
     return {"rows": timeline, "total": total_jobs}
