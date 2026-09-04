@@ -547,7 +547,7 @@ except ValueError:
 # hiring-client checks — the post-launch backstop for candidates whose
 # employer the launch-time resolution pass could not verify.
 EMPLOYER_QUESTION_ENABLED = _os.getenv(
-    "EMPLOYER_QUESTION_ENABLED", "true"
+    "EMPLOYER_QUESTION_ENABLED", "false"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # A resume older than this many months makes its parsed "Present" weak
