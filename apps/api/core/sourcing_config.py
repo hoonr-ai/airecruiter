@@ -540,12 +540,17 @@ try:
 except ValueError:
     EMPLOYER_RESOLUTION_MAX_CANDIDATES = 300
 
-# Ask every PAIR interview "which company do you currently work for?" (one
-# extra pre-screen question appended at payload build; see
-# services/stated_employer.py). The answer comes back on the PairBot webhook,
-# is persisted as data.stated_current_employer, and re-runs the no-contact +
-# hiring-client checks — the post-launch backstop for candidates whose
-# employer the launch-time resolution pass could not verify.
+# Whether to append \"which company do you currently work for?\" to every PAIR
+# interview payload (one extra pre-screen question; see services/stated_employer.py).
+# The answer comes back on the PairBot webhook, is persisted as
+# data.stated_current_employer, and re-runs the no-contact + hiring-client
+# checks — the post-launch backstop for candidates whose employer the
+# launch-time resolution pass could not verify.
+#
+# Default False (2026-09-04): the question was introduced in PR #531 as part of
+# the employer-backstop feature but was found to appear in all PairBot launches
+# unexpectedly. Flipping to opt-in (False) so it only goes out when explicitly
+# enabled via the EMPLOYER_QUESTION_ENABLED env var.
 EMPLOYER_QUESTION_ENABLED = _os.getenv(
     "EMPLOYER_QUESTION_ENABLED", "false"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
