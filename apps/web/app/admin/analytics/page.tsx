@@ -77,6 +77,7 @@ interface JobTimelineEntry {
   jobdiva_submittals?: number;
   campaign_id: string | null;
   recruiter_emails?: string[];
+  first_feedback_at: string | null;
 }
 
 interface LaunchSpeed {
@@ -782,7 +783,7 @@ export default function AdminAnalyticsPage() {
       ),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback Submitted At",
       ...(data.jobs_timeline || []).map((job) =>
         [
           escapeCsvField(job.title),
@@ -806,6 +807,7 @@ export default function AdminAnalyticsPage() {
           job.candidates_sourced,
           job.candidates_launched,
           job.jobdiva_submittals ?? 0,
+          escapeCsvField(formatDateTime(job.first_feedback_at)),
         ].join(","),
       ),
       // LinkedIn accounts are global infrastructure — only exported on the
@@ -849,7 +851,7 @@ export default function AdminAnalyticsPage() {
 
     const lines = [
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback Submitted At",
       ...filteredTimeline.map((job) =>
         [
           escapeCsvField(job.title),
@@ -873,6 +875,7 @@ export default function AdminAnalyticsPage() {
           job.candidates_sourced,
           job.candidates_launched,
           job.jobdiva_submittals ?? 0,
+          escapeCsvField(formatDateTime(job.first_feedback_at)),
         ].join(","),
       ),
     ];
@@ -2143,6 +2146,7 @@ export default function AdminAnalyticsPage() {
                 <th className="py-3 px-6 text-center">Sourced</th>
                 <th className="py-3 px-6 text-center">Launched</th>
                 <th className="py-3 px-6 text-center">Submittals</th>
+                <th className="py-3 px-6 whitespace-nowrap">First Feedback Submitted At</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-[13px]">
@@ -2191,12 +2195,15 @@ export default function AdminAnalyticsPage() {
                     <td className="py-4 px-6 text-center">
                       <div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" />
                     </td>
+                    <td className="py-4 px-6">
+                      <div className="h-4 w-28 bg-slate-100 animate-pulse rounded" />
+                    </td>
                   </tr>
                 ))
               ) : filteredTimeline.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={14}
+                    colSpan={15}
                     className="py-12 text-center text-slate-400 text-[13px]"
                   >
                     {timelineRows.length === 0
@@ -2303,6 +2310,9 @@ export default function AdminAnalyticsPage() {
                       </td>
                       <td className="py-3.5 px-6 text-center font-bold text-amber-600">
                         {(job.jobdiva_submittals ?? 0).toLocaleString()}
+                      </td>
+                      <td className="py-3.5 px-6 whitespace-nowrap">
+                        {renderDateCell(job.first_feedback_at)}
                       </td>
                     </tr>
                   );
