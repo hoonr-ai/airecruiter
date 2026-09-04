@@ -28,7 +28,7 @@ ROUTER_PATH = Path(__file__).resolve().parents[1] / "routers" / "candidates.py"
 
 def _routes() -> List[Dict]:
     """Every `@router.<method>("<path>")` in candidates.py with its guards."""
-    src = ROUTER_PATH.read_text()
+    src = ROUTER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
     found: List[Dict] = []
     for node in ast.walk(tree):
@@ -158,7 +158,7 @@ def test_delegating_handlers_forward_the_user():
     the argument would bind the literal `Depends` object as `user` and
     `verify_job_access` would then read attributes off it.
     """
-    src = ROUTER_PATH.read_text()
+    src = ROUTER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
     guarded = {
         n.name
@@ -212,7 +212,7 @@ def test_job_scoped_routes_check_job_access(func):
 def test_evaluation_report_has_no_unguarded_branch():
     """The no-job_id path must authorize, not fall through."""
     route = _by_func("get_candidate_evaluation_report")
-    src = ROUTER_PATH.read_text()
+    src = ROUTER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
     body = next(
         ast.get_source_segment(src, n)
@@ -230,7 +230,7 @@ def test_evaluation_report_has_no_unguarded_branch():
 
 def test_report_access_fallback_fails_closed():
     """Resolving zero jobs must deny, not allow."""
-    src = ROUTER_PATH.read_text()
+    src = ROUTER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
     body = next(
         ast.get_source_segment(src, n)
@@ -247,7 +247,7 @@ def test_report_access_fallback_fails_closed():
 
 def test_bulk_contacts_checks_job_access_per_item():
     """bulk-contacts must not be weaker than its singular twins."""
-    src = ROUTER_PATH.read_text()
+    src = ROUTER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
     body = next(
         ast.get_source_segment(src, n)

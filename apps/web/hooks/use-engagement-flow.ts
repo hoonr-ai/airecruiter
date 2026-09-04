@@ -77,6 +77,18 @@ export type LaunchExcludedCandidate = {
   reason: string;
 };
 
+// A candidate who LAUNCHED, but whose employer the backend's resolution pass
+// could not fully verify — the client-employee / no-contact checks had weak
+// or no data to judge for them. "profile_only" means only JobDiva's noisy
+// profile lines existed; "verified_stale" means the signals came from a
+// resume older than the staleness threshold (its "Present" may be outdated).
+export type LaunchUnverifiedEmployer = {
+  candidate_id: string;
+  name?: string;
+  employer_verification: string; // "unverified" | "profile_only" | "verified_stale"
+  resume_updated_at?: string;
+};
+
 export type LaunchEvent =
   | { type: "start"; total_candidates: number; total_batches: number; batch_size: number }
   | {
@@ -90,6 +102,8 @@ export type LaunchEvent =
       already_sent?: number;
       // Count of server-side exclusions in this batch (see done.excluded_candidates).
       excluded?: number;
+      // Count launched with an unverified employer (see done.employer_unverified).
+      employer_unverified?: number;
       bulk_id?: string;
       error?: string;
       candidate_ids?: string[];
@@ -98,9 +112,10 @@ export type LaunchEvent =
   | {
       type: "done";
       aborted: boolean;
-      totals: { sent: number; already_sent: number; failed_batches: number; no_interview?: number; excluded?: number };
+      totals: { sent: number; already_sent: number; failed_batches: number; no_interview?: number; excluded?: number; employer_unverified?: number };
       skipped_already_sent: string[];
       excluded_candidates?: LaunchExcludedCandidate[];
+      employer_unverified?: LaunchUnverifiedEmployer[];
       failed_candidate_ids: string[];
     };
 

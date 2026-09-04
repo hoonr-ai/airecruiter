@@ -88,7 +88,7 @@ import {
   type LaunchFailedCandidate,
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
-import { useEngagementFlow } from "@/hooks/use-engagement-flow";
+import { useEngagementFlow, type LaunchUnverifiedEmployer } from "@/hooks/use-engagement-flow";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
@@ -7461,6 +7461,7 @@ function NewJobPageContent() {
       totalEngaged: 0,
       totalFailedBatches: 0,
       failedCandidates: [],
+      employerUnverified: [],
       jobIdForRelaunch: jobdivaIdForSave ? String(jobdivaIdForSave) : undefined,
     }));
 
@@ -7525,6 +7526,11 @@ function NewJobPageContent() {
     // offer extended, …) — the server may know company data the FE's own
     // pre-filter (hardFilterSkipIds) couldn't see.
     let serverExcluded: { candidate_id: string; name?: string; reason: string }[] = [];
+    // Candidates that LAUNCHED with an employer the backend couldn't verify —
+    // the client-employee / no-contact checks had nothing to judge for them
+    // (no resume, no parsed history). Surfaced so the recruiter knows the
+    // company checks ran blind for these, instead of the old silent pass.
+    let serverUnverifiedEmployer: LaunchUnverifiedEmployer[] = [];
     // Ids of candidates whose save batch succeeded — the single launch call
     // below engages exactly these (in order).
     const savedCandidateIds: string[] = [];
@@ -7842,6 +7848,7 @@ function NewJobPageContent() {
                 })
                 .filter(Boolean);
               serverExcluded = evt.excluded_candidates || [];
+              serverUnverifiedEmployer = evt.employer_unverified || [];
             }
           }
         );
@@ -7930,8 +7937,19 @@ function NewJobPageContent() {
       );
     }
 
+    if (serverUnverifiedEmployer.length > 0) {
+      // Copy must cover ALL states in the bucket — "verified_stale" rows HAVE
+      // parsed work history (just from an old resume), so don't claim the
+      // checks ran blind; the launch panel labels each candidate precisely.
+      showToast(
+        `${serverUnverifiedEmployer.length} candidate${serverUnverifiedEmployer.length === 1 ? "" : "s"} launched with weak or unverified employer data (no history, JobDiva profile only, or a stale resume) — see the launch panel`,
+        "info",
+      );
+    }
+
     setLaunchProgress(prev => ({
       ...prev,
+      employerUnverified: serverUnverifiedEmployer,
       phase: totalFailedBatches === 0 ? "completed" : (totalHandled > 0 ? "completed" : "failed"),
       totalSaved,
       totalEngaged,
@@ -7990,6 +8008,7 @@ function NewJobPageContent() {
       enrichFailed: 0,
       hardFilterSkipped: 0,
       hardFilterSkippedNames: [],
+      employerUnverified: [],
       finalMessage: undefined,
     }));
     const overrides = Object.keys(pendingLaunchOverrides).length > 0 ? pendingLaunchOverrides : undefined;

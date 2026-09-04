@@ -485,3 +485,86 @@ try:
     )
 except ValueError:
     EXA_SOURCING_CONTACT_LIFETIME_CAP = 100
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Launch-time employer resolution (services/employer_resolution.py)
+# ─────────────────────────────────────────────────────────────────────────
+# Policy (2026-09-02): whenever a candidate reaching a PAIR launch has no
+# confident employer data (no extracted company_experience and no explicit
+# current_company), fetch their resume and parse it BEFORE outreach — every
+# time — and attach JobDiva's CandidatesProfileDetail work history as
+# corroboration. JobDiva exposes no structured employer field anywhere else
+# (live-probed 2026-09-02), so without this the client-employee and
+# no-contact gates run blind on most JobDiva rows.
+EMPLOYER_RESOLUTION_ENABLED = _os.getenv(
+    "EMPLOYER_RESOLUTION_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# Concurrent resume parses per launch. The extraction pipeline is
+# resume-hash cached, so repeat candidates cost nothing; this bounds the
+# fresh-parse burst against the LLM.
+try:
+    EMPLOYER_RESOLUTION_CONCURRENCY = int(
+        _os.getenv("EMPLOYER_RESOLUTION_CONCURRENCY", "6").strip() or "6"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_CONCURRENCY = 6
+
+# Per-candidate ceiling on one resume parse (crisp + extract LLM calls).
+try:
+    EMPLOYER_RESOLUTION_PER_CANDIDATE_TIMEOUT_S = float(
+        _os.getenv("EMPLOYER_RESOLUTION_PER_CANDIDATE_TIMEOUT_S", "45").strip() or "45"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_PER_CANDIDATE_TIMEOUT_S = 45.0
+
+# Overall wall-clock budget for the resolution pass of ONE launch. Parses
+# that don't start before the budget runs out are skipped (the launch
+# proceeds on stored signals and reports those candidates as
+# employer-unverified); anything parsed is persisted, so the next launch
+# starts warmer.
+try:
+    EMPLOYER_RESOLUTION_BUDGET_S = float(
+        _os.getenv("EMPLOYER_RESOLUTION_BUDGET_S", "180").strip() or "180"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_BUDGET_S = 180.0
+
+# Hard cap on candidates resolved per launch (defence against a pathological
+# batch; normal launches are ≤ LAUNCH_BATCH_SIZE anyway).
+try:
+    EMPLOYER_RESOLUTION_MAX_CANDIDATES = int(
+        _os.getenv("EMPLOYER_RESOLUTION_MAX_CANDIDATES", "300").strip() or "300"
+    )
+except ValueError:
+    EMPLOYER_RESOLUTION_MAX_CANDIDATES = 300
+
+# Whether to append \"which company do you currently work for?\" to every PAIR
+# interview payload (one extra pre-screen question; see services/stated_employer.py).
+# The answer comes back on the PairBot webhook, is persisted as
+# data.stated_current_employer, and re-runs the no-contact + hiring-client
+# checks — the post-launch backstop for candidates whose employer the
+# launch-time resolution pass could not verify.
+#
+# Default False (2026-09-04): the question was introduced in PR #531 as part of
+# the employer-backstop feature but was found to appear in all PairBot launches
+# unexpectedly. Flipping to opt-in (False) so it only goes out when explicitly
+# enabled via the EMPLOYER_QUESTION_ENABLED env var.
+EMPLOYER_QUESTION_ENABLED = _os.getenv(
+    "EMPLOYER_QUESTION_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# A resume older than this many months makes its parsed "Present" weak
+# evidence: launch candidates whose employer signals rest on such a resume
+# classify as employer_verification "verified_stale" (surfaced in the launch
+# report next to unverified/profile_only — advisory, never blocking).
+# JobDiva's resume DATEUPDATED is fetched per launch (one batched
+# CandidatesResumesDetail call, services/employer_resolution.py
+# stamp_resume_freshness). 0 disables the freshness check entirely.
+try:
+    EMPLOYER_STALE_RESUME_MONTHS = int(
+        _os.getenv("EMPLOYER_STALE_RESUME_MONTHS", "12").strip() or "12"
+    )
+except ValueError:
+    EMPLOYER_STALE_RESUME_MONTHS = 12

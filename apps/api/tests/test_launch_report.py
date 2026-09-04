@@ -324,6 +324,31 @@ def test_phase_distribution_normalizes_phase_variants():
     assert lr._summarise_outreach(payloads)["phases"] == {"phase1": 3, "phase2": 1, "phase3": 1}
 
 
+def test_summarise_outreach_passed_failed_sub_buckets():
+    failed_payload = _outreach("failed")
+    failed_payload["score"] = 50  # Candidate engaged and failed
+    payloads = [
+        _outreach("passed"),
+        failed_payload,
+        _outreach("completed"),
+    ]
+    summary = lr._summarise_outreach(payloads)
+    assert summary["buckets"]["passed"] == 1
+    assert summary["buckets"]["failed"] == 1
+    assert summary["buckets"]["completed"] == 3
+
+
+def test_summarise_outreach_unengaged_failed_buckets_as_pending():
+    # Failed status without any score/response/phase should be bucketed as pending.
+    # A candidate who got an outreach_phase is considered to have been contacted;
+    # we use a flat payload with no phase to simulate a never-contacted scenario.
+    payload = {"outreach": {"outreach_status": "failed"}, "communications": []}
+    summary = lr._summarise_outreach([payload])
+    assert summary["buckets"]["pending"] == 1
+    assert summary["buckets"]["failed"] == 0
+
+
+
 def test_phase_distribution_falls_back_to_status_when_phase_missing():
     payload = {"outreach": {"outreach_status": "phase2"}, "communications": []}
     summary = lr._summarise_outreach([payload])
@@ -426,6 +451,27 @@ def test_time_to_source_runs_from_pair_published():
         "feedback_at": None, "engage_completed_at": None,
     }]
     assert lr._build_row(job, candidates, [], {})["time_to_source_minutes"] == 1440.0
+
+
+def test_first_feedback_at_earliest_wins():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "feedback_at": "2026-08-27T10:00:00Z"},
+        {"candidate_id": "c2", "feedback_at": "2026-08-26T10:00:00Z"},
+        {"candidate_id": "c3"},  # no feedback
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    # EDT offset from UTC is -04:00, so 10:00 UTC = 06:00 EDT
+    assert row["first_feedback_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_first_feedback_at_is_none_when_no_feedback():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1"},
+        {"candidate_id": "c2"},
+    ]
+    assert lr._build_row(job, candidates, [], {})["first_feedback_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -598,3 +644,100 @@ def test_query_rows_render_both_timestamp_shapes_in_eastern(pg_conn):
     assert v1["pair_published_at"] == "2026-08-20T08:00:00-04:00"   # IST string
     assert v2["pair_published_at"] == "2026-08-27T14:00:00-04:00"   # NOW() timestamp
     assert v2["version"] == 2
+
+
+def test_summarise_outreach_flat_payload_with_outreach_channel():
+    """Flat PairBot webhook payload must properly resolve status, phase and channel."""
+    flat_payload = {
+        "interview_id": "10144",
+        "jobdiva_id": "26-26878",
+        "status": "completed",
+        "phase": "Phase 3",
+        "outreach_phase": "phase3",
+        "channel": "Web",
+        "outreach_channel": "web",
+        "completed_at": "2026-09-02T14:18:42.509867",
+    }
+    summary = lr._summarise_outreach([flat_payload])
+    assert summary["buckets"]["completed"] == 1
+    assert summary["phases"]["phase3"] == 1
+    assert summary["channels"]["web"] == 1
+
+
+def test_summarise_outreach_mixed_nested_flat_payload():
+    """Mixed nested outreach status and flat phase/channel must resolve symmetrically."""
+    mixed_payload = {
+        "outreach": {"outreach_status": "completed"},
+        "outreach_phase": "phase3",
+        "outreach_channel": "web",
+    }
+    summary = lr._summarise_outreach([mixed_payload])
+    assert summary["buckets"]["completed"] == 1
+    assert summary["phases"]["phase3"] == 1
+    assert summary["channels"]["web"] == 1
+
+
+def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys():
+    """When PairBot live API is missing channel/phase or empty, candidate DB fallback populates the report."""
+    job = _job(1)
+    cand_rows = [
+        {
+            "engage_interview_id": "10144",
+            "candidate_id": "cand_1",
+            "engage_status": "completed",
+            "outreach_phase": "phase3",
+            "outreach_channel": "web",
+            "first_completed_at": "2026-09-02T14:18:42.509867",
+        }
+    ]
+    audit_rows = [{"interview_id": "10144", "response": None}]
+    # PairBot live HTTP API returns partial response without channel/phase
+    outreach_by_interview = {"10144": {"outreach_status": "completed"}}
+
+    row = lr._build_row(job, cand_rows, audit_rows, outreach_by_interview)
+
+    assert row["completed"] == 1
+    assert row["web"] == 1
+    assert row["phase3"] == 1
+
+
+
+
+# ---------------------------------------------------------------------------
+# outreach status fetching
+# ---------------------------------------------------------------------------
+import asyncio
+
+class MockResponse:
+    def __init__(self, json_data):
+        self._json_data = json_data
+    def json(self):
+        return self._json_data
+    def raise_for_status(self):
+        pass
+
+class MockClient:
+    def __init__(self, json_data):
+        self.json_data = json_data
+    async def get(self, url):
+        return MockResponse(self.json_data)
+
+def test_fetch_outreach_status_unwraps_apiresponse_envelope():
+    async def _test():
+        client = MockClient({"success": True, "data": {"outreach_status": "pass", "outreach_phase": "phase2"}})
+        semaphore = asyncio.Semaphore(1)
+        deadline = asyncio.get_running_loop().time() + 60.0
+        
+        result = await lr._fetch_outreach_status(client, semaphore, deadline, "123")
+        assert result == {"outreach_status": "pass", "outreach_phase": "phase2"}
+    asyncio.run(_test())
+
+def test_fetch_outreach_status_handles_legacy_unwrapped_payload():
+    async def _test():
+        client = MockClient({"outreach_status": "pass", "outreach_phase": "phase2"})
+        semaphore = asyncio.Semaphore(1)
+        deadline = asyncio.get_running_loop().time() + 60.0
+        
+        result = await lr._fetch_outreach_status(client, semaphore, deadline, "123")
+        assert result == {"outreach_status": "pass", "outreach_phase": "phase2"}
+    asyncio.run(_test())

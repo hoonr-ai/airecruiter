@@ -22,6 +22,7 @@ than failing the report.
 """
 import asyncio
 import datetime
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,6 +39,8 @@ from routers._helpers import (
     _parse_posted_date,
     _parse_recruiter_emails,
 )
+from services.outreach_normalization import normalize_channel, normalize_phase
+
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
 logger = logging.getLogger(__name__)
@@ -228,18 +231,7 @@ def _bucket_status(raw: Optional[str]) -> str:
 
 def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3."""
-    value = (raw or "").strip().lower()
-    if not value:
-        return None
-    if value in ("phase1", "phase2", "phase3"):
-        return value
-    if not allow_pending_aliases and value in _PENDING_STATUSES:
-        return None
-    aliased = _PHASE_ALIASES.get(value)
-    if aliased:
-        return aliased
-    logger.warning(f"LAUNCH-REPORT: unrecognised outreach phase {value!r} — not counted")
-    return None
+    return normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
 
 
 def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
@@ -257,16 +249,8 @@ def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
 
 def _normalize_channel(raw: Optional[str]) -> Optional[str]:
     """Map communication channel/source variants onto call/sms/web columns."""
-    value = (raw or "").strip().lower()
-    if not value:
-        return None
-    if value in _CHANNEL_COLUMNS:
-        return _CHANNEL_COLUMNS[value]
-    mapped = _CHANNEL_COLUMNS.get(value) or _CHANNEL_ALIASES.get(value)
-    if mapped:
-        return mapped
-    logger.warning(f"LAUNCH-REPORT: unrecognised communication channel/source {value!r} — not counted")
-    return None
+    return normalize_channel(raw)
+
 
 
 def _extract_channel(comm: Dict[str, Any]) -> Optional[str]:
@@ -369,7 +353,11 @@ def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str,
             data->>'first_completed_at'   AS first_completed_at,
             data->>'engage_completed_at'  AS engage_completed_at,
             data->>'engage_status'        AS engage_status,
-            data->>'engage_interview_id'  AS engage_interview_id
+            data->>'engage_interview_id'  AS engage_interview_id,
+            data->>'phase'                AS phase,
+            data->>'outreach_phase'       AS outreach_phase,
+            data->>'channel'              AS channel,
+            data->>'outreach_channel'     AS outreach_channel
         FROM sourced_candidates
         WHERE jobdiva_id = ANY(%s)
     """
@@ -388,7 +376,7 @@ def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any
     if not job_keys:
         return {}
     sql = """
-        SELECT jobdiva_id, interview_id, candidate_id, created_at
+        SELECT jobdiva_id, interview_id, candidate_id, created_at, response
         FROM engage_interview_audit
         WHERE jobdiva_id = ANY(%s)
           AND NULLIF(interview_id, '') IS NOT NULL
@@ -426,7 +414,10 @@ async def _fetch_outreach_status(
         try:
             res = await client.get(f"/api/interviews/{interview_id}/outreach-status")
             res.raise_for_status()
-            return res.json()
+            payload = res.json()
+            if isinstance(payload, dict) and payload.get("success") is True and isinstance(payload.get("data"), dict):
+                return payload["data"]
+            return payload
         except Exception as exc:
             logger.warning(f"LAUNCH-REPORT: outreach-status failed for interview {interview_id}: {exc}")
             return None
@@ -462,6 +453,82 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     return fetched
 
 
+def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[str, Any], live_api: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge outreach data from 3 layers with the *last layer winning*:
+      Candidate DB (lowest priority) → Audit DB → Live API (highest priority).
+
+    This means live_api fields override everything, which is intentional: the
+    live pair-bot response is the ground truth for a candidate's current outreach
+    state. Local DB fields serve as a best-effort fallback when the API is
+    unavailable or returns no data for an interview.
+
+    Callers that need first-available semantics should use the individual layers
+    directly before calling this helper.
+    """
+    merged_payload = {**cand_fallback}
+    for source in (audit_fallback, live_api):
+        if isinstance(source, dict):
+            for k, v in source.items():
+                if v is not None:
+                    merged_payload[k] = v
+    return merged_payload
+
+
+def build_merged_outreach_payload(
+    cand_data: Dict[str, Any],
+    audit_response: Any,
+    audit_status: Optional[str],
+    raw_live_api: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Constructs the merged outreach payload from the 3 fallback layers:
+    Candidate DB -> Audit DB -> Live API.
+    """
+    # Layer 1: Local DB Candidate Row
+    cand_fallback = {}
+    if cand_data.get("engage_status"):
+        cand_fallback["outreach_status"] = cand_data["engage_status"]
+    raw_p = cand_data.get("outreach_phase") or cand_data.get("phase")
+    if raw_p:
+        cand_fallback["outreach_phase"] = raw_p
+    raw_c = cand_data.get("outreach_channel") or cand_data.get("channel")
+    if raw_c:
+        cand_fallback["outreach_channel"] = raw_c
+    if cand_data.get("first_attempted_at"):
+        cand_fallback["first_attempted_at"] = cand_data["first_attempted_at"]
+    raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
+    if raw_comp:
+        cand_fallback["first_completed_at"] = raw_comp
+
+    # Layer 2: Local DB Audit Row Response
+    audit_fallback = {}
+    if isinstance(audit_response, dict):
+        audit_fallback = dict(audit_response)
+    elif isinstance(audit_response, str) and audit_response.strip():
+        try:
+            audit_fallback = json.loads(audit_response)
+        except Exception as e:
+            logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
+            audit_fallback = {}
+            
+    if audit_status:
+        if "outreach_status" not in audit_fallback:
+            audit_fallback["outreach_status"] = audit_status
+        if "status" not in audit_fallback:
+            audit_fallback["status"] = audit_status
+
+    # Layer 3: Live PairBot HTTP API Response
+    # Unwrap nested `outreach` key from live API payload if present
+    if isinstance(raw_live_api, dict) and isinstance(raw_live_api.get("outreach"), dict):
+        live_api: Optional[Dict[str, Any]] = {**raw_live_api, **raw_live_api["outreach"]}
+    else:
+        live_api = raw_live_api
+
+    # Merge in priority order: Layer 1 -> Layer 2 -> Layer 3
+    return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+
+
 def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
@@ -469,7 +536,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     sent — a candidate SMS'd three times counts once, which is what a recruiter
     reading "SMS: 12" expects.
     """
-    buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0}
+    buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}
     phases = {"phase1": 0, "phase2": 0, "phase3": 0}
     channels = {"call": 0, "sms": 0, "web": 0}
     first_response_minutes: List[float] = []
@@ -477,14 +544,58 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     first_contact_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
-        outreach = payload.get("outreach") or {}
-        buckets[_bucket_status(outreach.get("outreach_status"))] += 1
+        outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+        merged = {**payload, **outreach_dict}
 
-        phase = _extract_phase(outreach)
+        # If the payload came wrapped with an "outreach" dict (like from the UI or candidates API),
+        # we strictly avoid falling back to the top-level `payload["status"]` (which is the candidate's
+        # resume-screening status). If it's a flat payload, `payload["status"]` IS the outreach status.
+        if "outreach" in payload:
+            status_raw = merged.get("outreach_status") or outreach_dict.get("status")
+        else:
+            status_raw = merged.get("outreach_status") or merged.get("status")
+        normalized_status = (status_raw or "").strip().lower()
+
+        # Candidates marked as failed/rejected who never actually engaged/attended
+        # the interview across phases should be classified as pending.
+        # Engagement signals: any recorded score, completion timestamp, a comms
+        # response, OR a known phase beyond the initial dispatch (outreach_phase
+        # being set means pair-bot already routed this candidate to a call/SMS phase).
+        if normalized_status in ("failed", "fail", "rejected"):
+            comms = payload.get("communications") or merged.get("communications") or []
+            phase_raw = (
+                merged.get("outreach_phase")
+                or merged.get("phase")
+                or merged.get("current_phase")
+            )
+            has_engaged = (
+                merged.get("candidate_score") is not None
+                or merged.get("score") is not None
+                or merged.get("engage_score") is not None
+                or merged.get("first_completed_at") is not None
+                or bool(phase_raw)  # phase2/phase3 implies contact was made
+                or any(comm.get("response_at") for comm in comms if isinstance(comm, dict))
+            )
+            if not has_engaged:
+                status_raw = "pending"
+                normalized_status = "pending"
+
+        buckets[_bucket_status(status_raw)] += 1
+
+        # Passed/Failed are sub-buckets within "completed".
+        # _bucket_status already maps pass/fail → "completed", so we
+        # read the raw status directly to classify the sub-bucket without
+        # double-incrementing the completed counter.
+        if normalized_status in ("passed", "pass"):
+            buckets["passed"] += 1
+        elif normalized_status in ("failed", "fail"):
+            buckets["failed"] += 1
+
+        phase = _extract_phase(merged)
         if phase:
             phases[phase] += 1
 
-        comms = payload.get("communications") or []
+        comms = payload.get("communications") or merged.get("communications") or []
         seen_channels = set()
         sent_times: List[datetime.datetime] = []
         responded_times: List[datetime.datetime] = []
@@ -500,11 +611,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 responded_times.append(responded)
 
         # Some pair-bot payloads expose a single channel/source at outreach level.
-        if not seen_channels and isinstance(outreach, dict):
+        if not seen_channels:
             fallback_channel = (
-                _normalize_channel(outreach.get("channel"))
-                or _normalize_channel(outreach.get("source"))
-                or _normalize_channel(outreach.get("communication_source"))
+                _normalize_channel(merged.get("outreach_channel"))
+                or _normalize_channel(merged.get("channel"))
+                or _normalize_channel(merged.get("source"))
+                or _normalize_channel(merged.get("communication_source"))
             )
             if fallback_channel:
                 seen_channels.add(fallback_channel)
@@ -582,6 +694,10 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "submitted_candidates": submitted,
         "rejected_candidates": rejected,
         "time_to_feedback_minutes": _mean(time_to_feedback),
+        "first_feedback_at": min(
+            (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
+            default=None,
+        ),
     }
 
 
@@ -592,11 +708,34 @@ def _build_row(
     outreach_by_interview: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     cand = _summarise_candidates(candidate_rows)
-    payloads = [
-        outreach_by_interview[str(a["interview_id"])]
-        for a in audit_rows
-        if str(a["interview_id"]) in outreach_by_interview
-    ]
+
+    cand_by_interview = {
+        str(c["engage_interview_id"]): c
+        for c in candidate_rows
+        if c.get("engage_interview_id")
+    }
+
+    payloads = []
+    for a in audit_rows:
+        iid = str(a.get("interview_id") or "")
+        if not iid:
+            continue
+
+        cand_data = cand_by_interview.get(iid) or {}
+        raw_resp = a.get("response")
+        audit_status = a.get("status")
+        live_api = outreach_by_interview.get(iid)
+
+        merged_payload = build_merged_outreach_payload(
+            cand_data,
+            raw_resp,
+            audit_status,
+            live_api
+        )
+
+        if merged_payload:
+            payloads.append(merged_payload)
+
     outreach = _summarise_outreach(payloads)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
@@ -670,6 +809,7 @@ def _build_row(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
         ),
         "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
+        "first_feedback_at": _edt(cand["first_feedback_at"]),
         "time_to_first_pass_minutes": (
             round(float(job["time_to_first_pass"]), 1)
             if job.get("time_to_first_pass") is not None

@@ -1239,10 +1239,11 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         '  ],\n'
         '  "company_experience": [\n'
         '    {\n'
-        '      "company": "Company Name",\n'
+        '      "company": "Employer of record as written in the resume",\n'
         '      "title": "Job Title",\n'
         '      "start_date": "Jan 2020",\n'
-        '      "end_date": "Dec 2023 or Present"\n'
+        '      "end_date": "Dec 2023 or Present",\n'
+        '      "end_client": "Client company for consulting/placement roles, else empty string"\n'
         '    }\n'
         '  ],\n'
         '  "candidate_education": [\n'
@@ -1278,7 +1279,15 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         "2. job_title must be the candidate's current or most recent title from the latest experience entry.\n"
         "3. years_of_experience must be a numeric total based on the resume timeline or explicit summary.\n"
         "4. Extract concrete professional skills into skills[].name. Include all meaningful technical and functional skills stated in the resume.\n"
-        "5. Extract complete company_experience entries with company, title, start_date, end_date. List them in reverse chronological order.\n"
+        "5. Extract complete company_experience entries with company, title, start_date, end_date, end_client. List them in reverse chronological order.\n"
+        "5a. company must be the EMPLOYER OF RECORD exactly as the resume names it. When an entry names both an "
+        "employer/vendor and the client it served (e.g. 'Client: Walmart', 'TCS - deployed at Walmart', "
+        "'via Infosys for Walmart'), put the employer in company and the client company in end_client. Set "
+        "end_client to an empty string when no separate client is named. Never use project names, products, or "
+        "technologies as companies.\n"
+        "5b. end_date must be 'Present' ONLY when the resume explicitly marks the role as ongoing (words like "
+        "'Present', 'Current', 'till date', 'now'). Otherwise use the end date as written, or an empty string "
+        "when no end date is stated. Never guess or invent dates.\n"
         "6. Extract all education entries present in the resume into candidate_education.\n"
         "7. Extract all certifications/licenses present in the resume into candidate_certification.\n"
         "8. Extract only LinkedIn, GitHub, and portfolio URLs into urls.\n"

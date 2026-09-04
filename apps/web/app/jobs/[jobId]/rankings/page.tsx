@@ -25,7 +25,9 @@ import {
   Zap,
   Check,
   X,
-  Activity
+  Activity,
+  Ban,
+  AlertTriangle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,9 +52,11 @@ import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
-import { API_BASE, authFetch } from "@/lib/api";
+import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
+import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
+import { cn } from "@/lib/utils";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -249,6 +253,22 @@ interface AppliedCriterion {
   priority_score?: number;
   is_required?: boolean;
   category?: string;
+}
+
+interface OutreachStats {
+  buckets: {
+    pending: number;
+    in_progress: number;
+    completed: number;
+    partial_complete: number;
+    passed: number;
+    failed: number;
+  };
+  phases: {
+    phase1: number;
+    phase2: number;
+    phase3: number;
+  };
 }
 
 interface Candidate {
@@ -465,6 +485,14 @@ function HardFilterHoverCard({
   );
 }
 
+const StatsGroupSkeleton = ({ count = 3 }: { count?: number }) => (
+  <>
+    {Array.from({ length: count }).map((_, i) => (
+      <Skeleton key={i} className="h-5 w-48 bg-slate-100" />
+    ))}
+  </>
+);
+
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
@@ -494,10 +522,14 @@ export default function CandidateRankingsPage() {
   const [invalidContactCount, setInvalidContactCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [outreachStats, setOutreachStats] = useState<OutreachStats | null>(null);
+  const [statsLoaded, setStatsLoaded] = useState(false);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
   const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
+  const [feedbackReasons, setFeedbackReasons] = useState<Record<string, string>>({});
+  const [feedbackTimes, setFeedbackTimes] = useState<Record<string, string>>({});
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
@@ -506,22 +538,14 @@ export default function CandidateRankingsPage() {
   const handleConfirmSubmit = async () => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
+      const submittedAt = new Date().toISOString();
       try {
-        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ feedback_type: 'Submit' })
-        });
-
-        if (response.ok) {
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-        } else {
-          console.error('Failed to sync submission with JobDiva');
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-        }
+        await api.candidates.feedback(jobId as string, String(actionCandidateId), { feedback_type: 'Submit' });
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
       } catch (error) {
         console.error('Error syncing submission:', error);
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        setToast({ message: "Failed to save submission", type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
@@ -531,27 +555,21 @@ export default function CandidateRankingsPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (actionCandidateId && rejectReason) {
+    const trimmedReason = rejectReason?.trim() || "";
+    if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
+      const rejectedAt = new Date().toISOString();
       try {
-        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            feedback_type: 'Reject',
-            reason: rejectReason
-          })
+        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+          feedback_type: 'Reject',
+          reason: trimmedReason
         });
-
-        if (response.ok) {
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        } else {
-          console.error('Failed to sync rejection with JobDiva');
-          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        }
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
+        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
       } catch (error) {
         console.error('Error syncing rejection:', error);
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        setToast({ message: "Failed to save rejection reason", type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
@@ -910,6 +928,8 @@ export default function CandidateRankingsPage() {
   const [refreshingResumeMatchIds, setRefreshingResumeMatchIds] = useState<Set<string>>(new Set());
   const [candidateProfileUrls, setCandidateProfileUrls] = useState<Record<string, string>>({});
 
+  const [stopOutreachCandidate, setStopOutreachCandidate] = useState<StopOutreachCandidate | null>(null);
+
   const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
   const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
   const [pendingScreenCandidate, setPendingScreenCandidate] = useState<Candidate | null>(null);
@@ -1039,38 +1059,20 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidate_id: candidateKey,
-          jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
-          source: candidate.source || undefined,
-          linkedin_url: linkedinUrl,
-          full_name: candidate.name || undefined,
-          company_name:
-            candidate.data?.company_name ||
-            candidate.data?.company?.name ||
-            candidate.data?.enhanced_info?.current_company ||
-            undefined,
-          email: candidate.email || undefined,
-          phone: candidate.phone || undefined,
-        }),
+      const payload = await api.candidates.enrichContact({
+        candidate_id: candidateKey,
+        jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
+        source: candidate.source || undefined,
+        linkedin_url: linkedinUrl,
+        full_name: candidate.name || undefined,
+        company_name:
+          candidate.data?.company_name ||
+          candidate.data?.company?.name ||
+          candidate.data?.enhanced_info?.current_company ||
+          undefined,
+        email: candidate.email || undefined,
+        phone: candidate.phone || undefined,
       });
-
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg = payload?.detail || `ZoomInfo call failed (${res.status})`;
-        setEnrichStatusByCandidateId(prev => ({
-          ...prev,
-          [candidateKey]: {
-            type: "error",
-            message: msg,
-          },
-        }));
-        pushToast(msg, "error");
-        return;
-      }
 
       const nextPhone = payload?.phone || candidate.phone || "";
       const nextEmail = payload?.email || candidate.email || "";
@@ -1246,6 +1248,20 @@ export default function CandidateRankingsPage() {
     setMessageModalOpen(true);
   };
 
+  // "Stop outreach" — the recruiter-side half of the do-not-contact flow.
+  // The modal reads the current suppression state and confirms before it acts:
+  // the stop cancels queued sends across every interview the candidate has and
+  // is not undone in one click.
+  const handleStopOutreach = (candidate: Candidate) => {
+    setStopOutreachCandidate({
+      candidate_id: String(candidate.candidate_id || candidate.id || ""),
+      name: candidate.name,
+      email: candidate.email,
+      phone: candidate.phone,
+      interview_id: candidate.engage_interview_id,
+    });
+  };
+
   const handleSmsCandidate = (candidate: Candidate) => {
     const raw = String(candidate.phone || "").trim();
     const digits = raw.replace(/\D/g, "");
@@ -1268,17 +1284,9 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await authFetch(
-        `${API_BASE}/jobs/${jobId}/candidates/${encodeURIComponent(candidateKey)}/refresh-resume-match`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ source: candidate.source || undefined }),
-        }
-      );
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || payload?.status !== "success") {
-        throw new Error(payload?.detail || payload?.message || `Refresh failed (${res.status})`);
+      const payload = await api.jobs.refreshResumeMatch(jobId as string, candidateKey, { source: candidate.source || undefined });
+      if (payload?.status !== "success") {
+        throw new Error(payload?.detail || payload?.message || `Refresh failed`);
       }
 
       setCandidates(prev =>
@@ -1489,24 +1497,32 @@ export default function CandidateRankingsPage() {
   }, []);
 
   const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean) => {
-    const apiBase = API_BASE;
     const query = new URLSearchParams({
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
-    const candRes = await authFetch(`${apiBase}/jobs/${jobId}/candidates?${query.toString()}`);
-    const candData = await candRes.json();
+    const candData = await api.jobs.getCandidates(jobId as string, query.toString());
 
     if (candData.status !== "success" || !Array.isArray(candData.candidates)) return;
 
     const pageRows = candData.candidates;
     const pageFeedbacks: Record<string, string> = {};
+    const pageFeedbackReasons: Record<string, string> = {};
+    const pageFeedbackTimes: Record<string, string> = {};
     pageRows.forEach((c: any) => {
       if (c.data?.feedback_type) {
         pageFeedbacks[c.id] = c.data.feedback_type;
       }
+      if (c.data?.feedback_reason) {
+        pageFeedbackReasons[c.id] = c.data.feedback_reason;
+      }
+      if (c.data?.feedback_at) {
+        pageFeedbackTimes[c.id] = c.data.feedback_at;
+      }
     });
     setFeedbacks(prev => ({ ...prev, ...pageFeedbacks }));
+    setFeedbackReasons(prev => ({ ...prev, ...pageFeedbackReasons }));
+    setFeedbackTimes(prev => ({ ...prev, ...pageFeedbackTimes }));
 
     const launchedCount = Number(candData?.launched_count);
     if (Number.isFinite(launchedCount)) {
@@ -1566,18 +1582,20 @@ export default function CandidateRankingsPage() {
     setIsLoadingMore(false);
     setCandidates([]);
     setFeedbacks({});
+    setFeedbackReasons({});
     setCandidateTotalCount(0);
     setLaunchedRowCount(0);
     setDuplicateCount(0);
     setInvalidContactCount(0);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
+    setOutreachStats(null);
+    setStatsLoaded(false);
     try {
       const apiBase = API_BASE;
 
       // Fetch job details
-      const jobRes = await authFetch(`${apiBase}/jobs/${jobId}/monitored-data`);
-      const jobData = await jobRes.json();
+      const jobData = await api.jobs.getMonitoredData(jobId as string);
 
       // Handle both { data: { ... } } and flat { ... } structures
       const data = jobData.data || jobData;
@@ -1607,15 +1625,24 @@ export default function CandidateRankingsPage() {
         }
       }
 
+      // Parallel fetch outreach stats (non-blocking — slow pair-bot calls won't delay the main list)
+      try {
+        const statsData = await api.jobs.getOutreachStats(jobId as string);
+        if (statsData) {
+          setOutreachStats(statsData);
+        }
+      } catch (e) {
+        console.warn("Failed to fetch outreach stats:", e);
+      } finally {
+        setStatsLoaded(true);
+      }
+
       // B5: parallel fetch step-3 criteria so the applied-filters panel can
       // render priority + required/preferred chips next to sourcing filters.
       try {
-        const critRes = await authFetch(`${apiBase}/api/jobs/${jobId}/criteria`);
-        if (critRes.ok) {
-          const critData = await critRes.json();
-          if (Array.isArray(critData?.criteria)) {
-            setCriteriaList(critData.criteria);
-          }
+        const critData = await api.jobs.getCriteria(jobId as string);
+        if (critData && Array.isArray(critData.criteria)) {
+          setCriteriaList(critData.criteria);
         }
       } catch (e) {
         // Non-fatal: panel just hides the criteria column when unavailable.
@@ -1627,6 +1654,9 @@ export default function CandidateRankingsPage() {
       console.error("Error fetching ranking data:", error);
     } finally {
       setIsLoading(false);
+      // Guarantee the stats skeleton is never stuck, even if an earlier call threw
+      // before the inner stats try/finally had a chance to run.
+      setStatsLoaded(true);
     }
   };
 
@@ -1702,17 +1732,17 @@ export default function CandidateRankingsPage() {
       )}
 
       {/* Rankings Page Header matching the premium UI */}
-      <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between shadow-sm mb-6 gap-6">
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-3">
-            {isInitialLoading ? (
-              <Skeleton className="h-8 w-64 rounded bg-slate-100" />
-            ) : (
-              <>
-                <Medal className="w-8 h-8 text-indigo-600" />
-                <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
-                  {job?.title}
-                  <span className="text-slate-500 font-medium text-lg">
+      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-8 shadow-sm">
+        <div className="flex justify-between items-start mb-6">
+          <div className="flex items-start gap-4">
+            <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100/50">
+              <Medal className="w-8 h-8 text-indigo-600" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
+                {isInitialLoading ? <Skeleton className="h-8 w-64 bg-slate-100" /> : job?.title}
+                {!isInitialLoading && (
+                  <span className="text-slate-500 font-medium text-lg flex items-center">
                     ({job?.jobdiva_id || job?.job_id || jobId})
                     {(job?.jobdiva_numeric_id || job?.jobdiva_id) && (
                       <a
@@ -1720,78 +1750,152 @@ export default function CandidateRankingsPage() {
                         target="_blank"
                         rel="noopener noreferrer"
                         title="Open job in JobDiva"
-                        className="inline-flex items-center text-indigo-600 ml-1.5 align-middle hover:text-indigo-800"
+                        className="inline-flex items-center text-indigo-600 ml-1.5 hover:text-indigo-800 transition-colors"
                       >
                         <ExternalLink className="w-4 h-4" />
                       </a>
                     )}
                   </span>
-                </h2>
-              </>
-            )}
-          </div>
-          <div className="text-base text-slate-500 font-medium pl-[44px]">Candidate Rank List</div>
-        </div>
-
-        <div className="flex items-center gap-8">
-          <div className="flex gap-8 border-r border-slate-200 pr-8">
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-56 bg-slate-100" />
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{launchedRowCount}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{!job?.openings ? "—" : job.openings}</strong>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className="flex flex-col gap-3 text-sm text-slate-600">
-              {isInitialLoading ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-32 bg-slate-100" />
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className="flex flex-col gap-3 text-sm text-slate-600 pl-4 border-l border-slate-200">
-              {isInitialLoading ? (
-                <>
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                  <Skeleton className="h-5 w-48 bg-slate-100" />
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Invalid Contacts: <strong className="text-slate-900 ml-1">{invalidContactCount}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Duplicate Candidates: <strong className="text-slate-900 ml-1">{duplicateCount}</strong>
-                  </div>
-                </>
-              )}
+                )}
+              </h2>
+              <div className="text-sm text-slate-500 font-medium mt-1">Candidate Rank List</div>
             </div>
           </div>
           <Button
             variant="outline"
-            className="w-10 h-10 p-0 flex items-center justify-center text-slate-500 hover:text-slate-800 rounded-lg"
+            className="w-10 h-10 p-0 flex items-center justify-center text-slate-500 hover:bg-slate-50 hover:text-slate-900 rounded-lg transition-colors border-slate-200 shadow-sm"
             onClick={fetchData}
             disabled={isLoading}
           >
-            <RefreshCw className={`w-5 h-5 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
           </Button>
+        </div>
+
+        <div className="flex flex-col border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden">
+          {/* Row 1: Pipeline Overview */}
+          <div className="p-5 bg-slate-50/50">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
+                {isInitialLoading ? (
+                  <>
+                    <Skeleton className="h-5 w-48 bg-slate-100" />
+                    <Skeleton className="h-5 w-32 bg-slate-100" />
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between items-center">
+                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Candidates Launched:</span>
+                      <strong className="text-slate-900">{launchedRowCount}</strong>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Openings:</span>
+                      <strong className="text-slate-900">{!job?.openings ? "—" : job.openings}</strong>
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
+                {isInitialLoading ? (
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                ) : (
+                  <div className="flex justify-between items-center">
+                    <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Max. Allowed Submittals:</span>
+                    <strong className="text-slate-900">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                {isInitialLoading ? (
+                  <>
+                    <Skeleton className="h-5 w-48 bg-slate-100" />
+                    <Skeleton className="h-5 w-48 bg-slate-100" />
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between items-center">
+                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Invalid Contacts:</span>
+                      <strong className="text-slate-900">{invalidContactCount}</strong>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Duplicate Candidates:</span>
+                      <strong className="text-slate-900">{duplicateCount}</strong>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Outreach Stats */}
+          <div className="border-t border-slate-200 p-5">
+            {statsLoaded && !outreachStats ? (
+              <div className="flex items-center gap-2 text-[13px] text-rose-600 font-medium">
+                <AlertTriangle className="w-4 h-4" />
+                Couldn&apos;t load live outreach stats. Showing last known counts may be unavailable — try refreshing.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={3} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Pending:</span>
+                        <strong className="text-slate-900">{outreachStats!.buckets?.pending ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>In Progress:</span>
+                        <strong className="text-slate-900">{outreachStats!.buckets?.in_progress ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>Completed:</span>
+                        <strong className="text-slate-900">{outreachStats!.buckets?.completed ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={2} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>Passed:</span>
+                        <strong className="text-emerald-700">{outreachStats!.buckets?.passed ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-rose-400"></div>Failed:</span>
+                        <strong className="text-rose-700">{outreachStats!.buckets?.failed ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={3} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 1:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase1 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 2:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase2 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 3:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase3 ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -2537,6 +2641,15 @@ export default function CandidateRankingsPage() {
                               <Send className="w-3.5 h-3.5 mr-1" />
                               SMS
                             </Button>
+                            <Button
+                              size="sm"
+                              className="h-8 px-3 bg-white border border-red-200 text-red-600 hover:bg-red-600 hover:text-white font-bold text-[11px] rounded-md shadow-sm transition-all duration-200"
+                              onClick={() => handleStopOutreach(candidate)}
+                              title="Stop contacting this candidate on every channel"
+                            >
+                              <Ban className="w-3.5 h-3.5 mr-1" />
+                              Stop
+                            </Button>
                           </div>
                         </TableCell>
 
@@ -2564,8 +2677,33 @@ export default function CandidateRankingsPage() {
                               </SelectContent>
                             </Select>
                             {feedbacks[candidate.id] && (
-                              <div className={`text-[9px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                              <div className="flex flex-col items-center gap-2 mt-2">
+                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
+                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                                </div>
+                                {feedbackReasons[candidate.id] && (
+                                  <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
+                                    {feedbackReasons[candidate.id]}
+                                  </div>
+                                )}
+                                {feedbackTimes[candidate.id] && (() => {
+                                  const d = new Date(feedbackTimes[candidate.id]);
+                                  if (isNaN(d.getTime())) return null;
+                                  const fmt = new Intl.DateTimeFormat('en-US', {
+                                    timeZone: 'America/New_York',
+                                    month: '2-digit', day: '2-digit', year: 'numeric',
+                                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                    hour12: false, timeZoneName: 'short',
+                                  });
+                                  const parts = Object.fromEntries(fmt.formatToParts(d).map(x => [x.type, x.value]));
+                                  const hr = parts.hour === '24' ? '00' : parts.hour;
+                                  const label = `${parts.month}/${parts.day}/${parts.year} ${hr}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
+                                  return (
+                                    <div className="text-[10px] text-slate-400 font-medium text-center whitespace-nowrap" title={feedbackTimes[candidate.id]}>
+                                      {label}
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             )}
                           </div>
@@ -2641,6 +2779,15 @@ export default function CandidateRankingsPage() {
         />
       )}
 
+      <StopOutreachModal
+        open={Boolean(stopOutreachCandidate)}
+        candidate={stopOutreachCandidate}
+        onClose={() => setStopOutreachCandidate(null)}
+        // No refetch: nothing this table renders changes on a stop (there is no
+        // suppression column), and fetchData() resets the rows and the
+        // recruiter's scroll position. The modal shows the outcome itself.
+      />
+
       <EngageWizardModal
         open={isScreenModalOpen}
         onClose={handleScreenModalClose}
@@ -2672,15 +2819,10 @@ export default function CandidateRankingsPage() {
 
           if (picked && picked !== cand.phone) {
             try {
-              // Passing candidate_id in the body bypasses strict URL path decoders on QA
-              await authFetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  phone: picked,
-                  jobdiva_id: cand.jobdiva_id || String(jobId || ""),
-                  candidate_id: cid
-                }),
+              await api.candidates.updatePhone(cid, {
+                phone: picked,
+                jobdiva_id: cand.jobdiva_id || String(jobId || ""),
+                candidate_id: cid
               });
             } catch (err) {
               console.error("Failed to save phone number:", err);

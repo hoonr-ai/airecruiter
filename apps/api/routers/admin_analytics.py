@@ -33,37 +33,79 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
     the viewer's local timezone and dates can shift by a day.
     """
     cond, params = _mj_filter(scope)
+    dedup_key = "job_id::text"
     with conn.cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) FROM monitored_jobs WHERE {cond}", params)
+        cur.execute(f"SELECT COUNT(DISTINCT {dedup_key}) FROM monitored_jobs WHERE {cond}", params)
         total_jobs = int(cur.fetchone()[0] or 0)
 
         cur.execute(f"""
+            WITH deduped AS (
+                SELECT
+                    job_id,
+                    jobdiva_id,
+                    enhanced_title,
+                    title,
+                    customer_name,
+                    posted_date,
+                    created_at,
+                    pair_launched_at,
+                    outreach_stopped_at,
+                    is_archived,
+                    archive_reason,
+                    status,
+                    candidates_sourced,
+                    candidates_launched,
+                    jobdiva_total_subs,
+                    campaign_id,
+                    recruiter_emails,
+                    ROW_NUMBER() OVER(
+                        PARTITION BY {dedup_key}
+                        ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
+                    ) as rn
+                FROM monitored_jobs
+                WHERE {cond}
+            ),
+            feedback_times AS (
+                SELECT
+                    jobdiva_id,
+                    MIN(NULLIF(data->>'feedback_at', '')) AS first_feedback_at
+                FROM sourced_candidates
+                WHERE data->>'feedback_at' IS NOT NULL
+                GROUP BY jobdiva_id
+            )
             SELECT
-                job_id,
-                jobdiva_id,
-                COALESCE(NULLIF(TRIM(enhanced_title), ''), NULLIF(TRIM(title), ''), 'Untitled') AS title,
-                COALESCE(NULLIF(TRIM(customer_name), ''), 'Unknown') AS customer_name,
-                posted_date,
-                ({_ts('created_at')}) AT TIME ZONE 'UTC' AS created_at,
-                ({_ts('pair_launched_at')}) AT TIME ZONE 'UTC' AS pair_launched_at,
-                ({_ts('outreach_stopped_at')}) AT TIME ZONE 'UTC' AS outreach_stopped_at,
-                COALESCE(is_archived, FALSE) AS is_archived,
-                status,
-                {_int('candidates_sourced')},
-                {_int('candidates_launched')},
-                {_int('jobdiva_total_subs')},
-                campaign_id
-            FROM monitored_jobs
-            WHERE {cond}
-            ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
-            LIMIT 200
+                d.job_id,
+                d.jobdiva_id,
+                COALESCE(NULLIF(TRIM(d.enhanced_title), ''), NULLIF(TRIM(d.title), ''), 'Untitled') AS title,
+                COALESCE(NULLIF(TRIM(d.customer_name), ''), 'Unknown') AS customer_name,
+                d.posted_date,
+                ({_ts('d.created_at')}) AT TIME ZONE 'UTC' AS created_at,
+                ({_ts('d.pair_launched_at')}) AT TIME ZONE 'UTC' AS pair_launched_at,
+                ({_ts('d.outreach_stopped_at')}) AT TIME ZONE 'UTC' AS outreach_stopped_at,
+                COALESCE(d.is_archived, FALSE) AS is_archived,
+                d.archive_reason,
+                d.status,
+                {_int('d.candidates_sourced')},
+                {_int('d.candidates_launched')},
+                {_int('d.jobdiva_total_subs')},
+                d.campaign_id,
+                d.recruiter_emails,
+                ft.first_feedback_at
+            FROM deduped d
+            LEFT JOIN feedback_times ft
+              ON ft.jobdiva_id = d.jobdiva_id OR ft.jobdiva_id = d.job_id::text
+            WHERE d.rn = 1
+            ORDER BY d.is_archived ASC, COALESCE({_ts('d.pair_launched_at')}, {_ts('d.created_at')}) DESC NULLS LAST
+            LIMIT 2000
         """, params)
         rows = cur.fetchall()
 
+    scope_emails = set(scope["emails"]) if scope and scope.get("emails") else None
+
     timeline = []
     for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
-         launched_at, stopped_at, is_archived, status, sourced, launched_count,
-         jobdiva_subs, campaign_id) in rows:
+         launched_at, stopped_at, is_archived, archive_reason, status, sourced, launched_count,
+         jobdiva_subs, campaign_id, raw_recruiter_emails, first_feedback_at) in rows:
         posted_on = _parse_posted_date(posted_raw)
         lag_days = None
         if launched_at is not None and posted_on is not None:
@@ -85,6 +127,18 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
         else:
             pair_status = "Active"
 
+        # Intersect with scope emails if present to avoid leaking out-of-team recruiters
+        emails = []
+        if raw_recruiter_emails:
+            try:
+                raw_emails = json.loads(raw_recruiter_emails)
+                if isinstance(raw_emails, list):
+                    emails = [e.lower().strip() for e in raw_emails if e]
+                    if scope_emails is not None:
+                        emails = [e for e in emails if e in scope_emails]
+            except Exception:
+                pass
+
         timeline.append({
             "job_id": str(job_id or ""),
             "jobdiva_id": str(jobdiva_id or ""),
@@ -97,13 +151,17 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             "outreach_stopped_at": _iso(stopped_at),
             "posted_to_launch_days": lag_days,
             "is_archived": bool(is_archived),
+            "archive_reason": archive_reason,
             "jobdiva_status": str(status or ""),
             "pair_status": pair_status,
             "candidates_sourced": int(sourced or 0),
             "candidates_launched": int(launched_count or 0),
             "jobdiva_submittals": int(jobdiva_subs or 0),
             "campaign_id": str(campaign_id or "") or None,
+            "recruiter_emails": emails,
+            "first_feedback_at": _iso(first_feedback_at),
         })
+
     return {"rows": timeline, "total": total_jobs}
 
 

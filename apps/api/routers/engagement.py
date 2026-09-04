@@ -181,6 +181,11 @@ def _merge_employer_signals(
         merged["company_experience"] = signals["company_experience"]
     if signals.get("title") and not merged.get("title"):
         merged["title"] = signals["title"]
+    # JobDiva's own parsed work history (services/employer_resolution.py):
+    # free-text lines the gate matches one-directionally, attached by the
+    # launch-time resolution pass alongside any fresh resume extraction.
+    if signals.get("jobdiva_profile_experience") and not merged.get("jobdiva_profile_experience"):
+        merged["jobdiva_profile_experience"] = signals["jobdiva_profile_experience"]
     return merged
 
 
@@ -259,6 +264,22 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         if "pyramid" in normalize_company_name(comp).split():
             return True, "Current Employee (Pyramid)"
 
+    # The candidate's own interview answer to "which company do you currently
+    # work for?" (persisted by the voice-agent webhook as
+    # stated_current_employer). Their own words beat every extracted signal,
+    # so this runs even when a structured current employer is on file. Free
+    # text — matched one-directionally only (client ⊂ answer). The no-contact
+    # side of the same answer is handled inside check_no_contact below.
+    stated_text = str(
+        data.get("stated_current_employer")
+        or candidate.get("stated_current_employer")
+        or ""
+    ).strip()
+    if stated_text and client_name and not is_placeholder_client(client_name):
+        from services.company_match import client_appears_in_text
+        if client_appears_in_text(stated_text, client_name):
+            return True, "Employed by Hiring Client (stated in interview)"
+
     # Works at the client TODAY. The last employer is consulted only when no
     # current employer is on file at all (many source rows carry no "Present"
     # entry) — a fallback, not a union, so someone who left the client for a
@@ -269,6 +290,8 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     if client_hit:
         if client_hit["relation"] == "current":
             return True, "Employed by Hiring Client"
+        if client_hit["relation"] == "placement":
+            return True, "Placed at Hiring Client (current engagement)"
         return True, "Employed by Hiring Client (last known employer)"
 
     # No-contact companies (services/no_contact.py): current or LAST employer
@@ -283,6 +306,55 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
     if nc_hit:
         return True, f"No-Contact Company ({nc_hit['keyword']})"
 
+    # JobDiva profile work history (jobdiva_profile_experience, attached by
+    # the launch-time employer resolution pass): free-text resume lines with
+    # structured dates. Too noisy for the structured matchers, so:
+    #   - no-contact keywords scan the current + last lines one-directionally
+    #     (keyword ⊂ text — the same safe direction the keyword matcher
+    #     already uses; over-matching skips a contactable candidate, which is
+    #     the side these thresholds deliberately err toward);
+    #   - the hiring client matches only via client_appears_in_text
+    #     (client ⊂ text, never the reverse) and only as a FALLBACK below the
+    #     structured signals, mirroring employed_by_client's current-then-last
+    #     ladder — a named structured employer that isn't the client still
+    #     means the candidate stays contactable.
+    profile_current_texts: List[str] = []
+    profile_last_texts: List[str] = []
+    try:
+        from services.employer_resolution import candidate_profile_texts
+        profile_current_texts, profile_last_texts = candidate_profile_texts(candidate)
+    except Exception:  # noqa: BLE001 — profile parsing must not block launches
+        pass
+    if profile_current_texts or profile_last_texts:
+        try:
+            from services.no_contact import matches_no_contact_company
+            for text in profile_current_texts + profile_last_texts:
+                kw = matches_no_contact_company(text)
+                if kw:
+                    return True, f"No-Contact Company ({kw})"
+        except Exception:  # noqa: BLE001
+            pass
+        if client_name and not is_placeholder_client(client_name):
+            from services.company_match import (
+                client_appears_in_text,
+                collect_last_companies as _collect_last,
+            )
+            if not current_companies:
+                for text in profile_current_texts:
+                    if client_appears_in_text(text, client_name):
+                        return True, "Employed by Hiring Client (JobDiva profile)"
+                # Last-resort ladder rung: consulted only when NO structured
+                # signal of any kind exists — a structured last employer that
+                # already cleared employed_by_client must not be second-guessed
+                # by a noisier source.
+                if not profile_current_texts and not _collect_last(candidate):
+                    for text in profile_last_texts:
+                        if client_appears_in_text(text, client_name):
+                            return True, (
+                                "Employed by Hiring Client "
+                                "(last known employer, JobDiva profile)"
+                            )
+
     # Visibility for the failure mode that put a Bank of America employee into
     # outreach for a Bank of America req: a real hiring client, but not one
     # current-employer signal on the row, so the check above had nothing to
@@ -294,7 +366,12 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         return False, ""
     from services.company_match import collect_last_companies
 
-    if collect_last_companies(candidate):
+    if (
+        collect_last_companies(candidate)
+        or profile_current_texts
+        or profile_last_texts
+        or stated_text
+    ):
         return False, ""
     logger.warning(
         "client_conflict_check_blind candidate=%s client=%r — no current- or "
@@ -798,6 +875,18 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                 fallback_job_title=(job_row.get("enhanced_title") or job_row.get("title") or request.job_id),
                 boolean_mode=is_l05,
             )
+            # Employer backstop (2026-09-02): every interview asks where the
+            # candidate works NOW. The answer returns on the PairBot webhook
+            # (routers/voice_agent.py), persists as stated_current_employer,
+            # and re-runs the no-contact + hiring-client checks — the last
+            # line of defense for candidates launched employer-unverified.
+            # Appended post-sanitize in the PAIR schema shape; category
+            # "logistics" so L0.5 boolean rewriting preserves it verbatim.
+            try:
+                from services.stated_employer import append_employer_question
+                pre_screen_questions = append_employer_question(pre_screen_questions)
+            except Exception as _q_err:  # noqa: BLE001
+                logger.warning(f"employer question injection skipped: {_q_err}")
 
         cur.close()
         conn.close()
@@ -1746,9 +1835,15 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             )
 
         excluded_records: List[Dict[str, str]] = []
+        unverified_employer_records: List[Dict[str, str]] = []
         if request.real_candidate_ids:
             excluded_candidate_ids = set()
             try:
+                # (candidate_id, name, hydrated candidate) — rows are collected
+                # first and gated after the DB connection is released, because
+                # the employer-resolution pass between the two can await
+                # resume fetches + LLM parses for a while.
+                _gate_rows: List[Tuple[str, str, Dict[str, Any]]] = []
                 _excl_conn = _get_db_connection()
                 try:
                     _excl_cur = _excl_conn.cursor()
@@ -1770,7 +1865,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
                     _excl_cur.execute(
                         """
-                        SELECT candidate_id, data, name, headline
+                        SELECT candidate_id, data, name, headline, resume_text, source
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -1800,24 +1895,105 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                             signals=_excl_signals.get(str(_row[0])),
                         )
                         _cdata.setdefault("candidate_id", str(_row[0]))
-                        _is_excl, _excl_reason = is_candidate_excluded_from_pair(
-                            _cdata, _excl_client
-                        )
-                        if _is_excl:
-                            logger.info(
-                                "send_bulk_interview skipping excluded candidate %s reason: %s",
-                                _row[0],
-                                _excl_reason,
-                            )
-                            excluded_candidate_ids.add(_row[0])
-                            excluded_records.append({
-                                "candidate_id": str(_row[0]),
-                                "name": str(_row[2] or ""),
-                                "reason": _excl_reason,
-                            })
+                        # Stored resume + source ride along so the resolution
+                        # pass can parse without re-fetching from JobDiva.
+                        if _row[4] and not _cdata.get("resume_text"):
+                            _cdata["resume_text"] = str(_row[4])
+                        if _row[5] and not _cdata.get("source"):
+                            _cdata["source"] = str(_row[5])
+                        _gate_rows.append((str(_row[0]), str(_row[2] or ""), _cdata))
                     _excl_cur.close()
                 finally:
                     _excl_conn.close()
+
+                # Employer resolution (policy 2026-09-02): any candidate whose
+                # employer data is missing or not confident gets their resume
+                # fetched + parsed NOW, before outreach, with JobDiva's own
+                # profile work history attached as corroboration. Fails open —
+                # a resolution error gates on stored signals, as before.
+                try:
+                    from services.employer_resolution import employer_verification_state
+                except Exception:  # noqa: BLE001
+                    employer_verification_state = None  # type: ignore[assignment]
+                _resolved_signals: Dict[str, Dict[str, Any]] = {}
+                try:
+                    from services.employer_resolution import resolve_employer_signals
+                    _resolved_signals = await asyncio.wait_for(
+                        resolve_employer_signals([c for _, _, c in _gate_rows]),
+                        timeout=240.0
+                    )
+                except Exception as _res_err:  # noqa: BLE001
+                    logger.warning(
+                        "employer resolution failed for job %s (gating on stored signals): %s",
+                        job_id_from_payload, _res_err,
+                    )
+
+                _gate_rows = [
+                    (
+                        _cid,
+                        _cname,
+                        _merge_employer_signals(_cdata, signals=_resolved_signals[_cid])
+                        if _resolved_signals.get(_cid) else _cdata,
+                    )
+                    for _cid, _cname, _cdata in _gate_rows
+                ]
+                # Resume freshness (phase 3): stamp JobDiva's resume timestamp
+                # onto resume-verified candidates so a years-old "Present"
+                # classifies as verified_stale, not verified. Advisory only —
+                # never blocks; fails open.
+                try:
+                    from services.employer_resolution import stamp_resume_freshness
+                    # Hard 20s cap: freshness is advisory, and this fetch sits
+                    # on the launch path — a slow JobDiva must cost seconds,
+                    # not a batch-long stall (TimeoutError lands in the
+                    # except below and the launch proceeds unstamped).
+                    await asyncio.wait_for(
+                        stamp_resume_freshness([c for _, _, c in _gate_rows]),
+                        timeout=20.0,
+                    )
+                except Exception as _fresh_err:  # noqa: BLE001
+                    logger.warning(
+                        "resume-freshness check failed for job %s: %s",
+                        job_id_from_payload, _fresh_err,
+                    )
+
+                for _cid, _cname, _cdata in _gate_rows:
+                    _is_excl, _excl_reason = is_candidate_excluded_from_pair(
+                        _cdata, _excl_client
+                    )
+                    if _is_excl:
+                        logger.info(
+                            "send_bulk_interview skipping excluded candidate %s reason: %s",
+                            _cid,
+                            _excl_reason,
+                        )
+                        excluded_candidate_ids.add(_cid)
+                        excluded_records.append({
+                            "candidate_id": _cid,
+                            "name": _cname,
+                            "reason": _excl_reason,
+                        })
+                        continue
+                    # Not excluded — but say HOW WELL we know that. An
+                    # unverified employer means the client/no-contact checks
+                    # had nothing to judge, not that the candidate is clean.
+                    if employer_verification_state is not None:
+                        _emp_state = employer_verification_state(_cdata)
+                        if _emp_state != "verified":
+                            _unv_record = {
+                                "candidate_id": _cid,
+                                "name": _cname,
+                                "employer_verification": _emp_state,
+                            }
+                            if _cdata.get("resume_updated_at"):
+                                _unv_record["resume_updated_at"] = str(
+                                    _cdata["resume_updated_at"]
+                                )
+                            unverified_employer_records.append(_unv_record)
+                            logger.info(
+                                "launch_employer_unverified candidate=%s job=%s state=%s client=%r",
+                                _cid, job_id_from_payload, _emp_state, _excl_client,
+                            )
             except Exception as _excl_err:
                 logger.warning(
                     f"candidate exclusion check failed for job {job_id_from_payload}: {_excl_err}"
@@ -1850,6 +2026,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 "data": [],
                 "skipped_already_sent": skipped_already_sent,
                 "excluded_candidates": excluded_records,
+                "employer_unverified": unverified_employer_records,
                 "raw_response": {},
             }
 
@@ -2243,6 +2420,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 "data": interview_results,
                 "skipped_already_sent": skipped_already_sent,
                 "excluded_candidates": excluded_records,
+                "employer_unverified": unverified_employer_records,
                 "raw_response": response_data
             }
         else:
@@ -2260,6 +2438,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 "data": [],
                 "skipped_already_sent": skipped_already_sent,
                 "excluded_candidates": excluded_records,
+                "employer_unverified": unverified_employer_records,
                 "raw_response": response_data
             }
 
@@ -2363,9 +2542,10 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "batch_size": batch_size,
         })
 
-        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0}
+        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0, "employer_unverified": 0}
         all_skipped: List[str] = []
         all_excluded: List[Dict[str, str]] = []
+        all_employer_unverified: List[Dict[str, str]] = []
         failed_candidate_ids: List[str] = []
         aborted = False
         side_effects_fired = {"done": False}
@@ -2519,8 +2699,15 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # stream so the progress modal reports server skips too.
                     batch_excluded = res.get("excluded_candidates") or []
                     all_excluded.extend(batch_excluded)
+                    # Candidates that passed the gate with weak/unverified
+                    # employer data. Aggregated only for SUCCESSFUL sends —
+                    # the modal presents this list as "launched", and a batch
+                    # whose Pairbot send failed launched nobody (those rows go
+                    # to failedCandidates instead; totals gate the same way).
+                    batch_unverified = res.get("employer_unverified") or []
 
                     if res.get("success"):
+                        all_employer_unverified.extend(batch_unverified)
                         rows = res.get("data") or []
                         # Only rows PAIR actually created an interview for count as
                         # "sent". Rows returned without an interview_id were written
@@ -2532,6 +2719,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         totals["already_sent"] += len(skipped)
                         totals["no_interview"] += no_interview
                         totals["excluded"] += len(batch_excluded)
+                        totals["employer_unverified"] += len(batch_unverified)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
@@ -2540,6 +2728,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                             "no_interview": no_interview,
                             "already_sent": len(skipped),
                             "excluded": len(batch_excluded),
+                            "employer_unverified": len(batch_unverified),
                             "bulk_id": res.get("bulk_id"),
                         })
                     else:
@@ -2596,6 +2785,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "totals": totals,
             "skipped_already_sent": all_skipped,
             "excluded_candidates": all_excluded,
+            "employer_unverified": all_employer_unverified,
             "failed_candidate_ids": failed_candidate_ids,
         })
 
@@ -2687,6 +2877,8 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
     if not candidate_ids or not job_id:
         return
     try:
+        eligible_ids: List[str] = []
+        gate_rows: List[Tuple[str, Dict[str, Any]]] = []
         conn = _get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
@@ -2746,7 +2938,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
 
             cur.execute(
                 """
-                SELECT candidate_id, data, headline
+                SELECT candidate_id, data, headline, resume_text, source
                 FROM sourced_candidates
                 WHERE candidate_id = ANY(%s)
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -2774,7 +2966,6 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 """,
                 (list(candidate_ids), str(job_id), str(job_id), str(job_id), str(job_id)),
             )
-            eligible_ids = []
             candidate_rows = cur.fetchall() or []
             # This is the path that contacted a Bank of America employee for a
             # Bank of America req: the applicant sync persists `data` before
@@ -2798,14 +2989,86 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                     signals=employer_signals.get(str(r["candidate_id"])),
                 )
                 c_data.setdefault("candidate_id", str(r["candidate_id"]))
-                excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
-                if excluded:
-                    logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", r["candidate_id"], job_id, reason)
-                else:
-                    eligible_ids.append(str(r["candidate_id"]))
+                # Stored resume + source ride along so the resolution pass
+                # can parse without re-fetching from JobDiva.
+                if r.get("resume_text") and not c_data.get("resume_text"):
+                    c_data["resume_text"] = str(r.get("resume_text"))
+                if r.get("source") and not c_data.get("source"):
+                    c_data["source"] = str(r.get("source"))
+                gate_rows.append((str(r["candidate_id"]), c_data))
         finally:
             cur.close()
             conn.close()
+
+        # Employer resolution (policy 2026-09-02): auto-launch runs unattended,
+        # so this is the last point where a missing/unconfident employer can be
+        # resolved before outreach — fetch the resume and parse it now, with
+        # JobDiva's profile work history as corroboration. Runs after the DB
+        # connection is released (it can await resume fetches + LLM parses),
+        # and fails open: a resolution error gates on stored signals as before.
+        _emp_state_fn = None
+        resolved_signals: Dict[str, Dict[str, Any]] = {}
+        try:
+            from services.employer_resolution import (
+                employer_verification_state as _emp_state_fn,
+                resolve_employer_signals as _resolve_fn,
+            )
+        except Exception:  # noqa: BLE001
+            _resolve_fn = None
+        if _resolve_fn is not None:
+            try:
+                resolved_signals = await asyncio.wait_for(
+                    _resolve_fn([c for _, c in gate_rows]),
+                    timeout=240.0
+                )
+            except Exception as res_err:  # noqa: BLE001
+                logger.warning(
+                    "auto_launch employer resolution failed job_id=%s (gating on stored signals): %s",
+                    job_id, res_err,
+                )
+
+        gate_rows = [
+            (
+                cid,
+                _merge_employer_signals(c_data, signals=resolved_signals[cid])
+                if resolved_signals.get(cid) else c_data,
+            )
+            for cid, c_data in gate_rows
+        ]
+        # Resume freshness (phase 3) — advisory classification only; fails open.
+        try:
+            from services.employer_resolution import stamp_resume_freshness
+            # Same 20s advisory cap as the manual launch site.
+            await asyncio.wait_for(
+                stamp_resume_freshness([c for _, c in gate_rows]), timeout=20.0
+            )
+        except Exception as fresh_err:  # noqa: BLE001
+            logger.warning(
+                "auto_launch resume-freshness check failed job_id=%s: %s", job_id, fresh_err
+            )
+
+        unverified_count = 0
+        for cid, c_data in gate_rows:
+            excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
+            if excluded:
+                logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", cid, job_id, reason)
+                continue
+            eligible_ids.append(cid)
+            if _emp_state_fn is not None:
+                emp_state = _emp_state_fn(c_data)
+                if emp_state != "verified":
+                    unverified_count += 1
+                    logger.info(
+                        "launch_employer_unverified candidate=%s job_id=%s state=%s client=%r",
+                        cid, job_id, emp_state, client_name,
+                    )
+        if unverified_count:
+            logger.warning(
+                "auto_launch_employer_unverified job_id=%s count=%d of %d eligible — "
+                "weak or unverified employer data (no history, JobDiva profile "
+                "only, or a stale resume); see per-candidate state logs above",
+                job_id, unverified_count, len(eligible_ids),
+            )
 
         if not eligible_ids:
             logger.info(
