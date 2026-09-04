@@ -528,6 +528,7 @@ export default function CandidateRankingsPage() {
   const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
   const [feedbackReasons, setFeedbackReasons] = useState<Record<string, string>>({});
+  const [feedbackTimes, setFeedbackTimes] = useState<Record<string, string>>({});
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
@@ -536,12 +537,15 @@ export default function CandidateRankingsPage() {
   const handleConfirmSubmit = async () => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
+      const submittedAt = new Date().toISOString();
       try {
         await api.candidates.feedback(jobId as string, String(actionCandidateId), { feedback_type: 'Submit' });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
       } catch (error) {
         console.error('Error syncing submission:', error);
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
@@ -554,6 +558,7 @@ export default function CandidateRankingsPage() {
     const trimmedReason = rejectReason?.trim() || "";
     if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
+      const rejectedAt = new Date().toISOString();
       try {
         await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
@@ -561,6 +566,7 @@ export default function CandidateRankingsPage() {
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
         setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
+        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
       } catch (error) {
         console.error('Error syncing rejection:', error);
         setToast({ message: "Failed to save rejection reason", type: "error" });
@@ -1502,6 +1508,7 @@ export default function CandidateRankingsPage() {
     const pageRows = candData.candidates;
     const pageFeedbacks: Record<string, string> = {};
     const pageFeedbackReasons: Record<string, string> = {};
+    const pageFeedbackTimes: Record<string, string> = {};
     pageRows.forEach((c: any) => {
       if (c.data?.feedback_type) {
         pageFeedbacks[c.id] = c.data.feedback_type;
@@ -1509,9 +1516,13 @@ export default function CandidateRankingsPage() {
       if (c.data?.feedback_reason) {
         pageFeedbackReasons[c.id] = c.data.feedback_reason;
       }
+      if (c.data?.feedback_at) {
+        pageFeedbackTimes[c.id] = c.data.feedback_at;
+      }
     });
     setFeedbacks(prev => ({ ...prev, ...pageFeedbacks }));
     setFeedbackReasons(prev => ({ ...prev, ...pageFeedbackReasons }));
+    setFeedbackTimes(prev => ({ ...prev, ...pageFeedbackTimes }));
 
     const launchedCount = Number(candData?.launched_count);
     if (Number.isFinite(launchedCount)) {
@@ -2666,6 +2677,11 @@ export default function CandidateRankingsPage() {
                                 {feedbackReasons[candidate.id] && (
                                   <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
                                     {feedbackReasons[candidate.id]}
+                                  </div>
+                                )}
+                                {feedbackTimes[candidate.id] && (
+                                  <div className="text-[10px] text-slate-400 font-medium text-center whitespace-nowrap" title={feedbackTimes[candidate.id]}>
+                                    {new Date(feedbackTimes[candidate.id]).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                                   </div>
                                 )}
                               </div>

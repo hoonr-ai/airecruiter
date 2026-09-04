@@ -695,6 +695,10 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "submitted_candidates": submitted,
         "rejected_candidates": rejected,
         "time_to_feedback_minutes": _mean(time_to_feedback),
+        "first_feedback_at": min(
+            (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
+            default=None,
+        ),
     }
 
 
@@ -806,6 +810,7 @@ def _build_row(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
         ),
         "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
+        "first_feedback_at": _edt(cand["first_feedback_at"]),
         "time_to_first_pass_minutes": (
             round(float(job["time_to_first_pass"]), 1)
             if job.get("time_to_first_pass") is not None

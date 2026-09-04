@@ -51,6 +51,7 @@ interface LaunchReportRow {
   rejected_candidates: number;
   outstanding_feedback: number;
   time_to_feedback_minutes: number | null;
+  first_feedback_at: string | null;
   time_to_first_pass_minutes: number | null;
   call: number;
   sms: number;
@@ -252,6 +253,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "outstanding", label: "Outstanding", numeric: true, text: (r) => num(r.outstanding_feedback) },
       { key: "tt_feedback", label: "Time to Feedback", numeric: true, text: (r) => formatDuration(r.time_to_feedback_minutes) },
       { key: "tt_first_pass", label: "To First Pass", numeric: true, text: (r) => formatDuration(r.time_to_first_pass_minutes) },
+      { key: "first_feedback_at", label: "First Feedback At", text: (r) => formatDateTime(r.first_feedback_at) },
     ],
   },
   {
