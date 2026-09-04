@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useParams } from "next/navigation";
 import { AlertTriangle, Ban, Check, Loader2, Mail, Phone, RotateCcw } from "lucide-react";
 import {
   Dialog,
@@ -72,6 +73,7 @@ export function StopOutreachModal({
   onClose,
   onChanged,
 }: StopOutreachModalProps) {
+  const { jobId } = useParams<{ jobId: string }>();
   const { stopOutreach, resumeOutreach, getOptOutStatus } = useOutreachOptOut();
 
   const [reason, setReason] = useState("");
@@ -122,6 +124,7 @@ export function StopOutreachModal({
     if (!open || !hasIdentifier) return;
     let cancelled = false;
     getOptOutStatus({
+      jobId,
       candidateId: candidateKey || undefined,
       email: email || undefined,
       phone: phone || undefined,
@@ -141,7 +144,7 @@ export function StopOutreachModal({
     return () => {
       cancelled = true;
     };
-  }, [open, candidateKey, email, phone, interviewId, hasIdentifier, getOptOutStatus]);
+  }, [open, jobId, candidateKey, email, phone, interviewId, hasIdentifier, getOptOutStatus]);
 
   const handleStop = useCallback(async () => {
     if (!candidate) return;
@@ -149,6 +152,7 @@ export function StopOutreachModal({
     setError(null);
     try {
       const res = await stopOutreach({
+        jobId,
         candidateId: candidateKey || undefined,
         email: email || undefined,
         phone: phone || undefined,
@@ -171,7 +175,7 @@ export function StopOutreachModal({
     } finally {
       setSubmitting(false);
     }
-  }, [candidate, candidateKey, email, phone, interviewId, reason, onChanged, stopOutreach]);
+  }, [candidate, jobId, candidateKey, email, phone, interviewId, reason, onChanged, stopOutreach]);
 
   const handleResume = useCallback(async () => {
     if (!candidate) return;
@@ -179,6 +183,7 @@ export function StopOutreachModal({
     setError(null);
     try {
       const res = await resumeOutreach({
+        jobId,
         candidateId: candidateKey || undefined,
         email: email || undefined,
         phone: phone || undefined,
@@ -191,7 +196,7 @@ export function StopOutreachModal({
     } finally {
       setSubmitting(false);
     }
-  }, [candidate, candidateKey, email, phone, reason, onChanged, resumeOutreach]);
+  }, [candidate, jobId, candidateKey, email, phone, reason, onChanged, resumeOutreach]);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>

@@ -58,7 +58,7 @@ class PairBotOptOutError(Exception):
 
     @property
     def retryable(self) -> bool:
-        return self.status_code is None or self.status_code >= 500
+        return self.status_code is None or self.status_code >= 500 or self.status_code in (408, 429)
 
 
 def _base_url() -> str:

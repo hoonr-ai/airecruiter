@@ -1918,8 +1918,9 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 _resolved_signals: Dict[str, Dict[str, Any]] = {}
                 try:
                     from services.employer_resolution import resolve_employer_signals
-                    _resolved_signals = await resolve_employer_signals(
-                        [c for _, _, c in _gate_rows]
+                    _resolved_signals = await asyncio.wait_for(
+                        resolve_employer_signals([c for _, _, c in _gate_rows]),
+                        timeout=240.0
                     )
                 except Exception as _res_err:  # noqa: BLE001
                     logger.warning(
@@ -3016,7 +3017,10 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
             _resolve_fn = None
         if _resolve_fn is not None:
             try:
-                resolved_signals = await _resolve_fn([c for _, c in gate_rows])
+                resolved_signals = await asyncio.wait_for(
+                    _resolve_fn([c for _, c in gate_rows]),
+                    timeout=240.0
+                )
             except Exception as res_err:  # noqa: BLE001
                 logger.warning(
                     "auto_launch employer resolution failed job_id=%s (gating on stored signals): %s",

@@ -40,29 +40,32 @@ logger = logging.getLogger(__name__)
 
 
 _ENGINE: Optional[sqlalchemy.engine.Engine] = None
+_engine_lock = threading.Lock()
 
 
 def _get_engine() -> sqlalchemy.engine.Engine:
     global _ENGINE
     if _ENGINE is None:
-        url = DATABASE_URL or SUPABASE_DB_URL
-        if not url:
-            raise RuntimeError("DATABASE_URL not configured for dnc_storage")
-        _ENGINE = sqlalchemy.create_engine(
-            url,
-            pool_size=2,
-            max_overflow=4,
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            connect_args={"connect_timeout": 5},
-            # Without this, SQLAlchemy appends "[parameters: (...)]" to every
-            # DBAPI error string — which for this module means a candidate's
-            # email and phone. That string is logged, stored in
-            # outreach_opt_out_audit.local_result, AND returned to the browser
-            # as local.error, so masking the log arguments alone would not
-            # cover it. The statement and the driver's own message survive.
-            hide_parameters=True,
-        )
+        with _engine_lock:
+            if _ENGINE is None:
+                url = DATABASE_URL or SUPABASE_DB_URL
+                if not url:
+                    raise RuntimeError("DATABASE_URL not configured for dnc_storage")
+                _ENGINE = sqlalchemy.create_engine(
+                    url,
+                    pool_size=2,
+                    max_overflow=4,
+                    pool_pre_ping=True,
+                    pool_recycle=1800,
+                    connect_args={"connect_timeout": 5},
+                    # Without this, SQLAlchemy appends "[parameters: (...)]" to every
+                    # DBAPI error string — which for this module means a candidate's
+                    # email and phone. That string is logged, stored in
+                    # outreach_opt_out_audit.local_result, AND returned to the browser
+                    # as local.error, so masking the log arguments alone would not
+                    # cover it. The statement and the driver's own message survive.
+                    hide_parameters=True,
+                )
     return _ENGINE
 
 
@@ -372,6 +375,19 @@ def release_contact_locally(
     try:
         engine = _get_engine()
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            if not phone_norm and email_norm:
+                # Resolve the candidate's phone from sourced_candidates
+                phone_row = conn.execute(
+                    text("SELECT phone FROM sourced_candidates WHERE email IS NOT NULL AND LOWER(email) = :email AND phone IS NOT NULL AND phone <> '' LIMIT 1"),
+                    {"email": email_norm}
+                ).fetchone()
+                if phone_row and phone_row[0]:
+                    from utils.phone import normalize_phone
+                    resolved_phone = normalize_phone(phone_row[0])
+                    if resolved_phone:
+                        phone_norm = resolved_phone
+                        result["phone"] = phone_norm
+
             if phone_norm:
                 res = conn.execute(
                     text("DELETE FROM dnc_list WHERE phone = :phone AND source = 'opt_out'"),
@@ -452,6 +468,16 @@ def local_suppression_status(
     try:
         engine = _get_engine()
         with engine.connect() as conn:
+            if not phone_norm and email_norm:
+                # Resolve phone
+                phone_row = conn.execute(
+                    text("SELECT phone FROM sourced_candidates WHERE email IS NOT NULL AND LOWER(email) = :email AND phone IS NOT NULL AND phone <> '' LIMIT 1"),
+                    {"email": email_norm}
+                ).fetchone()
+                if phone_row and phone_row[0]:
+                    from utils.phone import normalize_phone
+                    phone_norm = normalize_phone(phone_row[0])
+
             if phone_norm:
                 row = conn.execute(
                     text("SELECT source FROM dnc_list WHERE phone = :phone LIMIT 1"),

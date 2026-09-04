@@ -99,6 +99,7 @@ def calls(monkeypatch):
     monkeypatch.setattr(mod, "release_contact_locally", fake_release)
     monkeypatch.setattr(mod, "record_opt_out_audit", fake_audit)
     monkeypatch.setattr(mod, "local_suppression_status", fake_local_status)
+    monkeypatch.setattr(mod, "_verify_job_access_by_id", lambda *args, **kwargs: None)
     return recorded
 
 
@@ -106,9 +107,7 @@ def calls(monkeypatch):
 # opt-out, happy path
 # ---------------------------------------------------------------------------
 def test_opt_out_passes_message_through_verbatim(client, calls):
-    res = client.post(
-        "/api/v1/outreach/opt-out",
-        json={"email": "AhMay02@Gmail.com ", "phone": "(510) 590-8688",
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "AhMay02@Gmail.com ", "phone": "(510) 590-8688",
               "reason": "Candidate replied STOP to the recruiter"},
     )
     assert res.status_code == 200
@@ -122,9 +121,7 @@ def test_opt_out_passes_message_through_verbatim(client, calls):
 
 
 def test_opt_out_sends_both_identities_upstream(client, calls):
-    client.post(
-        "/api/v1/outreach/opt-out",
-        json={"email": "ahmay02@gmail.com", "phone": "5105908688"},
+    client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "ahmay02@gmail.com", "phone": "5105908688"},
     )
     sent = calls["opt_out"][0]
     # A suppression recorded against only the address will not match a Twilio
@@ -134,7 +131,7 @@ def test_opt_out_sends_both_identities_upstream(client, calls):
 
 
 def test_opt_out_omits_channels_and_scope_by_default(client, calls):
-    client.post("/api/v1/outreach/opt-out", json={"email": "a@b.com"})
+    client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "a@b.com"})
     sent = calls["opt_out"][0]
     # Omitted, not spelled out: pair-bot defaults channels to all three and
     # scope to "curate". Sending our own guesses would freeze those defaults.
@@ -143,9 +140,7 @@ def test_opt_out_omits_channels_and_scope_by_default(client, calls):
 
 
 def test_opt_out_stamps_actor_into_upstream_reason(client, calls):
-    client.post(
-        "/api/v1/outreach/opt-out",
-        json={"email": "a@b.com", "reason": "Asked on the phone"},
+    client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "a@b.com", "reason": "Asked on the phone"},
     )
     reason = calls["opt_out"][0]["reason"]
     assert "Asked on the phone" in reason
@@ -153,9 +148,7 @@ def test_opt_out_stamps_actor_into_upstream_reason(client, calls):
 
 
 def test_opt_out_writes_local_dnc(client, calls):
-    res = client.post(
-        "/api/v1/outreach/opt-out",
-        json={"email": "a@b.com", "phone": "5105908688", "reason": "stop"},
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "a@b.com", "phone": "5105908688", "reason": "stop"},
     )
     assert res.status_code == 200
     assert len(calls["suppress"]) == 1
@@ -166,15 +159,13 @@ def test_opt_out_writes_local_dnc(client, calls):
 
 
 def test_opt_out_accepts_interview_id_alone(client, calls):
-    res = client.post("/api/v1/outreach/opt-out", json={"interview_id": 7})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "interview_id": 7})
     assert res.status_code == 200
     assert calls["opt_out"][0]["interview_id"] == 7
 
 
 def test_opt_out_forwards_explicit_scope_and_channels(client, calls):
-    res = client.post(
-        "/api/v1/outreach/opt-out",
-        json={"email": "a@b.com", "scope": "global", "channels": ["SMS", "call", "sms"]},
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "a@b.com", "scope": "global", "channels": ["SMS", "call", "sms"]},
     )
     assert res.status_code == 200
     sent = calls["opt_out"][0]
@@ -186,16 +177,14 @@ def test_opt_out_forwards_explicit_scope_and_channels(client, calls):
 # opt-out, validation and failure
 # ---------------------------------------------------------------------------
 def test_opt_out_without_identifier_is_422(client, calls):
-    res = client.post("/api/v1/outreach/opt-out", json={"reason": "stop"})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "reason": "stop"})
     assert res.status_code == 422
     assert not calls["opt_out"]
     assert not calls["suppress"]
 
 
 def test_opt_out_unknown_channel_is_422(client, calls):
-    res = client.post(
-        "/api/v1/outreach/opt-out",
-        json={"email": "a@b.com", "channels": ["carrier-pigeon"]},
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","job_id": "job123", "email": "a@b.com", "channels": ["carrier-pigeon"]},
     )
     assert res.status_code == 422
     assert "carrier-pigeon" in res.json()["detail"]
@@ -209,7 +198,7 @@ def test_opt_out_client_error_writes_nothing_locally(client, calls, monkeypatch)
         raise PairBotOptOutError("interview 7 does not exist", status_code=404)
 
     monkeypatch.setattr(mod, "pairbot_opt_out", bad_request)
-    res = client.post("/api/v1/outreach/opt-out", json={"interview_id": 7})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","interview_id": 7})
     assert res.status_code == 404
     # Nothing was suppressed upstream, so nothing is suppressed here either.
     assert not calls["suppress"]
@@ -221,8 +210,7 @@ def test_opt_out_unreachable_pairbot_still_suppresses_locally(client, calls, mon
         raise PairBotOptOutError("connection refused")
 
     monkeypatch.setattr(mod, "pairbot_opt_out", unreachable)
-    res = client.post(
-        "/api/v1/outreach/opt-out", json={"email": "a@b.com", "phone": "5105908688"}
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","email": "a@b.com", "phone": "5105908688"}
     )
     assert res.status_code == 502
     detail = res.json()["detail"]
@@ -255,7 +243,7 @@ def test_unreachable_pairbot_does_not_claim_a_suppression_it_did_not_make(
             "error": "no normalizable phone or email",
         },
     )
-    res = client.post("/api/v1/outreach/opt-out", json={"interview_id": 7})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","interview_id": 7})
     assert res.status_code == 502
     detail = res.json()["detail"]
     assert "still being contacted" in detail
@@ -278,8 +266,7 @@ def test_unreachable_pairbot_reports_failed_local_write_honestly(
             "error": "db down",
         },
     )
-    res = client.post(
-        "/api/v1/outreach/opt-out", json={"email": "a@b.com", "phone": "5105908688"}
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","email": "a@b.com", "phone": "5105908688"}
     )
     assert res.status_code == 502
     assert "marked do-not-contact" not in res.json()["detail"]
@@ -295,13 +282,13 @@ def test_opt_in_unreachable_pairbot_keeps_the_shared_status_mapping(
         raise PairBotOptOutError("missing api key", status_code=403)
 
     monkeypatch.setattr(mod, "pairbot_opt_in", forbidden)
-    res = client.post("/api/v1/outreach/opt-in", json={"email": "a@b.com"})
+    res = client.post("/api/v1/outreach/opt-in", json={"job_id": "job123","email": "a@b.com"})
     assert res.status_code == 401
     assert not calls["release"]
 
 
 def test_email_is_lowercased_before_going_upstream(client, calls):
-    client.post("/api/v1/outreach/opt-out", json={"email": "  AhMay02@Gmail.COM "})
+    client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","email": "  AhMay02@Gmail.COM "})
     # pair-bot normalizes case itself, but sending the canonical form means the
     # two sides agree regardless of what the recruiter's row happened to hold.
     assert calls["opt_out"][0]["email"] == "ahmay02@gmail.com"
@@ -327,7 +314,7 @@ def test_unreachable_pairbot_credits_an_already_standing_local_suppression(
             "error": None,
         },
     )
-    res = client.post("/api/v1/outreach/opt-out", json={"phone": "5105908688"})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","phone": "5105908688"})
     assert res.status_code == 502
     assert "marked do-not-contact in pair" in res.json()["detail"]
 
@@ -337,7 +324,7 @@ def test_opt_out_bad_api_key_surfaces_as_401(client, calls, monkeypatch):
         raise PairBotOptOutError("missing api key", status_code=403)
 
     monkeypatch.setattr(mod, "pairbot_opt_out", forbidden)
-    res = client.post("/api/v1/outreach/opt-out", json={"email": "a@b.com"})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","email": "a@b.com"})
     assert res.status_code == 401
     assert not calls["suppress"]
 
@@ -352,7 +339,7 @@ def test_opt_out_survives_local_write_failure(client, calls, monkeypatch):
         }
 
     monkeypatch.setattr(mod, "suppress_contact_locally", broken)
-    res = client.post("/api/v1/outreach/opt-out", json={"email": "a@b.com"})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","email": "a@b.com"})
     # Outreach IS stopped upstream; bookkeeping trouble must not read as
     # "still calling".
     assert res.status_code == 200
@@ -368,7 +355,7 @@ def test_candidate_id_resolves_contact_details(client, calls, monkeypatch):
         mod, "_resolve_contact",
         lambda cid: {"email": "found@x.com", "phone": "5105908688", "name": "A"},
     )
-    res = client.post("/api/v1/outreach/opt-out", json={"candidate_id": "c-1"})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","candidate_id": "c-1"})
     assert res.status_code == 200
     assert calls["opt_out"][0]["email"] == "found@x.com"
     assert calls["opt_out"][0]["phone"] == "5105908688"
@@ -379,9 +366,7 @@ def test_caller_supplied_contact_wins_over_lookup(client, calls, monkeypatch):
         mod, "_resolve_contact",
         lambda cid: {"email": "stale@x.com", "phone": "5105908688", "name": "A"},
     )
-    client.post(
-        "/api/v1/outreach/opt-out",
-        json={"candidate_id": "c-1", "email": "typed@x.com"},
+    client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","candidate_id": "c-1", "email": "typed@x.com"},
     )
     sent = calls["opt_out"][0]
     assert sent["email"] == "typed@x.com"
@@ -394,7 +379,7 @@ def test_candidate_id_with_no_contact_on_file_is_422(client, calls, monkeypatch)
         mod, "_resolve_contact",
         lambda cid: {"email": None, "phone": None, "name": None},
     )
-    res = client.post("/api/v1/outreach/opt-out", json={"candidate_id": "c-1"})
+    res = client.post("/api/v1/outreach/opt-out", json={"job_id": "job123","candidate_id": "c-1"})
     assert res.status_code == 422
     assert not calls["opt_out"]
 
@@ -403,9 +388,7 @@ def test_candidate_id_with_no_contact_on_file_is_422(client, calls, monkeypatch)
 # opt-in
 # ---------------------------------------------------------------------------
 def test_opt_in_releases_after_pairbot_accepts(client, calls):
-    res = client.post(
-        "/api/v1/outreach/opt-in",
-        json={"email": "a@b.com", "phone": "5105908688", "reason": "Candidate called back"},
+    res = client.post("/api/v1/outreach/opt-in", json={"job_id": "job123","email": "a@b.com", "phone": "5105908688", "reason": "Candidate called back"},
     )
     assert res.status_code == 200
     assert len(calls["release"]) == 1
@@ -415,7 +398,7 @@ def test_opt_in_releases_after_pairbot_accepts(client, calls):
 
 
 def test_opt_in_never_sends_interview_id(client, calls):
-    client.post("/api/v1/outreach/opt-in", json={"email": "a@b.com"})
+    client.post("/api/v1/outreach/opt-in", json={"job_id": "job123","email": "a@b.com"})
     assert "interview_id" not in calls["opt_in"][0]
 
 
@@ -424,7 +407,7 @@ def test_opt_in_fails_closed_when_pairbot_unreachable(client, calls, monkeypatch
         raise PairBotOptOutError("timeout")
 
     monkeypatch.setattr(mod, "pairbot_opt_in", unreachable)
-    res = client.post("/api/v1/outreach/opt-in", json={"email": "a@b.com"})
+    res = client.post("/api/v1/outreach/opt-in", json={"job_id": "job123","email": "a@b.com"})
     assert res.status_code == 502
     assert "still suppressed" in res.json()["detail"]
     # Failing closed: nobody gets contacted while the two sides disagree.
@@ -432,7 +415,7 @@ def test_opt_in_fails_closed_when_pairbot_unreachable(client, calls, monkeypatch
 
 
 def test_opt_in_without_identifier_is_422(client, calls):
-    res = client.post("/api/v1/outreach/opt-in", json={"reason": "why not"})
+    res = client.post("/api/v1/outreach/opt-in", json={"job_id": "job123","reason": "why not"})
     assert res.status_code == 422
     assert not calls["opt_in"]
 
@@ -447,7 +430,7 @@ def test_opt_in_flags_retained_imported_dnc(client, calls, monkeypatch):
             "error": None,
         },
     )
-    res = client.post("/api/v1/outreach/opt-in", json={"phone": "5105908688"})
+    res = client.post("/api/v1/outreach/opt-in", json={"job_id": "job123","phone": "5105908688"})
     assert res.status_code == 200
     # A clean "lifted" here would read as "we can call them now" — the Zoom
     # DNC list still says otherwise.
@@ -458,7 +441,7 @@ def test_opt_in_flags_retained_imported_dnc(client, calls, monkeypatch):
 # status
 # ---------------------------------------------------------------------------
 def test_status_reports_both_sides(client, calls):
-    res = client.get("/api/v1/outreach/opt-out", params={"email": "a@b.com"})
+    res = client.get("/api/v1/outreach/opt-out", params={"job_id": "job123","email": "a@b.com"})
     assert res.status_code == 200
     body = res.json()
     assert "pairbot" in body and "local" in body
@@ -469,7 +452,7 @@ def test_status_degrades_to_200_when_pairbot_down(client, calls, monkeypatch):
         raise PairBotOptOutError("connection refused")
 
     monkeypatch.setattr(mod, "pairbot_opt_out_status", unreachable)
-    res = client.get("/api/v1/outreach/opt-out", params={"email": "a@b.com"})
+    res = client.get("/api/v1/outreach/opt-out", params={"job_id": "job123","email": "a@b.com"})
     # The local half of the answer is still worth rendering.
     assert res.status_code == 200
     assert res.json()["pairbot"]["error"]
@@ -477,7 +460,7 @@ def test_status_degrades_to_200_when_pairbot_down(client, calls, monkeypatch):
 
 
 def test_status_without_identifier_is_422(client, calls):
-    assert client.get("/api/v1/outreach/opt-out").status_code == 422
+    assert client.get("/api/v1/outreach/opt-out", params={"job_id": "job123"}).status_code == 422
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
     the viewer's local timezone and dates can shift by a day.
     """
     cond, params = _mj_filter(scope)
-    dedup_key = "COALESCE(jobdiva_id, job_id::text)"
+    dedup_key = "job_id::text"
     with conn.cursor() as cur:
         cur.execute(f"SELECT COUNT(DISTINCT {dedup_key}) FROM monitored_jobs WHERE {cond}", params)
         total_jobs = int(cur.fetchone()[0] or 0)
@@ -100,6 +100,8 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
         """, params)
         rows = cur.fetchall()
 
+    scope_emails = set(scope["emails"]) if scope and scope.get("emails") else None
+
     timeline = []
     for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
          launched_at, stopped_at, is_archived, archive_reason, status, sourced, launched_count,
@@ -125,6 +127,18 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
         else:
             pair_status = "Active"
 
+        # Intersect with scope emails if present to avoid leaking out-of-team recruiters
+        emails = []
+        if raw_recruiter_emails:
+            try:
+                raw_emails = json.loads(raw_recruiter_emails)
+                if isinstance(raw_emails, list):
+                    emails = [e.lower().strip() for e in raw_emails if e]
+                    if scope_emails is not None:
+                        emails = [e for e in emails if e in scope_emails]
+            except Exception:
+                pass
+
         timeline.append({
             "job_id": str(job_id or ""),
             "jobdiva_id": str(jobdiva_id or ""),
@@ -141,11 +155,11 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             "jobdiva_status": str(status or ""),
             "pair_status": pair_status,
             "candidates_sourced": int(sourced or 0),
-            "candidates_launched": launched_count,
-            "jobdiva_submittals": jobdiva_subs,
+            "candidates_launched": int(launched_count or 0),
+            "jobdiva_submittals": int(jobdiva_subs or 0),
             "campaign_id": str(campaign_id or "") or None,
-            "recruiter_emails": _parse_recruiter_emails(raw_recruiter_emails),
-            "first_feedback_at": str(first_feedback_at) if first_feedback_at else None,
+            "recruiter_emails": emails,
+            "first_feedback_at": _iso(first_feedback_at),
         })
 
     return {"rows": timeline, "total": total_jobs}
