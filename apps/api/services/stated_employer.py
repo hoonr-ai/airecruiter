@@ -48,9 +48,14 @@ _MAX_STATED_LEN = 300
 def _employer_question_enabled() -> bool:
     try:
         from core import sourcing_config as _sc
-        return bool(getattr(_sc, "EMPLOYER_QUESTION_ENABLED", True))
+        # Default to False: if the attribute is missing the question stays off,
+        # matching the new opt-in intent of this flag.
+        return bool(getattr(_sc, "EMPLOYER_QUESTION_ENABLED", False))
     except Exception:  # noqa: BLE001
-        return True
+        # Import failure → fail-safe (off). Returning True here would silently
+        # re-enable the question whenever sourcing_config can't be loaded,
+        # defeating the purpose of defaulting the flag to False.
+        return False
 
 
 def is_employer_question(text: Any) -> bool:

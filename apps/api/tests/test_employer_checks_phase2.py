@@ -123,7 +123,12 @@ def test_no_contact_flags_current_placement():
 
 # ── the interview question ─────────────────────────────────────────────────
 
-def test_append_employer_question_appends_once_in_pair_schema():
+def test_append_employer_question_appends_once_in_pair_schema(monkeypatch):
+    from core import sourcing_config
+    # Explicitly enable: the default is now False (flag off by default so the
+    # question is not sent to PairBot unless opted-in). This test exercises the
+    # append logic itself, so it forces the flag on.
+    monkeypatch.setattr(sourcing_config, "EMPLOYER_QUESTION_ENABLED", True, raising=False)
     qs = append_employer_question([
         {"question_text": "Are you authorized to work in the US?", "pass_criteria": "",
          "is_default": True, "category": "default", "is_hard_filter": True},
