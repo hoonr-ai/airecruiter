@@ -291,11 +291,14 @@ const renderPairStatusBadge = (status: JobTimelineEntry["pair_status"]) => {
       : status === "Unpublished"
         ? "bg-amber-50 text-amber-700 border border-amber-200"
         : "bg-slate-100 text-slate-600 border border-slate-200";
+  // Prefixed with "Outreach" so this never reads as a duplicate of the
+  // adjacent Active/Archived column — the two badges track unrelated states.
+  const label = status === "Active" ? "Outreach Active" : status === "Inactive" ? "Outreach Inactive" : status;
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${badgeClass}`}
+      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold whitespace-nowrap ${badgeClass}`}
     >
-      {status}
+      {label}
     </span>
   );
 };
@@ -522,6 +525,11 @@ export default function AdminAnalyticsPage() {
   const submissionTopJobs = submissionMetrics.top_jobs_by_submittals || [];
 
   const timelineRows = data?.jobs_timeline || [];
+  // jobs_timeline_total counts every matching job server-side (no LIMIT);
+  // timelineRows is capped, so a larger total means older jobs aren't loaded
+  // and any date-range filter below is only searching the loaded window.
+  const isTimelineTruncated =
+    (data?.jobs_timeline_total ?? 0) > timelineRows.length;
   const timelineQuery = timelineSearch.trim().toLowerCase();
   const filteredTimeline = timelineRows.filter((job) => {
     if (timelineFilter !== "All" && job.pair_status !== timelineFilter)
@@ -2111,6 +2119,15 @@ export default function AdminAnalyticsPage() {
               <span className="shrink-0 text-[12px] font-medium text-slate-400 whitespace-nowrap">
                 Showing {filteredTimeline.length} of{" "}
                 {data?.jobs_timeline_total || timelineRows.length} jobs
+                {isTimelineTruncated && (
+                  <span className="text-amber-600">
+                    {" "}(most recent {timelineRows.length} loaded
+                    {(timelineStartDate || timelineEndDate)
+                      ? " — older jobs outside this window aren't included in the date filter"
+                      : ""}
+                    )
+                  </span>
+                )}
               </span>
             </div>
           </div>
@@ -2260,9 +2277,9 @@ export default function AdminAnalyticsPage() {
                       <td className="py-3.5 px-6">
                         {job.recruiter_emails?.length ? (
                           <div className="flex flex-col gap-1 max-w-[250px] max-h-[64px] overflow-y-auto pr-1">
-                            {job.recruiter_emails.map((email, i) => (
+                            {job.recruiter_emails.map((email) => (
                               <div
-                                key={i}
+                                key={email}
                                 className="text-slate-600 text-[13px] break-words"
                                 title={email}
                               >

@@ -521,7 +521,7 @@ def record_opt_out_audit(
     action: str,
     email: Optional[str],
     phone: Optional[str],
-    interview_id: Optional[str],
+    interview_id: Optional[int],
     candidate_id: Optional[str],
     scope: Optional[str],
     channels: Optional[str],

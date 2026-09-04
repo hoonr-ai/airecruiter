@@ -63,7 +63,7 @@ def normalize_channel(raw: Optional[str]) -> Optional[str]:
         return None
     if value in _CHANNEL_COLUMNS:
         return _CHANNEL_COLUMNS[value]
-    mapped = _CHANNEL_COLUMNS.get(value) or _CHANNEL_ALIASES.get(value)
+    mapped = _CHANNEL_ALIASES.get(value)
     if mapped:
         return mapped
     logger.warning(f"OUTREACH-NORMALIZATION: unrecognised communication channel/source {value!r} — not counted")
