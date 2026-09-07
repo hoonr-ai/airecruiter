@@ -455,26 +455,41 @@ def _validate_pair_payload_contacts(payload_obj: Dict[str, Any]) -> None:
 # (Q6) front-matter questions. When a recruiter sets a pass criterion on either
 # of these — e.g. "Must be open to W2 with Pyramid" — they are knockout gates
 # and must be treated as hard filters regardless of screening level.
+#
+# DESIGN NOTES:
+# - Patterns are intentionally anchored / context-rich to avoid false positives
+#   on role-specific questions that happen to mention related terms in passing.
+#   e.g. "Have you managed subcontractors?" must NOT match.
+# - Bare "c2c", "1099", "subcontract" are NOT in the top-level alternation;
+#   they only match when preceded by employment-context phrases.
 _COMP_ARRANGEMENT_PATTERNS = re.compile(
     r"(expected\s+(compensation|pay|salary|rate|package)"
     r"|what\s+is\s+your\s+(expected|current)\s+(comp|salary|pay|rate)"
     r"|compensation\s+expectation"
+    r"|your\s+(expected|desired|target)\s+(comp|salary|pay|rate|package)"
     r"|work(ing)?\s+arrangement|job\s+type|employment\s+type"
-    r"|open\s+to\s+work(ing)?\s+(on|under|with|as)\s+(w-?2|c2c|corp|1099)"
-    r"|w-?2\s+(agreement|employee|position|role|basis)"
-    r"|corp(-|\s+)to(-|\s+)corp|c2c|1099|subcontract"
+    r"|open\s+to\s+work(ing)?\s+(on|under|with|as)\s+(a\s+)?(w-?2|c2c|corp|1099)"
+    r"|w-?2\s+(agreement|employee|position|role|basis|arrangement)"
+    r"|\bc2c\b"                                        # whole-word: catches "C2C" in Q6 text
+    r"|corp(-|\s+)to(-|\s+)corp\s+(arrangement|basis|role|position|employee|contractor)"
     r"|eligible\s+to\s+work.*w-?2"
     r"|which\s+types?\s+of\s+working\s+arrangement"
-    r"|select\s+.*(w2|c2c|subcontract|independent\s+contractor))",
+    r"|select\s+all\s+that\s+apply.*(w-?2|c2c|subcontract|independent\s+contractor)"
+    r"|pyramid\s+consulting.*w-?2"
+    r"|w-?2.*pyramid)",
     flags=re.IGNORECASE,
 )
 
 
 def _is_compensation_or_work_arrangement_question(text: str) -> bool:
     """True if the question text is identifiable as a compensation or
-    work-arrangement / job-type question (Q5 or Q6 in the front-matter).
+    work-arrangement / job-type front-matter question (Q5 or Q6).
+
     Used to auto-promote these to hard filters when the recruiter has
-    configured an explicit pass criterion."""
+    configured an explicit pass criterion. Intentionally anchored to
+    employment-context phrases to avoid false-positive matches on
+    role-specific questions (e.g. 'Have you managed subcontractors?').
+    """
     return bool(_COMP_ARRANGEMENT_PATTERNS.search(text or ""))
 
 
@@ -508,13 +523,14 @@ def _sanitize_pre_screen_questions_for_pair(
 
         # Auto-promote compensation and work-arrangement questions to hard
         # filters whenever the recruiter has set an explicit pass criterion.
-        # These are knockout gates (a candidate who says "No, I want C2C"
-        # on a W2-only role must fail regardless of their skills), and the
-        # recruiter's act of filling in pass_criteria signals that intent.
-        # This runs BEFORE the role-specific zeroing below so it takes
-        # precedence over the historical L1/L2 no-hard-filter policy.
-        pass_criteria_set = bool(pass_criteria.strip())
-        if pass_criteria_set and _is_compensation_or_work_arrangement_question(text):
+        #
+        # Scope: ONLY front-matter questions (is_default=True OR category
+        # is default/logistics). This prevents role-specific questions that
+        # happen to mention W2 or pay ranges from being silently promoted.
+        # The recruiter's act of filling in pass_criteria on Q5/Q6 signals
+        # knockout intent — a blank pass_criteria means informational only.
+        is_front_matter = bool(q.get("is_default")) or category.lower() in ("default", "logistics")
+        if pass_criteria and is_front_matter and _is_compensation_or_work_arrangement_question(text):
             is_hard_filter = True
 
         # PRESERVE HISTORICAL PAIRBOT BUG: Pairbot historically ignored hard filters for Q10+

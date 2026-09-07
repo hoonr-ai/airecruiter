@@ -96,6 +96,32 @@ class TestIsCompensationOrWorkArrangementQuestion:
             "What is your current location?"
         )
 
+    # --- False-positive guard tests (these MUST not match) ---
+
+    def test_subcontractor_management_not_matched(self):
+        """Role-specific: managing subcontractors should NOT be treated as a work-arrangement Q."""
+        assert not _is_compensation_or_work_arrangement_question(
+            "Have you managed subcontractors in construction or field projects?"
+        )
+
+    def test_1099_tax_reporting_not_matched(self):
+        """Role-specific: 1099 tax forms in a finance/accounting role must NOT match."""
+        assert not _is_compensation_or_work_arrangement_question(
+            "Have you processed 1099 tax reporting for contractors in your previous role?"
+        )
+
+    def test_c2c_in_client_context_not_matched(self):
+        """'C2C' in a business/client relationship context must NOT match."""
+        assert not _is_compensation_or_work_arrangement_question(
+            "Describe your experience working in a B2B or client-to-client engagement model."
+        )
+
+    def test_corp_to_corp_without_employment_context_not_matched(self):
+        """'Corp to corp' alone without employment arrangement context must NOT match."""
+        assert not _is_compensation_or_work_arrangement_question(
+            "How did you handle Corp to Corp M&A integrations?"
+        )
+
     def test_empty_string_not_matched(self):
         assert not _is_compensation_or_work_arrangement_question("")
 
@@ -253,3 +279,35 @@ class TestSanitizeAutoPromotesCompWorkArrangement:
             boolean_mode=False,
         )
         assert result[0]["is_hard_filter"] is True
+
+    def test_role_specific_subcontractor_question_not_promoted(self):
+        """Critical: a role-specific question mentioning subcontractors with pass criteria
+        must NOT be promoted — only front-matter default/logistics questions qualify."""
+        result = _sanitize_pre_screen_questions_for_pair(
+            [{
+                "question_text": "Have you managed subcontractors in construction or field projects?",
+                "pass_criteria": "Candidate confirms direct experience managing subcontractors.",
+                "category": "role-specific",
+                "is_default": False,
+                "order_index": 8,
+                "is_hard_filter": False,
+            }],
+            boolean_mode=False,
+        )
+        assert result[0]["is_hard_filter"] is False
+
+    def test_role_specific_1099_tax_question_not_promoted(self):
+        """Critical: a finance role-specific question about 1099 tax reporting
+        must NOT be auto-promoted even if it has a pass criterion set."""
+        result = _sanitize_pre_screen_questions_for_pair(
+            [{
+                "question_text": "Have you processed 1099 tax reporting for independent contractors?",
+                "pass_criteria": "Candidate confirms they have filed 1099 forms.",
+                "category": "role-specific",
+                "is_default": False,
+                "order_index": 9,
+                "is_hard_filter": False,
+            }],
+            boolean_mode=False,
+        )
+        assert result[0]["is_hard_filter"] is False
