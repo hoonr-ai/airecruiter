@@ -112,6 +112,67 @@ class TestIsCompensationOrWorkArrangementQuestion:
             "What employment type are you seeking?"
         )
 
+    def test_employment_arrangement(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "What type of employment arrangement do you prefer?"
+        )
+
+    # --- Recruiter-tweaked work arrangement: C2C ---
+
+    def test_c2c_basis_open_to(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you open to working on a C2C basis?"
+        )
+
+    def test_c2c_alone(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you open to C2C?"
+        )
+
+    def test_w2_or_c2c(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Do you prefer W2 or C2C?"
+        )
+
+    def test_c2c_and_1099(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Can you work on a C2C or 1099 basis?"
+        )
+
+    # --- Recruiter-tweaked work arrangement: 1099 ---
+
+    def test_1099_contractor_open_to(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you open to work as a 1099 contractor?"
+        )
+
+    # --- Recruiter-tweaked work arrangement: Subcontractor ---
+
+    def test_subcontractor_through_employer(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you open to working as a subcontractor through your employer?"
+        )
+
+    # --- Recruiter-tweaked work arrangement: Corp-to-Corp ---
+
+    def test_corp_to_corp_arrangement(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Would you be comfortable with a Corp-to-Corp arrangement?"
+        )
+
+    def test_corp_to_corp_open_to(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you open to working under a corp to corp arrangement?"
+        )
+
+    # --- W2 with 'employment' suffix ---
+
+    def test_w2_employment_eligible(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you eligible for W-2 employment?"
+        )
+
+
     def test_non_comp_question_not_matched(self):
         assert not _is_compensation_or_work_arrangement_question(
             "Have you worked with Denodo in any of your projects?"
