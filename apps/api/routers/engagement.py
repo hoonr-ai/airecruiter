@@ -451,6 +451,33 @@ def _validate_pair_payload_contacts(payload_obj: Dict[str, Any]) -> None:
             )
 
 
+# Patterns that identify the Compensation (Q5) and Work-Arrangement / Job-Type
+# (Q6) front-matter questions. When a recruiter sets a pass criterion on either
+# of these — e.g. "Must be open to W2 with Pyramid" — they are knockout gates
+# and must be treated as hard filters regardless of screening level.
+_COMP_ARRANGEMENT_PATTERNS = re.compile(
+    r"(expected\s+(compensation|pay|salary|rate|package)"
+    r"|what\s+is\s+your\s+(expected|current)\s+(comp|salary|pay|rate)"
+    r"|compensation\s+expectation"
+    r"|work(ing)?\s+arrangement|job\s+type|employment\s+type"
+    r"|open\s+to\s+work(ing)?\s+(on|under|with|as)\s+(w-?2|c2c|corp|1099)"
+    r"|w-?2\s+(agreement|employee|position|role|basis)"
+    r"|corp(-|\s+)to(-|\s+)corp|c2c|1099|subcontract"
+    r"|eligible\s+to\s+work.*w-?2"
+    r"|which\s+types?\s+of\s+working\s+arrangement"
+    r"|select\s+.*(w2|c2c|subcontract|independent\s+contractor))",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_compensation_or_work_arrangement_question(text: str) -> bool:
+    """True if the question text is identifiable as a compensation or
+    work-arrangement / job-type question (Q5 or Q6 in the front-matter).
+    Used to auto-promote these to hard filters when the recruiter has
+    configured an explicit pass criterion."""
+    return bool(_COMP_ARRANGEMENT_PATTERNS.search(text or ""))
+
+
 def _sanitize_pre_screen_questions_for_pair(
     questions: List[Dict[str, Any]],
     *,
@@ -478,7 +505,18 @@ def _sanitize_pre_screen_questions_for_pair(
             category = category[:50].rstrip()
 
         is_hard_filter = bool(q.get("is_hard_filter", False))
-        
+
+        # Auto-promote compensation and work-arrangement questions to hard
+        # filters whenever the recruiter has set an explicit pass criterion.
+        # These are knockout gates (a candidate who says "No, I want C2C"
+        # on a W2-only role must fail regardless of their skills), and the
+        # recruiter's act of filling in pass_criteria signals that intent.
+        # This runs BEFORE the role-specific zeroing below so it takes
+        # precedence over the historical L1/L2 no-hard-filter policy.
+        pass_criteria_set = bool(pass_criteria.strip())
+        if pass_criteria_set and _is_compensation_or_work_arrangement_question(text):
+            is_hard_filter = True
+
         # PRESERVE HISTORICAL PAIRBOT BUG: Pairbot historically ignored hard filters for Q10+
         # User wants this ignorance to continue for L1/L2, but be respected for L0.5.
         q_order = int(q.get("order_index", 0) or 0)
@@ -486,8 +524,12 @@ def _sanitize_pre_screen_questions_for_pair(
         # before the same check, so a capitalized stored category (e.g. "Default") would
         # otherwise make the two functions disagree about what is role-specific.
         is_role_specific = q_order > 9 or category.lower() not in ("default", "logistics")
-        
-        if not boolean_mode and is_role_specific:
+
+        # Only zero out hard-filter for role-specific questions that were NOT
+        # auto-promoted above (compensation/work-arrangement are never role-specific
+        # in the slot sense, but belt-and-suspenders: skip the zero-out if the
+        # flag was just promoted by the recruiter-criteria check).
+        if not boolean_mode and is_role_specific and not _is_compensation_or_work_arrangement_question(text):
             is_hard_filter = False
 
         sanitized.append({
