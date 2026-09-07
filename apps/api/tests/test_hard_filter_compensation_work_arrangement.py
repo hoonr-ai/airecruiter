@@ -66,6 +66,37 @@ class TestIsCompensationOrWorkArrangementQuestion:
             "Can you share your compensation expectations?"
         )
 
+    # --- Recruiter-tweaked compensation phrasings ---
+
+    def test_salary_expectations_tweaked(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "What are your salary expectations?"
+        )
+
+    def test_pay_expectation_tweaked(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "What is your pay expectation?"
+        )
+
+    def test_pay_rate_expecting_tweaked(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "What pay rate are you expecting for this role?"
+        )
+
+    def test_hourly_rate_targeting_tweaked(self):
+        assert _is_compensation_or_work_arrangement_question(
+            "What hourly rate are you targeting?"
+        )
+
+    # --- Recruiter-tweaked W2 phrasing (from Pragyan Dubey image) ---
+
+    def test_pyramid_w2_agreement_tweaked(self):
+        """Exact phrasing from the recruiter image."""
+        assert _is_compensation_or_work_arrangement_question(
+            "Are you open to work with pyramid Consulting under a W2 Agreement?"
+        )
+
+
     def test_work_arrangement(self):
         assert _is_compensation_or_work_arrangement_question(
             "What is your preferred work arrangement?"
