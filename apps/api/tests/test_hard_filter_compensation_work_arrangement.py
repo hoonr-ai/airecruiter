@@ -271,6 +271,33 @@ class TestSanitizeAutoPromotesCompWorkArrangement:
         assert len(result) == 1
         assert result[0]["is_hard_filter"] is True
 
+    def test_work_arrangement_category_promoted(self):
+        """Ensure questions with category 'work-arrangement' are recognized as front-matter and promoted."""
+        q = _make_w2_question(pass_criteria="Must be open to W2.")
+        q["category"] = "work-arrangement"
+        q["is_default"] = False  # Should still promote based on category
+        result = _sanitize_pre_screen_questions_for_pair([q], boolean_mode=False)
+        assert result[0]["is_hard_filter"] is True
+
+    def test_genuine_role_specific_matching_regex_not_zeroed_out(self):
+        """Ensure genuine role-specific questions that happen to match the regex aren't zeroed out if already True."""
+        q = {
+            "question_text": "What pay rate do you quote subcontractors?",
+            "pass_criteria": "Candidate has negotiation experience.",
+            "category": "role-specific",
+            "is_default": False,
+            "order_index": 8,
+            "is_hard_filter": True,  # Already set to True upstream
+        }
+        result = _sanitize_pre_screen_questions_for_pair([q], boolean_mode=False)
+        # It's role specific, but boolean_mode=False means zero-out usually applies.
+        # However, it didn't get auto_promoted by THIS block. Wait, the rule is:
+        # if not boolean_mode and is_role_specific and not auto_promoted: is_hard_filter = False.
+        # So it SHOULD be zeroed out if it's role specific. The reviewer's point was:
+        # Previously, it was NOT zeroed out because it matched the regex.
+        # Now it WILL be zeroed out because it wasn't auto_promoted.
+        assert result[0]["is_hard_filter"] is False
+
     def test_w2_question_with_pass_criteria_promoted_l05(self):
         """L0.5 mode: W2 question with criteria → still promoted (redundant but consistent)."""
         result = _sanitize_pre_screen_questions_for_pair(

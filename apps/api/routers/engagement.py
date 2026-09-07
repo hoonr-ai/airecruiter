@@ -480,9 +480,7 @@ _COMP_ARRANGEMENT_PATTERNS = re.compile(
     r"|eligible\s+(for|to\s+work).{0,15}(w-?2|c2c)"       # "eligible for W-2 employment"
     r"|which\s+types?\s+of\s+working\s+arrangement"
     r"|select\s+all\s+that\s+apply.*(w-?2|c2c|subcontract|independent\s+contractor)"
-    r"|as\s+a\s+subcontract(or)?\s+(through|via|with)"     # "as a subcontractor through your employer"
-    r"|pyramid\s+consulting.*w-?2"
-    r"|w-?2.*pyramid)",
+    r"|as\s+a\s+subcontract(or)?\s+(through|via|with))",   # "as a subcontractor through your employer"
     flags=re.IGNORECASE,
 )
 
@@ -531,13 +529,17 @@ def _sanitize_pre_screen_questions_for_pair(
         # filters whenever the recruiter has set an explicit pass criterion.
         #
         # Scope: ONLY front-matter questions (is_default=True OR category
-        # is default/logistics). This prevents role-specific questions that
+        # is default/logistics/work-arrangement). This prevents role-specific questions that
         # happen to mention W2 or pay ranges from being silently promoted.
         # The recruiter's act of filling in pass_criteria on Q5/Q6 signals
         # knockout intent — a blank pass_criteria means informational only.
-        is_front_matter = bool(q.get("is_default")) or category.lower() in ("default", "logistics")
-        if pass_criteria and is_front_matter and _is_compensation_or_work_arrangement_question(text):
+        is_front_matter = bool(q.get("is_default")) or category.lower() in ("default", "logistics", "work-arrangement")
+        is_comp_arr_text = _is_compensation_or_work_arrangement_question(text)
+        
+        auto_promoted = False
+        if pass_criteria and is_front_matter and is_comp_arr_text:
             is_hard_filter = True
+            auto_promoted = True
 
         # PRESERVE HISTORICAL PAIRBOT BUG: Pairbot historically ignored hard filters for Q10+
         # User wants this ignorance to continue for L1/L2, but be respected for L0.5.
@@ -545,13 +547,13 @@ def _sanitize_pre_screen_questions_for_pair(
         # Compare case-insensitively: _enforce_boolean_pre_screen_questions lowercases
         # before the same check, so a capitalized stored category (e.g. "Default") would
         # otherwise make the two functions disagree about what is role-specific.
-        is_role_specific = q_order > 9 or category.lower() not in ("default", "logistics")
+        is_role_specific = q_order > 9 or category.lower() not in ("default", "logistics", "work-arrangement")
 
         # Only zero out hard-filter for role-specific questions that were NOT
         # auto-promoted above (compensation/work-arrangement are never role-specific
         # in the slot sense, but belt-and-suspenders: skip the zero-out if the
         # flag was just promoted by the recruiter-criteria check).
-        if not boolean_mode and is_role_specific and not _is_compensation_or_work_arrangement_question(text):
+        if not boolean_mode and is_role_specific and not auto_promoted:
             is_hard_filter = False
 
         sanitized.append({
