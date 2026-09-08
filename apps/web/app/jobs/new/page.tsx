@@ -5,6 +5,12 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode } from "@/lib/jobs/wizard-types";
 import {
+  DEFAULT_SEARCH_SOURCES,
+  SEARCH_SOURCES_VERSION,
+  restoreSavedSearchSources,
+  type SearchSources,
+} from "@/lib/search-sources";
+import {
   History,
   Plus,
   Search,
@@ -992,10 +998,12 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. The two JobDiva talent pools and LinkedIn are pre-ticked
-  // (LinkedIn sourcing now round-robins across all attached Unipile
-  // accounts, so default-on no longer risks burning a single account);
-  // the recruiter opts in to Dice/Exa explicitly.
+  // switchboard now. The two JobDiva talent pools, LinkedIn and Exa are
+  // pre-ticked (LinkedIn sourcing round-robins across all attached Unipile
+  // accounts, so default-on no longer risks burning a single account; Exa
+  // had been opt-in since the April QA punch list, which in practice meant
+  // it never ran — re-enabled 2026-09). Dice stays opt-in and hidden.
+  // Defaults + saved-draft migration live in lib/search-sources.ts.
   //
   // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
   // recruiter set inside JobDiva) and `jobdiva_talent` (the boolean string
@@ -1003,13 +1011,7 @@ function NewJobPageContent() {
   // always fired both. They're separate now so the recruiter can put the
   // search budget on whichever pool actually works for the req. Both default
   // on, which reproduces the old behaviour.
-  const [searchSources, setSearchSources] = useState({
-    jobdiva_agent: true,
-    jobdiva_talent: true,
-    linkedin: true,
-    dice: false,
-    exa: false,
-  });
+  const [searchSources, setSearchSources] = useState<SearchSources>({ ...DEFAULT_SEARCH_SOURCES });
   // Either JobDiva pool selected — for the bits of Step 5 that care about
   // "is JobDiva in play at all" (Search-more button, result chips).
   const jobdivaSelected = searchSources.jobdiva_agent || searchSources.jobdiva_talent;
@@ -2254,25 +2256,15 @@ function NewJobPageContent() {
       if (draft.sourcing_filters) {
         const sf = draft.sourcing_filters;
         if (sf.sources) {
-          // Strip the retired jobdiva_hotlist flag from persisted drafts so
-          // saved jobs don't resurrect the removed checkbox. The single
-          // `jobdiva` flag was likewise split into jobdiva_agent /
-          // jobdiva_talent — migrate it to both (that's what it used to run)
-          // and drop the old key so it isn't persisted forward.
-          const {
-            jobdiva_hotlist: _removedHotlist,
-            jobdiva: legacyJobdiva,
-            ...cleanSources
-          } = sf.sources as Record<string, boolean>;
-          const migrated: Record<string, boolean> =
-            typeof legacyJobdiva === "boolean"
-              ? {
-                  jobdiva_agent: legacyJobdiva,
-                  jobdiva_talent: legacyJobdiva,
-                  ...cleanSources,
-                }
-              : cleanSources;
-          setSearchSources(prev => ({ ...prev, ...migrated }));
+          // Persisted-flag migration — the retired jobdiva_hotlist flag, the
+          // legacy single `jobdiva` flag (split into jobdiva_agent /
+          // jobdiva_talent) and the pre-v2 Exa default-off — lives in
+          // lib/search-sources.ts so it is unit-tested. `sources_version`
+          // is what lets a stored `exa: false` be read as "old default"
+          // (legacy draft) vs "recruiter unticked it" (v2 draft).
+          setSearchSources(prev =>
+            restoreSavedSearchSources(sf.sources, sf.sources_version, prev)
+          );
         }
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
@@ -2969,6 +2961,7 @@ function NewJobPageContent() {
           })),
           sourcing_filters: {
             sources: searchSources,
+            sources_version: SEARCH_SOURCES_VERSION,
             titles: sourceTitles,
             skills: sourceSkills,
             locations: sourceLocations,
