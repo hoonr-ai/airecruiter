@@ -473,7 +473,7 @@ _COMP_ARRANGEMENT_PATTERNS = re.compile(
     r"|hourly\s+rate\s+.{0,15}(target|expect|look)"       # "hourly rate are you targeting"
     r"|work(ing)?\s+arrangement|job\s+type"
     r"|employment\s+(type|arrangement)"                    # "employment arrangement" + "employment type"
-    r"|open\s+to\s+work(ing)?.{0,40}(w-?2|c2c|corp|1099|subcontract)"
+    r"|open\s+to\s+work(ing)?\s+(?:on|under|with|as|for)\s+(?:[\w,-]+\s+){0,4}(?:on|under|with|as|for)?\s*(?:a\s+)?(w-?2|c2c|corp|1099|subcontract)" # e.g. "open to work with the client as a w2"
     r"|w-?2\s+(agreement|employee|employment|position|role|basis|arrangement)"
     r"|\bc2c\b"
     r"|corp(-|\s+)to(-|\s+)corp\s+(arrangement|basis|role|position|employee|contractor)"
