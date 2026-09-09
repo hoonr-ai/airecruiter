@@ -973,15 +973,16 @@ async def get_launch_report(
             if iid:
                 deduped[iid] = row
 
-        launch_day = _eastern_date(_parse_iso(job.get("first_launch_at")))
-        if launch_day is None:
-            day_rows = list(deduped.values())
-        else:
-            day_rows = [
-                row
-                for row in deduped.values()
-                if _eastern_date(_parse_iso(row.get("created_at"))) == launch_day
-            ]
+        # Scoped to the requested report range rather than only the job's
+        # first-launch day, so later-day launches show up on their own report
+        # instead of vanishing (the job's row is keyed on first-launch day,
+        # but its later launches still fall inside a range that includes them).
+        day_rows = [
+            row
+            for row in deduped.values()
+            if (created_date := _eastern_date(_parse_iso(row.get("created_at")))) is not None
+            and report_start_date <= created_date <= report_end_date
+        ]
 
         audit_by_job[str(job["job_id"])] = day_rows
         interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
