@@ -342,8 +342,8 @@ class TestSanitizeAutoPromotesCompWorkArrangement:
         )
         assert result[0]["is_hard_filter"] is False
 
-    def test_mixed_questions_only_comp_promoted(self):
-        """In a full question set, only the comp/work-arrangement gets promoted."""
+    def test_mixed_questions_front_matter_promoted(self):
+        """In a full question set, any front-matter question with pass criteria gets promoted."""
         questions = [
             {
                 "question_text": "To start, can you briefly introduce yourself?",
@@ -364,8 +364,8 @@ class TestSanitizeAutoPromotesCompWorkArrangement:
         ]
         result = _sanitize_pre_screen_questions_for_pair(questions, boolean_mode=False)
         assert len(result) == 4
-        # Q1 intro: not promoted
-        assert result[0]["is_hard_filter"] is False
+        # Q1 intro: promoted because it is front matter and has pass criteria
+        assert result[0]["is_hard_filter"] is True
         # Q6 W2 with criteria: promoted
         assert result[1]["is_hard_filter"] is True
         # Q5 comp without criteria: not promoted
@@ -373,12 +373,12 @@ class TestSanitizeAutoPromotesCompWorkArrangement:
         # Role-specific: not promoted
         assert result[3]["is_hard_filter"] is False
 
-    def test_already_true_hard_filter_preserved(self):
-        """If is_hard_filter was already True (e.g. work-arrangement on onsite role),
-        it stays True even when pass_criteria is empty."""
+    def test_already_true_hard_filter_overridden_if_empty(self):
+        """If is_hard_filter was already True (e.g. work-arrangement),
+        it is overridden to False (info-only) if pass_criteria is empty."""
         q = _make_w2_question(pass_criteria="", is_hard_filter=True)
         result = _sanitize_pre_screen_questions_for_pair([q], boolean_mode=False)
-        assert result[0]["is_hard_filter"] is True
+        assert result[0]["is_hard_filter"] is False
 
     def test_c2c_question_promoted(self):
         """C2C / Corp-to-Corp question text also triggers promotion."""

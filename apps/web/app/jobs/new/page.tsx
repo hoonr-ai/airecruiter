@@ -65,7 +65,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+import { cn, getQuestionFilterType } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -7240,6 +7240,26 @@ function NewJobPageContent() {
                     role-specific
                   </span>
                 )}
+                {(() => {
+                  const filterType = getQuestionFilterType(
+                    q.question_text ?? "",
+                    q.pass_criteria ?? "",
+                    q.category ?? "",
+                    q.order_index ?? index + 1,
+                    screeningLevel === "L0.5",
+                    Boolean(q.is_hard_filter)
+                  );
+                  if (filterType === "HARD_FILTER") {
+                    return <span className="bg-red-50 text-red-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-red-200 whitespace-nowrap mb-1">Hard Filter</span>;
+                  }
+                  if (filterType === "INFO_ONLY") {
+                    return <span className="bg-blue-50 text-blue-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-200 whitespace-nowrap mb-1">Info-Only</span>;
+                  }
+                  if (filterType === "SCORED") {
+                    return <span className="bg-orange-50 text-orange-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-orange-200 whitespace-nowrap mb-1">Scored</span>;
+                  }
+                  return null;
+                })()}
                 <button
                   onClick={() => deleteScreenQuestion(q.id)}
                   className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"

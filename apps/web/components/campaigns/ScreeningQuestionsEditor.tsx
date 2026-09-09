@@ -14,6 +14,7 @@ import { GripVertical, Plus, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TemplateQuestion } from "@/lib/campaigns";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
+import { getQuestionFilterType } from "@/lib/utils";
 
 // ── Inline drag-reorder hook (same implementation as job wizard) ──────────────
 function useDragReorder(onMove: (from: number, to: number) => void) {
@@ -44,11 +45,13 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
   interface ScreeningQuestionsEditorProps {
     questions: TemplateQuestion[];
     onChange: (q: TemplateQuestion[]) => void;
+    isBooleanMode?: boolean;
   }
 
   export function ScreeningQuestionsEditor({
     questions,
     onChange,
+    isBooleanMode = false,
   }: ScreeningQuestionsEditorProps) {
 
   // AI policy check (NSFW / rude / discriminatory / nonsensical) on
@@ -181,6 +184,26 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 role-specific
               </span>
             )}
+            {(() => {
+              const filterType = getQuestionFilterType(
+                q.question_text ?? "",
+                q.pass_criteria ?? "",
+                q.category ?? "",
+                q.order_index ?? index + 1,
+                isBooleanMode,
+                Boolean(q.is_hard_filter)
+              );
+              if (filterType === "HARD_FILTER") {
+                return <span className="bg-red-50 text-red-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-red-200 whitespace-nowrap mb-1">Hard Filter</span>;
+              }
+              if (filterType === "INFO_ONLY") {
+                return <span className="bg-blue-50 text-blue-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-200 whitespace-nowrap mb-1">Info-Only</span>;
+              }
+              if (filterType === "SCORED") {
+                return <span className="bg-orange-50 text-orange-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-orange-200 whitespace-nowrap mb-1">Scored</span>;
+              }
+              return null;
+            })()}
             <button
               type="button"
               onClick={() => remove(index)}
