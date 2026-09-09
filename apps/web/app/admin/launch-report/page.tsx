@@ -29,6 +29,7 @@ interface LaunchReportRow {
   recruiter_emails: string[];
   job_title: string;
   customer_name: string;
+  launch_date: string | null;
   version: number;
   jobdiva_published_date: string | null;
   pair_published_at: string | null;
@@ -66,6 +67,8 @@ interface LaunchReportRow {
 
 interface LaunchReportData {
   report_date: string;
+  start_date: string;
+  end_date: string;
   timezone: string;
   generated_at: string | null;
   jobs: LaunchReportRow[];
@@ -146,6 +149,13 @@ function formatPercent(value: number | null): string {
   return value === null || value === undefined ? "—" : `${value}%`;
 }
 
+/** "02/24/2026" for a single day, or "02/24/2026 – 02/28/2026" for a range. */
+function formatDateRange(start: string | null | undefined, end: string | null | undefined): string {
+  if (!start) return "—";
+  if (!end || end === start) return formatDate(start);
+  return `${formatDate(start)} – ${formatDate(end)}`;
+}
+
 // Column groups drive the header spans, the cell order AND the CSV export, so
 // the three can't drift apart as columns get added.
 type Column = {
@@ -167,6 +177,9 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Job",
     columns: [
+      // Only shown for a multi-day range report — a single-day report has
+      // one date for every row, so the column would be redundant there.
+      { key: "launch_date", label: "Launch Date", text: (r) => formatDate(r.launch_date) },
       {
         key: "recruiter",
         label: "Recruiter",
@@ -276,22 +289,28 @@ const COLUMN_GROUPS: ColumnGroup[] = [
 
 const FLAT_COLUMNS = COLUMN_GROUPS.flatMap((g) => g.columns);
 
+/** Column groups with the Launch Date column stripped out for a single-day report. */
+function visibleColumnGroups(showLaunchDate: boolean): ColumnGroup[] {
+  if (showLaunchDate) return COLUMN_GROUPS;
+  return COLUMN_GROUPS.map((g) => ({ ...g, columns: g.columns.filter((c) => c.key !== "launch_date") }));
+}
+
 /**
  * Build the report CSV.
  *
- * Columns come from COLUMN_GROUPS so the export always matches what is on
- * screen. The leading Job/ID/Version cells mirror the pinned first column,
- * which is rendered outside the column list. Escaping (including formula-
- * injection defence) lives in lib/csv.
+ * Columns come from the (possibly range-filtered) column list so the export
+ * always matches what is on screen. The leading Job/ID/Version cells mirror
+ * the pinned first column, which is rendered outside the column list.
+ * Escaping (including formula-injection defence) lives in lib/csv.
  */
-function buildCsv(rows: LaunchReportRow[]): string {
+function buildCsv(rows: LaunchReportRow[], columns: Column[]): string {
   return toCsv(
-    ["Job Title", "JobDiva ID", "Version", ...FLAT_COLUMNS.map((c) => c.label)],
+    ["Job Title", "JobDiva ID", "Version", ...columns.map((c) => c.label)],
     rows.map((row) => [
       row.job_title || "Untitled job",
       row.jobdiva_id || row.job_id,
       `v${row.version}`,
-      ...FLAT_COLUMNS.map((col) => col.text(row)),
+      ...columns.map((col) => col.text(row)),
     ]),
   );
 }
@@ -313,45 +332,59 @@ export default function LaunchReportPage() {
   // Computed once per mount: the report is historical, so re-deriving "today"
   // mid-session would let the max silently drift past midnight.
   const [maxDate] = useState<string>(yesterdayEastern);
+  const [isRange, setIsRange] = useState(false);
   const [selectedDate, setSelectedDate] = useState<string>(maxDate);
-  const [requestedDate, setRequestedDate] = useState<string | null>(null);
+  const [selectedEndDate, setSelectedEndDate] = useState<string>(maxDate);
+  const [requestedRange, setRequestedRange] = useState<{ start: string; end: string } | null>(null);
   const [data, setData] = useState<LaunchReportData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const generateReport = useCallback(() => {
-    if (!selectedDate) {
-      setError("Please select a date first.");
+    if (!selectedDate || (isRange && !selectedEndDate)) {
+      setError(isRange ? "Please select both a start and end date." : "Please select a date first.");
       return;
     }
-    if (selectedDate > maxDate) {
+    const end = isRange ? selectedEndDate : selectedDate;
+    if (selectedDate > maxDate || end > maxDate) {
       setError("Today's report is not available yet. Please select a previous date.");
+      return;
+    }
+    if (isRange && selectedDate > end) {
+      setError("Start date must not be after the end date.");
       return;
     }
     setIsLoading(true);
     setError(null);
-    setRequestedDate(selectedDate);
-  }, [selectedDate, maxDate]);
+    setRequestedRange({ start: selectedDate, end });
+  }, [selectedDate, selectedEndDate, isRange, maxDate]);
+
+  // Shows the Launch Date column and the range label only once the loaded
+  // report actually spans more than one day, not just because range mode is on.
+  const isMultiDay = !!data && data.start_date !== data.end_date;
+  const columnGroups = useMemo(() => visibleColumnGroups(isMultiDay), [isMultiDay]);
+  const flatColumns = useMemo(() => columnGroups.flatMap((g) => g.columns), [columnGroups]);
 
   const downloadCsv = useCallback(() => {
     if (!data?.jobs.length) return;
-    const blob = new Blob([UTF8_BOM, buildCsv(data.jobs)], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([UTF8_BOM, buildCsv(data.jobs, flatColumns)], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `Pair Bulk Launch Report - ${data.report_date}.csv`;
+    const label = isMultiDay ? `${data.start_date} to ${data.end_date}` : data.report_date;
+    link.download = `Pair Bulk Launch Report - ${label}.csv`;
     link.click();
     URL.revokeObjectURL(url);
-  }, [data]);
+  }, [data, flatColumns, isMultiDay]);
 
   useEffect(() => {
-    if (isRoleLoading || !canView || !requestedDate) return;
-    // Guards against a slow response for an earlier date landing after a
+    if (isRoleLoading || !canView || !requestedRange) return;
+    // Guards against a slow response for an earlier request landing after a
     // newer one and overwriting it.
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.launchReport.get(requestedDate);
+        const res = await api.launchReport.get({ startDate: requestedRange.start, endDate: requestedRange.end });
         if (cancelled) return;
         setData(res?.data ?? null);
         setError(null);
@@ -367,7 +400,8 @@ export default function LaunchReportPage() {
     return () => {
       cancelled = true;
     };
-  }, [isRoleLoading, canView, requestedDate]);
+  }, [isRoleLoading, canView, requestedRange]);
+
 
   const rows = useMemo(() => data?.jobs ?? [], [data]);
 
@@ -426,6 +460,18 @@ export default function LaunchReportPage() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 h-10 px-2 text-[12px] font-semibold text-slate-500 select-none">
+            <input
+              type="checkbox"
+              checked={isRange}
+              onChange={(e) => {
+                setError(null);
+                setIsRange(e.target.checked);
+              }}
+              className="h-3.5 w-3.5 accent-primary"
+            />
+            Date range
+          </label>
           <label
             htmlFor="report-date"
             className="flex items-center gap-2 h-10 px-3 rounded-lg border border-slate-200 bg-white shadow-sm"
@@ -450,6 +496,27 @@ export default function LaunchReportPage() {
               className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
             />
           </label>
+          {isRange && (
+            <label
+              htmlFor="report-end-date"
+              className="flex items-center gap-2 h-10 px-3 rounded-lg border border-slate-200 bg-white shadow-sm"
+            >
+              <span className="text-[12px] font-semibold text-slate-400">to</span>
+              <input
+                id="report-end-date"
+                type="date"
+                lang="en-US"
+                value={selectedEndDate}
+                max={maxDate}
+                required
+                onChange={(e) => {
+                  setError(null);
+                  setSelectedEndDate(e.target.value || maxDate);
+                }}
+                className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
+              />
+            </label>
+          )}
           <Button
             variant="outline"
             onClick={generateReport}
@@ -472,8 +539,14 @@ export default function LaunchReportPage() {
       </div>
 
       <p className="text-[13px] text-slate-500 leading-relaxed max-w-[880px]">
-        Jobs whose first PAIR launch happened on{" "}
-        <span className="font-semibold text-slate-700">{formatDate(data?.report_date ?? requestedDate ?? selectedDate)}</span>. Dates and times
+        Jobs whose first PAIR launch happened{" "}
+        <span className="font-semibold text-slate-700">
+          {isMultiDay ? "between " : "on "}
+          {formatDateRange(
+            data?.start_date ?? requestedRange?.start ?? selectedDate,
+            data?.end_date ?? requestedRange?.end ?? (isRange ? selectedEndDate : selectedDate),
+          )}
+        </span>. Dates and times
         are Eastern (EDT/EST), so a job launched late in the evening belongs to that day rather than the next. Interview
         status, channel, phase and response columns are read live from PAIR Bot.
       </p>
@@ -520,7 +593,7 @@ export default function LaunchReportPage() {
                 >
                   Job
                 </th>
-                {COLUMN_GROUPS.map((group) => (
+                {columnGroups.map((group) => (
                   <th
                     key={group.title}
                     colSpan={group.columns.length}
@@ -531,7 +604,7 @@ export default function LaunchReportPage() {
                 ))}
               </tr>
               <tr className="bg-slate-50 border-b border-slate-200">
-                {COLUMN_GROUPS.flatMap((group) =>
+                {columnGroups.flatMap((group) =>
                   group.columns.map((col, idx) => (
                     <th
                       key={col.key}
@@ -546,22 +619,28 @@ export default function LaunchReportPage() {
               </tr>
             </thead>
             <tbody>
-              {!requestedDate && !isLoading ? (
+              {!requestedRange && !isLoading ? (
                 <tr>
-                  <td colSpan={FLAT_COLUMNS.length + 1} className="p-8 text-center text-[13px] text-slate-500">
+                  <td colSpan={flatColumns.length + 1} className="p-8 text-center text-[13px] text-slate-500">
                     Select a date and click Generate Report.
                   </td>
                 </tr>
               ) : isLoading ? (
                 <tr>
-                  <td colSpan={FLAT_COLUMNS.length + 1} className="p-8 text-center text-[13px] text-slate-500">
+                  <td colSpan={flatColumns.length + 1} className="p-8 text-center text-[13px] text-slate-500">
                     Loading launch report…
                   </td>
                 </tr>
               ) : rows.length === 0 && !error ? (
                 <tr>
-                  <td colSpan={FLAT_COLUMNS.length + 1} className="p-8 text-center text-[13px] text-slate-500">
-                    No jobs were launched on {formatDate(data?.report_date ?? requestedDate ?? selectedDate)}.
+                  <td colSpan={flatColumns.length + 1} className="p-8 text-center text-[13px] text-slate-500">
+                    No jobs were launched{" "}
+                    {isMultiDay ? "between " : "on "}
+                    {formatDateRange(
+                      data?.start_date ?? requestedRange?.start ?? selectedDate,
+                      data?.end_date ?? requestedRange?.end ?? (isRange ? selectedEndDate : selectedDate),
+                    )}
+                    .
                   </td>
                 </tr>
               ) : (
@@ -596,7 +675,7 @@ export default function LaunchReportPage() {
                           )}
                         </div>
                       </td>
-                      {FLAT_COLUMNS.map((col) => (
+                      {flatColumns.map((col) => (
                         <td
                           key={col.key}
                           className={`px-3 py-3 whitespace-nowrap text-slate-700 ${

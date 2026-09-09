@@ -257,11 +257,18 @@ export const api = {
   },
   launchReport: {
     // `date` is a calendar date in Eastern time (YYYY-MM-DD); omitting it asks
-    // the backend for yesterday. Team leads are auto-scoped server-side, so
-    // teamId is only meaningful for admins.
-    get: (date?: string | null, teamId?: string | null) => {
+    // the backend for yesterday. Pass startDate+endDate instead for a range
+    // (both required together); date is ignored when a range is given. Team
+    // leads are auto-scoped server-side, so teamId is only meaningful for admins.
+    get: (opts?: { date?: string | null; startDate?: string | null; endDate?: string | null; teamId?: string | null }) => {
+      const { date, startDate, endDate, teamId } = opts ?? {};
       const qs = new URLSearchParams();
-      if (date) qs.set("date", date);
+      if (startDate && endDate) {
+        qs.set("start_date", startDate);
+        qs.set("end_date", endDate);
+      } else if (date) {
+        qs.set("date", date);
+      }
       if (teamId) qs.set("team_id", teamId);
       const suffix = qs.toString();
       return req<any>(`/api/v1/launch-report${suffix ? `?${suffix}` : ""}`);
