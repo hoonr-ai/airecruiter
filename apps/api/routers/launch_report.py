@@ -66,6 +66,7 @@ EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pa
 _OUTREACH_CONCURRENCY = int(os.getenv("LAUNCH_REPORT_OUTREACH_CONCURRENCY", "8"))
 _OUTREACH_TIMEOUT_S = float(os.getenv("LAUNCH_REPORT_OUTREACH_TIMEOUT", "10"))
 _OUTREACH_BUDGET_S = float(os.getenv("LAUNCH_REPORT_OUTREACH_BUDGET", "120"))
+MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31"))
 
 # Status buckets. Both Pending/InProgress/Completed AND Partial Complete are
 # read off pair-bot's own `outreach_status` so the four buckets partition the
@@ -271,14 +272,26 @@ def _eastern_date_expr(col: str) -> str:
     return f"(({col} AT TIME ZONE %s) AT TIME ZONE %s)::date"
 
 
-def _fetch_jobs_launched_on(conn, report_date: datetime.date, scope: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _fetch_jobs_launched_on(
+    conn,
+    start_date: datetime.date,
+    scope: Optional[Dict[str, Any]] = None,
+    end_date: Optional[datetime.date] = None,
+) -> List[Dict[str, Any]]:
     """Jobs whose FIRST launch (MIN of engage_interview_audit.created_at) falls
-    on `report_date` in Eastern time.
+    between `start_date` and `end_date` (inclusive) in Eastern time. A single
+    day is just the range where start_date == end_date.
 
     Keyed on first launch rather than "any launch that day" so a job appears
     exactly once, on the day it went live, however long it keeps launching.
     """
+    single_day_query = end_date is None
+    if single_day_query:
+        end_date = start_date
+
     mj_cond, mj_params = _mj_filter(scope, "mj")
+    launch_date_expr = _eastern_date_expr('l.first_launch_at')
+    launch_date_filter = f"{launch_date_expr} = %s" if single_day_query else f"{launch_date_expr} BETWEEN %s AND %s"
     sql = f"""
         WITH launches AS (
             SELECT
@@ -321,10 +334,12 @@ def _fetch_jobs_launched_on(conn, report_date: datetime.date, scope: Optional[Di
             l.total_launched
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
-        WHERE {_eastern_date_expr('l.first_launch_at')} = %s
+        WHERE {launch_date_filter}
         ORDER BY l.first_launch_at ASC
     """
-    params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), report_date]
+    params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date]
+    if not single_day_query:
+        params.append(end_date)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
@@ -771,6 +786,9 @@ def _build_row(
         "recruiter_emails": _parse_recruiter_emails(job.get("recruiter_emails")),
         "job_title": (job.get("enhanced_title") or job.get("title") or "").strip(),
         "customer_name": (job.get("customer_name") or "").strip(),
+        # Eastern calendar day of first launch — only meaningful once a
+        # multi-day range report can mix rows from different days.
+        "launch_date": launch_at.astimezone(REPORT_TIMEZONE).date().isoformat() if launch_at else None,
         # Only a missing version defaults to 1 — `or 1` would rewrite a real 0.
         "version": 1 if job.get("version") is None else int(job["version"]),
 
@@ -832,13 +850,13 @@ def _build_row(
 
 
 def _load_report_inputs(
-    report_date: datetime.date, scope_team_id: Optional[str]
+    start_date: datetime.date, end_date: datetime.date, scope_team_id: Optional[str]
 ) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
     """All Postgres reads for the report, on a worker thread (psycopg2 is sync)."""
     conn = get_db_connection()
     try:
         scope = _load_team_scope(conn, scope_team_id) if scope_team_id else None
-        jobs = _fetch_jobs_launched_on(conn, report_date, scope)
+        jobs = _fetch_jobs_launched_on(conn, start_date, scope, end_date)
         if not jobs:
             return [], {}, {}
 
@@ -863,10 +881,15 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
 @router.get("/launch-report")
 async def get_launch_report(
     date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; defaults to yesterday"),
+    start_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with end_date"),
+    end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with start_date"),
     team_id: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
 ):
-    """Daily PAIR launch report for jobs first launched on `date` (Eastern time).
+    """PAIR launch report for jobs first launched on `date`, or between
+    `start_date` and `end_date` inclusive (Eastern time). A single day is
+    just the range where start_date == end_date; `date` is kept for callers
+    that only ever want one day.
 
     - Admins: system-wide by default; pass ?team_id=... to scope to one team.
     - Team leads: always scoped to their own team (team_id is ignored).
@@ -882,24 +905,44 @@ async def get_launch_report(
             detail="Access denied. Admin or team lead access required to view the launch report.",
         )
 
-    if date:
+    yesterday = datetime.datetime.now(REPORT_TIMEZONE).date() - datetime.timedelta(days=1)
+
+    if start_date or end_date:
+        if not (start_date and end_date):
+            raise HTTPException(status_code=400, detail="Both start_date and end_date are required for a range.")
         try:
-            report_date = datetime.date.fromisoformat(date.strip())
+            report_start_date = datetime.date.fromisoformat(start_date.strip())
+            report_end_date = datetime.date.fromisoformat(end_date.strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start_date/end_date — expected YYYY-MM-DD.")
+        if report_start_date > report_end_date:
+            raise HTTPException(status_code=400, detail="start_date must not be after end_date.")
+        if report_end_date > yesterday:
+            raise HTTPException(status_code=400, detail="Today's report is not available yet — end_date must be yesterday or earlier.")
+        range_days = (report_end_date - report_start_date).days + 1
+        if range_days > MAX_LAUNCH_REPORT_RANGE_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Date range cannot exceed {MAX_LAUNCH_REPORT_RANGE_DAYS} days.",
+            )
+    elif date:
+        try:
+            report_start_date = report_end_date = datetime.date.fromisoformat(date.strip())
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid date {date!r} — expected YYYY-MM-DD.")
     else:
-        report_date = datetime.datetime.now(REPORT_TIMEZONE).date() - datetime.timedelta(days=1)
+        report_start_date = report_end_date = yesterday
 
     try:
         jobs, candidates_by_key, audit_by_key = await asyncio.to_thread(
-            _load_report_inputs, report_date, scope_team_id
+            _load_report_inputs, report_start_date, report_end_date, scope_team_id
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         # Full detail to the server log; the client gets a generic message so a
         # DB error string never reaches the browser.
-        logger.error(f"LAUNCH-REPORT: failed to load {report_date}: {e}", exc_info=True)
+        logger.error(f"LAUNCH-REPORT: failed to load {report_start_date}..{report_end_date}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to build the launch report.")
 
     # Fan out over every launched interview across every job in one pass, so
@@ -934,7 +977,10 @@ async def get_launch_report(
     return {
         "status": "success",
         "data": {
-            "report_date": report_date.isoformat(),
+            # report_date kept for callers that only ever requested one day.
+            "report_date": report_start_date.isoformat(),
+            "start_date": report_start_date.isoformat(),
+            "end_date": report_end_date.isoformat(),
             "timezone": str(REPORT_TIMEZONE),
             "generated_at": _edt(datetime.datetime.now(datetime.timezone.utc)),
             "team_id": scope_team_id,

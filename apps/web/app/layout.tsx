@@ -40,9 +40,9 @@ export default function RootLayout({
             </AIProvider>
           </AuthGuard>
         </MsalProviderWrapper>
+        {/* New Relic Browser agent (self-gates to pair.pyramidci.com; no-op elsewhere) */}
+        <Script src="/newrelic-browser-agent.js" strategy="beforeInteractive" />
       </body>
-      {/* New Relic Browser agent (self-gates to pair.pyramidci.com; no-op elsewhere) */}
-      <Script src="/newrelic-browser-agent.js" strategy="beforeInteractive" />
     </html>
   );
 }
