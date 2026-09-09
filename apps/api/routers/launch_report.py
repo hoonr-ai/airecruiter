@@ -285,10 +285,7 @@ def _fetch_jobs_launched_on(
     Keyed on first launch rather than "any launch that day" so a job appears
     exactly once, on the day it went live, however long it keeps launching.
     """
-    single_day_query = end_date is None or isinstance(end_date, dict)
-    if isinstance(end_date, dict):
-        scope = end_date
-
+    single_day_query = end_date is None
     if single_day_query:
         end_date = start_date
 
