@@ -569,6 +569,7 @@ export function CampaignForm({
           <ScreeningQuestionsEditor
             questions={questions}
             onChange={setQuestions}
+            isBooleanMode={screeningLevel === "L0.5"}
           />
         </div>
       </div>

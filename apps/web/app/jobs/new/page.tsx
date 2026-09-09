@@ -65,7 +65,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+import { cn, getQuestionFilterType } from "@/lib/utils";
+import { QuestionFilterBadge } from "@/components/QuestionFilterBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -7240,6 +7241,16 @@ function NewJobPageContent() {
                     role-specific
                   </span>
                 )}
+                <QuestionFilterBadge
+                  filterType={getQuestionFilterType(
+                    q.question_text ?? "",
+                    q.pass_criteria ?? "",
+                    q.category ?? "",
+                    q.order_index ?? index + 1,
+                    screeningLevel === "L0.5",
+                    Boolean(q.is_hard_filter)
+                  )}
+                />
                 <button
                   onClick={() => deleteScreenQuestion(q.id)}
                   className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"

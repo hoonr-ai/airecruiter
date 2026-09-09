@@ -523,37 +523,30 @@ def _sanitize_pre_screen_questions_for_pair(
         if len(category) > 50:
             category = category[:50].rstrip()
 
-        is_hard_filter = bool(q.get("is_hard_filter", False))
-
-        # Auto-promote compensation and work-arrangement questions to hard
-        # filters whenever the recruiter has set an explicit pass criterion.
-        #
-        # Scope: ONLY front-matter questions (is_default=True OR category
-        # is default/logistics/work-arrangement). This prevents role-specific questions that
-        # happen to mention W2 or pay ranges from being silently promoted.
-        # The recruiter's act of filling in pass_criteria on Q5/Q6 signals
-        # knockout intent — a blank pass_criteria means informational only.
+        is_hard_filter_in_db = bool(q.get("is_hard_filter", False))
+        has_pass_criteria = bool(pass_criteria)
         is_front_matter = bool(q.get("is_default")) or category.lower() in ("default", "logistics", "work-arrangement")
-        is_comp_arr_text = _is_compensation_or_work_arrangement_question(text)
-        
-        auto_promoted = False
-        if pass_criteria and is_front_matter and is_comp_arr_text:
-            is_hard_filter = True
-            auto_promoted = True
 
-        # PRESERVE HISTORICAL PAIRBOT BUG: Pairbot historically ignored hard filters for Q10+
-        # User wants this ignorance to continue for L1/L2, but be respected for L0.5.
+        q_lower = text.lower()
+        is_new_opps = _PHRASE_NEW_OPPS in q_lower
+        is_onsite_hybrid = any(p in q_lower for p in _PHRASES_ONSITE_HYBRID)
+
         q_order = int(q.get("order_index", 0) or 0)
-        # Compare case-insensitively: _enforce_boolean_pre_screen_questions lowercases
-        # before the same check, so a capitalized stored category (e.g. "Default") would
-        # otherwise make the two functions disagree about what is role-specific.
         is_role_specific = q_order > 9 or category.lower() not in ("default", "logistics", "work-arrangement")
 
-        # Only zero out hard-filter for role-specific questions that were NOT
-        # auto-promoted above (compensation/work-arrangement are never role-specific
-        # in the slot sense, but belt-and-suspenders: skip the zero-out if the
-        # flag was just promoted by the recruiter-criteria check).
-        if not boolean_mode and is_role_specific and not auto_promoted:
+        # Dynamic Hard Filter Logic
+        # - Always-on questions (new-opps, onsite/hybrid) → unconditionally True
+        # - Other front-matter questions → True iff recruiter provided pass_criteria
+        # - Non-front-matter (role-specific) in boolean mode → honour the DB flag
+        # - Non-front-matter in non-boolean mode → these are scored interview questions
+        if is_new_opps or is_onsite_hybrid:
+            is_hard_filter = True
+        elif is_front_matter:
+            is_hard_filter = has_pass_criteria
+        elif boolean_mode:
+            # Role-specific boolean questions keep their pre-calculated hard filter flag
+            is_hard_filter = is_hard_filter_in_db
+        else:
             is_hard_filter = False
 
         sanitized.append({
@@ -571,6 +564,20 @@ def _is_yes_no_question(text: str) -> bool:
     normalized = (text or "").strip().lower()
     return normalized.startswith(("are ", "do ", "does ", "did ", "have ", "has ", "is ", "can ", "will ", "would "))
 
+
+# ---------------------------------------------------------------------------
+# Always-on hard-filter detection phrases
+# These phrases identify questions that are unconditionally knockout criteria
+# regardless of whether the recruiter supplies a pass_criteria value.
+# Centralised here so that any wording change to the question templates only
+# needs to be updated in one place (backend + shared with frontend via docs).
+# ---------------------------------------------------------------------------
+_PHRASE_NEW_OPPS = "exploring new job opportunities"
+_PHRASES_ONSITE_HYBRID = (
+    "follows an onsite",
+    "hybrid work arrangement",
+    "onsite work arrangement",
+)
 
 _ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role"
 
