@@ -140,6 +140,10 @@ interface LinkedInAccount {
   last_error: string;
   /** Live Unipile workspace status ("OK", "CREDENTIALS", "DETACHED", ...) — only present on the /admin/linkedin-accounts live view. */
   status?: string;
+  /** Which LinkedIn search API last worked on this account: "recruiter", or "classic" when the account has no Recruiter seat. */
+  search_api?: "recruiter" | "classic" | string | null;
+  /** True when the LinkedIn session is gone (logged out elsewhere, expired, checkpoint) and someone must reconnect it in Unipile. */
+  needs_reconnect?: boolean;
 }
 
 interface AnalyticsData {
@@ -2433,19 +2437,41 @@ export default function AdminAnalyticsPage() {
                     const coolingDown =
                       !!acc.cooldown_until &&
                       new Date(acc.cooldown_until).getTime() > Date.now();
-                    let chipText = "In rotation";
-                    let chipClass =
-                      "bg-emerald-50 text-emerald-700 border border-emerald-200";
-                    if (coolingDown) {
+                    const classicMode = acc.search_api === "classic";
+                    let chipText = classicMode
+                      ? "In rotation · classic search"
+                      : "In rotation";
+                    let chipClass = classicMode
+                      ? "bg-sky-50 text-sky-700 border border-sky-200"
+                      : "bg-emerald-50 text-emerald-700 border border-emerald-200";
+                    let chipTitle: string | undefined = classicMode
+                      ? "No LinkedIn Recruiter seat on this account — searches use LinkedIn classic people search (10 per page, up to 50 per search)."
+                      : undefined;
+                    if (acc.status === "DETACHED") {
+                      chipText = "Detached";
+                      chipClass =
+                        "bg-slate-100 text-slate-600 border border-slate-200";
+                      chipTitle = "No longer attached to the Unipile workspace.";
+                    } else if (acc.needs_reconnect) {
+                      // LinkedIn logged the seat out (opened elsewhere), the
+                      // session expired, or a checkpoint is pending. Only a
+                      // human can fix this: reconnect the account in Unipile.
+                      chipText = acc.status && acc.status !== "OK"
+                        ? `Needs reconnect · ${acc.status}`
+                        : "Needs reconnect";
+                      chipClass =
+                        "bg-rose-50 text-rose-700 border border-rose-200";
+                      chipTitle =
+                        "LinkedIn session is gone for this account. Reconnect it in the Unipile dashboard; rotation skips it meanwhile.";
+                    } else if (coolingDown) {
                       chipText = "Cooling down";
                       chipClass =
                         "bg-amber-50 text-amber-700 border border-amber-200";
+                      chipTitle = `Benched after a transient error until ${formatDate(acc.cooldown_until)}`;
                     } else if (acc.status && acc.status !== "OK") {
                       chipText = acc.status;
                       chipClass =
-                        acc.status === "DETACHED"
-                          ? "bg-slate-100 text-slate-600 border border-slate-200"
-                          : "bg-rose-50 text-rose-700 border border-rose-200";
+                        "bg-rose-50 text-rose-700 border border-rose-200";
                     }
 
                     return (
@@ -2464,11 +2490,7 @@ export default function AdminAnalyticsPage() {
                         <td className="py-3.5 px-6">
                           <span
                             className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${chipClass}`}
-                            title={
-                              coolingDown
-                                ? `Until ${formatDate(acc.cooldown_until)}`
-                                : undefined
-                            }
+                            title={chipTitle}
                           >
                             {chipText}
                           </span>

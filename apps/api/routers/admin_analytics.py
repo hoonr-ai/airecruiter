@@ -639,12 +639,39 @@ async def get_admin_linkedin_accounts(user: UserIdentity = Depends(get_current_u
         logger.warning(f"Unipile usage table unavailable: {e}")
         usage = []
 
+    # Unipile error types that mean "a human must reconnect this LinkedIn
+    # account in the Unipile dashboard" — LinkedIn logged the seat out
+    # (multiple_sessions), the session expired, or a checkpoint is pending.
+    _RECONNECT_MARKERS = (
+        "disconnected_account", "multiple_session", "credentials",
+        "checkpoint", "expired", "invalid account",
+    )
+    # ...and the ones that mean "this account has no Recruiter seat" — the
+    # search falls back to LinkedIn classic people search on it.
+    _NO_SEAT_MARKERS = ("feature_not_subscribed", "feature_not_available", "insufficient_permissions")
+
+    def _annotate(row: Dict[str, Any], live_status: str) -> Dict[str, Any]:
+        err = str(row.get("last_error") or "").lower()
+        status = (live_status or "").upper()
+        row["needs_reconnect"] = bool(
+            (status and status not in ("OK", "DETACHED"))
+            or any(m in err for m in _RECONNECT_MARKERS)
+        )
+        # `search_api` is what last WORKED (set on success, which also
+        # clears last_error); a stale 403 with no success yet reads as
+        # classic too, since that is what the next search will do.
+        api = str(row.get("search_api") or "").lower()
+        if not api and any(m in err for m in _NO_SEAT_MARKERS):
+            api = "classic"
+        row["search_api"] = api or None
+        return row
+
     usage_by_id = {u["account_id"]: u for u in usage}
     merged: List[Dict[str, Any]] = []
     seen = set()
     for acc in live:
         u = usage_by_id.get(acc["id"], {})
-        merged.append({
+        merged.append(_annotate({
             "account_id": acc["id"],
             "account_name": acc.get("name") or u.get("account_name") or "",
             "status": acc.get("status") or "",
@@ -652,12 +679,13 @@ async def get_admin_linkedin_accounts(user: UserIdentity = Depends(get_current_u
             "last_used_at": u.get("last_used_at"),
             "cooldown_until": u.get("cooldown_until"),
             "last_error": u.get("last_error", ""),
-        })
+            "search_api": u.get("search_api"),
+        }, acc.get("status") or ""))
         seen.add(acc["id"])
     # Accounts with usage history that are no longer attached to the workspace
     for u in usage:
         if u["account_id"] not in seen:
-            merged.append({**u, "status": "DETACHED"})
+            merged.append(_annotate({**u, "status": "DETACHED"}, "DETACHED"))
 
     return {"status": "success", "data": {"accounts": merged}}
 
