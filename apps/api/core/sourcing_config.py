@@ -312,6 +312,27 @@ UNIPILE_SEARCH_LIMIT = 100
 # LinkedIn's ranking. Enforced in unipile_service._search_candidates_once.
 UNIPILE_MUST_HAVE_SKILL_CAP = 2
 
+# LinkedIn *classic* people search is the fallback for attached accounts
+# WITHOUT a Recruiter seat — Unipile answers their Recruiter-mode search with
+# 403 errors/feature_not_subscribed (PROD 2026-09-09: two of five accounts).
+# LinkedIn caps classic pages at 10 rows; we page by cursor up to this many
+# rows per search. Enforced in unipile_service._search_classic_once.
+UNIPILE_CLASSIC_SEARCH_LIMIT = 50
+UNIPILE_CLASSIC_PAGE_SIZE = 10
+
+# On a Unipile-side 5xx (500 errors/unexpected_error) or upstream timeout
+# (504 errors/request_timeout) the Recruiter search is retried ONCE on the
+# same account with this page size before the account is benched. A 100-row
+# Recruiter page is four upstream LinkedIn calls; that is what timed out on
+# both PROD seat-holding accounts on 2026-09-09.
+UNIPILE_5XX_RETRY_LIMIT = 25
+
+# How long (seconds) an account is remembered as "no Recruiter seat" so it
+# goes straight to classic search instead of burning a Recruiter attempt (and
+# a 30-minute bench) on every search. Per worker; a newly bought seat is
+# picked up when this lapses.
+UNIPILE_NO_RECRUITER_TTL_S = 24 * 3600
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # CandidatesDetail batch — concurrency + retry
