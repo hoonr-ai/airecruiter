@@ -18,9 +18,11 @@ Postgres. The full statements were separately validated against a scratch
 Postgres when written.
 """
 import datetime
+import asyncio
 
 import pytest
 
+from core.auth import UserIdentity
 from routers import launch_report as lr
 
 
@@ -520,6 +522,70 @@ def test_version_is_surfaced_and_defaults_to_one():
     assert lr._build_row({**_job(0), "version": 2}, [], [], {})["version"] == 2
     assert lr._build_row({**_job(0), "version": None}, [], [], {})["version"] == 1
     assert lr._build_row(_job(0), [], [], {})["version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Request validation
+# ---------------------------------------------------------------------------
+def _admin_user() -> UserIdentity:
+    return UserIdentity(email="admin@example.com", role="admin")
+
+
+def test_launch_report_rejects_ranges_over_the_server_cap_before_db(monkeypatch):
+    called = False
+
+    def _fail_if_called(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("range validation must run before DB reads")
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _fail_if_called)
+
+    with pytest.raises(lr.HTTPException) as exc:
+        asyncio.run(
+            lr.get_launch_report(
+                date=None,
+                start_date="2026-01-01",
+                end_date="2026-02-01",
+                team_id=None,
+                user=_admin_user(),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert str(lr.MAX_LAUNCH_REPORT_RANGE_DAYS) in exc.value.detail
+    assert called is False
+
+
+def test_launch_report_accepts_range_at_the_server_cap(monkeypatch):
+    captured = {}
+
+    def _load_inputs(start_date, end_date, scope_team_id):
+        captured["dates"] = (start_date, end_date)
+        captured["scope_team_id"] = scope_team_id
+        return [], {}, {}
+
+    async def _no_outreach(_interview_ids):
+        return {}
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _no_outreach)
+
+    end_date = datetime.date(2026, 2, 1)
+    start_date = end_date - datetime.timedelta(days=lr.MAX_LAUNCH_REPORT_RANGE_DAYS - 1)
+    response = asyncio.run(
+        lr.get_launch_report(
+            date=None,
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            team_id=None,
+            user=_admin_user(),
+        )
+    )
+
+    assert response["status"] == "success"
+    assert captured["dates"] == (start_date, end_date)
+    assert captured["scope_team_id"] is None
 
 
 # ---------------------------------------------------------------------------
