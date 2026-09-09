@@ -66,6 +66,7 @@ EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pa
 _OUTREACH_CONCURRENCY = int(os.getenv("LAUNCH_REPORT_OUTREACH_CONCURRENCY", "8"))
 _OUTREACH_TIMEOUT_S = float(os.getenv("LAUNCH_REPORT_OUTREACH_TIMEOUT", "10"))
 _OUTREACH_BUDGET_S = float(os.getenv("LAUNCH_REPORT_OUTREACH_BUDGET", "120"))
+MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31"))
 
 # Status buckets. Both Pending/InProgress/Completed AND Partial Complete are
 # read off pair-bot's own `outreach_status` so the four buckets partition the
@@ -272,7 +273,10 @@ def _eastern_date_expr(col: str) -> str:
 
 
 def _fetch_jobs_launched_on(
-    conn, start_date: datetime.date, end_date: datetime.date, scope: Optional[Dict[str, Any]]
+    conn,
+    start_date: datetime.date,
+    scope: Optional[Dict[str, Any]] = None,
+    end_date: Optional[datetime.date] = None,
 ) -> List[Dict[str, Any]]:
     """Jobs whose FIRST launch (MIN of engage_interview_audit.created_at) falls
     between `start_date` and `end_date` (inclusive) in Eastern time. A single
@@ -281,7 +285,16 @@ def _fetch_jobs_launched_on(
     Keyed on first launch rather than "any launch that day" so a job appears
     exactly once, on the day it went live, however long it keeps launching.
     """
+    single_day_query = end_date is None or isinstance(end_date, dict)
+    if isinstance(end_date, dict):
+        scope = end_date
+
+    if single_day_query:
+        end_date = start_date
+
     mj_cond, mj_params = _mj_filter(scope, "mj")
+    launch_date_expr = _eastern_date_expr('l.first_launch_at')
+    launch_date_filter = f"{launch_date_expr} = %s" if single_day_query else f"{launch_date_expr} BETWEEN %s AND %s"
     sql = f"""
         WITH launches AS (
             SELECT
@@ -324,10 +337,12 @@ def _fetch_jobs_launched_on(
             l.total_launched
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
-        WHERE {_eastern_date_expr('l.first_launch_at')} BETWEEN %s AND %s
+        WHERE {launch_date_filter}
         ORDER BY l.first_launch_at ASC
     """
-    params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date, end_date]
+    params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date]
+    if not single_day_query:
+        params.append(end_date)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
@@ -844,7 +859,7 @@ def _load_report_inputs(
     conn = get_db_connection()
     try:
         scope = _load_team_scope(conn, scope_team_id) if scope_team_id else None
-        jobs = _fetch_jobs_launched_on(conn, start_date, end_date, scope)
+        jobs = _fetch_jobs_launched_on(conn, start_date, scope, end_date)
         if not jobs:
             return [], {}, {}
 
@@ -907,6 +922,12 @@ async def get_launch_report(
             raise HTTPException(status_code=400, detail="start_date must not be after end_date.")
         if report_end_date > yesterday:
             raise HTTPException(status_code=400, detail="Today's report is not available yet — end_date must be yesterday or earlier.")
+        range_days = (report_end_date - report_start_date).days + 1
+        if range_days > MAX_LAUNCH_REPORT_RANGE_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Date range cannot exceed {MAX_LAUNCH_REPORT_RANGE_DAYS} days.",
+            )
     elif date:
         try:
             report_start_date = report_end_date = datetime.date.fromisoformat(date.strip())

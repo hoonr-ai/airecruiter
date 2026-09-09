@@ -81,6 +81,14 @@ interface LaunchReportData {
   };
 }
 
+const MAX_LAUNCH_REPORT_RANGE_DAYS = 31;
+
+function inclusiveDateSpanDays(start: string, end: string): number {
+  const startTime = Date.parse(`${start}T00:00:00Z`);
+  const endTime = Date.parse(`${end}T00:00:00Z`);
+  return Math.floor((endTime - startTime) / (24 * 60 * 60 * 1000)) + 1;
+}
+
 /** Yesterday's calendar date in Eastern time, as YYYY-MM-DD. */
 function yesterdayEastern(): string {
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -354,6 +362,10 @@ export default function LaunchReportPage() {
       setError("Start date must not be after the end date.");
       return;
     }
+    if (isRange && inclusiveDateSpanDays(selectedDate, end) > MAX_LAUNCH_REPORT_RANGE_DAYS) {
+      setError(`Date range cannot exceed ${MAX_LAUNCH_REPORT_RANGE_DAYS} days.`);
+      return;
+    }
     setIsLoading(true);
     setError(null);
     setRequestedRange({ start: selectedDate, end });
@@ -508,6 +520,7 @@ export default function LaunchReportPage() {
                 lang="en-US"
                 value={selectedEndDate}
                 max={maxDate}
+                min={selectedDate}
                 required
                 onChange={(e) => {
                   setError(null);
@@ -548,7 +561,8 @@ export default function LaunchReportPage() {
           )}
         </span>. Dates and times
         are Eastern (EDT/EST), so a job launched late in the evening belongs to that day rather than the next. Interview
-        status, channel, phase and response columns are read live from PAIR Bot.
+        status, channel, phase and response columns are read live from PAIR Bot. Date ranges are limited to{" "}
+        {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
 
       {error && (
