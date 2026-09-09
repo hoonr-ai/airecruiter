@@ -528,33 +528,26 @@ def _sanitize_pre_screen_questions_for_pair(
         is_front_matter = bool(q.get("is_default")) or category.lower() in ("default", "logistics", "work-arrangement")
 
         q_lower = text.lower()
-        is_new_opps = "exploring new job opportunities" in q_lower
-        is_onsite_hybrid = "follows an onsite" in q_lower or "hybrid work arrangement" in q_lower or "onsite work arrangement" in q_lower
-        is_comp_arr = _is_compensation_or_work_arrangement_question(text) and is_front_matter
-        is_auth = "authorized to work indefinitely" in q_lower and is_front_matter
-        is_sponsor = "require visa sponsorship" in q_lower and is_front_matter
-        
+        is_new_opps = _PHRASE_NEW_OPPS in q_lower
+        is_onsite_hybrid = any(p in q_lower for p in _PHRASES_ONSITE_HYBRID)
+
         q_order = int(q.get("order_index", 0) or 0)
         is_role_specific = q_order > 9 or category.lower() not in ("default", "logistics", "work-arrangement")
 
         # Dynamic Hard Filter Logic
-        if boolean_mode:
-            if is_new_opps or is_onsite_hybrid:
-                is_hard_filter = True
-            elif is_front_matter:
-                is_hard_filter = has_pass_criteria
-            elif is_role_specific:
-                # Role-specific boolean questions retain their pre-calculated hard filter flag
-                is_hard_filter = is_hard_filter_in_db
-            else:
-                is_hard_filter = False
+        # - Always-on questions (new-opps, onsite/hybrid) → unconditionally True
+        # - Other front-matter questions → True iff recruiter provided pass_criteria
+        # - Non-front-matter (role-specific) in boolean mode → honour the DB flag
+        # - Non-front-matter in non-boolean mode → these are scored interview questions
+        if is_new_opps or is_onsite_hybrid:
+            is_hard_filter = True
+        elif is_front_matter:
+            is_hard_filter = has_pass_criteria
+        elif boolean_mode:
+            # Role-specific boolean questions keep their pre-calculated hard filter flag
+            is_hard_filter = is_hard_filter_in_db
         else:
-            if is_new_opps or is_onsite_hybrid:
-                is_hard_filter = True
-            elif is_front_matter:
-                is_hard_filter = has_pass_criteria
-            else:
-                is_hard_filter = False
+            is_hard_filter = False
 
         sanitized.append({
             "question_text": text,
@@ -571,6 +564,20 @@ def _is_yes_no_question(text: str) -> bool:
     normalized = (text or "").strip().lower()
     return normalized.startswith(("are ", "do ", "does ", "did ", "have ", "has ", "is ", "can ", "will ", "would "))
 
+
+# ---------------------------------------------------------------------------
+# Always-on hard-filter detection phrases
+# These phrases identify questions that are unconditionally knockout criteria
+# regardless of whether the recruiter supplies a pass_criteria value.
+# Centralised here so that any wording change to the question templates only
+# needs to be updated in one place (backend + shared with frontend via docs).
+# ---------------------------------------------------------------------------
+_PHRASE_NEW_OPPS = "exploring new job opportunities"
+_PHRASES_ONSITE_HYBRID = (
+    "follows an onsite",
+    "hybrid work arrangement",
+    "onsite work arrangement",
+)
 
 _ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role"
 

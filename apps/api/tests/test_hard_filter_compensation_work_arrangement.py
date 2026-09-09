@@ -430,3 +430,28 @@ class TestSanitizeAutoPromotesCompWorkArrangement:
             boolean_mode=False,
         )
         assert result[0]["is_hard_filter"] is False
+
+class TestUnconditionalHardFilters:
+    def test_new_opps_is_always_hard_filter(self):
+        questions = [
+            {
+                "id": "q1",
+                "question_text": "Are you exploring new job opportunities?",
+                "is_default": True,
+                "category": "default",
+            }
+        ]
+        result = _sanitize_pre_screen_questions_for_pair(questions, boolean_mode=False)
+        assert result[0]["is_hard_filter"] is True
+
+    def test_onsite_hybrid_is_always_hard_filter(self):
+        questions = [
+            {
+                "id": "q1",
+                "question_text": "This role follows an onsite work arrangement.",
+                "is_default": True,
+                "category": "work-arrangement",
+            }
+        ]
+        result = _sanitize_pre_screen_questions_for_pair(questions, boolean_mode=False)
+        assert result[0]["is_hard_filter"] is True
