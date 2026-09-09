@@ -206,6 +206,13 @@ def _midnight_eastern(day: Optional[datetime.date]) -> Optional[datetime.datetim
     return datetime.datetime.combine(day, datetime.time.min, tzinfo=REPORT_TIMEZONE)
 
 
+def _eastern_date(dt: Optional[datetime.datetime]) -> Optional[datetime.date]:
+    """Calendar date of a timestamp in report timezone."""
+    if dt is None:
+        return None
+    return dt.astimezone(REPORT_TIMEZONE).date()
+
+
 def _mean(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 1) if values else None
 
@@ -759,7 +766,15 @@ def _build_row(
     pair_published_at = _parse_monitored_jobs_timestamp(job.get("job_created_at_text"))
     launch_at = _parse_iso(job.get("first_launch_at"))
     jobdiva_published = _parse_posted_date(job.get("posted_date"))
-    total_launched = int(job.get("total_launched") or 0)
+    # Day-scoped truth: one unique launched interview per audit row on that
+    # launch day. Using this avoids lifetime-count inflation in range mode.
+    total_launched = len(
+        {
+            str(a.get("interview_id") or "").strip()
+            for a in audit_rows
+            if str(a.get("interview_id") or "").strip()
+        }
+    )
 
     buckets = outreach["buckets"]
     # Percentage = (Completed + Partial Complete) / Total Launched * 100.
@@ -952,9 +967,25 @@ async def get_launch_report(
     for job in jobs:
         rows = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
         # A job matched under both keys yields the same interview twice.
-        deduped = {str(r["interview_id"]): r for r in rows}
-        audit_by_job[str(job["job_id"])] = list(deduped.values())
-        interview_ids.extend(deduped.keys())
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            iid = str(row.get("interview_id") or "").strip()
+            if iid:
+                deduped[iid] = row
+
+        # Scoped to the requested report range rather than only the job's
+        # first-launch day, so later-day launches show up on their own report
+        # instead of vanishing (the job's row is keyed on first-launch day,
+        # but its later launches still fall inside a range that includes them).
+        day_rows = [
+            row
+            for row in deduped.values()
+            if (created_date := _eastern_date(_parse_iso(row.get("created_at")))) is not None
+            and report_start_date <= created_date <= report_end_date
+        ]
+
+        audit_by_job[str(job["job_id"])] = day_rows
+        interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
 
     outreach_by_interview = await _fetch_all_outreach(sorted(set(interview_ids)))
 

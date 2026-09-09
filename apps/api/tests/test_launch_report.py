@@ -266,6 +266,57 @@ def test_percentage_uses_full_launched_count_when_partially_resolved():
     assert (row["outreach_detail_resolved"], row["outreach_detail_expected"]) == (1, 4)
 
 
+def test_total_candidates_launched_uses_day_scoped_audit_rows_not_sql_lifetime_count():
+    """Range mode must not inherit a lifetime launch count into one day."""
+    audit = [{"interview_id": "1"}, {"interview_id": "2"}, {"interview_id": "2"}]
+    row = lr._build_row(
+        _job(999),
+        [],
+        audit,
+        {"1": _outreach("completed"), "2": _outreach("pending")},
+    )
+    assert row["total_candidates_launched"] == 2
+    assert row["percentage"] == 50.0
+
+
+def test_launch_report_filters_audit_rows_to_the_jobs_first_launch_day(monkeypatch):
+    captured = {}
+
+    first_launch = datetime.datetime(2026, 8, 28, 2, 2)  # 2026-08-27 in Eastern
+    jobs = [{**_job(999), "job_id": "55", "jobdiva_id": "26-01234", "first_launch_at": first_launch}]
+    audit_by_key = {
+        "26-01234": [
+            {"interview_id": "same-day", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "response": None},
+            {"interview_id": "next-day", "created_at": datetime.datetime(2026, 8, 29, 2, 10), "response": None},
+        ]
+    }
+
+    def _load_inputs(_start_date, _end_date, _scope_team_id):
+        return jobs, {}, audit_by_key
+
+    async def _fake_outreach(interview_ids):
+        captured["ids"] = sorted(interview_ids)
+        return {iid: _outreach("completed") for iid in interview_ids}
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _fake_outreach)
+
+    response = asyncio.run(
+        lr.get_launch_report(
+            date=None,
+            start_date="2026-08-27",
+            end_date="2026-08-27",
+            team_id=None,
+            user=_admin_user(),
+        )
+    )
+
+    row = response["data"]["jobs"][0]
+    assert captured["ids"] == ["same-day"]
+    assert row["outreach_detail_expected"] == 1
+    assert row["total_candidates_launched"] == 1
+
+
 # ---------------------------------------------------------------------------
 # outreach aggregation
 # ---------------------------------------------------------------------------
