@@ -6494,6 +6494,24 @@ class UnifiedCandidateSearch:
         if profile_location and str(profile_location).strip():
             extracted["location"] = str(profile_location).strip()
 
+        # Public vanity URL from the full profile. Recruiter search rows
+        # occasionally lack `public_profile_url` (~2%); the profile payload
+        # usually has it (or the bare `public_identifier` slug). Only a
+        # public `/in/` URL is ever written — the Recruiter deep link is
+        # RPS-only and lives in `recruiter_profile_url`.
+        _public = str(profile.get("public_profile_url") or "").strip()
+        if not _public:
+            _ident = str(profile.get("public_identifier") or "").strip().strip("/")
+            if _ident and "/" not in _ident and " " not in _ident:
+                _public = f"https://www.linkedin.com/in/{_ident}"
+        if "linkedin.com/in/" in _public.lower():
+            extracted["profile_url"] = _public
+
+        # Positive open-to-work signal from the profile itself; absence is
+        # left unset so the Apify resolver still runs for the row.
+        if profile.get("is_open_to_work") is True:
+            extracted["open_to_work"] = True
+
         # Extract experience (Unipile has been observed to use both
         # `experience` and `work_experience` for LinkedIn payloads)
         experience = (
@@ -6527,7 +6545,7 @@ class UnifiedCandidateSearch:
                 edu_list.append({
                     "degree": edu.get("degree", edu.get("degree_name", "")),
                     "institution": edu.get("school", edu.get("institution", "")),
-                    "year": edu.get("end_date", edu.get("year", ""))
+                    "year": edu.get("end_date", edu.get("end", edu.get("year", "")))
                 })
             extracted["candidate_education"] = edu_list
         
@@ -6543,8 +6561,10 @@ class UnifiedCandidateSearch:
             for cert in certifications:
                 cert_list.append({
                     "name": cert.get("name", cert.get("certification_name", "")),
-                    "issuer": cert.get("authority", cert.get("issuer", "")),
-                    "year": cert.get("issue_date", cert.get("year", ""))
+                    # Unipile's `linkedin_sections=*` payload names the
+                    # issuer `organization`.
+                    "issuer": cert.get("authority", cert.get("issuer", cert.get("organization", ""))),
+                    "year": cert.get("issue_date", cert.get("start", cert.get("year", "")))
                 })
             extracted["candidate_certification"] = cert_list
         

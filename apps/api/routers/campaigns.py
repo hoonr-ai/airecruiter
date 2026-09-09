@@ -785,7 +785,19 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 for i, s in enumerate(active_rubric.get("skills") or [])
             ]
             sourcing_payload = {
-                "sources": {"jobdiva": True, "linkedin": False, "dice": False, "exa": False},
+                # Mirror the wizard's Step-5 defaults (web/lib/search-sources.ts):
+                # both JobDiva pools, LinkedIn (Unipile) and Exa on, Dice off.
+                # The old seed turned LinkedIn and Exa off for every child job.
+                # `sources_version` marks these as real values so the wizard's
+                # legacy-draft migration doesn't reinterpret them.
+                "sources": {
+                    "jobdiva_agent": True,
+                    "jobdiva_talent": True,
+                    "linkedin": True,
+                    "dice": False,
+                    "exa": True,
+                },
+                "sources_version": 2,
                 "titles": titles,
                 "skills": skills,
                 "locations": [],
