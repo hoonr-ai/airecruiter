@@ -371,9 +371,10 @@ class UnipileService:
         if first_name or last_name:
             return f"{first_name} {last_name}".strip()
 
-        derived_name = self._derive_name_from_profile_url(
-            item.get("profile_url") or item.get("public_profile_url")
-        )
+        # Only the PUBLIC vanity URL carries a name slug. The recruiter-mode
+        # `profile_url` is `/talent/search/profile/<AEMAA… hash>`, which used
+        # to be fed here and rendered opaque hashes as candidate names.
+        derived_name = self._derive_name_from_profile_url(self._public_profile_url(item))
         if derived_name:
             return derived_name
 
@@ -394,6 +395,43 @@ class UnipileService:
             return f"LinkedIn Professional {str(provider_id)[:8]}"
 
         return "LinkedIn Candidate"
+
+    @staticmethod
+    def _is_public_linkedin_url(url: Optional[str]) -> bool:
+        return "linkedin.com/in/" in str(url or "").strip().lower()
+
+    def _public_profile_url(self, item: Dict[str, Any]) -> Optional[str]:
+        """Public vanity URL (``linkedin.com/in/<slug>``) for a search or
+        profile row, or None when the row has none (~2% of recruiter rows).
+
+        Recruiter-mode rows put it under ``public_profile_url`` (or expose
+        just the slug as ``public_identifier``); their ``profile_url`` is a
+        Recruiter deep link that needs an RPS seat and is never returned
+        here — see :py:meth:`_recruiter_profile_url`.
+        """
+        if not isinstance(item, dict):
+            return None
+        for key in ("public_profile_url", "public_url"):
+            url = str(item.get(key) or "").strip()
+            if self._is_public_linkedin_url(url):
+                return url
+        ident = str(item.get("public_identifier") or "").strip().strip("/")
+        if ident and "/" not in ident and " " not in ident:
+            return f"https://www.linkedin.com/in/{ident}"
+        url = str(item.get("profile_url") or "").strip()
+        if self._is_public_linkedin_url(url):
+            return url
+        return None
+
+    def _recruiter_profile_url(self, item: Dict[str, Any]) -> Optional[str]:
+        """The RPS-only Recruiter deep link, when the row's ``profile_url``
+        is one (i.e. not a public ``/in/`` URL)."""
+        if not isinstance(item, dict):
+            return None
+        url = str(item.get("profile_url") or "").strip()
+        if url and not self._is_public_linkedin_url(url):
+            return url
+        return None
 
     def _split_candidate_name(self, full_name: str) -> tuple[str, str]:
         cleaned = re.sub(r"\s+", " ", str(full_name or "")).strip()
@@ -750,8 +788,36 @@ class UnipileService:
                         
                         # Handle potential nulls and field variations from docs
                         img_url = item.get("img") or item.get("profile_picture_url")
-                        p_url = item.get("profile_url") or item.get("public_profile_url")
-                        
+                        # Recruiter-mode rows carry TWO links: `profile_url` is a
+                        # Recruiter deep link (`/talent/search/profile/<hash>`)
+                        # that only an RPS seat can open, and
+                        # `public_profile_url` / `public_identifier` is the real
+                        # vanity URL. Everything downstream — the Step-5 link,
+                        # Apify open-to-work, ZoomInfo/Apollo/Exa contact
+                        # enrichment (all keyed on `linkedin.com/in/`), cross-
+                        # source dedup — needs the PUBLIC one. Preferring the
+                        # RPS link here paywalled every candidate and silently
+                        # disabled every URL-keyed enricher for Unipile rows.
+                        public_url = self._public_profile_url(item)
+                        recruiter_url = self._recruiter_profile_url(item)
+                        # Search rows already list endorsed skills; carry them
+                        # so a row has skill signal even when the profile
+                        # fetch later fails. Same {"name": ...} shape the
+                        # profile enrichment produces.
+                        row_skills = []
+                        for _s in item.get("skills") or []:
+                            _name = _s.get("name") if isinstance(_s, dict) else _s
+                            _name = str(_name or "").strip()
+                            if _name:
+                                row_skills.append({"name": _name})
+                        # Recruiter rows expose the badge as an interest flag.
+                        # Only a positive signal is trusted: absence is left
+                        # unset so the Apify resolver still runs for it.
+                        _interests = item.get("interests") or []
+                        _open_to_work = isinstance(_interests, list) and any(
+                            str(_i or "").strip().upper() == "OPEN_TO_WORK" for _i in _interests
+                        )
+
                         cand = {
                             "id": f"unipile_{c_id}",
                             "provider_id": c_id,
@@ -772,7 +838,10 @@ class UnipileService:
                             "title": item.get("headline", ""),
                             "source": "LinkedIn-Unipile",
                             "match_score": 0,
-                            "profile_url": p_url,
+                            "profile_url": public_url or "",
+                            # RPS-only deep link, kept for seat holders; never
+                            # used as the candidate's identity.
+                            "recruiter_profile_url": recruiter_url,
                             "image_url": img_url,
                             # `open_to_work` is intentionally left unset here.
                             # It used to be hardcoded to the request-level flag
@@ -789,6 +858,10 @@ class UnipileService:
                             # messaging reuse this account.
                             "unipile_account_id": account_id,
                         }
+                        if row_skills:
+                            cand["skills"] = row_skills[:20]
+                        if _open_to_work:
+                            cand["open_to_work"] = True
                         results.append(cand)
                 else:
                     body = resp.text
@@ -865,7 +938,16 @@ class UnipileService:
         
         try:
              async with httpx.AsyncClient(timeout=15.0) as client:
-                 params = {"account_id": account_id}
+                 # `linkedin_sections=*` is REQUIRED. Without it Unipile
+                 # returns a ~26-key stub with no experience / education /
+                 # skills / summary, so every Unipile candidate was scored on
+                 # an empty profile, landed below EXTERNAL_SOURCE_MIN_SCORE and
+                 # was dropped — the "LinkedIn returns N profiles, UI shows 0"
+                 # failure. With it the payload carries `work_experience`
+                 # (role field `position`, dates `start`/`end`), `education`,
+                 # `skills`, `certifications` (issuer `organization`),
+                 # `summary` and `is_open_to_work`.
+                 params = {"account_id": account_id, "linkedin_sections": "*"}
                  resp = await client.get(url, params=params, headers=self._get_headers())
                  
                  if resp.status_code == 200:
