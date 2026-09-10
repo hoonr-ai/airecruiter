@@ -373,14 +373,27 @@ def test_response_times_use_first_contact_and_first_reply():
 
 
 def test_phase_distribution_normalizes_phase_variants():
-    payloads = [_outreach("pending", phase=p) for p in ("phase1", "phase 1", "contact_check", "phase1_6hr", "phase 2", "phase2", "phase 3", "phase3", "phase 4", "phase1_extra")]
+    payloads = [_outreach("pending", phase=p) for p in (
+        "phase1", "phase 1", "contact_check",
+        "phase1_6hr", "phase 2",
+        "phase2", "phase 3",
+        "phase3", "phase 4",
+        "phase1_extra", "phase1_6hr_extra", "phase2_extra"
+    )]
     phases = lr._summarise_outreach(payloads)["phases"]
     # "phase1", "phase 1", "contact_check" -> phase1 (3)
     # "phase1_6hr", "phase 2" -> phase2 (2)
     # "phase2", "phase 3" -> phase3 (2)
     # "phase3", "phase 4" -> phase4 (2)
-    # "phase1_extra" -> extra (1)
-    assert phases == {"phase1": 3, "phase2": 2, "phase3": 2, "phase4": 2, "extra": 1}
+    # "phase1_extra" -> extra1 (1), "phase1_6hr_extra" -> extra2 (1), "phase2_extra" -> extra3 (1), total extra (3)
+    assert phases["phase1"] == 3
+    assert phases["phase2"] == 2
+    assert phases["phase3"] == 2
+    assert phases["phase4"] == 2
+    assert phases["extra1"] == 1
+    assert phases["extra2"] == 1
+    assert phases["extra3"] == 1
+    assert phases["extra"] == 3
 
 
 def test_summarise_outreach_passed_failed_sub_buckets():
@@ -411,13 +424,13 @@ def test_summarise_outreach_unengaged_failed_buckets_as_pending():
 def test_phase_distribution_falls_back_to_status_when_phase_missing():
     payload = {"outreach": {"outreach_status": "phase2"}, "communications": []}
     summary = lr._summarise_outreach([payload])
-    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 1, "phase4": 0, "extra": 0}
+    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 1, "phase4": 0, "extra": 0, "extra1": 0, "extra2": 0, "extra3": 0}
 
 
 def test_phase_distribution_does_not_promote_pending_status_to_phase1_when_phase_missing():
     payload = {"outreach": {"outreach_status": "queued"}, "communications": []}
     summary = lr._summarise_outreach([payload])
-    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0, "phase4": 0, "extra": 0}
+    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0, "phase4": 0, "extra": 0, "extra1": 0, "extra2": 0, "extra3": 0}
 
 
 def test_outstanding_feedback_never_goes_negative():

@@ -233,8 +233,12 @@ def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) 
         return "phase3"
     if norm == "phase3":
         return "phase4"
-    if norm in ("phase1_extra", "phase1_6hr_extra", "phase2_extra"):
-        return "extra"
+    if norm == "phase1_extra":
+        return "extra1"
+    if norm == "phase1_6hr_extra":
+        return "extra2"
+    if norm == "phase2_extra":
+        return "extra3"
     return None
 
 
@@ -561,6 +565,9 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         "phase3": 0,
         "phase4": 0,
         "extra": 0,
+        "extra1": 0,
+        "extra2": 0,
+        "extra3": 0,
     }
     channels = {"call": 0, "sms": 0, "web": 0}
     first_response_minutes: List[float] = []
@@ -617,7 +624,9 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         phase = _extract_phase(merged)
         if phase:
-            phases[phase] += 1
+            phases[phase] = phases.get(phase, 0) + 1
+            if phase in ("extra1", "extra2", "extra3"):
+                phases["extra"] = phases.get("extra", 0) + 1
 
         comms = payload.get("communications") or merged.get("communications") or []
         seen_channels = set()
@@ -859,6 +868,9 @@ def _build_row(
         "phase3": outreach["phases"]["phase3"],
         "phase4": outreach["phases"].get("phase4", 0),
         "extra": outreach["phases"].get("extra", 0),
+        "extra1": outreach["phases"].get("extra1", 0),
+        "extra2": outreach["phases"].get("extra2", 0),
+        "extra3": outreach["phases"].get("extra3", 0),
         "percentage": percentage,
 
         # Lets the UI mark a row whose outreach columns are partial rather
