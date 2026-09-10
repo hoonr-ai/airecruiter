@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { ArrowLeft, Search, Loader2, Phone, MessageSquare, ChevronDown, ChevronUp, ChevronsUpDown, Check, X, AlertTriangle, ExternalLink, User, Briefcase, Building2, Zap, Activity, Calendar, Mail, Download, Filter } from "lucide-react";
+import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -96,7 +96,7 @@ const openCandidateProfileUrl = async (candidate: Candidate) => {
     candidate.data?.jobdiva_candidate_id ||
     (isJobDivaSource ? candidateKey : "")
   ).trim();
-  
+
   if (jobdivaCandidateId) {
     const url = buildJobDivaCandidateUrl(jobdivaCandidateId);
     if (url) {
@@ -138,6 +138,29 @@ const normalizeInterviewStatus = (raw: string | undefined | null): { label: stri
   return { label, color: "#64748b" };
 };
 
+interface CandidateData {
+  profile_url?: string;
+  linkedin_url?: string;
+  urls?: { linkedin?: string; linkedin_url?: string };
+  resume_text?: string;
+  experience_years?: number | string | null;
+  company_experience?: Array<{ company?: string }>;
+  matched_skills?: string[];
+  missing_skills?: string[];
+  explainability?: Array<string | { text?: string }>;
+  feedback_type?: string;
+  feedback_reason?: string;
+  feedback_at?: string;
+  jobdiva_candidate_id?: string;
+  [key: string]: unknown;
+}
+
+interface HardFilterDetail {
+  question?: string;
+  status?: string;
+  reason?: string;
+}
+
 interface Candidate {
   id: number;
   jobdiva_id: string;
@@ -152,17 +175,17 @@ interface Candidate {
   engage_interview_id: string;
   engage_created_at: string;
   engage_score: number;
-  audit_payload: any;
+  audit_payload?: { hard_filter_details?: HardFilterDetail[] };
   job_title: string;
   screening_level: string;
   attended_via: string;
-  data?: any;
+  data?: CandidateData;
   location?: string;
   work_location?: string;
   profile_url?: string;
   image_url?: string;
   headline?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 function ResumeScreeningHoverCard({
@@ -270,7 +293,7 @@ function HardFilterHoverCard({
   details,
   open,
 }: {
-  details?: any[];
+  details?: HardFilterDetail[];
   open: boolean;
 }) {
   if (!details || details.length === 0) return null;
@@ -331,7 +354,7 @@ function HardFilterHoverCard({
 
 export default function GlobalCandidatesPage() {
   const CANDIDATE_PAGE_SIZE = 50;
-  
+
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -386,6 +409,11 @@ export default function GlobalCandidatesPage() {
   // Hover states
   const [hoveredScoreCandidateId, setHoveredScoreCandidateId] = useState<string | null>(null);
   const [hoveredEngageCandidateId, setHoveredEngageCandidateId] = useState<string | null>(null);
+
+  const resetPagination = () => {
+    setOffset(0);
+    setIsLoading(true);
+  };
 
   const handleConfirmSubmit = async () => {
     if (actionCandidateId) {
@@ -498,14 +526,17 @@ export default function GlobalCandidatesPage() {
   }, [searchInput, searchQuery]);
 
   useEffect(() => {
-    setIsLoading(true);
-    fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, true).finally(() => setIsLoading(false));
+    const request = window.setTimeout(() => {
+      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, true)
+        .finally(() => setIsLoading(false));
+    }, 0);
+    return () => window.clearTimeout(request);
   }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, fetchCandidates]);
 
   const loadMore = async () => {
     const nextOffset = offset + CANDIDATE_PAGE_SIZE;
     if (nextOffset >= totalCount) return;
-    
+
     setIsFetchingMore(true);
     setOffset(nextOffset);
     await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, false);
@@ -517,7 +548,7 @@ export default function GlobalCandidatesPage() {
   const handleExport = () => {
     if (!candidates || candidates.length === 0) return;
 
-    const escapeCsvField = (field: any) => {
+    const escapeCsvField = (field: unknown) => {
       if (field === null || field === undefined) return "";
       const str = String(field);
       if (str.includes(",") || str.includes('"') || str.includes("\n")) {
@@ -542,7 +573,7 @@ export default function GlobalCandidatesPage() {
       const resumeScore = Math.round(c.match_score || 0);
       const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
       const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
-      
+
       const statusInfo = normalizeInterviewStatus(c.engage_status);
 
       return [
@@ -591,10 +622,10 @@ export default function GlobalCandidatesPage() {
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)] flex flex-col h-[calc(100vh-180px)] min-h-[600px]">
-        
+
         {/* Toolbar */}
         <div className="p-4 border-b border-slate-100 flex flex-col gap-4 bg-slate-50/50 rounded-t-2xl">
-          
+
           {/* Row 2: Search and Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
             <div className="relative shrink-0 min-w-[260px] flex-1 max-w-[600px]">
@@ -614,9 +645,9 @@ export default function GlobalCandidatesPage() {
               </span>
             )}
             {candidates.length > 0 && (
-              <Button 
-                variant="outline" 
-                size="sm" 
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={handleExport}
                 className="h-9 px-3 flex items-center gap-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-sm transition-colors rounded-lg font-medium text-[12.5px]"
                 title="Export current view to CSV"
@@ -627,7 +658,7 @@ export default function GlobalCandidatesPage() {
             )}
           </div>
         </div>
-          
+
           {/* Row 2: Filters */}
           <div className="flex flex-wrap items-center gap-3 w-full">
             <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[180px]">
@@ -635,7 +666,10 @@ export default function GlobalCandidatesPage() {
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
               <select
                 value={filterStatus}
-                onChange={(e) => setFilterStatus(e.target.value)}
+                onChange={(e) => {
+                  resetPagination();
+                  setFilterStatus(e.target.value);
+                }}
                 className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 w-full"
               >
                 <option value="">All</option>
@@ -648,13 +682,16 @@ export default function GlobalCandidatesPage() {
                 <option value="invalid contact">Invalid Contact</option>
               </select>
             </div>
-            
+
             <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[180px]">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
               <select
                 value={filterFeedback}
-                onChange={(e) => setFilterFeedback(e.target.value)}
+                onChange={(e) => {
+                  resetPagination();
+                  setFilterFeedback(e.target.value);
+                }}
                 className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 w-full"
               >
                 <option value="">All</option>
@@ -669,7 +706,10 @@ export default function GlobalCandidatesPage() {
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
               <select
                 value={filterSource}
-                onChange={(e) => setFilterSource(e.target.value)}
+                onChange={(e) => {
+                  resetPagination();
+                  setFilterSource(e.target.value);
+                }}
                 className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 w-full"
               >
                 <option value="all">All</option>
@@ -687,6 +727,7 @@ export default function GlobalCandidatesPage() {
                 max={100}
                 value={filterMinScore}
                 onChange={(e) => {
+                  resetPagination();
                   const val = e.target.value;
                   if (val === "") {
                     setFilterMinScore("");
@@ -703,7 +744,7 @@ export default function GlobalCandidatesPage() {
 
         {/* Table Area */}
         <div className="flex-1 relative min-h-0">
-          <Table 
+          <Table
             containerClassName="absolute inset-0 overflow-auto scrollbar-thin scrollbar-thumb-slate-200"
             className="min-w-[1750px] border-separate border-spacing-0"
           >
@@ -953,7 +994,7 @@ export default function GlobalCandidatesPage() {
           )}
         </div>
       </div>
-      
+
       {/* Modals */}
       {selectedCandidate && (
         <CandidateDetailsModal

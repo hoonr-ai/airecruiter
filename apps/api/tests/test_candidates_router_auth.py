@@ -109,6 +109,20 @@ def test_feedback_route_shape_is_unchanged():
     assert route["method"] == "POST"
 
 
+def test_launched_candidates_requires_admin_access():
+    """The global pool contains cross-job candidate PII, so UI hiding is insufficient."""
+    src = ROUTER_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    body = next(
+        ast.get_source_segment(src, node)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "get_launched_candidates"
+    )
+    assert "if not user.is_admin:" in body
+    assert "status_code=403" in body
+
+
 # --------------------------------------------------------------------------
 # Inventory of routes still reachable without credentials.
 # --------------------------------------------------------------------------

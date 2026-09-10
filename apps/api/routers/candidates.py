@@ -2940,6 +2940,12 @@ async def get_launched_candidates(
     Fetches all launched candidates across all jobs.
     Returns data formatted for the Master Candidate Pool page.
     """
+    # The sidebar is only a convenience layer. Enforce the same admin-only
+    # policy here so a recruiter cannot retrieve the global candidate pool
+    # by calling the API directly.
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
     try:
         from psycopg2.extras import RealDictCursor
         conn = get_db_connection()
@@ -2951,17 +2957,17 @@ async def get_launched_candidates(
                 if search:
                     search_condition += """
                         AND (
-                            sc.name ILIKE %s OR 
-                            sc.email ILIKE %s OR 
+                            sc.name ILIKE %s OR
+                            sc.email ILIKE %s OR
                             sc.phone ILIKE %s OR
-                            sc.jobdiva_id ILIKE %s OR 
+                            sc.jobdiva_id ILIKE %s OR
                             sc.candidate_id::text ILIKE %s OR
                             mj.title ILIKE %s
                         )
                     """
                     like_term = f"%{search.strip()}%"
                     params.extend([like_term] * 6)
-                
+
                 if status:
                     if status.lower() == "waiting" or status.lower() == "initiated":
                         search_condition += " AND (la.status IS NULL OR la.status = 'Waiting' OR la.status = 'Initiated')"
@@ -2992,7 +2998,7 @@ async def get_launched_candidates(
                 if source:
                     search_condition += " AND sc.source = %s"
                     params.append(source)
-                
+
                 if min_score is not None:
                     search_condition += " AND sc.resume_match_percentage >= %s"
                     params.append(min_score)
@@ -3098,7 +3104,7 @@ async def get_launched_candidates(
         # Collect interview IDs for live fallback.
         import json
         import asyncio
-        
+
         interview_ids = []
         for cand in candidates:
             if cand.get("data") and isinstance(cand["data"], str):
@@ -3131,16 +3137,16 @@ async def get_launched_candidates(
         for cand in candidates:
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
             iid = cand.get("engage_interview_id")
-            
+
             # Live merge from API payload if available
             live_payload = payloads_dict.get(iid) if iid else None
-            
+
             if live_payload:
                 cand["engage_status"] = live_payload.get("status") or cand.get("engage_status")
                 cand["engage_score"] = live_payload.get("evaluation", {}).get("total_score")
             else:
                 cand["engage_score"] = data_blob.get("engage_score")
-                
+
             # Parse payload for attended_via
             audit_payload = cand.get("audit_payload")
             cand["attended_via"] = "Phone" # Defaulting for voice
