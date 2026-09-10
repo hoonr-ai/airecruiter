@@ -838,7 +838,7 @@ export default function GlobalCandidatesPage() {
 
           {/* Row 2: Search and Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
-            <div className="relative shrink-0 min-w-[200px] flex-1 max-w-[380px]">
+            <div className="relative shrink-0 min-w-[200px] flex-1 max-w-[460px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
               <Input
                 placeholder="Search by Name, Email, Phone, Job Title, or JobDiva ID..."
@@ -850,14 +850,14 @@ export default function GlobalCandidatesPage() {
 
             <div className="flex items-center gap-4 shrink-0">
               <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-2 h-9 shadow-sm">
-                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pl-1">Launched</label>
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pl-1 pr-1">Launched From</label>
                 <input
                   type="date"
                   value={exportStartDate}
                   onChange={(e) => setExportStartDate(e.target.value)}
                   className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
                 />
-                <span className="text-slate-300 text-[11px] uppercase font-bold">to</span>
+                <span className="text-slate-300 text-[11px] uppercase font-bold px-1">to</span>
                 <input
                   type="date"
                   value={exportEndDate}
@@ -968,7 +968,7 @@ export default function GlobalCandidatesPage() {
             containerClassName="overflow-visible"
             className="min-w-[1750px] border-separate border-spacing-0"
           >
-            <TableHeader className="bg-slate-50/80 sticky top-0 z-40 backdrop-blur-sm shadow-sm">
+            <TableHeader className="bg-slate-50 sticky top-0 z-40 shadow-sm">
               <TableRow className="border-b-slate-200 hover:bg-transparent h-[50px]">
                 <TableHead className="w-[50px] min-w-[50px] max-w-[50px] sticky left-0 z-30 bg-slate-50 text-center font-bold text-slate-500 text-[12px] uppercase tracking-wider px-2">#</TableHead>
                 <TableHead className="w-[120px] min-w-[120px] max-w-[120px] sticky left-[50px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOBDIVA ID</TableHead>
