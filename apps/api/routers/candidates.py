@@ -2979,10 +2979,6 @@ async def get_launched_candidates(
                         search_condition += " AND (LOWER(la.status) LIKE '%complete%' OR LOWER(la.status) IN ('passed', 'pass'))"
                     elif status.lower() == "fail":
                         search_condition += " AND LOWER(la.status) IN ('failed', 'fail', 'rejected')"
-                    elif status.lower() in ["n/a", "duplicate candidate", "invalid contact"]:
-                        # These statuses imply the candidate was never launched and has no interview ID.
-                        # Since the base query strictly requires la.interview_id IS NOT NULL, these will always return 0.
-                        search_condition += " AND 1=0"
                     else:
                         search_condition += " AND la.status = %s"
                         params.append(status)
@@ -3005,7 +3001,7 @@ async def get_launched_candidates(
 
                 params.extend([limit, offset])
 
-                query = f"""
+                BASE_CTE = """
                     WITH latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
                             candidate_id,
@@ -3030,7 +3026,11 @@ async def get_launched_candidates(
                         ) x
                         WHERE lookup_id IS NOT NULL AND lookup_id <> ''
                         ORDER BY lookup_id
-                    ),
+                    )
+                """
+
+                query = f"""
+                    {BASE_CTE},
                     launched_candidates AS (
                         SELECT DISTINCT ON (sc.candidate_id)
                             sc.id,
@@ -3064,28 +3064,7 @@ async def get_launched_candidates(
 
                 # Get total count
                 count_query = f"""
-                    WITH latest_audit AS (
-                        SELECT DISTINCT ON (candidate_id)
-                            candidate_id,
-                            interview_id,
-                            status
-                        FROM engage_interview_audit
-                        ORDER BY candidate_id, id DESC
-                    ),
-                    monitored_jobs_lookup AS (
-                        SELECT DISTINCT ON (lookup_id) lookup_id, title
-                        FROM (
-                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title
-                            FROM monitored_jobs mj
-                            WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
-                            UNION ALL
-                            SELECT mj.job_id::text AS lookup_id, mj.title
-                            FROM monitored_jobs mj
-                            WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
-                        ) x
-                        WHERE lookup_id IS NOT NULL AND lookup_id <> ''
-                        ORDER BY lookup_id
-                    )
+                    {BASE_CTE}
                     SELECT COUNT(DISTINCT sc.candidate_id) as total
                     FROM sourced_candidates sc
                     JOIN latest_audit la ON la.candidate_id = sc.candidate_id
@@ -3110,7 +3089,7 @@ async def get_launched_candidates(
             if cand.get("data") and isinstance(cand["data"], str):
                 try:
                     cand["data"] = json.loads(cand["data"])
-                except:
+                except json.JSONDecodeError:
                     pass
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
             iid = cand.get("engage_interview_id")

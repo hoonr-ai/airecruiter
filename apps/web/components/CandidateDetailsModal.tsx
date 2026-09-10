@@ -42,16 +42,7 @@ interface CandidateDetailsModalProps {
   explainability?: string[];
   jobdivaCandidateId?: string;
   source?: string;
-  /** "high_level" when the backend skipped the detailed AI skills match
-   *  (JobDiva agent-search results are scored on cheap signals only). */
   scoringMode?: string;
-  resumeText?: string;
-  email?: string;
-  phone?: string;
-  jobDivaId?: string;
-  candidateId?: string;
-  jobId?: string;
-  hasActiveInterview?: boolean;
 }
 
 /** Title-case a string: "cloud security engineer" → "Cloud Security Engineer" */

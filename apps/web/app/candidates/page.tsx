@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -110,7 +110,10 @@ const openCandidateProfileUrl = async (candidate: Candidate) => {
     String(candidate.data?.profile_url || "").trim();
 
   if (existingProfileUrl) {
-    window.open(existingProfileUrl, "_blank", "noopener,noreferrer");
+    const url = existingProfileUrl.startsWith('http://') || existingProfileUrl.startsWith('https://') 
+      ? existingProfileUrl 
+      : `https://${existingProfileUrl}`;
+    window.open(url, "_blank", "noopener,noreferrer");
     return;
   }
 };
@@ -126,7 +129,11 @@ const normalizeInterviewStatus = (raw: string | undefined | null): { label: stri
     return { label: "In Progress", color: "#f59e0b" };
   }
 
-  if (status.includes("complete") || status === "passed" || status === "pass") {
+  if (status === "incomplete") {
+    return { label: "Incomplete", color: "#64748b" };
+  }
+
+  if (status === "complete" || status === "completed" || status === "passed" || status === "pass") {
     return { label: "Pass", color: "#059669" };
   }
 
@@ -461,7 +468,18 @@ export default function GlobalCandidatesPage() {
     }
   };
 
+  const fetchIdRef = useRef(0);
+
   const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", replace: boolean = false) => {
+    fetchIdRef.current += 1;
+    const currentFetchId = fetchIdRef.current;
+
+    if (replace) {
+      setFeedbacks({});
+      setFeedbackReasons({});
+      setFeedbackTimes({});
+    }
+
     try {
       const query = new URLSearchParams({
         limit: String(CANDIDATE_PAGE_SIZE),
@@ -484,6 +502,8 @@ export default function GlobalCandidatesPage() {
       }
 
       const candData = await api.candidates.getAllLaunched(query.toString());
+      if (currentFetchId !== fetchIdRef.current) return;
+
       if (candData.status === "success" && Array.isArray(candData.candidates)) {
         const pageFeedbacks: Record<string, string> = {};
         const pageFeedbackReasons: Record<string, string> = {};
@@ -534,6 +554,7 @@ export default function GlobalCandidatesPage() {
   }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, fetchCandidates]);
 
   const loadMore = async () => {
+    if (isFetchingMore) return;
     const nextOffset = offset + CANDIDATE_PAGE_SIZE;
     if (nextOffset >= totalCount) return;
 
@@ -550,7 +571,10 @@ export default function GlobalCandidatesPage() {
 
     const escapeCsvField = (field: unknown) => {
       if (field === null || field === undefined) return "";
-      const str = String(field);
+      let str = String(field);
+      if (/^[=+\-@]/.test(str)) {
+        str = "'" + str;
+      }
       if (str.includes(",") || str.includes('"') || str.includes("\n")) {
         return `"${str.replace(/"/g, '""')}"`;
       }
@@ -581,7 +605,7 @@ export default function GlobalCandidatesPage() {
         escapeCsvField(c.name || "Unknown"),
         escapeCsvField(c.email || ""),
         escapeCsvField(c.phone || ""),
-        escapeCsvField(c.jobdiva_id ? "JobDiva" : "Manual"),
+        escapeCsvField(normalizeSourceLabel(c.source)),
         escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
         escapeCsvField(statusInfo.label),
         escapeCsvField(engageScoreStr),
@@ -677,9 +701,6 @@ export default function GlobalCandidatesPage() {
                 <option value="fail">Fail</option>
                 <option value="in progress">In Progress</option>
                 <option value="pending">Pending</option>
-                <option value="n/a">N/A</option>
-                <option value="duplicate candidate">Duplicate Candidate</option>
-                <option value="invalid contact">Invalid Contact</option>
               </select>
             </div>
 
@@ -785,7 +806,7 @@ export default function GlobalCandidatesPage() {
                 ))
               ) : candidates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="h-48 text-center">
+                  <TableCell colSpan={10} className="h-48 text-center">
                     <div className="text-slate-400 text-[14px]">No candidates found.</div>
                   </TableCell>
                 </TableRow>
@@ -859,15 +880,20 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="text-center font-semibold text-slate-700 text-[12px]">
-                        {c.jobdiva_id ? "JobDiva" : "Manual"}
+                        {normalizeSourceLabel(c.source)}
                       </TableCell>
 
                       <TableCell className="text-center font-medium text-slate-900 text-[13px]">
                         {resumeScore > 0 ? (
                           <div
-                            className="relative group/score inline-block w-full"
+                            className="relative group/score inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
                             onMouseEnter={() => setHoveredScoreCandidateId(c.candidate_id)}
                             onMouseLeave={() => setHoveredScoreCandidateId(null)}
+                            onFocus={() => setHoveredScoreCandidateId(c.candidate_id)}
+                            onBlur={() => setHoveredScoreCandidateId(null)}
+                            tabIndex={0}
+                            aria-label="View Resume Screening Details"
+                            role="button"
                           >
                             <span className="font-bold text-slate-900 text-[14px] underline decoration-indigo-200 underline-offset-4 cursor-help">
                               {resumeScore}/100
@@ -896,9 +922,14 @@ export default function GlobalCandidatesPage() {
                       <TableCell className="text-center font-medium text-slate-700 text-[13px]">
                         {c.engage_score !== null && c.engage_score !== undefined ? (
                           <div
-                            className="relative group/engage inline-block w-full"
+                            className="relative group/engage inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
                             onMouseEnter={() => setHoveredEngageCandidateId(c.candidate_id)}
                             onMouseLeave={() => setHoveredEngageCandidateId(null)}
+                            onFocus={() => setHoveredEngageCandidateId(c.candidate_id)}
+                            onBlur={() => setHoveredEngageCandidateId(null)}
+                            tabIndex={0}
+                            aria-label="View Hard Filter Details"
+                            role="button"
                           >
                             <span className="font-bold text-slate-900 text-[14px] underline decoration-indigo-200 underline-offset-4 cursor-help">
                               {c.engage_score}/100
@@ -1008,13 +1039,6 @@ export default function GlobalCandidatesPage() {
           workLocation={selectedCandidate.work_location}
           experienceYears={selectedCandidate.data?.experience_years}
           matchScore={selectedCandidate.match_score}
-          resumeText={selectedCandidate.data?.resume_text}
-          email={selectedCandidate.email}
-          phone={selectedCandidate.phone}
-          jobDivaId={selectedCandidate.jobdiva_id}
-          candidateId={selectedCandidate.candidate_id}
-          jobId={selectedCandidate.jobdiva_id} // using jobdiva_id as jobId for the modal context
-          hasActiveInterview={!!selectedCandidate.engage_interview_id}
         />
       )}
 
@@ -1039,7 +1063,7 @@ export default function GlobalCandidatesPage() {
                     <ExternalLink className="w-5 h-5 text-indigo-600" />
                     Submit to JobDiva
                   </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
@@ -1078,7 +1102,7 @@ export default function GlobalCandidatesPage() {
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
