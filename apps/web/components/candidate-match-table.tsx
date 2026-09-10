@@ -193,17 +193,19 @@ function getSourceBadge(source: string | undefined, sources?: string[]) {
           : isJobDiva
             ? "bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]"
             : "bg-slate-50 text-slate-700 border-slate-200";
+  let defaultJobDivaLabel = src || "JobDiva";
+  if (src.toLowerCase().startsWith("jobdiva-")) {
+    const parts = src.split("-").slice(1);
+    defaultJobDivaLabel = `JobDiva ${parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ")}`;
+  }
+
   const label = isBothExa
     ? "LinkedIn + Deep"
     : isDeepOnly
       ? "LinkedIn Deep"
       : isLinkedIn
         ? "LinkedIn"
-        : isJobAgent
-          ? "JobDiva Agent"
-          : isJobDivaTalent
-            ? "JobDiva"
-            : src || "JobDiva";
+        : defaultJobDivaLabel;
   const Icon = isLinkedIn ? Linkedin : isJobDivaTalent || isJobAgent ? Zap : ShieldCheck;
   return { colors, label, Icon, isLinkedIn };
 }

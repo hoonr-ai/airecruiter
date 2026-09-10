@@ -185,8 +185,10 @@ interface Candidate {
   engage_interview_id: string;
   engage_created_at: string;
   engage_score: number;
+  total_fit_score?: number | null;
   audit_payload?: { hard_filter_details?: HardFilterDetail[] };
   job_title: string;
+  recruiter_emails?: string | string[];
   screening_level: string;
   attended_via: string;
   data?: CandidateData;
@@ -406,12 +408,11 @@ export default function GlobalCandidatesPage() {
 
   const normalizeSourceLabel = (source: string | null | undefined): string => {
     const raw = String(source || "").trim();
-    if (!raw) return "Unknown";
-    // Usually jobdiva-talent_search or jobdiva-jobagent or similar. Format nicely:
-    if (raw.toLowerCase().startsWith("jobdiva-")) {
-      const parts = raw.split("-").slice(1);
-      return `JobDiva ${parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ")}`;
-    }
+    const s = raw.toLowerCase();
+    if (!s) return "Unknown";
+    if (s.includes("applicant")) return "Job-Diva Applicant";
+    if (s.includes("talentsearch") || s.includes("talent_search")) return "Job-Diva Candidate";
+    if (s.includes("linkedin")) return "LinkedIn";
     return raw;
   };
 
@@ -634,13 +635,14 @@ export default function GlobalCandidatesPage() {
       "Resume Screening Score",
       "Engage Status",
       "Engage Score",
-      "Total Fit Score"
+      "Total Fit Score",
+      "Recruiter Email"
     ];
 
     const generateRows = (cands: any[]) => cands.map((c) => {
       const resumeScore = Math.round(c.match_score || 0);
       const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
-      const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
+      const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
 
       const statusInfo = normalizeInterviewStatus(c.engage_status);
 
@@ -654,7 +656,8 @@ export default function GlobalCandidatesPage() {
         escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
         escapeCsvField(statusInfo.label),
         escapeCsvField(engageScoreStr),
-        escapeCsvField(totalFitScoreStr)
+        escapeCsvField(totalFitScoreStr),
+        escapeCsvField(c.recruiter_emails || "N/A")
       ].join(",");
     });
 
@@ -735,13 +738,14 @@ export default function GlobalCandidatesPage() {
           "Resume Screening Score",
           "Engage Status",
           "Engage Score",
-          "Total Fit Score"
+          "Total Fit Score",
+          "Recruiter Email"
         ];
 
         const generateRows = (cands: Candidate[]) => cands.map((c) => {
           const resumeScore = Math.round(c.match_score || 0);
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
-          const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
+          const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
 
           const statusInfo = normalizeInterviewStatus(c.engage_status);
 
@@ -755,7 +759,8 @@ export default function GlobalCandidatesPage() {
             escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
             escapeCsvField(statusInfo.label),
             escapeCsvField(engageScoreStr),
-            escapeCsvField(totalFitScoreStr)
+            escapeCsvField(totalFitScoreStr),
+            escapeCsvField(c.recruiter_emails || "N/A")
           ].join(",");
         });
 
@@ -951,6 +956,7 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
                 <TableHead className="w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
                 <TableHead className="w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">CANDIDATE FEEDBACK</TableHead>
+                <TableHead className="w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -973,11 +979,12 @@ export default function GlobalCandidatesPage() {
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
                   </TableRow>
                 ))
               ) : candidates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="h-48 text-center">
+                  <TableCell colSpan={11} className="h-48 text-center">
                     <div className="text-slate-400 text-[14px]">No candidates found.</div>
                   </TableCell>
                 </TableRow>
@@ -1120,8 +1127,8 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
-                        {c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? (
-                          <span>{Math.round((c.engage_score + resumeScore) / 2)}/100</span>
+                        {c.total_fit_score !== null && c.total_fit_score !== undefined ? (
+                          <span>{c.total_fit_score}/100</span>
                         ) : (
                           <span className="font-normal opacity-40 italic text-[13px]">Waiting</span>
                         )}
@@ -1148,10 +1155,10 @@ export default function GlobalCandidatesPage() {
                             <SelectTrigger className="w-[140px] h-8 text-[12px] font-semibold text-slate-700 bg-white border-slate-300 hover:border-slate-400 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500">
                               <SelectValue placeholder="Select Action..." />
                             </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="Submit" className="text-[12px] font-semibold cursor-pointer">Submit</SelectItem>
-                              <SelectItem value="Reject" className="text-[12px] font-semibold cursor-pointer">Reject</SelectItem>
-                              <SelectItem value="Unreachable" className="text-[12px] font-semibold cursor-pointer">Unreachable</SelectItem>
+                            <SelectContent className="bg-white border-slate-200 shadow-xl">
+                              <SelectItem value="Submit" className="text-[12px] font-semibold text-slate-700 focus:bg-indigo-50 focus:text-indigo-700">Submit</SelectItem>
+                              <SelectItem value="Reject" className="text-[12px] font-semibold text-slate-700 focus:bg-red-50 focus:text-red-700">Reject</SelectItem>
+                              <SelectItem value="Unreachable" className="text-[12px] font-semibold text-slate-700 focus:bg-orange-50 focus:text-orange-700">Unreachable</SelectItem>
                             </SelectContent>
                           </Select>
                           {feedbacks[c.id] && (
@@ -1178,6 +1185,15 @@ export default function GlobalCandidatesPage() {
                             </div>
                           )}
                         </div>
+                      </TableCell>
+                      <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200">
+                        {c.recruiter_emails ? (
+                          <span className="block truncate max-w-[200px]" title={Array.isArray(c.recruiter_emails) ? c.recruiter_emails.join(", ") : c.recruiter_emails}>
+                            {Array.isArray(c.recruiter_emails) ? c.recruiter_emails.join(", ") : c.recruiter_emails}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 italic">N/A</span>
+                        )}
                       </TableCell>
                     </TableRow>
                   );

@@ -52,6 +52,16 @@ def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
         merged_trans.append(live_item)
     return merged_trans
 
+from routers.launch_report import build_merged_outreach_payload
+
+def _to_iso_z(dt_val) -> str:
+    from datetime import datetime
+    if isinstance(dt_val, datetime):
+        return dt_val.isoformat() + "Z"
+    elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+        return dt_val.replace(" ", "T") + "Z"
+    return dt_val if isinstance(dt_val, str) else None
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -1422,7 +1432,6 @@ async def get_job_candidates(
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
-            from routers.launch_report import build_merged_outreach_payload
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
             
@@ -1492,15 +1501,25 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
-            scores_to_avg = [float(r_score)]
-            if is_engage_done and cand.get("engage_score") is not None:
-                scores_to_avg.append(float(cand["engage_score"]))
+            try:
+                scores_to_avg = [float(r_score)]
+                if is_engage_done and cand.get("engage_score") is not None:
+                    scores_to_avg.append(float(cand["engage_score"]))
 
-            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+                cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+            except (TypeError, ValueError):
+                pass
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
                 cand["engage_hard_filter_status"] = None
+
+            import datetime
+            dt_val = cand.get("engage_created_at")
+            if isinstance(dt_val, datetime.datetime):
+                cand["engage_created_at"] = dt_val.isoformat() + "Z"
+            elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+                cand["engage_created_at"] = dt_val.replace(" ", "T") + "Z"
 
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob
@@ -3009,20 +3028,28 @@ async def get_launched_candidates(
                 import re
                 date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-                # Date range filters apply to engage_created_at (la.created_at).
-                # Note: engage_interview_audit.created_at is stored in UTC by the DB session.
-                # Converting (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')
-                # evaluates wall-clock date boundaries in America/New_York time matching the UI display.
+                # Convert input NY dates to UTC before querying the DB.
+                # This safely avoids the Postgres 'AT TIME ZONE' cast flipping based on whether the column is naive or timestamptz.
+                if start_date or end_date:
+                    from zoneinfo import ZoneInfo
+                    from datetime import datetime
+                    ny_tz = ZoneInfo("America/New_York")
+                    utc_tz = ZoneInfo("UTC")
+
                 if start_date:
                     if not date_pattern.match(start_date):
                         raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
-                    search_condition += " AND (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') >= %s"
-                    params.append(f"{start_date} 00:00:00")
+                    dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
+                    utc_start = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
+                    search_condition += " AND la.created_at >= %s"
+                    params.append(utc_start)
                 if end_date:
                     if not date_pattern.match(end_date):
                         raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
-                    search_condition += " AND (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') <= %s"
-                    params.append(f"{end_date} 23:59:59")
+                    dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
+                    utc_end = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
+                    search_condition += " AND la.created_at <= %s"
+                    params.append(utc_end)
 
                 params.extend([limit, offset])
 
@@ -3039,13 +3066,13 @@ async def get_launched_candidates(
                         ORDER BY candidate_id, id DESC
                     ),
                     monitored_jobs_lookup AS (
-                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level
+                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level, recruiter_emails
                         FROM (
-                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level
+                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
                             FROM monitored_jobs mj
                             WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
                             UNION ALL
-                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level
+                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
                             FROM monitored_jobs mj
                             WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
                         ) x
@@ -3073,7 +3100,8 @@ async def get_launched_candidates(
                             la.payload as audit_payload,
                             la.response as audit_response,
                             mj.title as job_title,
-                            mj.screening_level
+                            mj.screening_level,
+                            mj.recruiter_emails
                         FROM sourced_candidates sc
                         JOIN latest_audit la ON la.candidate_id = sc.candidate_id
                         LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
@@ -3163,70 +3191,95 @@ async def get_launched_candidates(
                 if data_blob.get("engage_hard_filter_status"):
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
 
-            iid = cand.get("engage_interview_id")
-            live_payload = payloads_dict.get(str(iid).strip()) if iid else None
+            iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
+            raw_live_api = payloads_dict.get(iid_str) if iid_str else None
+            
+            merged = build_merged_outreach_payload(
+                cand, 
+                cand.get("audit_response"), 
+                cand.get("engage_status"), 
+                raw_live_api
+            )
+            
+            outreach_status = merged.get("outreach_status") or merged.get("status")
+            if outreach_status:
+                cand["engage_status"] = outreach_status
+                if isinstance(data_blob, dict):
+                    data_blob["engage_status"] = outreach_status
+                    
+            first_completed_at = merged.get("first_completed_at")
+            if first_completed_at:
+                cand["engage_completed_at"] = first_completed_at
+                if isinstance(data_blob, dict):
+                    data_blob["engage_completed_at"] = first_completed_at
 
-            if live_payload and isinstance(live_payload, dict):
-                if live_payload.get("status"):
-                    cand["engage_status"] = live_payload.get("status")
-                
-                eval_dict = live_payload.get("evaluation")
-                score_val = None
-                total_val = None
-                if isinstance(eval_dict, dict):
-                    score_val = _pick_first_not_none(
-                        eval_dict.get("total_score"),
-                        eval_dict.get("candidate_score"),
-                        eval_dict.get("score")
-                    )
-                    total_val = _pick_first_not_none(
-                        eval_dict.get("max_score"),
-                        eval_dict.get("total_score_possible")
-                    )
-                if score_val is None:
-                    score_val = _pick_first_not_none(
-                        live_payload.get("candidate_score"),
-                        live_payload.get("overall_score"),
-                        live_payload.get("score")
-                    )
-                if score_val is not None:
-                    cand["engage_score"] = score_val
-                if total_val is not None:
-                    cand["engage_total_score"] = total_val
+            if not cand.get("engage_interview_id") and cand.get("audit_interview_id"):
+                cand["engage_interview_id"] = cand.get("audit_interview_id")
+                if isinstance(data_blob, dict):
+                    data_blob["engage_interview_id"] = cand.get("audit_interview_id")
 
-            # Fallback to audit_response or original_payload if engage_score is still missing
-            if cand.get("engage_score") is None:
-                resp = cand.get("audit_response")
-                if isinstance(resp, str) and resp.strip():
-                    try:
-                        resp = json.loads(resp)
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        resp = {}
-                if isinstance(resp, dict):
-                    aud_score = _pick_first_not_none(
-                        resp.get("candidate_score"),
-                        resp.get("overall_score"),
-                        resp.get("score")
-                    )
-                    if aud_score is not None:
-                        cand["engage_score"] = aud_score
-                    if resp.get("total_score") is not None:
-                        cand["engage_total_score"] = resp.get("total_score")
+            if not cand.get("engage_created_at") and cand.get("audit_created_at"):
+                cand["engage_created_at"] = cand.get("audit_created_at")
 
-            # Normalize score safely (handling string numbers and preventing division errors)
-            raw_score = _pick_first_not_none(cand.get("engage_score"), cand.get("engage_candidate_score"))
+            is_boolean_job = str(cand.get("screening_level") or "").strip().lower() == "l0.5"
+
+            if merged.get("score") is not None:
+                cand["engage_score"] = merged.get("score")
+            if merged.get("total_score") is not None:
+                cand["engage_total_score"] = merged.get("total_score")
+
+            # read-side normalization for consistency across views
+            norm_engage_score = None
+            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
             raw_total = cand.get("engage_total_score")
-            if raw_score is not None and raw_total is not None:
-                try:
-                    f_score = float(raw_score)
-                    f_total = float(raw_total)
-                    if f_total > 0:
-                        cand["engage_score"] = round((f_score / f_total) * 100, 1)
-                except (TypeError, ValueError):
-                    pass
+            
+            if raw_score is not None and raw_total and raw_total > 0:
+                norm_engage_score = round((float(raw_score) / float(raw_total)) * 100, 1)
+                cand["engage_score"] = norm_engage_score
+                cand["engage_total_score"] = 100
+            elif raw_score is not None:
+                cand["engage_score"] = raw_score
+
+            hf_display = str(cand.get("engage_hard_filter_status") or "").lower()
+            score_display = cand.get("engage_score")
+
+            # Format engage_status
+            status_display = _format_engage_status(cand.get("engage_status"), cand.get("engage_score"), hf_display)
+            cand["engage_status"] = status_display
+
+            r_score = cand.get("match_score") or 0
+            is_engage_done = _is_engage_done(cand.get("engage_status"), cand.get("engage_score"), is_boolean_job)
+
+            # Boolean (L0.5) interviews: 100 for pass, 0 for fail
+            if is_boolean_job and is_engage_done:
+                if status_display == "Pass":
+                    cand["engage_score"] = 100.0
+                elif status_display == "Fail":
+                    cand["engage_score"] = 0.0
+                cand["engage_total_score"] = 100
+
+            try:
+                scores_to_avg = [float(r_score)]
+                if is_engage_done and cand.get("engage_score") is not None:
+                    scores_to_avg.append(float(cand["engage_score"]))
+
+                cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+            except (TypeError, ValueError):
+                pass
+
+            # Suppress hard filter for in progress
+            if status_display == "In Progress":
+                cand["engage_hard_filter_status"] = None
 
             # Parse outreach method before replacing audit_payload
             cand["attended_via"] = "SMS" if original_payload.get("outreach_method") == "sms" else "Phone"
+
+            import datetime
+            dt_val = cand.get("engage_created_at")
+            if isinstance(dt_val, datetime.datetime):
+                cand["engage_created_at"] = dt_val.isoformat() + "Z"
+            elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+                cand["engage_created_at"] = dt_val.replace(" ", "T") + "Z"
 
             # Format audit_payload for frontend hover card
             hf_details = _extract_rankings_hard_filter_details(
@@ -3783,6 +3836,7 @@ async def get_candidate_evaluation_report(
                 "ai_description":    job_row.get("ai_description") or job_row.get("jobdiva_description"),
                 "recruiter_notes":   job_row.get("recruiter_notes"),
                 "bot_introduction":  job_row.get("bot_introduction"),
+                "recruiter_emails":  job_row.get("recruiter_emails"),
                 "rubric":            rubric,
                 "sourcing_filters":  sourcing_filters,
                 "resume_match_filters": resume_match_filters,
@@ -3977,8 +4031,8 @@ async def get_candidate_evaluation_report(
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1) if total_fit_score is not None else None,
             "engage_interview_id":   engage_interview_id,
-            "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
-            "engage_created_at":     str(engage_created_at) if engage_created_at else None,
+            "engage_completed_at":   _to_iso_z(engage_completed_at),
+            "engage_created_at":     _to_iso_z(engage_created_at),
             "is_boolean_interview":  is_l05,
             # Same data source as the hover card — avoids a separate live-fetch failure
             "engage_hard_filter_details": _extract_rankings_hard_filter_details(
