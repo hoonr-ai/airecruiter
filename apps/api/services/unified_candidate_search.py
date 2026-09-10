@@ -127,6 +127,10 @@ class SearchCriteria(BaseModel):
     page_number: int = 0
     companies: List[str] = []
     page_size: int = 100
+    # Step-5 "Search more" tier (0 = first search). Selects the JobDiva
+    # JobAgentSearch resumeCount + hydration cap from the tier schedule in
+    # core.sourcing_config — higher tiers fetch a deeper pool on demand.
+    search_more_tier: int = 0
     sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
     boolean_string: str = ""
@@ -1342,7 +1346,9 @@ class UnifiedCandidateSearch:
                     return rank if isinstance(rank, int) else 10**9
                 hydration_targets.sort(key=_hydration_key)
                 hydration_targets = hydration_targets[
-                    : _sc.FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES
+                    : _sc.jobdiva_hydration_cap_for_tier(
+                        getattr(criteria, "search_more_tier", 0)
+                    )
                 ]
                 hydration_task = asyncio.create_task(
                     self._hydrate_jobdiva_in_background(
@@ -1551,11 +1557,14 @@ class UnifiedCandidateSearch:
 
             if criteria.job_id:
                 # resumeCount drives JobAgentSearch latency (it scales with the
-                # number of candidates JobDiva ranks). We cap the pool to the
-                # top-100 for display + hydration anyway, so over-requesting
-                # just slows the call. See sourcing_config.JOBAGENT_RESUME_COUNT.
+                # number of candidates JobDiva ranks). We cap the pool for
+                # display + hydration anyway, so over-requesting just slows the
+                # call. The "Search more" tier escalates both on demand — see
+                # sourcing_config.jobagent_resume_count_for_tier().
                 from core import sourcing_config as _sc_rc
-                resume_count = _sc_rc.JOBAGENT_RESUME_COUNT
+                resume_count = _sc_rc.jobagent_resume_count_for_tier(
+                    getattr(criteria, "search_more_tier", 0)
+                )
                 # Wall-clock as the orchestrator sees it. Comparing this to the
                 # service's "JobAgent TIMING total_ms" reveals event-loop
                 # contention: if this is much larger, the coroutine was starved

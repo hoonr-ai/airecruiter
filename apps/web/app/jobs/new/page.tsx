@@ -910,6 +910,11 @@ function NewJobPageContent() {
   const MAX_BOOLEAN_ATTEMPTS = 4;
   const QUALIFIED_SCORE_THRESHOLD = 70;
   const QUALIFIED_TARGET_COUNT = 50;
+  // "Search more" tier: 0 = first (fast) search, each click escalates the
+  // JobDiva-only pool depth (resumeCount/hydration) via the backend tier
+  // schedule. Capped at MAX_SEARCH_MORE_TIER, after which the button hides.
+  const [searchMoreTier, setSearchMoreTier] = useState(0);
+  const MAX_SEARCH_MORE_TIER = 3;
   const [candidates, setCandidates] = useState<any[]>([]);
   // `true` when the current `candidates` list was restored from localStorage
   // rather than a fresh stream. Used to surface a small "Restored from last
@@ -5209,8 +5214,10 @@ function NewJobPageContent() {
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
+      searchMoreTier?: number;
     }
   ) => {
+    const searchMoreTier = overrides?.searchMoreTier ?? 0;
     const effectiveTitles = overrides?.titleCriteriaOverride ?? sourceTitles;
     const effectiveSkills = overrides?.skillCriteriaOverride ?? sourceSkills;
 
@@ -5275,7 +5282,11 @@ function NewJobPageContent() {
       resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
-      sources: selectedSourcesArray,
+      // "Search more" deepens the JobDiva JobAgent pool only — re-running
+      // LinkedIn/Dice/Exa on each click would re-bill paid sources, so the
+      // expansion is scoped to JobDiva. Tier 0 (first search) keeps the
+      // recruiter's full source selection.
+      sources: searchMoreTier > 0 ? ["JobDiva"] : selectedSourcesArray,
       boolean_string: booleanString,
       // 5.6 / 5.10 plumbing — backend honors these in
       // jobdiva_service.search_candidates. `recent_days: 0` means Any.
@@ -5294,7 +5305,10 @@ function NewJobPageContent() {
       // omitted, and filters placeholder values ("External"/"Unknown").
       client_name: (jobData?.customer_name || jobData?.customer || "").trim() || undefined,
       page: 1,
-      page_size: 100
+      page_size: 100,
+      // 0 = first search (fast). 1+ escalates the JobDiva pool depth; the
+      // backend clamps to its tier schedule.
+      search_more_tier: searchMoreTier
     };
   };
 
@@ -5306,6 +5320,7 @@ function NewJobPageContent() {
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
+      searchMoreTier?: number;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -5586,6 +5601,9 @@ function NewJobPageContent() {
       setCandidates(dedupedCached);
       setHasSearched(true);
       setRestoredFromCache(true);
+      // Restored results are the fast tier-0 pool; reset so "Search more"
+      // escalates from tier 1 again.
+      setSearchMoreTier(0);
       const seen = seenCandidateIdsRef.current;
       for (const c of dedupedCached) {
         const id = String(c?.candidate_id || c?.id || "");
@@ -5605,6 +5623,8 @@ function NewJobPageContent() {
     setIsSearching(true);
     setHasSearched(true);
     setRestoredFromCache(false);
+    // Fresh search starts at the fast tier-0 pool; "Search more" re-escalates.
+    setSearchMoreTier(0);
     detailFailedIdsRef.current = new Set<string>();
     trackEvent("job_wizard_step5_candidate_search_started", {
       step: 5,
@@ -5758,6 +5778,50 @@ function NewJobPageContent() {
           label: attempt.label,
           query: truncateForTelemetry(attempt.query, 260),
         })),
+        ...buildStep5FilterContext(),
+      });
+    }
+  };
+
+  // "Search more": deepen the JobDiva JobAgent pool one tier and append the
+  // newly-surfaced ranks. JobAgentSearch has no offset/cursor, so each tier
+  // re-requests a larger ranked superset; runSearchStream's `seenIds` dedup
+  // (only reset on a "replace" run) drops the already-shown lower ranks so
+  // only the new candidates land. JobDiva-only is enforced in buildSearchPayload.
+  const handleSearchMore = async () => {
+    if (isSearching) return;
+    const nextTier = Math.min(searchMoreTier + 1, MAX_SEARCH_MORE_TIER);
+    if (nextTier === searchMoreTier) return; // already at the deepest tier
+    setIsSearching(true);
+    setHasSearched(true);
+    setSearchMoreTier(nextTier);
+    const beforeCount = candidates.length;
+    const runStartMs = Date.now();
+    let runResults: any[] = [];
+    trackEvent("job_wizard_step5_search_more_started", {
+      step: 5,
+      tier: nextTier,
+      candidates_before: beforeCount,
+    });
+    try {
+      setSearchStatus("Fetching more candidates from JobDiva...");
+      runResults = await runSearchStream(resolvedGeneratedBoolean, "append", {
+        searchMoreTier: nextTier,
+      });
+    } catch (error) {
+      console.error("Failed to search more candidates:", error);
+    } finally {
+      setIsSearching(false);
+      const runtimeSeconds = Number(((Date.now() - runStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(1);
+      const runQuality = collectCandidateQualityStats(runResults);
+      trackEvent("job_wizard_step5_search_more_finished", {
+        step: 5,
+        tier: nextTier,
+        runtime_seconds: runtimeSeconds,
+        new_results_count: runResults.length,
+        quality: runQuality,
         ...buildStep5FilterContext(),
       });
     }
@@ -7941,6 +8005,17 @@ function NewJobPageContent() {
                       isSearching ? searchStatus : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
+                  {/* "Search more" — deepen the JobDiva pool one tier and append. */}
+                  {hasSearched && !isSearching && candidates.length > 0 && searchMoreTier < MAX_SEARCH_MORE_TIER && searchSources.jobdiva && (
+                    <button
+                      onClick={handleSearchMore}
+                      disabled={isSearching}
+                      className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-bold text-[#6366f1] hover:text-white hover:bg-[#6366f1] px-2.5 py-1 rounded-md border border-[#ddd6fe] bg-[#f5f3ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Fetch a deeper pool of JobDiva candidates and append them to the list"
+                    >
+                      Search more
+                    </button>
+                  )}
                   {hasSearched && !isSearching && candidates.length > 0 && qualityScorecard && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                       <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-[#ede9fe] text-[#5b21b6] text-[10.5px] font-bold uppercase tracking-wider border border-[#ddd6fe]">

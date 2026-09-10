@@ -134,6 +134,10 @@ class CandidateSearchRequest(BaseModel):
     page: int = 1
     limit: int = 100
     page_size: Optional[int] = None
+    # Step-5 "Search more" tier (0 = first search, 1+ = each button click).
+    # Escalates the JobDiva JobAgentSearch pool depth via the tier schedule
+    # in core.sourcing_config; clamped server-side. 0 keeps first paint fast.
+    search_more_tier: int = 0
     within_miles: Optional[int] = None
     recent_days: Optional[int] = None
     require_resume: Optional[bool] = None

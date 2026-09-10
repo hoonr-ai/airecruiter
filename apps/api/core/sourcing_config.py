@@ -127,6 +127,8 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE = 100
 # Total candidates we'll background-hydrate. The long tail of the
 # locally-sorted result is left thin — recruiters never reach it, and
 # burning rate budget there blocks the rows that matter.
+# This is the tier-0 (first-search) cap; the "Search more" button escalates
+# it via JOBDIVA_HYDRATION_TIERS / jobdiva_hydration_cap_for_tier() below.
 FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES = 100
 
 # Sleep (seconds) between hydration pages to spread JobDiva load.
@@ -139,14 +141,46 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 # JobAgentSearch latency scales with resumeCount — measured 2026-06-04 on
 # real jobs: jobId 32364764 took 13s @ rc=100 vs 110s @ rc=400; jobId
 # 32344914 took 1.6s @ rc=100 vs 3.8s @ rc=400. The talent pool is capped
-# to the top-100 for display AND background hydration
-# (FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES) regardless, so the old
-# max(200, page_size*4)=400 just made JobDiva rank ~300 candidates we
-# immediately discard. 150 = the 100 display cap + headroom to absorb the
-# client-side state filter and cross-source dedup, while keeping the call
-# fast. Bump if a search's state filter is dropping enough to starve the
-# top-100; lower toward 100 for the fastest first paint.
+# for display AND background hydration to the per-tier hydration cap, so
+# requesting much beyond that just makes JobDiva rank candidates we discard.
+# resumeCount = the display/hydration cap + ~1.5x headroom to absorb the
+# client-side state filter and cross-source dedup.
+#
+# This is the tier-0 (first-search) value — kept small so first paint stays
+# fast. The Step-5 "Search more" button escalates the pool on demand via the
+# tier schedule below; each click trades latency for coverage (see the
+# rc=400 ≈ 110s measurement above — higher tiers are slow on large jobs).
 JOBAGENT_RESUME_COUNT = 150
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# "Search more" tier schedule (button-gated pool escalation)
+# ─────────────────────────────────────────────────────────────────────────
+# Tier 0 = first search (fast). Each "Search more" click bumps the tier,
+# re-querying JobDiva-only for a deeper ranked pool; the frontend's seen-id
+# dedup appends only the newly-surfaced ranks. The request:display ratio
+# (~1.5x) preserves headroom for the state filter + cross-source dedup.
+# Index 0 of each list MUST equal the tier-0 constants above so the first
+# search is unchanged. Higher tiers are progressively slower — the cost of
+# more candidates, now opt-in per click rather than paid on every search.
+JOBAGENT_RESUME_COUNT_TIERS = [150, 450, 750, 1050]
+JOBDIVA_HYDRATION_TIERS = [100, 300, 500, 700]
+
+
+def jobagent_resume_count_for_tier(tier) -> int:
+    """resumeCount to request from JobAgentSearch for a "Search more" tier.
+
+    Clamps to the schedule so an out-of-range tier from the client can never
+    request an unbounded pool.
+    """
+    tiers = JOBAGENT_RESUME_COUNT_TIERS
+    return tiers[max(0, min(int(tier or 0), len(tiers) - 1))]
+
+
+def jobdiva_hydration_cap_for_tier(tier) -> int:
+    """Background-hydration / display cap for a "Search more" tier."""
+    tiers = JOBDIVA_HYDRATION_TIERS
+    return tiers[max(0, min(int(tier or 0), len(tiers) - 1))]
 
 
 # ─────────────────────────────────────────────────────────────────────────

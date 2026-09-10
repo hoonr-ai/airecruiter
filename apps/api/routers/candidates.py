@@ -415,6 +415,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 "" if client_name.lower() in ("", "external", "unknown", "n/a")
                 else client_name
             ),
+            # Step-5 "Search more" pool-depth tier (clamped in sourcing_config).
+            search_more_tier=request.search_more_tier,
         )
 
         # Execute unified search as a stream. Persist each candidate to
