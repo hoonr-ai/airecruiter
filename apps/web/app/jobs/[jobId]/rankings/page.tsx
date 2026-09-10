@@ -2525,7 +2525,7 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell
-                          className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
+                          className="border-b border-slate-200 text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
                           onMouseEnter={() => {
                             if (screeningScore > 0) setHoveredResumeScoreKey(candidateKey);
                           }}
@@ -2603,7 +2603,7 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell
-                          className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
+                          className="border-b border-slate-200 text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
                           onMouseEnter={() => {
                             if (showEngageScore) setHoveredEngageScoreKey(candidateKey);
                           }}
