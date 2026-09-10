@@ -3009,7 +3009,10 @@ async def get_launched_candidates(
                 import re
                 date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-                # Date range filters apply to the engage_created_at which is la.created_at, evaluated in America/New_York timezone to match table display
+                # Date range filters apply to engage_created_at (la.created_at).
+                # Note: engage_interview_audit.created_at is stored in UTC by the DB session.
+                # Converting (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')
+                # evaluates wall-clock date boundaries in America/New_York time matching the UI display.
                 if start_date:
                     if not date_pattern.match(start_date):
                         raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
@@ -3102,6 +3105,13 @@ async def get_launched_candidates(
         finally:
             conn.close()
 
+        # Helper to pick first non-None score value (preventing 0 scores from being treated as falsy)
+        def _pick_first_not_none(*vals):
+            for v in vals:
+                if v is not None:
+                    return v
+            return None
+
         # Handle data blob unpacking and fetch live outreach if needed
         # Collect interview IDs for live fallback.
         import json
@@ -3138,6 +3148,7 @@ async def get_launched_candidates(
 
         for cand in candidates:
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            original_payload = cand.get("audit_payload") if isinstance(cand.get("audit_payload"), dict) else {}
             
             # Promote persisted values from data_blob
             if isinstance(data_blob, dict):
@@ -3163,50 +3174,69 @@ async def get_launched_candidates(
                 score_val = None
                 total_val = None
                 if isinstance(eval_dict, dict):
-                    score_val = eval_dict.get("total_score") or eval_dict.get("candidate_score") or eval_dict.get("score")
-                    total_val = eval_dict.get("max_score") or eval_dict.get("total_score_possible")
+                    score_val = _pick_first_not_none(
+                        eval_dict.get("total_score"),
+                        eval_dict.get("candidate_score"),
+                        eval_dict.get("score")
+                    )
+                    total_val = _pick_first_not_none(
+                        eval_dict.get("max_score"),
+                        eval_dict.get("total_score_possible")
+                    )
                 if score_val is None:
-                    score_val = live_payload.get("candidate_score") or live_payload.get("overall_score") or live_payload.get("score")
+                    score_val = _pick_first_not_none(
+                        live_payload.get("candidate_score"),
+                        live_payload.get("overall_score"),
+                        live_payload.get("score")
+                    )
                 if score_val is not None:
                     cand["engage_score"] = score_val
                 if total_val is not None:
                     cand["engage_total_score"] = total_val
 
-            # Fallback to audit_response or audit_payload if engage_score is still missing
+            # Fallback to audit_response or original_payload if engage_score is still missing
             if cand.get("engage_score") is None:
                 resp = cand.get("audit_response")
                 if isinstance(resp, str) and resp.strip():
-                    try: resp = json.loads(resp)
-                    except: resp = {}
+                    try:
+                        resp = json.loads(resp)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        resp = {}
                 if isinstance(resp, dict):
-                    aud_score = resp.get("candidate_score") or resp.get("overall_score") or resp.get("score")
+                    aud_score = _pick_first_not_none(
+                        resp.get("candidate_score"),
+                        resp.get("overall_score"),
+                        resp.get("score")
+                    )
                     if aud_score is not None:
                         cand["engage_score"] = aud_score
                     if resp.get("total_score") is not None:
                         cand["engage_total_score"] = resp.get("total_score")
 
-            # Normalize score
-            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
+            # Normalize score safely (handling string numbers and preventing division errors)
+            raw_score = _pick_first_not_none(cand.get("engage_score"), cand.get("engage_candidate_score"))
             raw_total = cand.get("engage_total_score")
-            if raw_score is not None and raw_total and raw_total > 0:
-                cand["engage_score"] = round((float(raw_score) / float(raw_total)) * 100, 1)
+            if raw_score is not None and raw_total is not None:
+                try:
+                    f_score = float(raw_score)
+                    f_total = float(raw_total)
+                    if f_total > 0:
+                        cand["engage_score"] = round((f_score / f_total) * 100, 1)
+                except (TypeError, ValueError):
+                    pass
+
+            # Parse outreach method before replacing audit_payload
+            cand["attended_via"] = "SMS" if original_payload.get("outreach_method") == "sms" else "Phone"
 
             # Format audit_payload for frontend hover card
             hf_details = _extract_rankings_hard_filter_details(
                 data_blob,
                 cand.get("audit_response") or {},
-                cand.get("audit_payload") if isinstance(cand.get("audit_payload"), dict) else {}
+                original_payload
             )
             cand["audit_payload"] = {
                 "hard_filter_details": hf_details
             }
-
-            # Parse payload for attended_via
-            audit_payload = cand.get("audit_payload")
-            cand["attended_via"] = "Phone" # Defaulting for voice
-            if audit_payload and isinstance(audit_payload, dict):
-                if audit_payload.get("outreach_method") == "sms":
-                    cand["attended_via"] = "SMS"
 
         return {
             "status": "success",
