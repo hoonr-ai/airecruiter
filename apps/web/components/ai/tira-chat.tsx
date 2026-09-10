@@ -23,7 +23,19 @@ import {
 import { useAI } from "@/context/ai-context";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
+import { API_BASE, authFetch, isNetworkFetchError, promptReLogin } from "@/lib/api";
+
+// A 401 on a Tira call means the request left the browser with no/expired
+// auth (MSAL silent token acquisition failed, so authFetch attached no
+// Authorization header). Kick off the same re-login redirect the central api
+// client's req() uses, and return a human message instead of surfacing the
+// backend's raw "Authentication required. Provide a valid Authorization
+// Bearer token." detail.
+function authExpiredMessage(res: Response): string | null {
+    if (res.status !== 401) return null;
+    promptReLogin();
+    return "Your session has expired — taking you back to sign-in…";
+}
 
 type TiraMode = "chat" | "boolean" | "match" | "aicheck" | "bug";
 
@@ -272,7 +284,7 @@ function BooleanMode() {
             if (file) fd.append("jd_file", file);
             const res = await authFetch(`${apiBase}/tira/boolean`, { method: "POST", body: fd });
             const data = await res.json();
-            if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
+            if (!res.ok) throw new Error(authExpiredMessage(res) || data?.detail || `Failed (${res.status})`);
             setResult(data as BooleanResult);
         } catch (e) {
             const msg = e instanceof Error ? e.message : "Couldn't build a boolean string.";
@@ -464,7 +476,7 @@ function MatchMode() {
             fd.append("resume_file", file);
             const res = await authFetch(`${apiBase}/tira/match`, { method: "POST", body: fd });
             const data = await res.json();
-            if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
+            if (!res.ok) throw new Error(authExpiredMessage(res) || data?.detail || `Failed (${res.status})`);
             setResult(data as MatchResult);
         } catch (e) {
             const msg = e instanceof Error ? e.message : "Something went wrong scoring the resume.";
@@ -664,7 +676,8 @@ function AICheckMode() {
             }
             if (!res.ok || !data) {
                 throw new Error(
-                    data?.detail
+                    authExpiredMessage(res)
+                        || data?.detail
                         || (res.status === 413
                             ? "Upload too large — remove some files and try again."
                             : `Failed (${res.status})`),
@@ -903,7 +916,7 @@ function BugMode() {
             if (screenshot) fd.append("screenshot", screenshot);
             const res = await authFetch(`${apiBase}/tira/bug-report`, { method: "POST", body: fd });
             const data = await res.json();
-            if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
+            if (!res.ok) throw new Error(authExpiredMessage(res) || data?.detail || `Failed (${res.status})`);
             setSuccess(data?.sent ? "sent" : "logged");
         } catch (e) {
             const msg = e instanceof Error ? e.message : "Couldn't submit the bug report.";

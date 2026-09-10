@@ -28,6 +28,10 @@ export interface LaunchBatchInfo {
   dncSkipped: number;
   engageSent: number;
   alreadySent: number;
+  // Candidates PAIR accepted but returned no interview_id for — not sent,
+  // recorded as failed candidates (retryable), surfaced on the batch row so a
+  // partial batch never reads as a clean success.
+  noInterview?: number;
   errorMessage?: string;
 }
 
@@ -147,7 +151,9 @@ function batchLabel(b: LaunchBatchInfo): string {
     case "completed":
       return `Saved ${b.savedCount} · Sent ${b.engageSent}${
         b.alreadySent ? ` · ${b.alreadySent} already sent` : ""
-      }${b.dncSkipped ? ` · ${b.dncSkipped} DNC` : ""}`;
+      }${b.noInterview ? ` · ${b.noInterview} no interview` : ""}${
+        b.dncSkipped ? ` · ${b.dncSkipped} DNC` : ""
+      }`;
     case "failed":
       return b.errorMessage || "Failed";
     default:

@@ -1844,7 +1844,26 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
                                 resume_match_percentage = EXCLUDED.resume_match_percentage,
-                                data = EXCLUDED.data,
+                                -- Replace the sourcing blob but carry over engage_*
+                                -- bookkeeping: launch stamps engage_status into this
+                                -- same jsonb, and every Launch PAIR run re-saves its
+                                -- selection first. A plain EXCLUDED.data wiped
+                                -- engage_status='sent', so the engage idempotency
+                                -- check no longer saw the candidate as launched and
+                                -- re-sent them (duplicate outreach).
+                                data = EXCLUDED.data::jsonb || COALESCE(
+                                    (
+                                        SELECT jsonb_object_agg(key, value)
+                                        FROM jsonb_each(sourced_candidates.data)
+                                        WHERE key IN (
+                                            'engage_status',
+                                            'engage_updated_at',
+                                            'engage_interview_id',
+                                            'engage_last_response'
+                                        )
+                                    ),
+                                    '{}'::jsonb
+                                ),
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
                         """, candidate_data)

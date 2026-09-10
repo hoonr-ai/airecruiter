@@ -77,6 +77,25 @@ function strError(e: any): string {
   return (e?.message || e?.errorCode || String(e || "")).toLowerCase();
 }
 
+// Nudge an expired/blocked session back through MSAL login — the same 401
+// recovery req() applies, exported for callers that use authFetch directly
+// (Tira panel, multipart uploads, streams). When silent token acquisition
+// fails, getAuthHeaders sends the request with NO Authorization header and
+// the backend answers 401 "Authentication required" — without this nudge the
+// user just sees that raw error with no way forward but a manual reload.
+export function promptReLogin(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const activeAccount =
+      msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
+    if (activeAccount) {
+      msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+    }
+  } catch {
+    /* MSAL not initialized */
+  }
+}
+
 export async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const authHeaders = await getAuthHeaders();
   const existingHeaders = (init.headers || {}) as Record<string, string>;

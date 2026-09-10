@@ -87,6 +87,9 @@ export type LaunchEvent =
       // Candidates PAIR accepted but returned no interview_id for. They are NOT
       // counted as sent and remain retryable on a subsequent launch.
       no_interview?: number;
+      // The ids behind no_interview, so the caller can record them as failed
+      // candidates and feed the Retry flow (older backends omit this).
+      no_interview_candidate_ids?: string[];
       already_sent?: number;
       // Count of server-side exclusions in this batch (see done.excluded_candidates).
       excluded?: number;

@@ -7521,11 +7521,41 @@ function NewJobPageContent() {
                 const already = evt.already_sent || 0;
                 totalEngaged += sent;
                 totalAlreadySent += already;
+                // Candidates PAIR accepted but created no interview for. These
+                // were previously invisible: the batch rendered as a clean
+                // success on `sent` alone, so a launch that engaged 5 of 75
+                // still said "Launched" with no failures, no CSV, no Retry.
+                // Record them as failed candidates (they're engage_status=
+                // 'failed' server-side and retryable) and block the clean-run
+                // redirect via totalFailedBatches.
+                const noInterviewIds = Array.isArray(evt.no_interview_candidate_ids)
+                  ? evt.no_interview_candidate_ids.map((id) => String(id)).filter(Boolean)
+                  : [];
+                const noInterview = evt.no_interview || noInterviewIds.length;
+                if (noInterviewIds.length > 0) {
+                  recordLaunchFailures(
+                    noInterviewIds,
+                    "PAIR accepted the batch but created no interview for this candidate",
+                  );
+                }
+                if (noInterview > 0) {
+                  totalFailedBatches += 1;
+                  if (!engageFailureMessage) {
+                    engageFailureMessage = `PAIR created no interview for ${noInterview} candidate${noInterview === 1 ? "" : "s"}`;
+                  }
+                }
                 updateBatch(launchIndexOffset + evt.index, {
-                  status: "completed",
+                  status:
+                    noInterview > 0 && sent === 0 && already === 0
+                      ? "failed"
+                      : "completed",
                   engageSent: sent,
                   alreadySent: already,
+                  noInterview,
                   savedCount: sent + already,
+                  ...(noInterview > 0 && sent === 0 && already === 0
+                    ? { errorMessage: `PAIR created no interviews for this batch (${noInterview} candidates)` }
+                    : {}),
                 });
               } else {
                 const msg = evt.error || "Launch failed";

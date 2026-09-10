@@ -997,12 +997,19 @@ def _stamp_engage_status_batch(
     conn = _get_db_connection()
     try:
         cur = conn.cursor()
+        # engage_updated_at rides along so the idempotency check can tell a
+        # live 'processing' launch from one stranded by a crash/cancellation.
         cur.execute(
             """
             UPDATE sourced_candidates
             SET data = jsonb_set(
-                    COALESCE(data, '{}'::jsonb),
-                    '{engage_status}',
+                    jsonb_set(
+                        COALESCE(data, '{}'::jsonb),
+                        '{engage_status}',
+                        to_jsonb(%s::text),
+                        true
+                    ),
+                    '{engage_updated_at}',
                     to_jsonb(%s::text),
                     true
                 ),
@@ -1012,6 +1019,7 @@ def _stamp_engage_status_batch(
             """,
             (
                 status_value,
+                datetime.now(timezone.utc).isoformat(),
                 list(candidate_ids),
                 str(job_id_value or ""),
                 str(job_id_alt or ""),
@@ -1021,6 +1029,12 @@ def _stamp_engage_status_batch(
         cur.close()
     finally:
         conn.close()
+
+
+# A 'processing' stamp older than this is a stranded launch, not a live one:
+# the creation wait below caps at 600s, so anything past 600s + slack means the
+# waiting request died without stamping sent/failed. Keep > the wait timeout.
+_ENGAGE_PROCESSING_STALE_SECONDS = 1200
 
 
 async def _wait_for_pairbot_creation(
@@ -1445,6 +1459,12 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
         # PAIR side. Crucially, 'failed' is NOT treated as already-sent — a candidate
         # PAIR accepted but returned no interview_id for (or that erred) must remain
         # retryable, otherwise a transient miss would silently skip them forever.
+        # 'processing' only counts as already-sent while FRESH: the stamp precedes a
+        # creation wait capped at ~10 min, so a 'processing' older than the stale
+        # window (or with no engage_updated_at at all — pre-fix stranded rows) means
+        # the launch that stamped it died mid-wait (deploy restart, client
+        # disconnect). Those must stay retryable or they are skipped forever as
+        # "Already Launched".
         # We keep the skipped candidate_ids in skipped_already_sent so the caller
         # can show them as already-launched in the UI.
         skipped_already_sent: List[str] = []
@@ -1455,7 +1475,9 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     _idem_cur = _idem_conn.cursor()
                     _idem_cur.execute(
                         """
-                        SELECT DISTINCT candidate_id
+                        SELECT candidate_id,
+                               COALESCE(data ->> 'engage_status', ''),
+                               data ->> 'engage_updated_at'
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -1467,8 +1489,31 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                             str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
                         ),
                     )
-                    skipped_already_sent = [r[0] for r in _idem_cur.fetchall() or []]
+                    _idem_rows = _idem_cur.fetchall() or []
                     _idem_cur.close()
+                    _skip_set: set = set()
+                    for _cid, _status, _stamped_iso in _idem_rows:
+                        if _status == "processing":
+                            _stale = True
+                            if _stamped_iso:
+                                try:
+                                    _ts = datetime.fromisoformat(str(_stamped_iso))
+                                    if _ts.tzinfo is None:
+                                        _ts = _ts.replace(tzinfo=timezone.utc)
+                                    _stale = (
+                                        datetime.now(timezone.utc) - _ts
+                                    ).total_seconds() > _ENGAGE_PROCESSING_STALE_SECONDS
+                                except (ValueError, TypeError):
+                                    _stale = True
+                            if _stale:
+                                logger.warning(
+                                    "engage idempotency: candidate %s stuck at "
+                                    "engage_status=processing (stamped %s) — treating as retryable",
+                                    _cid, _stamped_iso,
+                                )
+                                continue
+                        _skip_set.add(_cid)
+                    skipped_already_sent = list(_skip_set)
                 finally:
                     _idem_conn.close()
             except Exception as _idem_err:
@@ -1644,8 +1689,13 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 )
                 try:
                     creation_event = await _wait_for_pairbot_creation(bulk_id)
-                except Exception as wait_err:
+                except (Exception, asyncio.CancelledError) as wait_err:
                     # Do not leave candidates stuck at engage_status=processing.
+                    # CancelledError (BaseException since py3.8) must be handled
+                    # too: a client disconnect / worker shutdown cancels this
+                    # coroutine mid-wait, and without the failed-stamp the batch
+                    # stays 'processing' forever and later launches skip it as
+                    # "already sent".
                     try:
                         _stamp_engage_status_batch(
                             list(request.real_candidate_ids),
@@ -2244,17 +2294,30 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         # engage_status='failed' (and stay retryable) — surface them
                         # as no_interview instead of inflating the sent tally.
                         sent = sum(1 for r in rows if isinstance(r, dict) and r.get("interview_id"))
+                        # Ids PAIR accepted but returned no interview for — the FE
+                        # must see WHO so it can report them as failed and feed the
+                        # Retry button. Counting alone hid these entirely: launches
+                        # that created a handful of interviews out of 75 still
+                        # rendered as a clean success.
+                        no_interview_ids = [
+                            str(r.get("candidate_id"))
+                            for r in rows
+                            if isinstance(r, dict) and not r.get("interview_id") and r.get("candidate_id")
+                        ]
                         no_interview = len(rows) - sent
                         totals["sent"] += sent
                         totals["already_sent"] += len(skipped)
                         totals["no_interview"] += no_interview
                         totals["excluded"] += len(batch_excluded)
+                        if no_interview_ids:
+                            failed_candidate_ids.extend(no_interview_ids)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
                             "status": "completed",
                             "sent": sent,
                             "no_interview": no_interview,
+                            "no_interview_candidate_ids": no_interview_ids,
                             "already_sent": len(skipped),
                             "excluded": len(batch_excluded),
                             "bulk_id": res.get("bulk_id"),
