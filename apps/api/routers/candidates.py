@@ -3048,11 +3048,11 @@ async def get_launched_candidates(
                     monitored_jobs_lookup AS (
                         SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level
                         FROM (
-                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level
+                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
                             FROM monitored_jobs mj
                             WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
                             UNION ALL
-                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level
+                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
                             FROM monitored_jobs mj
                             WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
                         ) x
@@ -3080,7 +3080,8 @@ async def get_launched_candidates(
                             la.payload as audit_payload,
                             la.response as audit_response,
                             mj.title as job_title,
-                            mj.screening_level
+                            mj.screening_level,
+                            mj.recruiter_emails
                         FROM sourced_candidates sc
                         JOIN latest_audit la ON la.candidate_id = sc.candidate_id
                         LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
@@ -3825,6 +3826,7 @@ async def get_candidate_evaluation_report(
                 "ai_description":    job_row.get("ai_description") or job_row.get("jobdiva_description"),
                 "recruiter_notes":   job_row.get("recruiter_notes"),
                 "bot_introduction":  job_row.get("bot_introduction"),
+                "recruiter_emails":  job_row.get("recruiter_emails"),
                 "rubric":            rubric,
                 "sourcing_filters":  sourcing_filters,
                 "resume_match_filters": resume_match_filters,
