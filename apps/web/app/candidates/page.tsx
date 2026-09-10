@@ -407,12 +407,11 @@ export default function GlobalCandidatesPage() {
 
   const normalizeSourceLabel = (source: string | null | undefined): string => {
     const raw = String(source || "").trim();
-    if (!raw) return "Unknown";
-    // Usually jobdiva-talent_search or jobdiva-jobagent or similar. Format nicely:
-    if (raw.toLowerCase().startsWith("jobdiva-")) {
-      const parts = raw.split("-").slice(1);
-      return `JobDiva ${parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ")}`;
-    }
+    const s = raw.toLowerCase();
+    if (!s) return "—";
+    if (s.includes("applicant")) return "Job-Diva Applicant";
+    if (s.includes("talentsearch") || s.includes("talent_search")) return "Job-Diva Candidate";
+    if (s.includes("linkedin")) return "LinkedIn";
     return raw;
   };
 
