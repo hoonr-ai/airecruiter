@@ -188,6 +188,7 @@ interface Candidate {
   total_fit_score?: number | null;
   audit_payload?: { hard_filter_details?: HardFilterDetail[] };
   job_title: string;
+  recruiter_emails?: string | string[];
   screening_level: string;
   attended_via: string;
   data?: CandidateData;
