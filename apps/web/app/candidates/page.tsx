@@ -185,6 +185,7 @@ interface Candidate {
   engage_interview_id: string;
   engage_created_at: string;
   engage_score: number;
+  total_fit_score?: number | null;
   audit_payload?: { hard_filter_details?: HardFilterDetail[] };
   job_title: string;
   screening_level: string;
@@ -640,7 +641,7 @@ export default function GlobalCandidatesPage() {
     const generateRows = (cands: any[]) => cands.map((c) => {
       const resumeScore = Math.round(c.match_score || 0);
       const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
-      const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
+      const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
 
       const statusInfo = normalizeInterviewStatus(c.engage_status);
 
@@ -741,7 +742,7 @@ export default function GlobalCandidatesPage() {
         const generateRows = (cands: Candidate[]) => cands.map((c) => {
           const resumeScore = Math.round(c.match_score || 0);
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
-          const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
+          const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
 
           const statusInfo = normalizeInterviewStatus(c.engage_status);
 
@@ -1120,8 +1121,8 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
-                        {c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? (
-                          <span>{Math.round((c.engage_score + resumeScore) / 2)}/100</span>
+                        {c.total_fit_score !== null && c.total_fit_score !== undefined ? (
+                          <span>{c.total_fit_score}/100</span>
                         ) : (
                           <span className="font-normal opacity-40 italic text-[13px]">Waiting</span>
                         )}
