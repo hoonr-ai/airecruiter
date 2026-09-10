@@ -849,20 +849,22 @@ export default function GlobalCandidatesPage() {
             </div>
 
             <div className="flex items-center gap-4 shrink-0">
-              <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-2 h-9 shadow-sm">
-                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pl-1 pr-1">Launched From</label>
+              <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-3 h-9 shadow-sm">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pr-1">
+                  Launched <span className="text-slate-400">From</span>
+                </label>
                 <input
                   type="date"
                   value={exportStartDate}
                   onChange={(e) => setExportStartDate(e.target.value)}
-                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
                 />
-                <span className="text-slate-300 text-[11px] uppercase font-bold px-1">to</span>
+                <span className="text-slate-400 text-[11px] uppercase font-bold mx-0.5">to</span>
                 <input
                   type="date"
                   value={exportEndDate}
                   onChange={(e) => setExportEndDate(e.target.value)}
-                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
                 />
               </div>
 
