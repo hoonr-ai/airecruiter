@@ -22,6 +22,16 @@ _COOLDOWN_AUTH_S = 30 * 60      # 401/403/checkpoint — needs human attention
 _COOLDOWN_RATE_LIMIT_S = 15 * 60  # 429 — LinkedIn throttled this account
 _COOLDOWN_TRANSIENT_S = 5 * 60  # 5xx — brief backoff, likely recovers
 
+# LinkedIn's opaque profile identifiers. Recruiter search rows are keyed by an
+# `AEMAA…` hash and classic member ids are `ACoAA…`; both are base64url, so
+# they carry '-' and '_'. Matched against the separator-stripped, case-folded
+# form, and only ever alongside the length floor below — the prefix alone
+# would indict a real name like "Ace Aaronson Baker" ("aceaa…").
+_LINKEDIN_OPAQUE_ID_RE = re.compile(r"^(?:ac[a-z]aa|aemaa)[a-z0-9]+$")
+# Observed ids compact to 34-39 chars. A name that both reaches this length
+# AND opens with one of those prefixes is not a realistic collision.
+_LINKEDIN_OPAQUE_ID_MIN_LEN = 25
+
 
 class UnipileService:
     def __init__(self):
@@ -38,7 +48,12 @@ class UnipileService:
         # Explicit pin list (UNIPILE_ACCOUNT_IDS env only). Empty = rotate
         # across every discovered workspace account.
         self.pinned_account_ids = list(UNIPILE_ACCOUNT_IDS)
-        # Used only when the /accounts listing is unreachable and no cache exists.
+        # Last-resort ids for when the /accounts listing is unreachable AND the
+        # DB has no rotation history. The legacy single UNIPILE_ACCOUNT_ID is
+        # the weakest of these on purpose: it is a stale hand-pinned value in
+        # every old deployment and has been observed pointing at an account
+        # that was later disconnected, which turned every discovery blip into
+        # 100% of traffic hitting a dead seat.
         self.fallback_account_ids = list(UNIPILE_ACCOUNT_IDS) or ([UNIPILE_ACCOUNT_ID] if UNIPILE_ACCOUNT_ID else [])
         self._id_cache = {} # Simple in-memory cache for skill/location IDs
         # Discovered LinkedIn accounts: [{"id","name","status"}], cached per worker.
@@ -96,6 +111,13 @@ class UnipileService:
                     if accounts:
                         self._accounts_cache = accounts
                         self._accounts_cache_at = now
+                        # Surface workspace-level breakage (e.g. a LinkedIn
+                        # account whose session expired -> "CREDENTIALS") on
+                        # the admin health view. Without this the account is
+                        # merely skipped by rotation and its `last_error`
+                        # stays blank, so a disconnected seat looks idle
+                        # rather than broken.
+                        await self._record_unhealthy_accounts(accounts)
                         return accounts
                     logger.warning("Unipile: no LinkedIn accounts attached to the workspace.")
                 else:
@@ -105,7 +127,66 @@ class UnipileService:
 
         if self._accounts_cache:
             return self._accounts_cache  # stale beats empty
+
+        # Discovery is down and this worker has never seen the workspace.
+        # Prefer accounts the cluster has actually used and that aren't
+        # currently benched over the hand-pinned env var.
+        try:
+            known = await asyncio.to_thread(self._known_good_account_ids_sync)
+        except Exception as e:
+            logger.warning(f"Unipile: usage-table fallback unavailable ({e}).")
+            known = []
+        if known:
+            logger.warning(
+                "Unipile: /accounts unreachable; falling back to %d account(s) from rotation history.",
+                len(known),
+            )
+            return [{"id": a, "name": "", "status": ""} for a in known]
         return [{"id": a, "name": "", "status": ""} for a in self.fallback_account_ids]
+
+    def _known_good_account_ids_sync(self) -> List[str]:
+        """Accounts seen by the cluster before and not currently benched."""
+        from core.db import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT account_id FROM unipile_account_usage
+                    WHERE cooldown_until IS NULL OR cooldown_until <= NOW()
+                    ORDER BY last_used_at DESC NULLS LAST
+                """)
+                return [r[0] for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    async def _record_unhealthy_accounts(self, accounts: List[Dict[str, Any]]) -> None:
+        """Bench accounts the workspace reports as broken, with the reason.
+
+        Cooldown matches the discovery cache TTL, so an account that gets
+        reconnected rejoins rotation on the next refresh instead of serving
+        out a long bench it no longer deserves.
+        """
+        unhealthy = [a for a in accounts if a.get("status") and a["status"] != "OK"]
+        if not unhealthy:
+            return
+        for acc in unhealthy:
+            logger.warning(
+                "Unipile: account %s (%s) is %s in the workspace — excluded from rotation "
+                "until it is reconnected in the Unipile dashboard.",
+                acc["id"], acc.get("name") or "?", acc["status"],
+            )
+            try:
+                if not self._usage_table_ready:
+                    await asyncio.to_thread(self._ensure_usage_table_sync)
+                    self._usage_table_ready = True
+                await asyncio.to_thread(
+                    self._mark_account_failure_sync,
+                    acc["id"],
+                    f"workspace status: {acc['status']} — reconnect this LinkedIn account in Unipile",
+                    _ACCOUNTS_CACHE_TTL_S,
+                )
+            except Exception as e:
+                logger.warning(f"Unipile: could not record unhealthy account {acc['id']}: {e}")
 
     async def get_rotation_account_ids(self) -> List[str]:
         """Account ids eligible for rotation.
@@ -302,6 +383,38 @@ class UnipileService:
             return _COOLDOWN_TRANSIENT_S
         return None
 
+    @staticmethod
+    def _looks_like_opaque_id(raw: str) -> bool:
+        """True when `raw` is a LinkedIn identifier wearing a name's clothes.
+
+        The separator-insensitive `compact` form is what matters: a recruiter
+        hash like `AEMAAGs9ehYBSTb_a4-CPooWbc5YoNZEjTZ0rFo` arrives here as
+        "Aemaags9ehybstb A4 Cpoowbc5yonzejtz0rfo" once a URL-slug deriver has
+        turned its '-'/'_' into spaces, which is exactly how it used to slip
+        past a "no spaces" guard and get stored as a candidate's name.
+        """
+        compact = re.sub(r"[\s\-_.]+", "", raw)
+        if len(compact) < 16 or not compact.isalnum():
+            return False
+        if (
+            len(compact) >= _LINKEDIN_OPAQUE_ID_MIN_LEN
+            and _LINKEDIN_OPAQUE_ID_RE.match(compact.casefold())
+        ):
+            return True
+        # Digits surviving inside a long token: real names don't carry them,
+        # base64url identifiers almost always do. Callers that work on vanity
+        # slugs strip LinkedIn's numeric disambiguator
+        # ("kani-mozhi-s-646666422") before asking.
+        if any(c.isdigit() for c in compact):
+            return True
+        # Hash-like case churn. Only indicts a SINGLE unbroken token: a long
+        # multi-word name ("Maria Del Carmen Rodriguez Fernandez") carries one
+        # capital per word and would otherwise trip this. Meaningful only
+        # before a .capitalize() has flattened the case.
+        if re.search(r"[\s\-_.]", raw.strip()):
+            return False
+        return len(re.findall(r"[A-Z]", compact)) > 5 and len(re.findall(r"[a-z]", compact)) > 5
+
     def _clean_candidate_name(self, value: Optional[str]) -> Optional[str]:
         raw = re.sub(r"\s+", " ", str(value or "")).strip()
         if not raw:
@@ -310,6 +423,7 @@ class UnipileService:
         normalized = raw.casefold()
         placeholders = {
             "linkedin candidate",
+            "linkedin member",
             "professional candidate",
             "unknown candidate",
             "candidate",
@@ -317,19 +431,20 @@ class UnipileService:
         }
         if normalized in placeholders:
             return None
-            
-        # Alphanumeric ID detection: Reject long strings with no spaces that contain digits
-        # e.g. "Aemaaesrdj8Bputbeeugzft99J0Qcie7Kbhun5K"
-        if len(raw) > 15 and " " not in raw:
-            if any(c.isdigit() for c in raw):
-                return None
-            # Also reject if it has extremely suspicious character distribution (e.g. hashes)
-            if len(re.findall(r'[A-Z]', raw)) > 5 and len(re.findall(r'[a-z]', raw)) > 5:
-                return None
+
+        if self._looks_like_opaque_id(raw):
+            return None
 
         return raw
 
     def _derive_name_from_profile_url(self, profile_url: Optional[str]) -> Optional[str]:
+        """Best-effort name from a PUBLIC LinkedIn vanity URL (/in/<slug>).
+
+        Deliberately narrow. Recruiter rows also carry a
+        `/talent/search/profile/<hash>` URL whose last path segment is an
+        opaque id — the old `path_parts[-1]` fallback happily turned that hash
+        into a candidate's name.
+        """
         if not profile_url:
             return None
 
@@ -338,19 +453,32 @@ class UnipileService:
         except Exception:
             return None
 
-        slug = ""
         path_parts = [part for part in (parsed.path or "").split("/") if part]
-        if "in" in path_parts:
-            in_index = path_parts.index("in")
-            if in_index + 1 < len(path_parts):
-                slug = path_parts[in_index + 1]
-        elif path_parts:
-            slug = path_parts[-1]
+        if "in" not in path_parts:
+            return None
+        in_index = path_parts.index("in")
+        if in_index + 1 >= len(path_parts):
+            return None
+        return self._derive_name_from_slug(path_parts[in_index + 1])
 
+    def _derive_name_from_slug(self, slug: Optional[str]) -> Optional[str]:
+        """"bruno-vidal-" -> "Bruno Vidal". None when the slug is an id."""
+        slug = str(slug or "").strip()
+        if not slug:
+            return None
+
+        # Normalise separators and drop LinkedIn's numeric disambiguator
+        # ("kani-mozhi-s-646666422") BEFORE the id check — otherwise every
+        # vanity slug carrying a numeric suffix reads as an identifier.
         slug = re.sub(r"[-_]+", " ", slug).strip()
         slug = re.sub(r"\b\d+\b", " ", slug)
         slug = re.sub(r"\s+", " ", slug).strip()
         if not slug:
+            return None
+
+        # Now the id check bites: a recruiter hash keeps its embedded digits
+        # and its AEMAA/ACoAA prefix, and is still in its original case.
+        if self._looks_like_opaque_id(slug):
             return None
 
         if not re.search(r"[a-zA-Z]{2,}", slug):
@@ -365,14 +493,18 @@ class UnipileService:
         if explicit_name:
             return explicit_name
 
-        # Try first_name + last_name from profile
+        # Try first_name + last_name from profile. Join only the parts that
+        # survived cleaning — interpolating a None gave names like "None Vidal".
         first_name = self._clean_candidate_name(item.get("first_name") or item.get("firstName"))
         last_name = self._clean_candidate_name(item.get("last_name") or item.get("lastName"))
         if first_name or last_name:
-            return f"{first_name} {last_name}".strip()
+            return " ".join(p for p in (first_name, last_name) if p)
 
-        derived_name = self._derive_name_from_profile_url(
-            item.get("profile_url") or item.get("public_profile_url")
+        # PUBLIC vanity URL only — `profile_url` on a recruiter row is the
+        # /talent/ deep link, whose slug is an opaque hash.
+        derived_name = (
+            self._derive_name_from_profile_url(item.get("public_profile_url"))
+            or self._derive_name_from_slug(item.get("public_identifier"))
         )
         if derived_name:
             return derived_name
@@ -394,6 +526,16 @@ class UnipileService:
             return f"LinkedIn Professional {str(provider_id)[:8]}"
 
         return "LinkedIn Candidate"
+
+    def is_usable_candidate_name(self, value: Optional[str]) -> bool:
+        """False for blanks, placeholders and LinkedIn ids masquerading as names.
+
+        Lets callers decide whether a later, better source (e.g. the profile
+        fetch) should overwrite a name they already have.
+        """
+        if self._clean_candidate_name(value) is None:
+            return False
+        return not str(value or "").strip().startswith("LinkedIn Professional ")
 
     def _split_candidate_name(self, full_name: str) -> tuple[str, str]:
         cleaned = re.sub(r"\s+", " ", str(full_name or "")).strip()
@@ -750,8 +892,45 @@ class UnipileService:
                         
                         # Handle potential nulls and field variations from docs
                         img_url = item.get("img") or item.get("profile_picture_url")
-                        p_url = item.get("profile_url") or item.get("public_profile_url")
-                        
+
+                        # `profile_url` on a recruiter row is the LinkedIn
+                        # Recruiter deep link (/talent/search/profile/<hash>) —
+                        # opening it needs an RPS seat, so it is NOT what we
+                        # hand the UI. The same row carries the real vanity URL
+                        # in `public_profile_url` (or rebuildable from
+                        # `public_identifier`). When neither is present the
+                        # field stays empty and profile enrichment fills it in
+                        # from /users; the recruiter link is preserved
+                        # separately for seat-holders and recruiter-scoped ops.
+                        public_id = (item.get("public_identifier") or "").strip()
+                        recruiter_url = item.get("profile_url") or ""
+                        p_url = item.get("public_profile_url") or (
+                            f"https://www.linkedin.com/in/{public_id}" if public_id else ""
+                        )
+                        if not p_url and "/talent/" not in recruiter_url:
+                            # A non-recruiter response shape: whatever it gave
+                            # us is already a public URL.
+                            p_url = recruiter_url
+
+                        # LinkedIn Recruiter tells us open-to-work directly on
+                        # the search row — no need to pay Apify to rediscover
+                        # it. Absent marker leaves the field unset so the Apify
+                        # resolver still runs (a missing `interests` array is
+                        # not evidence of "not looking").
+                        interests = item.get("interests") or []
+                        native_otw = True if any(
+                            str(i).upper().endswith("OPEN_TO_WORK") for i in interests
+                        ) else None
+
+                        # Endorsed skills ride along on the row; keeping them
+                        # gives the scorer real evidence even when the profile
+                        # fetch later fails.
+                        native_skills = [
+                            {"name": s.get("name"), "endorsement_count": s.get("endorsement_count", 0)}
+                            for s in (item.get("skills") or [])
+                            if isinstance(s, dict) and s.get("name")
+                        ]
+
                         cand = {
                             "id": f"unipile_{c_id}",
                             "provider_id": c_id,
@@ -774,14 +953,22 @@ class UnipileService:
                             "match_score": 0,
                             "profile_url": p_url,
                             "image_url": img_url,
-                            # `open_to_work` is intentionally left unset here.
-                            # It used to be hardcoded to the request-level flag
-                            # (always True), which (a) mislabeled every profile
-                            # as open-to-work in the UI and (b) made the frontend
+                            # The RPS-only link, kept out of `profile_url` so
+                            # the UI never sends a non-seat-holder to a
+                            # Recruiter paywall.
+                            "recruiter_profile_url": recruiter_url,
+                            "linkedin_public_identifier": public_id,
+                            # `open_to_work` is left UNSET unless LinkedIn
+                            # itself flagged it (above). It used to be
+                            # hardcoded to the request-level flag (always
+                            # True), which (a) mislabeled every profile as
+                            # open-to-work in the UI and (b) made the frontend
                             # poller skip them (it only polls candidates whose
-                            # open_to_work is not yet a bool). It's now populated
-                            # from the real Apify signal downstream, exactly like
-                            # Exa LinkedIn candidates.
+                            # open_to_work is not yet a bool). Rows without the
+                            # marker still fall through to the Apify signal,
+                            # exactly like Exa LinkedIn candidates.
+                            **({"open_to_work": True} if native_otw else {}),
+                            **({"skills": native_skills} if native_skills else {}),
                             "recruiter_candidate_id": item.get("recruiter_candidate_id"),
                             # Account affinity: recruiter_candidate_id and some
                             # profile lookups are only valid on the account that
@@ -813,6 +1000,24 @@ class UnipileService:
         logger.info(f"Unipile returned {len(results)} candidates from account {account_id}")
         return results, "ok"
 
+    async def _resolve_messaging_id(self, candidate_provider_id: str, account_id: str) -> Optional[str]:
+        """The classic member id (ACoAA…) usable as a /chats attendee.
+
+        Recruiter search rows are keyed by an AEMAA… hash, which /chats does
+        not accept. /users/{hash} resolves it — and also accepts the member id
+        itself, so ids that are already correct round-trip unchanged.
+        """
+        raw = str(candidate_provider_id or "").strip()
+        if not raw:
+            return None
+        if not raw.upper().startswith("AEMAA"):
+            return raw
+        profile = await self.get_candidate_profile(raw, account_id=account_id)
+        member_id = (profile or {}).get("provider_id")
+        if member_id:
+            return str(member_id)
+        return None
+
     async def send_message(self, candidate_provider_id: str, text: str, account_id: Optional[str] = None) -> bool:
         """
         Send LinkedIn Message (InMail if premium allowed).
@@ -820,18 +1025,29 @@ class UnipileService:
         """
         account_id = account_id or await self.acquire_account()
         if not account_id: return False
-        
+
+        # Candidates sourced through Recruiter search carry the recruiter-scoped
+        # hash (AEMAA…) as their provider_id, but /chats attendees must be the
+        # classic member id (ACoAA…). Resolve it before sending — passing the
+        # recruiter hash silently fails every LinkedIn outreach.
+        attendee_id = await self._resolve_messaging_id(candidate_provider_id, account_id)
+        if not attendee_id:
+            logger.error(
+                f"Unipile: cannot message {candidate_provider_id} — no LinkedIn member id resolved."
+            )
+            return False
+
         url = f"{self.api_url}/chats"
-        
+
         # Need to handle Multipart/Form or JSON?
         # Docs showed cURL with --form (Multipart).
         # Docs also showed JS client.messaging.startNewChat (JSON).
         # Unipile API usually accepts JSON.
-        
+
         payload = {
             "account_id": account_id,
             "text": text,
-            "attendees_ids": [candidate_provider_id],
+            "attendees_ids": [attendee_id],
             "linkedin": {
                 "api": "classic",
                 "inmail": True
@@ -860,12 +1076,18 @@ class UnipileService:
         if not account_id: return None
         
         # Try specific LinkedIn User endpoint
-        # verified via debug: /users/{id} works for provider_id
+        # verified via debug: /users/{id} works for provider_id AND for the
+        # recruiter-scoped hash a recruiter search row is keyed by.
         url = f"{self.api_url}/users/{candidate_provider_id}"
-        
+
         try:
-             async with httpx.AsyncClient(timeout=15.0) as client:
-                 params = {"account_id": account_id}
+             async with httpx.AsyncClient(timeout=30.0) as client:
+                 # Without `linkedin_sections` the response is a 26-key stub:
+                 # no experience, education, skills, certifications or summary.
+                 # Every Unipile candidate then reached the scorer as a
+                 # name/headline/location fragment and ranked off the
+                 # parsing-gap floor. '*' returns all sections.
+                 params = {"account_id": account_id, "linkedin_sections": "*"}
                  resp = await client.get(url, params=params, headers=self._get_headers())
                  
                  if resp.status_code == 200:

@@ -1349,7 +1349,21 @@ class UnifiedCandidateSearch:
                                         # for the role-anchor check when the
                                         # profile supplies a real job title.
                                         _headline = str(cand.get("title") or "")
-                                        cand.update(self._extract_linkedin_profile_data(full_profile))
+                                        _extracted = self._extract_linkedin_profile_data(full_profile)
+                                        _profile_name = _extracted.pop("profile_name", "")
+                                        cand.update(_extracted)
+                                        # LinkedIn withholds `name` on some
+                                        # out-of-network rows; the profile
+                                        # fetch has it. Only fill a genuinely
+                                        # unusable name so a good search-row
+                                        # name is never clobbered.
+                                        if _profile_name and not self.unipile_service.is_usable_candidate_name(
+                                            cand.get("name")
+                                        ):
+                                            cand["name"] = _profile_name
+                                            cand["firstName"], cand["lastName"] = (
+                                                self.unipile_service._split_candidate_name(_profile_name)
+                                            )
                                         if _headline and not cand.get("headline"):
                                             cand["headline"] = _headline
                                 except Exception as e:
@@ -5974,6 +5988,36 @@ class UnifiedCandidateSearch:
         """Extract detailed data from full LinkedIn profile for enrichment."""
         extracted = {}
 
+        # Identity. Recruiter search rows are keyed by an opaque AEMAA… hash
+        # and LinkedIn withholds `name` on some out-of-network profiles; the
+        # profile fetch carries the real first/last name, the public vanity
+        # slug, and the classic member id that LinkedIn messaging requires.
+        # `profile_name` is deliberately NOT called `name` — the caller
+        # decides precedence rather than letting a blind .update() clobber a
+        # good search-row name.
+        first = str(profile.get("first_name") or "").strip()
+        last = str(profile.get("last_name") or "").strip()
+        if first or last:
+            extracted["profile_name"] = " ".join(p for p in (first, last) if p)
+
+        public_id = str(profile.get("public_identifier") or "").strip()
+        if public_id:
+            extracted["linkedin_public_identifier"] = public_id
+            extracted["profile_url"] = f"https://www.linkedin.com/in/{public_id}"
+
+        member_id = str(profile.get("provider_id") or "").strip()
+        if member_id:
+            extracted["linkedin_member_id"] = member_id
+
+        # LinkedIn's own open-to-work flag — free compared with the Apify
+        # lookup that would otherwise resolve it. Only a True is propagated:
+        # `is_open_to_work` reflects the PUBLIC badge, so it reads False for
+        # candidates who set "share with recruiters only" — a group the
+        # recruiter-search row does see. Letting a False land here would
+        # overwrite that better signal.
+        if profile.get("is_open_to_work") is True:
+            extracted["open_to_work"] = True
+
         # Profile-level location: more precise than the search row's coarse
         # area string, and required for the radius/country gates to place
         # Unipile candidates at all. Tolerant to Unipile schema variants.
@@ -5997,10 +6041,15 @@ class UnifiedCandidateSearch:
             company_exp = []
             for exp in experience[:10]:  # Limit to last 10 positions
                 company_exp.append({
-                    "company": exp.get("company", exp.get("company_name", "")),
-                    "title": exp.get("title", exp.get("job_title", exp.get("position", ""))),
-                    "start_date": exp.get("start_date", exp.get("start", "")),
-                    "end_date": exp.get("end_date", exp.get("end", "Present"))
+                    "company": exp.get("company") or exp.get("company_name") or "",
+                    # Unipile names the role field `position`.
+                    "title": exp.get("title") or exp.get("job_title") or exp.get("position") or "",
+                    "start_date": exp.get("start_date") or exp.get("start") or "",
+                    "end_date": exp.get("end_date") or exp.get("end") or "Present",
+                    # The role write-up is the densest skill evidence on a
+                    # LinkedIn profile — without it the extractor scores off
+                    # job titles alone.
+                    "description": str(exp.get("description") or "")[:1500],
                 })
             extracted["company_experience"] = company_exp
             # Current job title from the most recent position — the search
@@ -6010,7 +6059,8 @@ class UnifiedCandidateSearch:
             if recent_title:
                 extracted["title"] = recent_title
         
-        # Extract education
+        # Extract education. Unipile's LinkedIn payload dates the record with
+        # plain `start`/`end`; the *_date/year spellings are other providers'.
         education = profile.get("education", [])
         if education:
             edu_list = []
@@ -6018,23 +6068,35 @@ class UnifiedCandidateSearch:
                 edu_list.append({
                     "degree": edu.get("degree", edu.get("degree_name", "")),
                     "institution": edu.get("school", edu.get("institution", "")),
-                    "year": edu.get("end_date", edu.get("year", ""))
+                    "year": edu.get("end_date") or edu.get("year") or edu.get("end") or ""
                 })
             extracted["candidate_education"] = edu_list
-        
-        # Extract skills
+
+        # Extract skills. Unipile returns {name, endorsement_count, insights,
+        # endorsement_id, endorsed} — keep the two fields that carry signal
+        # rather than passing the whole object downstream.
         skills = profile.get("skills", [])
         if skills:
-            extracted["skills"] = [{"name": s} if isinstance(s, str) else s for s in skills[:20]]
-        
-        # Extract certifications
+            normalized_skills = []
+            for s in skills[:20]:
+                if isinstance(s, str):
+                    normalized_skills.append({"name": s})
+                elif isinstance(s, dict) and s.get("name"):
+                    normalized_skills.append({
+                        "name": s["name"],
+                        "endorsement_count": s.get("endorsement_count", 0),
+                    })
+            if normalized_skills:
+                extracted["skills"] = normalized_skills
+
+        # Extract certifications ("organization" is Unipile's issuer field)
         certifications = profile.get("certifications", []) or profile.get("licenses", [])
         if certifications:
             cert_list = []
             for cert in certifications:
                 cert_list.append({
                     "name": cert.get("name", cert.get("certification_name", "")),
-                    "issuer": cert.get("authority", cert.get("issuer", "")),
+                    "issuer": cert.get("organization") or cert.get("authority") or cert.get("issuer") or "",
                     "year": cert.get("issue_date", cert.get("year", ""))
                 })
             extracted["candidate_certification"] = cert_list

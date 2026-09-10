@@ -1507,6 +1507,10 @@ Experience:
 """
     for exp in company_exp:
         linkedin_profile_text += f"- {exp.get('title', '')} at {exp.get('company', '')} ({exp.get('start_date', '')} to {exp.get('end_date', '')})\n"
+        # The role write-up carries most of the profile's skill evidence.
+        exp_description = str(exp.get("description") or "").strip()
+        if exp_description:
+            linkedin_profile_text += f"  {exp_description}\n"
     linkedin_profile_text += "\nEducation:\n"
     for edu in education:
         linkedin_profile_text += f"- {edu.get('degree', '')} from {edu.get('institution', '')} ({edu.get('year', '')})\n"
