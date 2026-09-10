@@ -365,6 +365,14 @@ function HardFilterHoverCard({
 }
 
 
+
+const SCREENING_LEVEL_STYLES: Record<string, string> = {
+  "l0.5": "bg-gray-100 text-gray-600 border-gray-300",
+  "l1":   "bg-blue-50 text-blue-700 border-blue-200",
+  "l1.5": "bg-teal-50 text-teal-700 border-teal-200",
+  "l2":   "bg-purple-50 text-purple-700 border-purple-200",
+};
+
 const getRecruiterEmailsArray = (emails: string | string[] | null | undefined): string[] => {
   if (!emails) return [];
   if (Array.isArray(emails)) return emails;
@@ -963,12 +971,13 @@ export default function GlobalCandidatesPage() {
             <TableHeader className="bg-slate-50/80 sticky top-0 z-40 backdrop-blur-sm shadow-sm">
               <TableRow className="border-b-slate-200 hover:bg-transparent h-[50px]">
                 <TableHead className="w-[50px] min-w-[50px] max-w-[50px] sticky left-0 z-30 bg-slate-50 text-center font-bold text-slate-500 text-[12px] uppercase tracking-wider px-2">#</TableHead>
-                <TableHead className="w-[120px] min-w-[120px] max-w-[120px] sticky left-[50px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB DIVA ID</TableHead>
+                <TableHead className="w-[120px] min-w-[120px] max-w-[120px] sticky left-[50px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOBDIVA ID</TableHead>
                 <TableHead className="w-[200px] min-w-[200px] max-w-[200px] sticky left-[170px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB TITLE</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] sticky left-[370px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">CANDIDATE NAME</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
                 <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
                 <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
+                <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SCREENING LEVEL</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
@@ -1098,6 +1107,16 @@ export default function GlobalCandidatesPage() {
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px]">
                         {c.engage_created_at ? formatDate(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
                       </TableCell>
+                      
+                      <TableCell className="border-b border-slate-200 text-center font-medium border-l border-slate-200">
+                        {c.screening_level ? (
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold border uppercase ${SCREENING_LEVEL_STYLES[c.screening_level.toLowerCase()] ?? "bg-gray-100 text-gray-600 border-gray-300"}`}>
+                            {c.screening_level}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 text-xs italic">N/A</span>
+                        )}
+                      </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-900 text-[13px]">
                         {resumeScore > 0 ? (
@@ -1168,8 +1187,8 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
-                        <div className="flex flex-col items-center justify-center gap-1.5 h-[64px]">
+                      <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
+                        <div className="flex flex-col items-center justify-center gap-1.5 min-h-[64px]">
                           <Select
                             disabled={syncingCandidateId === c.id}
                             value={feedbacks[c.id]?.startsWith("Reject") ? "Reject" : feedbacks[c.id] || undefined}
@@ -1196,7 +1215,7 @@ export default function GlobalCandidatesPage() {
                             </SelectContent>
                           </Select>
                           {feedbacks[c.id] && (
-                            <div className="flex flex-col items-center gap-1 mt-1">
+                            <div className="flex flex-col items-center gap-1 mt-1.5">
                               <div className={`text-[12px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[c.id] === 'Submit' ? 'text-indigo-600' : feedbacks[c.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
                                 {feedbacks[c.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
                                  feedbacks[c.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 
