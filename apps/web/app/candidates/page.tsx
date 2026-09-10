@@ -1187,8 +1187,8 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
-                        <div className="flex flex-col items-center justify-center gap-1.5 h-[64px]">
+                      <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
+                        <div className="flex flex-col items-center justify-center gap-1.5 min-h-[64px]">
                           <Select
                             disabled={syncingCandidateId === c.id}
                             value={feedbacks[c.id]?.startsWith("Reject") ? "Reject" : feedbacks[c.id] || undefined}
@@ -1215,7 +1215,7 @@ export default function GlobalCandidatesPage() {
                             </SelectContent>
                           </Select>
                           {feedbacks[c.id] && (
-                            <div className="flex flex-col items-center gap-1 mt-1">
+                            <div className="flex flex-col items-center gap-1 mt-1.5">
                               <div className={`text-[12px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[c.id] === 'Submit' ? 'text-indigo-600' : feedbacks[c.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
                                 {feedbacks[c.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
                                  feedbacks[c.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 

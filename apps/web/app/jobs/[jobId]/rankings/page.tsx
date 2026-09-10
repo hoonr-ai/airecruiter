@@ -2678,8 +2678,8 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="border-b border-slate-200 text-center pr-4 pl-4 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
-                          <div className="flex flex-col items-center gap-2">
+                        <TableCell className="border-b border-slate-200 text-center pr-4 pl-4 border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex flex-col items-center gap-1.5">
                             <Select
                               disabled={syncingCandidateId === candidate.id}
                               value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || undefined}
@@ -2706,7 +2706,7 @@ export default function CandidateRankingsPage() {
                               </SelectContent>
                             </Select>
                             {feedbacks[candidate.id] && (
-                              <div className="flex flex-col items-center gap-2 mt-2">
+                              <div className="flex flex-col items-center gap-1 mt-1.5">
                                 <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : feedbacks[candidate.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
                                   {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
                                    feedbacks[candidate.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 
