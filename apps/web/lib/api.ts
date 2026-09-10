@@ -227,6 +227,10 @@ export const api = {
       req<any>(`/candidates/enrich-contact`, { method: "POST", body }),
     updatePhone: (candidateId: string, body: unknown) =>
       req<any>(`/candidates/${encodeURIComponent(candidateId)}/phone`, { method: "PATCH", body }),
+    getFilterOptions: () =>
+      req<any>(`/candidates/filter-options`),
+    getAllLaunched: (query?: string) =>
+      req<any>(`/candidates/launched${query ? `?${query}` : ""}`),
   },
   manualCandidates: {
     add: (jobRef: string, body: unknown) =>
