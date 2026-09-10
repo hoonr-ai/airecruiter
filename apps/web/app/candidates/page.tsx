@@ -880,8 +880,8 @@ export default function GlobalCandidatesPage() {
         </div>
 
           {/* Row 2: Filters */}
-          <div className="flex flex-wrap items-center gap-2 w-full">
-            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm shrink-0">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
               <select
@@ -890,7 +890,7 @@ export default function GlobalCandidatesPage() {
                   resetPagination();
                   setFilterStatus(e.target.value);
                 }}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[70px]"
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
               >
                 <option value="">All</option>
                 <option value="pass">Pass</option>
@@ -900,7 +900,7 @@ export default function GlobalCandidatesPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm shrink-0">
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
               <select
@@ -909,7 +909,7 @@ export default function GlobalCandidatesPage() {
                   resetPagination();
                   setFilterFeedback(e.target.value);
                 }}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
               >
                 <option value="">All</option>
                 <option value="No Feedback">No Feedback</option>
@@ -919,7 +919,7 @@ export default function GlobalCandidatesPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm shrink-0">
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
               <select
@@ -928,7 +928,7 @@ export default function GlobalCandidatesPage() {
                   resetPagination();
                   setFilterSource(e.target.value);
                 }}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[100px]"
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
               >
                 <option value="all">All</option>
                 {availableSources.map(s => (
@@ -937,7 +937,7 @@ export default function GlobalCandidatesPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm shrink-0">
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
               <Input
                 type="number"
@@ -948,7 +948,7 @@ export default function GlobalCandidatesPage() {
                   resetPagination();
                   handleFilterMinScoreChange(e.target.value);
                 }}
-                className="h-7 w-16 text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
+                className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
               />
             </div>
           </div>
@@ -980,23 +980,23 @@ export default function GlobalCandidatesPage() {
               {isLoading ? (
                 Array.from({ length: 10 }).map((_, i) => (
                   <TableRow key={`skel-${i}`}>
-                    <TableCell className="text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
-                    <TableCell className="text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
-                    <TableCell className="sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                    <TableCell className="border-b border-slate-200 text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
                       <div className="space-y-2">
                         <Skeleton className="h-4 w-40 mx-auto" />
                         <Skeleton className="h-3 w-32 mx-auto" />
                       </div>
                     </TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
                   </TableRow>
                 ))
               ) : candidates.length === 0 ? (
@@ -1012,22 +1012,22 @@ export default function GlobalCandidatesPage() {
                   const parsedRecruiterEmails = getRecruiterEmailsArray(c.recruiter_emails); // Cache parsed emails once per row
 
                   return (
-                    <TableRow key={c.candidate_id} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px]">
-                      <TableCell className="text-center text-[13px] font-medium text-slate-400 sticky left-0 z-10 bg-white group-hover:bg-slate-50 transition-colors">
+                    <TableRow key={c.candidate_id} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
+                      <TableCell className="border-b border-slate-200 text-center text-[13px] font-medium text-slate-400 sticky left-0 z-10 bg-white group-hover:bg-slate-50 transition-colors">
                         {i + 1}
                       </TableCell>
 
-                      <TableCell className="text-center font-semibold text-slate-700 text-[12px] sticky left-[50px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200">
+                      <TableCell className="border-b border-slate-200 text-center font-semibold text-slate-700 text-[12px] sticky left-[50px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200">
                         {c.jobdiva_id || "—"}
                       </TableCell>
 
-                      <TableCell className="text-center text-[13px] font-medium text-slate-700 sticky left-[170px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200 px-3">
+                      <TableCell className="border-b border-slate-200 text-center text-[13px] font-medium text-slate-700 sticky left-[170px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200 px-3">
                         <span className="whitespace-normal break-words leading-tight" title={c.job_title}>
                           {c.job_title || "Unknown Job"}
                         </span>
                       </TableCell>
 
-                      <TableCell className="text-center sticky left-[370px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                      <TableCell className="border-b border-slate-200 text-center sticky left-[370px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
                         <div className="flex flex-col gap-1 items-center justify-center">
                           <button
                             onClick={() => {
@@ -1075,11 +1075,11 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 min-w-[300px] max-w-[300px] px-3 align-top py-4">
+                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-700 text-[13px] border-l border-slate-200 min-w-[300px] max-w-[300px] px-3 align-middle py-4">
                         {parsedRecruiterEmails.length > 0 ? (
-                          <div className="flex flex-col items-center justify-center w-full h-full gap-2 py-1">
+                          <div className="flex flex-col items-center justify-center w-full gap-1.5">
                             {parsedRecruiterEmails.map((email) => (
-                              <span key={email} className="inline-block whitespace-nowrap leading-relaxed text-[11.5px] text-slate-500 text-center bg-slate-50 px-2.5 py-1 rounded-md border border-slate-100 max-w-full overflow-hidden text-ellipsis shadow-sm" title={email}>
+                              <span key={email} className="block whitespace-nowrap leading-relaxed w-full text-center max-w-full overflow-hidden text-ellipsis font-semibold" title={email}>
                                 {email}
                               </span>
                             ))}
@@ -1091,15 +1091,15 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center font-semibold text-slate-700 text-[12px]">
+                      <TableCell className="border-b border-slate-200 text-center font-semibold text-slate-700 text-[12px]">
                         {normalizeSourceLabel(c.source)}
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-600 text-[12px]">
+                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px]">
                         {c.engage_created_at ? formatDate(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-900 text-[13px]">
+                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-900 text-[13px]">
                         {resumeScore > 0 ? (
                           <div
                             className="relative group/score inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
@@ -1124,7 +1124,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center py-3 border-l border-slate-200">
+                      <TableCell className="border-b border-slate-200 text-center py-3 border-l border-slate-200">
                         <div className="flex justify-center items-center w-full">
                           <span
                             className="px-3 py-1 rounded-full text-[11px] font-bold border"
@@ -1135,7 +1135,7 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
+                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
                         {c.engage_score !== null && c.engage_score !== undefined ? (
                           <div
                             className="relative group/engage inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
@@ -1160,7 +1160,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
+                      <TableCell className="border-b border-slate-200 text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
                         {c.total_fit_score !== null && c.total_fit_score !== undefined ? (
                           <span>{c.total_fit_score}/100</span>
                         ) : (
@@ -1168,7 +1168,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
+                      <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
                         <div className="flex flex-col items-center justify-center gap-1.5 h-[64px]">
                           <Select
                             disabled={syncingCandidateId === c.id}
@@ -1226,22 +1226,22 @@ export default function GlobalCandidatesPage() {
               )}
               {isFetchingMore && Array.from({ length: 3 }).map((_, i) => (
                   <TableRow key={`skel-more-${i}`}>
-                    <TableCell className="text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
-                    <TableCell className="text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
-                    <TableCell className="sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                    <TableCell className="border-b border-slate-200 text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
                       <div className="space-y-2">
                         <Skeleton className="h-4 w-40 mx-auto" />
                         <Skeleton className="h-3 w-32 mx-auto" />
                       </div>
                     </TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
+                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
                   </TableRow>
               ))}
             </TableBody>
@@ -1253,7 +1253,7 @@ export default function GlobalCandidatesPage() {
                 onClick={loadMore}
                 className="h-10 px-8 rounded-full bg-white border border-indigo-200 text-[13px] font-semibold text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm flex items-center gap-2"
               >
-                Load More Candidates
+                Load More
               </button>
             </div>
           )}
