@@ -764,9 +764,9 @@ export default function GlobalCandidatesPage() {
         </div>
 
         {/* Table Area */}
-        <div className="flex-1 relative min-h-0">
+        <div className="flex-1 relative min-h-0 overflow-auto scrollbar-thin scrollbar-thumb-slate-200">
           <Table
-            containerClassName="absolute inset-0 overflow-auto scrollbar-thin scrollbar-thumb-slate-200"
+            containerClassName="overflow-visible"
             className="min-w-[1750px] border-separate border-spacing-0"
           >
             <TableHeader className="bg-slate-50/80 sticky top-0 z-40 backdrop-blur-sm shadow-sm">
