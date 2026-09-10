@@ -91,24 +91,7 @@ _CHANNEL_ALIASES = {
     "mail": "web",
     "web": "web",
 }
-_PHASE_ALIASES = {
-    "phase_1": "phase1",
-    "phase 1": "phase1",
-    "1": "phase1",
-    "stage1": "phase1",
-    "contact_check": "phase1",
-    "queued": "phase1",
-    "scheduled": "phase1",
-    "not_started": "phase1",
-    "phase_2": "phase2",
-    "phase 2": "phase2",
-    "2": "phase2",
-    "stage2": "phase2",
-    "phase_3": "phase3",
-    "phase 3": "phase3",
-    "3": "phase3",
-    "stage3": "phase3",
-}
+
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +221,21 @@ def _bucket_status(raw: Optional[str]) -> str:
 
 
 def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
-    """Map phase variants onto phase1/phase2/phase3."""
-    return normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
+    """Map phase variants onto phase1/phase2/phase3/phase4/extra."""
+    norm = normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
+    if not norm:
+        return None
+    if norm in ("contact_check", "phase1"):
+        return "phase1"
+    if norm == "phase1_6hr":
+        return "phase2"
+    if norm == "phase2":
+        return "phase3"
+    if norm == "phase3":
+        return "phase4"
+    if norm in ("phase1_extra", "phase1_6hr_extra", "phase2_extra"):
+        return "extra"
+    return None
 
 
 def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
@@ -559,7 +555,13 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     reading "SMS: 12" expects.
     """
     buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}
-    phases = {"phase1": 0, "phase2": 0, "phase3": 0}
+    phases = {
+        "phase1": 0,
+        "phase2": 0,
+        "phase3": 0,
+        "phase4": 0,
+        "extra": 0,
+    }
     channels = {"call": 0, "sms": 0, "web": 0}
     first_response_minutes: List[float] = []
     response_timestamps: List[datetime.datetime] = []
@@ -855,6 +857,8 @@ def _build_row(
         "phase1": outreach["phases"]["phase1"],
         "phase2": outreach["phases"]["phase2"],
         "phase3": outreach["phases"]["phase3"],
+        "phase4": outreach["phases"].get("phase4", 0),
+        "extra": outreach["phases"].get("extra", 0),
         "percentage": percentage,
 
         # Lets the UI mark a row whose outreach columns are partial rather

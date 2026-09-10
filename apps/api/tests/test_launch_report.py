@@ -373,8 +373,14 @@ def test_response_times_use_first_contact_and_first_reply():
 
 
 def test_phase_distribution_normalizes_phase_variants():
-    payloads = [_outreach("pending", phase=p) for p in ("phase1", "phase 1", "phase_2", "3", "contact_check")]
-    assert lr._summarise_outreach(payloads)["phases"] == {"phase1": 3, "phase2": 1, "phase3": 1}
+    payloads = [_outreach("pending", phase=p) for p in ("phase1", "phase 1", "contact_check", "phase1_6hr", "phase 2", "phase2", "phase 3", "phase3", "phase 4", "phase1_extra")]
+    phases = lr._summarise_outreach(payloads)["phases"]
+    # "phase1", "phase 1", "contact_check" -> phase1 (3)
+    # "phase1_6hr", "phase 2" -> phase2 (2)
+    # "phase2", "phase 3" -> phase3 (2)
+    # "phase3", "phase 4" -> phase4 (2)
+    # "phase1_extra" -> extra (1)
+    assert phases == {"phase1": 3, "phase2": 2, "phase3": 2, "phase4": 2, "extra": 1}
 
 
 def test_summarise_outreach_passed_failed_sub_buckets():
@@ -405,13 +411,13 @@ def test_summarise_outreach_unengaged_failed_buckets_as_pending():
 def test_phase_distribution_falls_back_to_status_when_phase_missing():
     payload = {"outreach": {"outreach_status": "phase2"}, "communications": []}
     summary = lr._summarise_outreach([payload])
-    assert summary["phases"] == {"phase1": 0, "phase2": 1, "phase3": 0}
+    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 1, "phase4": 0, "extra": 0}
 
 
 def test_phase_distribution_does_not_promote_pending_status_to_phase1_when_phase_missing():
     payload = {"outreach": {"outreach_status": "queued"}, "communications": []}
     summary = lr._summarise_outreach([payload])
-    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0}
+    assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0, "phase4": 0, "extra": 0}
 
 
 def test_outstanding_feedback_never_goes_negative():
@@ -777,7 +783,7 @@ def test_summarise_outreach_flat_payload_with_outreach_channel():
     }
     summary = lr._summarise_outreach([flat_payload])
     assert summary["buckets"]["completed"] == 1
-    assert summary["phases"]["phase3"] == 1
+    assert summary["phases"]["phase4"] == 1
     assert summary["channels"]["web"] == 1
 
 
@@ -790,7 +796,7 @@ def test_summarise_outreach_mixed_nested_flat_payload():
     }
     summary = lr._summarise_outreach([mixed_payload])
     assert summary["buckets"]["completed"] == 1
-    assert summary["phases"]["phase3"] == 1
+    assert summary["phases"]["phase4"] == 1
     assert summary["channels"]["web"] == 1
 
 
@@ -815,7 +821,8 @@ def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys(
 
     assert row["completed"] == 1
     assert row["web"] == 1
-    assert row["phase3"] == 1
+    assert row["phase4"] == 1
+
 
 
 

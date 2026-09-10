@@ -60,6 +60,8 @@ interface LaunchReportRow {
   phase1: number;
   phase2: number;
   phase3: number;
+  phase4: number;
+  extra: number;
   percentage: number | null;
   outreach_detail_resolved: number;
   outreach_detail_expected: number;
@@ -301,6 +303,13 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "phase1", label: "Phase 1", numeric: true, text: (r) => num(r.phase1) },
       { key: "phase2", label: "Phase 2", numeric: true, text: (r) => num(r.phase2) },
       { key: "phase3", label: "Phase 3", numeric: true, text: (r) => num(r.phase3) },
+      { key: "phase4", label: "Phase 4", numeric: true, text: (r) => num(r.phase4) },
+    ],
+  },
+  {
+    title: "Extra Outreach (>80% Match)",
+    columns: [
+      { key: "extra", label: "Extra (>80%)", numeric: true, text: (r) => num(r.extra) },
     ],
   },
 ];
