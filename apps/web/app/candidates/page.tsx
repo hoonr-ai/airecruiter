@@ -409,7 +409,7 @@ export default function GlobalCandidatesPage() {
   const normalizeSourceLabel = (source: string | null | undefined): string => {
     const raw = String(source || "").trim();
     const s = raw.toLowerCase();
-    if (!s) return "—";
+    if (!s) return "Unknown";
     if (s.includes("applicant")) return "Job-Diva Applicant";
     if (s.includes("talentsearch") || s.includes("talent_search")) return "Job-Diva Candidate";
     if (s.includes("linkedin")) return "LinkedIn";

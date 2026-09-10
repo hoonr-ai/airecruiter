@@ -52,6 +52,16 @@ def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
         merged_trans.append(live_item)
     return merged_trans
 
+from routers.launch_report import build_merged_outreach_payload
+
+def _to_iso_z(dt_val) -> str:
+    from datetime import datetime
+    if isinstance(dt_val, datetime):
+        return dt_val.isoformat() + "Z"
+    elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+        return dt_val.replace(" ", "T") + "Z"
+    return dt_val if isinstance(dt_val, str) else None
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -1422,7 +1432,6 @@ async def get_job_candidates(
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
-            from routers.launch_report import build_merged_outreach_payload
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
             
@@ -1492,11 +1501,14 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
-            scores_to_avg = [float(r_score)]
-            if is_engage_done and cand.get("engage_score") is not None:
-                scores_to_avg.append(float(cand["engage_score"]))
+            try:
+                scores_to_avg = [float(r_score)]
+                if is_engage_done and cand.get("engage_score") is not None:
+                    scores_to_avg.append(float(cand["engage_score"]))
 
-            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+                cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+            except (TypeError, ValueError):
+                pass
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
@@ -3054,7 +3066,7 @@ async def get_launched_candidates(
                         ORDER BY candidate_id, id DESC
                     ),
                     monitored_jobs_lookup AS (
-                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level
+                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level, recruiter_emails
                         FROM (
                             SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
                             FROM monitored_jobs mj
@@ -3179,7 +3191,6 @@ async def get_launched_candidates(
                 if data_blob.get("engage_hard_filter_status"):
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
 
-            from routers.launch_report import build_merged_outreach_payload
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
             
@@ -3247,11 +3258,14 @@ async def get_launched_candidates(
                     cand["engage_score"] = 0.0
                 cand["engage_total_score"] = 100
 
-            scores_to_avg = [float(r_score)]
-            if is_engage_done and cand.get("engage_score") is not None:
-                scores_to_avg.append(float(cand["engage_score"]))
+            try:
+                scores_to_avg = [float(r_score)]
+                if is_engage_done and cand.get("engage_score") is not None:
+                    scores_to_avg.append(float(cand["engage_score"]))
 
-            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+                cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+            except (TypeError, ValueError):
+                pass
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
@@ -4017,8 +4031,8 @@ async def get_candidate_evaluation_report(
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1) if total_fit_score is not None else None,
             "engage_interview_id":   engage_interview_id,
-            "engage_completed_at":   engage_completed_at.isoformat() + "Z" if isinstance(engage_completed_at, datetime) else (str(engage_completed_at).replace(" ", "T") + "Z" if engage_completed_at else None),
-            "engage_created_at":     engage_created_at.isoformat() + "Z" if isinstance(engage_created_at, datetime) else (str(engage_created_at).replace(" ", "T") + "Z" if engage_created_at else None),
+            "engage_completed_at":   _to_iso_z(engage_completed_at),
+            "engage_created_at":     _to_iso_z(engage_created_at),
             "is_boolean_interview":  is_l05,
             # Same data source as the hover card — avoids a separate live-fetch failure
             "engage_hard_filter_details": _extract_rankings_hard_filter_details(
