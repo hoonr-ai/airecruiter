@@ -2396,15 +2396,15 @@ export default function CandidateRankingsPage() {
                 {isInitialLoading ? (
                   Array.from({ length: 8 }).map((_, i) => (
                     <TableRow key={i} className="h-20 bg-white">
-                      <TableCell className="w-[50px] border-r border-slate-200/50 px-2 text-center"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
-                      <TableCell className="w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
-                      <TableCell className="w-[160px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
-                      <TableCell className="w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
-                      <TableCell className="w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
-                      <TableCell className="w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell className="w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell className="w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
-                      <TableCell className="w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[50px] border-r border-slate-200/50 px-2 text-center"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
                     </TableRow>
                   ))
                 ) : (
@@ -2419,10 +2419,10 @@ export default function CandidateRankingsPage() {
 
                     return (
                       <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
-                        <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-500 text-[12px] group-hover:bg-slate-50 transition-colors">
+                        <TableCell className="border-b border-slate-200 w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-500 text-[12px] group-hover:bg-slate-50 transition-colors">
                           {idx + 1}
                         </TableCell>
-                        <TableCell className="sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                        <TableCell className="border-b border-slate-200 sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
                           <Link
                             href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-1"
@@ -2516,7 +2516,7 @@ export default function CandidateRankingsPage() {
                           )}
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-2 px-2 border-l border-slate-200">
+                        <TableCell className="border-b border-slate-200 text-center align-middle py-2 px-2 border-l border-slate-200">
                           <span className="text-[12px] font-semibold text-slate-700">
                             {normalizeSourceLabel(candidate.source)}
                           </span>
@@ -2552,7 +2552,7 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-3 px-2 group-hover:bg-indigo-50/5 transition-colors border-l border-slate-200">
+                        <TableCell className="border-b border-slate-200 text-center align-middle py-3 px-2 group-hover:bg-indigo-50/5 transition-colors border-l border-slate-200">
                           {(() => {
                             const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
                             // If in outreach phase, show the timeline
@@ -2633,7 +2633,7 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center font-bold text-slate-900 text-[14px] align-middle py-3 px-2 transition-colors border-l border-slate-200">
+                        <TableCell className="border-b border-slate-200 text-center font-bold text-slate-900 text-[14px] align-middle py-3 px-2 transition-colors border-l border-slate-200">
                           {totalScore !== null ? (
                             <span>{totalScore}/100</span>
                           ) : (
@@ -2643,7 +2643,7 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center pr-3 pl-3 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
+                        <TableCell className="border-b border-slate-200 text-center pr-3 pl-3 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-wrap items-center justify-center gap-2">
 
                             <Button
@@ -2678,7 +2678,7 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center pr-4 pl-4 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
+                        <TableCell className="border-b border-slate-200 text-center pr-4 pl-4 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-col items-center gap-2">
                             <Select
                               disabled={syncingCandidateId === candidate.id}
