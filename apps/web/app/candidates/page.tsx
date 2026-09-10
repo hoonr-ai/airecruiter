@@ -1253,7 +1253,7 @@ export default function GlobalCandidatesPage() {
                 onClick={loadMore}
                 className="h-10 px-8 rounded-full bg-white border border-indigo-200 text-[13px] font-semibold text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm flex items-center gap-2"
               >
-                Load More Candidates
+                Load More
               </button>
             </div>
           )}
