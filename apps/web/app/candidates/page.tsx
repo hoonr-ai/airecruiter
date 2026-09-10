@@ -365,18 +365,20 @@ function HardFilterHoverCard({
 }
 
 
-const formatRecruiterEmails = (emails: string | string[] | null | undefined): string => {
-  if (!emails) return "";
-  if (Array.isArray(emails)) return emails.join(", ");
+const getRecruiterEmailsArray = (emails: string | string[] | null | undefined): string[] => {
+  if (!emails) return [];
+  if (Array.isArray(emails)) return emails;
   if (typeof emails === "string") {
     try {
       const parsed = JSON.parse(emails);
-      if (Array.isArray(parsed)) return parsed.join(", ");
+      if (Array.isArray(parsed)) return parsed.map(String);
+      if (typeof parsed === "string") return [parsed]; // Fix: handle JSON-quoted single strings without falling through
     } catch (e) {
       // ignore
     }
+    return emails.split(",").map(s => s.trim()).filter(Boolean);
   }
-  return String(emails);
+  return [String(emails)];
 };
 
 export default function GlobalCandidatesPage() {
@@ -672,7 +674,7 @@ export default function GlobalCandidatesPage() {
         escapeCsvField(statusInfo.label),
         escapeCsvField(engageScoreStr),
         escapeCsvField(totalFitScoreStr),
-        escapeCsvField(formatRecruiterEmails(c.recruiter_emails) || "N/A")
+        escapeCsvField(getRecruiterEmailsArray(c.recruiter_emails).join(", ") || "N/A")
       ].join(",");
     });
 
@@ -775,7 +777,7 @@ export default function GlobalCandidatesPage() {
             escapeCsvField(statusInfo.label),
             escapeCsvField(engageScoreStr),
             escapeCsvField(totalFitScoreStr),
-            escapeCsvField(formatRecruiterEmails(c.recruiter_emails) || "N/A")
+            escapeCsvField(getRecruiterEmailsArray(c.recruiter_emails).join(", ") || "N/A")
           ].join(",");
         });
 
@@ -964,14 +966,14 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[120px] min-w-[120px] max-w-[120px] sticky left-[50px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB DIVA ID</TableHead>
                 <TableHead className="w-[200px] min-w-[200px] max-w-[200px] sticky left-[170px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB TITLE</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] sticky left-[370px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">CANDIDATE NAME</TableHead>
-                <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
-                <TableHead className="w-[160px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
-                <TableHead className="w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
-                <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
-                <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
-                <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
-                <TableHead className="w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
-                <TableHead className="w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">CANDIDATE FEEDBACK</TableHead>
+                <TableHead className="w-[300px] min-w-[300px] max-w-[300px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
+                <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
+                <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
+                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
+                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
+                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
+                <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
+                <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">CANDIDATE FEEDBACK</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1007,6 +1009,7 @@ export default function GlobalCandidatesPage() {
                 candidates.map((c, i) => {
                   const statusInfo = normalizeInterviewStatus(c.engage_status);
                   const resumeScore = Math.round(c.match_score || 0);
+                  const parsedRecruiterEmails = getRecruiterEmailsArray(c.recruiter_emails); // Cache parsed emails once per row
 
                   return (
                     <TableRow key={c.candidate_id} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px]">
@@ -1072,15 +1075,19 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 max-w-[180px] px-3">
-                        {c.recruiter_emails && formatRecruiterEmails(c.recruiter_emails) ? (
-                          <div className="flex items-center justify-center w-full">
-                            <span className="inline-block break-words whitespace-normal leading-relaxed text-[11.5px] text-slate-500 w-full text-center">
-                              {formatRecruiterEmails(c.recruiter_emails)}
-                            </span>
+                      <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 min-w-[300px] max-w-[300px] px-3 align-top py-4">
+                        {parsedRecruiterEmails.length > 0 ? (
+                          <div className="flex flex-col items-center justify-center w-full h-full gap-2 py-1">
+                            {parsedRecruiterEmails.map((email) => (
+                              <span key={email} className="inline-block whitespace-nowrap leading-relaxed text-[11.5px] text-slate-500 text-center bg-slate-50 px-2.5 py-1 rounded-md border border-slate-100 max-w-full overflow-hidden text-ellipsis shadow-sm" title={email}>
+                                {email}
+                              </span>
+                            ))}
                           </div>
                         ) : (
-                          <span className="text-slate-400 italic text-[11px]">N/A</span>
+                          <div className="flex items-center justify-center h-full w-full">
+                            <span className="text-slate-400 italic text-[11px]">N/A</span>
+                          </div>
                         )}
                       </TableCell>
 
