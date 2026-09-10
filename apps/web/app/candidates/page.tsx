@@ -170,7 +170,7 @@ interface HardFilterDetail {
 
 interface Candidate {
   id: number;
-  jobdiva_id: string;
+  jobdiva_id: string | null;
   candidate_id: string;
   name: string;
   email: string;
@@ -473,6 +473,7 @@ export default function GlobalCandidatesPage() {
   };
 
   const handleMarkUnreachable = async (candidateId: number, jobDivaId: string | null) => {
+    setSyncingCandidateId(candidateId);
     try {
       if (!jobDivaId) throw new Error("No job ID found");
       await api.candidates.feedback(jobDivaId, String(candidateId), { feedback_type: 'Unreachable' });
@@ -485,6 +486,8 @@ export default function GlobalCandidatesPage() {
       });
     } catch (error) {
       console.error('Error marking unreachable:', error);
+    } finally {
+      setSyncingCandidateId(null);
     }
   };
 
@@ -976,6 +979,7 @@ export default function GlobalCandidatesPage() {
                       <TableCell className="text-center border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
                         <div className="flex flex-col items-center justify-center gap-1.5 h-[64px]">
                           <Select
+                            disabled={syncingCandidateId === c.id}
                             value={feedbacks[c.id]?.startsWith("Reject") ? "Reject" : feedbacks[c.id] || undefined}
                             onValueChange={(val) => {
                               if (val === "Reject") {

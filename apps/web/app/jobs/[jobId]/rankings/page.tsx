@@ -581,6 +581,7 @@ export default function CandidateRankingsPage() {
   };
 
   const handleMarkUnreachable = async (candidateId: string) => {
+    setSyncingCandidateId(Number(candidateId));
     try {
       await api.candidates.feedback(jobId as string, candidateId, { feedback_type: 'Unreachable' });
       setFeedbacks(prev => ({ ...prev, [candidateId]: 'Unreachable' }));
@@ -593,6 +594,8 @@ export default function CandidateRankingsPage() {
     } catch (error) {
       console.error('Error marking unreachable:', error);
       setToast({ message: "Failed to save unreachable status", type: "error" });
+    } finally {
+      setSyncingCandidateId(null);
     }
   };
 
@@ -2676,6 +2679,7 @@ export default function CandidateRankingsPage() {
                         <TableCell className="text-center pr-4 pl-4 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-col items-center gap-2">
                             <Select
+                              disabled={syncingCandidateId === candidate.id}
                               value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || undefined}
                               onValueChange={(val) => {
                                 if (val === "Reject") {
