@@ -1461,7 +1461,7 @@ async def get_job_candidates(
             raw_total = cand.get("engage_total_score")
             
             if raw_score is not None and raw_total and raw_total > 0:
-                norm_engage_score = (float(raw_score) / float(raw_total)) * 100
+                norm_engage_score = round((float(raw_score) / float(raw_total)) * 100, 1)
                 cand["engage_score"] = norm_engage_score
                 cand["engage_total_score"] = 100
             elif raw_score is not None:
@@ -1496,7 +1496,7 @@ async def get_job_candidates(
             if is_engage_done and cand.get("engage_score") is not None:
                 scores_to_avg.append(float(cand["engage_score"]))
 
-            cand["total_fit_score"] = sum(scores_to_avg) / len(scores_to_avg)
+            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
@@ -3228,7 +3228,7 @@ async def get_launched_candidates(
                     f_score = float(raw_score)
                     f_total = float(raw_total)
                     if f_total > 0:
-                        cand["engage_score"] = (f_score / f_total) * 100
+                        cand["engage_score"] = round((f_score / f_total) * 100, 1)
                 except (TypeError, ValueError):
                     pass
 
@@ -3254,7 +3254,7 @@ async def get_launched_candidates(
             if is_engage_done and cand.get("engage_score") is not None:
                 scores_to_avg.append(float(cand["engage_score"]))
 
-            cand["total_fit_score"] = sum(scores_to_avg) / len(scores_to_avg)
+            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
@@ -3973,7 +3973,7 @@ async def get_candidate_evaluation_report(
         display_engage_score = None
         if engage_score is not None and engage_total_score and engage_total_score > 0:
             # Calculate percentage: (score / total) * 100
-            display_engage_score = (float(engage_score) / float(engage_total_score)) * 100
+            display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
 
         is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
 
@@ -4017,7 +4017,7 @@ async def get_candidate_evaluation_report(
             "engage_total_score":    100 if (engage_total_score or is_l05) else None,
             "engage_status":         status_display,
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
-            "total_fit_score":       total_fit_score if total_fit_score is not None else None,
+            "total_fit_score":       round(total_fit_score, 1) if total_fit_score is not None else None,
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   engage_completed_at.isoformat() + "Z" if isinstance(engage_completed_at, datetime) else (str(engage_completed_at).replace(" ", "T") + "Z" if engage_completed_at else None),
             "engage_created_at":     engage_created_at.isoformat() + "Z" if isinstance(engage_created_at, datetime) else (str(engage_created_at).replace(" ", "T") + "Z" if engage_created_at else None),
