@@ -2765,7 +2765,7 @@ export default function CandidateRankingsPage() {
                 </p>
                 <button
                   onClick={loadMoreCandidates}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-[12px] font-bold hover:bg-indigo-100 transition-colors shadow-sm"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-indigo-200 bg-white text-indigo-700 text-[12px] font-bold hover:bg-indigo-50 transition-colors shadow-sm"
                 >
                   <ChevronDown className="w-4 h-4" />
                   Load more
