@@ -2935,6 +2935,8 @@ async def get_launched_candidates(
     feedback: Optional[str] = Query(None),
     source: Optional[str] = Query(None),
     min_score: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
 ):
     """
     Fetches all launched candidates across all jobs.
@@ -3003,6 +3005,21 @@ async def get_launched_candidates(
                 if min_score is not None:
                     search_condition += " AND sc.resume_match_percentage >= %s"
                     params.append(min_score)
+                    
+                import re
+                date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+                # Date range filters apply to the engage_created_at which is la.created_at
+                if start_date:
+                    if not date_pattern.match(start_date):
+                        raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
+                    search_condition += " AND la.created_at >= %s"
+                    params.append(f"{start_date} 00:00:00")
+                if end_date:
+                    if not date_pattern.match(end_date):
+                        raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
+                    search_condition += " AND la.created_at <= %s"
+                    params.append(f"{end_date} 23:59:59")
 
                 params.extend([limit, offset])
 

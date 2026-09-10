@@ -2085,7 +2085,7 @@ export default function CandidateRankingsPage() {
         {/* Filter bar: search + status + source + min-score. All filter state
             feeds into the `filteredCandidates` useMemo above. */}
         <div className="flex flex-wrap items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm mb-6">
-          <div className="relative shrink-0 min-w-[260px] flex-1 max-w-[380px]">
+          <div className="relative min-w-[260px] flex-1 max-w-[380px]">
             <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
               <Search className="h-4 w-4 text-slate-400" />
             </div>

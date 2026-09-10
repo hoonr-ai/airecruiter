@@ -379,6 +379,17 @@ export default function GlobalCandidatesPage() {
   const [filterSource, setFilterSource] = useState("all");
   const [filterMinScore, handleFilterMinScoreChange, setFilterMinScore] = useClampedScoreInput("");
   const [availableSources, setAvailableSources] = useState<string[]>([]);
+  const [exportStartDate, setExportStartDate] = useState("");
+  const [exportEndDate, setExportEndDate] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
 
   // Fetch global filter options on mount
   useEffect(() => {
@@ -496,7 +507,7 @@ export default function GlobalCandidatesPage() {
 
   const fetchIdRef = useRef(0);
 
-  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", replace: boolean = false) => {
+  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, replace: boolean = false) => {
     fetchIdRef.current += 1;
     const currentFetchId = fetchIdRef.current;
 
@@ -525,6 +536,12 @@ export default function GlobalCandidatesPage() {
       }
       if (minScore !== "") {
         query.append("min_score", String(minScore));
+      }
+      if (startDate) {
+        query.append("start_date", startDate);
+      }
+      if (endDate) {
+        query.append("end_date", endDate);
       }
 
       const candData = await api.candidates.getAllLaunched(query.toString());
@@ -573,11 +590,11 @@ export default function GlobalCandidatesPage() {
 
   useEffect(() => {
     const request = window.setTimeout(() => {
-      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, true)
+      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, true)
         .finally(() => setIsLoading(false));
     }, 0);
     return () => window.clearTimeout(request);
-  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, fetchCandidates]);
+  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, fetchCandidates]);
 
   const loadMore = async () => {
     if (isFetchingMore) return;
@@ -586,7 +603,7 @@ export default function GlobalCandidatesPage() {
 
     setIsFetchingMore(true);
     setOffset(nextOffset);
-    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, false);
+    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, false);
     setIsFetchingMore(false);
   };
 
@@ -613,13 +630,14 @@ export default function GlobalCandidatesPage() {
       "Email",
       "Phone",
       "Source",
+      "Launched Date",
       "Resume Screening Score",
       "Engage Status",
       "Engage Score",
       "Total Fit Score"
     ];
 
-    const rows = candidates.map((c) => {
+    const generateRows = (cands: any[]) => cands.map((c) => {
       const resumeScore = Math.round(c.match_score || 0);
       const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
       const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
@@ -632,6 +650,7 @@ export default function GlobalCandidatesPage() {
         escapeCsvField(c.email || ""),
         escapeCsvField(c.phone || ""),
         escapeCsvField(normalizeSourceLabel(c.source)),
+        escapeCsvField(c.engage_created_at ? formatDate(c.engage_created_at) : ""),
         escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
         escapeCsvField(statusInfo.label),
         escapeCsvField(engageScoreStr),
@@ -639,6 +658,7 @@ export default function GlobalCandidatesPage() {
       ].join(",");
     });
 
+    const rows = generateRows(candidates);
     const csvContent = [headers.join(","), ...rows].join("\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -651,6 +671,116 @@ export default function GlobalCandidatesPage() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleExportWithDateRange = async () => {
+    if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
+      setToast({ message: "Start Date cannot be after End Date.", type: "error" });
+      return;
+    }
+
+    setIsExporting(true);
+    try {
+      const allExportCandidates: Candidate[] = [];
+      let currentOffset = 0;
+      const CHUNK_SIZE = 500;
+      let hasMore = true;
+
+      while (hasMore) {
+        const query = new URLSearchParams({
+          limit: String(CHUNK_SIZE),
+          offset: String(currentOffset),
+        });
+        if (searchQuery) query.append("search", searchQuery);
+        if (filterStatus) query.append("status", filterStatus);
+        if (filterFeedback) query.append("feedback", filterFeedback);
+        if (filterSource && filterSource !== "all") query.append("source", filterSource);
+        if (filterMinScore !== "") query.append("min_score", String(filterMinScore));
+        if (exportStartDate) query.append("start_date", exportStartDate);
+        if (exportEndDate) query.append("end_date", exportEndDate);
+
+        const candData = await api.candidates.getAllLaunched(query.toString());
+        if (candData.status === "success" && Array.isArray(candData.candidates) && candData.candidates.length > 0) {
+          allExportCandidates.push(...candData.candidates);
+          currentOffset += CHUNK_SIZE;
+          if (allExportCandidates.length >= (candData.total || 0)) {
+            hasMore = false;
+          }
+        } else {
+          hasMore = false;
+        }
+      }
+
+      if (allExportCandidates.length > 0) {
+        
+        const escapeCsvField = (field: unknown) => {
+          if (field === null || field === undefined) return "";
+          let str = String(field);
+          if (/^[=+\-@]/.test(str)) {
+            str = "'" + str;
+          }
+          if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+            return `"${str.replace(/"/g, '""')}"`;
+          }
+          return str;
+        };
+
+        const headers = [
+          "JobDiva ID",
+          "Candidate Name",
+          "Email",
+          "Phone",
+          "Source",
+          "Launched Date",
+          "Resume Screening Score",
+          "Engage Status",
+          "Engage Score",
+          "Total Fit Score"
+        ];
+
+        const generateRows = (cands: Candidate[]) => cands.map((c) => {
+          const resumeScore = Math.round(c.match_score || 0);
+          const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
+          const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
+
+          const statusInfo = normalizeInterviewStatus(c.engage_status);
+
+          return [
+            escapeCsvField(c.jobdiva_id || ""),
+            escapeCsvField(c.name || "Unknown"),
+            escapeCsvField(c.email || ""),
+            escapeCsvField(c.phone || ""),
+            escapeCsvField(normalizeSourceLabel(c.source)),
+            escapeCsvField(c.engage_created_at ? formatDate(c.engage_created_at) : ""),
+            escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
+            escapeCsvField(statusInfo.label),
+            escapeCsvField(engageScoreStr),
+            escapeCsvField(totalFitScoreStr)
+          ].join(",");
+        });
+
+        const rows = generateRows(allExportCandidates);
+        const csvContent = [headers.join(","), ...rows].join("\n");
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute(
+          "download",
+          `Master_Candidate_Pool_${exportStartDate || "all"}_to_${exportEndDate || "all"}.csv`
+        );
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      } else {
+        setToast({ message: "No candidates found for the selected date range.", type: "error" });
+      }
+    } catch (error) {
+      console.error("Export failed:", error);
+      setToast({ message: "Failed to export data.", type: "error" });
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -689,6 +819,23 @@ export default function GlobalCandidatesPage() {
             </div>
 
             <div className="flex items-center gap-4 shrink-0">
+              <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-2 h-9 shadow-sm">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pl-1">Launched</label>
+                <input
+                  type="date"
+                  value={exportStartDate}
+                  onChange={(e) => setExportStartDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
+                />
+                <span className="text-slate-300 text-[11px] uppercase font-bold">to</span>
+                <input
+                  type="date"
+                  value={exportEndDate}
+                  onChange={(e) => setExportEndDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
+                />
+              </div>
+
             {totalCount > 0 && !isLoading && (
               <span className="text-[13px] font-medium text-slate-500 whitespace-nowrap">
                 Showing {candidates.length} of {totalCount}
@@ -698,12 +845,13 @@ export default function GlobalCandidatesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleExport}
+                onClick={handleExportWithDateRange}
+                disabled={isExporting}
                 className="h-9 px-3 flex items-center gap-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-sm transition-colors rounded-lg font-medium text-[12.5px]"
-                title="Export current view to CSV"
+                title="Export candidates matching current filters and date range"
               >
-                <Download className="h-3.5 w-3.5" />
-                Export CSV
+                {isExporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                {isExporting ? "Exporting..." : "Export CSV"}
               </Button>
             )}
           </div>
@@ -797,6 +945,7 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[200px] min-w-[200px] max-w-[200px] sticky left-[170px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB TITLE</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] sticky left-[370px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">CANDIDATE NAME</TableHead>
                 <TableHead className="w-[160px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
+                <TableHead className="w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
@@ -818,6 +967,7 @@ export default function GlobalCandidatesPage() {
                       </div>
                     </TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
@@ -929,7 +1079,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center py-3">
+                      <TableCell className="text-center py-3 border-l border-slate-200">
                         <div className="flex justify-center items-center w-full">
                           <span
                             className="px-3 py-1 rounded-full text-[11px] font-bold border"
@@ -940,7 +1090,7 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-700 text-[13px]">
+                      <TableCell className="text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
                         {c.engage_score !== null && c.engage_score !== undefined ? (
                           <div
                             className="relative group/engage inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
@@ -965,7 +1115,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center font-bold text-slate-900 text-[14px]">
+                      <TableCell className="text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
                         {c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? (
                           <span>{Math.round((c.engage_score + resumeScore) / 2)}/100</span>
                         ) : (
@@ -1041,6 +1191,7 @@ export default function GlobalCandidatesPage() {
                       </div>
                     </TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
@@ -1055,7 +1206,7 @@ export default function GlobalCandidatesPage() {
             <div className="p-6 flex justify-center border-t border-slate-100 pb-16">
               <button
                 onClick={loadMore}
-                className="h-10 px-8 rounded-full bg-indigo-50 border border-indigo-100 text-[13px] font-semibold text-indigo-600 hover:bg-indigo-100 transition-all shadow-sm flex items-center gap-2"
+                className="h-10 px-8 rounded-full bg-white border border-indigo-200 text-[13px] font-semibold text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm flex items-center gap-2"
               >
                 Load More Candidates
               </button>
@@ -1063,6 +1214,13 @@ export default function GlobalCandidatesPage() {
           )}
         </div>
       </div>
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed top-4 right-4 z-50 rounded-lg p-4 text-white ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} shadow-lg transition-all duration-300 transform translate-y-0 opacity-100`}>
+          {toast.message}
+        </div>
+      )}
 
       {/* Modals */}
       {selectedCandidate && (
