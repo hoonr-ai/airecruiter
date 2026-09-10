@@ -3009,16 +3009,16 @@ async def get_launched_candidates(
                 import re
                 date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-                # Date range filters apply to the engage_created_at which is la.created_at
+                # Date range filters apply to the engage_created_at which is la.created_at, evaluated in America/New_York timezone to match table display
                 if start_date:
                     if not date_pattern.match(start_date):
                         raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
-                    search_condition += " AND la.created_at >= %s"
+                    search_condition += " AND (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') >= %s"
                     params.append(f"{start_date} 00:00:00")
                 if end_date:
                     if not date_pattern.match(end_date):
                         raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
-                    search_condition += " AND la.created_at <= %s"
+                    search_condition += " AND (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') <= %s"
                     params.append(f"{end_date} 23:59:59")
 
                 params.extend([limit, offset])
@@ -3068,6 +3068,7 @@ async def get_launched_candidates(
                             la.interview_id as engage_interview_id,
                             la.created_at as engage_created_at,
                             la.payload as audit_payload,
+                            la.response as audit_response,
                             mj.title as job_title,
                             mj.screening_level
                         FROM sourced_candidates sc
@@ -3137,16 +3138,68 @@ async def get_launched_candidates(
 
         for cand in candidates:
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            
+            # Promote persisted values from data_blob
+            if isinstance(data_blob, dict):
+                if data_blob.get("engage_status"):
+                    cand["engage_status"] = data_blob.get("engage_status")
+                if data_blob.get("engage_score") is not None:
+                    cand["engage_score"] = data_blob.get("engage_score")
+                if data_blob.get("engage_candidate_score") is not None:
+                    cand["engage_candidate_score"] = data_blob.get("engage_candidate_score")
+                if data_blob.get("engage_total_score") is not None:
+                    cand["engage_total_score"] = data_blob.get("engage_total_score")
+                if data_blob.get("engage_hard_filter_status"):
+                    cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
+
             iid = cand.get("engage_interview_id")
+            live_payload = payloads_dict.get(str(iid).strip()) if iid else None
 
-            # Live merge from API payload if available
-            live_payload = payloads_dict.get(iid) if iid else None
+            if live_payload and isinstance(live_payload, dict):
+                if live_payload.get("status"):
+                    cand["engage_status"] = live_payload.get("status")
+                
+                eval_dict = live_payload.get("evaluation")
+                score_val = None
+                total_val = None
+                if isinstance(eval_dict, dict):
+                    score_val = eval_dict.get("total_score") or eval_dict.get("candidate_score") or eval_dict.get("score")
+                    total_val = eval_dict.get("max_score") or eval_dict.get("total_score_possible")
+                if score_val is None:
+                    score_val = live_payload.get("candidate_score") or live_payload.get("overall_score") or live_payload.get("score")
+                if score_val is not None:
+                    cand["engage_score"] = score_val
+                if total_val is not None:
+                    cand["engage_total_score"] = total_val
 
-            if live_payload:
-                cand["engage_status"] = live_payload.get("status") or cand.get("engage_status")
-                cand["engage_score"] = live_payload.get("evaluation", {}).get("total_score")
-            else:
-                cand["engage_score"] = data_blob.get("engage_score")
+            # Fallback to audit_response or audit_payload if engage_score is still missing
+            if cand.get("engage_score") is None:
+                resp = cand.get("audit_response")
+                if isinstance(resp, str) and resp.strip():
+                    try: resp = json.loads(resp)
+                    except: resp = {}
+                if isinstance(resp, dict):
+                    aud_score = resp.get("candidate_score") or resp.get("overall_score") or resp.get("score")
+                    if aud_score is not None:
+                        cand["engage_score"] = aud_score
+                    if resp.get("total_score") is not None:
+                        cand["engage_total_score"] = resp.get("total_score")
+
+            # Normalize score
+            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
+            raw_total = cand.get("engage_total_score")
+            if raw_score is not None and raw_total and raw_total > 0:
+                cand["engage_score"] = round((float(raw_score) / float(raw_total)) * 100, 1)
+
+            # Format audit_payload for frontend hover card
+            hf_details = _extract_rankings_hard_filter_details(
+                data_blob,
+                cand.get("audit_response") or {},
+                cand.get("audit_payload") if isinstance(cand.get("audit_payload"), dict) else {}
+            )
+            cand["audit_payload"] = {
+                "hard_filter_details": hf_details
+            }
 
             # Parse payload for attended_via
             audit_payload = cand.get("audit_payload")
