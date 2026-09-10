@@ -858,7 +858,7 @@ export default function GlobalCandidatesPage() {
         </div>
 
           {/* Row 2: Filters */}
-          <div className="flex flex-nowrap items-center gap-2 w-full overflow-x-auto">
+          <div className="flex flex-wrap items-center gap-2 w-full">
             <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm shrink-0">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
@@ -916,7 +916,7 @@ export default function GlobalCandidatesPage() {
             </div>
 
             <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm shrink-0">
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Score</label>
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
               <Input
                 type="number"
                 min={0}
@@ -926,7 +926,7 @@ export default function GlobalCandidatesPage() {
                   resetPagination();
                   handleFilterMinScoreChange(e.target.value);
                 }}
-                className="h-7 text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center flex-1 w-full focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
+                className="h-7 w-16 text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
               />
             </div>
           </div>
@@ -1050,12 +1050,12 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-600 text-[12px]">
-                        {c.engage_created_at ? formatDate(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
-                      </TableCell>
-
                       <TableCell className="text-center font-semibold text-slate-700 text-[12px]">
                         {normalizeSourceLabel(c.source)}
+                      </TableCell>
+
+                      <TableCell className="text-center font-medium text-slate-600 text-[12px]">
+                        {c.engage_created_at ? formatDate(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
                       </TableCell>
 
                       <TableCell className="text-center font-medium text-slate-900 text-[13px]">
