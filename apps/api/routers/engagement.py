@@ -496,6 +496,13 @@ def _get_db_connection():
 class GeneratePayloadRequest(BaseModel):
     candidate_ids: List[str]
     job_id: str
+    # "full" builds the job's own question set (unchanged default). "recheck"
+    # builds the short boolean set for candidates we have already screened —
+    # interest in this job + the expired facts named in recheck_fact_keys + this
+    # job's role-specific hard filters. Both optional so existing callers and the
+    # QA/edit modal are unaffected.
+    mode: str = "full"
+    recheck_fact_keys: List[str] = []
 
 class SendBulkInterviewRequest(BaseModel):
     payload: str  # JSON string (editable by user in modal)
@@ -525,44 +532,151 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
     return await _generate_payload_for(request)
 
 
+# Total question budget for a re-check screen. L0.5 targets 5 questions
+# (services/screening_question_generator._question_count_for_level); one extra
+# leaves room for the interest question without turning a "quick confirmation"
+# into a second full screen. If the budget is exceeded, role-specific filters are
+# dropped first — a stale work-authorization answer matters more than an extra
+# skills probe on a candidate we already scored on résumé.
+_RECHECK_QUESTION_BUDGET = 6
+
+
+def _build_recheck_questions(
+    *,
+    job_row: Dict[str, Any],
+    stale_fact_keys: List[str],
+    job_questions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Question set for the re-check tier.
+
+    Three parts, in priority order:
+      1. Interest in THIS job. Always asked — a person's interest in one role is
+         never evidence of interest in another, which is the whole reason the
+         re-check exists rather than skipping outreach outright.
+      2. Re-asks for facts whose TTL expired (`screen_facts.recheck_questions_for`).
+      3. This job's own role-specific hard filters. New to the candidate no matter
+         how recently we screened them, so they cannot be reused.
+    """
+    from services.screen_facts import is_role_specific_question, recheck_questions_for
+
+    title = str(job_row.get("enhanced_title") or job_row.get("title") or "this role").strip()
+    client = str(job_row.get("customer_name") or "").strip()
+    city = str(job_row.get("city") or "").strip()
+    state = str(job_row.get("state") or "").strip()
+
+    where = ", ".join([p for p in (city, state) if p])
+    at_client = f" with {client}" if client else ""
+    in_where = f" in {where}" if where else ""
+
+    questions: List[Dict[str, Any]] = [{
+        "question_text": (
+            f"We spoke with you recently about another role. Are you interested in a "
+            f"{title} position{at_client}{in_where}?"
+        ),
+        "pass_criteria": "Pass when the candidate confirms interest in this specific role.",
+        "is_default": True,
+        "category": "default",
+        "order_index": 1,
+        "is_hard_filter": True,
+    }]
+
+    questions.extend(recheck_questions_for(stale_fact_keys))
+
+    # Role-specific hard filters from this job, re-numbered to stay inside the
+    # front-matter block. Keeping order_index <= 9 matters: PAIR historically
+    # ignores hard filters past question 9, and boolean_mode only respects them
+    # for questions the sanitizer treats as front matter.
+    role_specific = [
+        q for q in job_questions
+        if is_role_specific_question(q.get("category"), q.get("order_index"))
+        and q.get("is_hard_filter")
+    ]
+
+    remaining = max(0, _RECHECK_QUESTION_BUDGET - len(questions))
+    dropped = len(role_specific) - remaining
+    for offset, q in enumerate(role_specific[:remaining]):
+        questions.append({**q, "order_index": len(questions) + offset + 1})
+
+    if dropped > 0:
+        logger.info(
+            "recheck payload for job %s dropped %s role-specific hard filter(s) to stay "
+            "within the %s-question budget",
+            job_row.get("jobdiva_id") or job_row.get("job_id"),
+            dropped,
+            _RECHECK_QUESTION_BUDGET,
+        )
+
+    return questions
+
+
 async def _generate_payload_for(request: GeneratePayloadRequest):
     """
     Generate an interview payload for a candidate.
     Fetches candidate data from sourced_candidates and job data from monitored_jobs,
     then assembles it into the samplepayload.json structure.
+
+    `request.mode` selects the question set: "full" (the job's own questions) or
+    "recheck" (a short boolean confirmation for candidates already screened).
     """
     try:
         conn = _get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
+        # ----- Resolve the launching job's keys FIRST -----
+        # The per-candidate SELECT below has to prefer *this* job's
+        # sourced_candidates row. `request.job_id` may be either the numeric
+        # job_id or the JobDiva ref, and sourced_candidates.jobdiva_id may hold
+        # either, so resolve both spellings once and match on the pair.
+        # (The full job row is re-read further down for the JD block; this
+        # lookup is deliberately narrow and cheap.)
+        cur.execute("""
+            SELECT job_id, jobdiva_id FROM monitored_jobs
+            WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
+            LIMIT 1
+        """, (request.job_id, request.job_id))
+        _job_keys = cur.fetchone() or {}
+        job_key_a = str(_job_keys.get("jobdiva_id") or request.job_id or "")
+        job_key_b = str(_job_keys.get("job_id") or request.job_id or "")
+
         # ----- Fetch candidate data -----
         # DNC gate: rows with dnc_stopped_at set are excluded so a candidate
         # added to the Do-Not-Contact list after launch stops receiving
         # interview invites without inactivating the rest of the PAIR.
+        #
+        # Row preference: this job's row first, any other job's row only as an
+        # identity fallback. Pre-fix this was a bare `WHERE candidate_id = %s
+        # ORDER BY updated_at DESC`, so a candidate sourced for several jobs
+        # could have their launch payload — including `match_score`, which PAIR
+        # surfaces as the resume screening score — built from a DIFFERENT job's
+        # row. `is_this_job` below lets us keep the identity fields from a
+        # fallback row while refusing to carry over a foreign match score.
         resumes = []
         candidate_phone = ""
         dnc_blocked_ids: List[str] = []
         for cid in request.candidate_ids:
             try:
                 cur.execute("""
-                    SELECT candidate_id, name, email, phone, headline, location, data, resume_match_percentage
+                    SELECT candidate_id, name, email, phone, headline, location, data, resume_match_percentage,
+                           (jobdiva_id IN (%s, %s)) AS is_this_job
                     FROM sourced_candidates
                     WHERE candidate_id = %s
                       AND dnc_stopped_at IS NULL
-                    ORDER BY updated_at DESC
+                    ORDER BY (jobdiva_id IN (%s, %s)) DESC, updated_at DESC
                     LIMIT 1
-                """, (cid,))
+                """, (job_key_a, job_key_b, cid, job_key_a, job_key_b))
                 row = cur.fetchone()
             except Exception:
                 cur.connection.rollback()
                 cur.execute("""
-                    SELECT candidate_id, name, email, phone, headline, location, data
+                    SELECT candidate_id, name, email, phone, headline, location, data,
+                           (jobdiva_id IN (%s, %s)) AS is_this_job
                     FROM sourced_candidates
                     WHERE candidate_id = %s
                       AND dnc_stopped_at IS NULL
-                    ORDER BY updated_at DESC
+                    ORDER BY (jobdiva_id IN (%s, %s)) DESC, updated_at DESC
                     LIMIT 1
-                """, (cid,))
+                """, (job_key_a, job_key_b, cid, job_key_a, job_key_b))
                 row = cur.fetchone()
             if not row:
                 # Either the candidate isn't sourced for any job, or every
@@ -606,14 +720,28 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     except Exception:
                         data_blob = {}
                 headline = row.get("headline") or data_blob.get("headline", "")
-                match_score = row.get("resume_match_percentage")
-                if match_score is None:
-                    match_score = data_blob.get("match_score")
-                if match_score is not None:
-                    try:
-                        match_score = float(match_score)
-                    except Exception:
-                        pass
+                # A match score is only meaningful against the job it was scored
+                # for. When the only row we found belongs to another job we keep
+                # the identity fields (name/email/phone are person-level) but
+                # send no score, rather than mislabel a foreign score as this
+                # job's resume screening result.
+                if row.get("is_this_job"):
+                    match_score = row.get("resume_match_percentage")
+                    if match_score is None:
+                        match_score = data_blob.get("match_score")
+                    if match_score is not None:
+                        try:
+                            match_score = float(match_score)
+                        except Exception:
+                            pass
+                else:
+                    match_score = None
+                    logger.info(
+                        "engagement_payload_cross_job_row candidate_id=%s job=%s "
+                        "— no row for this job, match_score omitted",
+                        cid,
+                        request.job_id,
+                    )
 
                 resumes.append({
                     "source_candidate_id": row.get("candidate_id") or cid,
@@ -692,6 +820,24 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                 for r in rows
             ]
             is_l05 = str(job_row.get("screening_level") or "").strip().lower() == "l0.5"
+
+            # Re-check cohort: this batch is made up of people we have already
+            # screened, so replace the job's full question set with a short
+            # boolean one — confirm interest in THIS job, re-ask only the facts
+            # that expired, and keep this job's own role-specific hard filters
+            # (those are new to them regardless of history).
+            #
+            # Mechanically this is the existing L0.5 shape, chosen per-candidate
+            # instead of per-job, so no PAIR-side contract changes: the payload
+            # still carries one `jd` with `is_l05` and a boolean question list.
+            if str(request.mode or "full").lower() == "recheck":
+                pre_screen_questions_raw = _build_recheck_questions(
+                    job_row=job_row,
+                    stale_fact_keys=list(request.recheck_fact_keys or []),
+                    job_questions=pre_screen_questions_raw,
+                )
+                is_l05 = True
+
             if is_l05:
                 pre_screen_questions_raw = _enforce_boolean_pre_screen_questions(pre_screen_questions_raw)
             pre_screen_questions = _sanitize_pre_screen_questions_for_pair(
@@ -1306,6 +1452,11 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
         # retryable, otherwise a transient miss would silently skip them forever.
         # We keep the skipped candidate_ids in skipped_already_sent so the caller
         # can show them as already-launched in the UI.
+        #
+        # `excluded_records` is declared up here (not next to the client-employee
+        # exclusion check below) because the cross-job suppression gate also
+        # reports into it, and that gate runs first.
+        excluded_records: List[Dict[str, str]] = []
         skipped_already_sent: List[str] = []
         if request.real_candidate_ids:
             try:
@@ -1333,6 +1484,72 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             except Exception as _idem_err:
                 logger.warning(f"engage idempotency check failed for job {job_id_from_payload}: {_idem_err}")
 
+        # Cross-job suppression. The idempotency check above only knows about THIS
+        # job, so on its own it cannot stop a second job from calling someone who
+        # is already mid-screen elsewhere, or who ignored us last week. The launch
+        # orchestrator plans cohorts (and therefore suppression) up front, but the
+        # rankings page's "Screen" button calls this endpoint directly, so the gate
+        # has to live here too.
+        #
+        # Only 'suppressed' is enforced here — tier downgrades (full -> re-check)
+        # need a differently-shaped payload and are the orchestrator's job. A
+        # direct send just gets the job's normal questions.
+        if request.real_candidate_ids:
+            try:
+                from core.config import CANDIDATE_POOL_REUSE_ENABLED
+
+                if CANDIDATE_POOL_REUSE_ENABLED:
+                    _pool_rows = await asyncio.to_thread(
+                        _load_candidates_for_identity, list(request.real_candidate_ids)
+                    )
+                    from services import reuse_policy as _rp
+
+                    _decisions = await asyncio.to_thread(
+                        _rp.decide_tiers_for_job, _pool_rows, str(job_id_from_payload)
+                    )
+                    _suppressed = {
+                        cid: d for cid, d in _decisions.items()
+                        if d.tier == _rp.TIER_SUPPRESSED
+                        # 'already launched for this job' is the per-job rule
+                        # above; let that path own it so the UI keeps reporting it
+                        # as already-sent rather than as a suppression.
+                        and d.reason_code != "already_launched_this_job"
+                    }
+                    if _suppressed:
+                        for _cid, _d in _suppressed.items():
+                            logger.info(
+                                "send_bulk_interview suppressing %s for job %s: %s",
+                                _cid,
+                                job_id_from_payload,
+                                _d.reason_code,
+                            )
+                            excluded_records.append({
+                                "candidate_id": _cid,
+                                "name": "",
+                                "reason": _d.reason,
+                            })
+                        _kept = [
+                            i for i, c in enumerate(request.real_candidate_ids)
+                            if c not in _suppressed
+                        ]
+                        _resumes = payload_obj.get("resumes")
+                        if isinstance(_resumes, list) and len(_resumes) >= len(
+                            request.real_candidate_ids
+                        ):
+                            payload_obj["resumes"] = [_resumes[i] for i in _kept]
+                        request.real_candidate_ids = [
+                            request.real_candidate_ids[i] for i in _kept
+                        ]
+            except Exception as _pool_err:  # noqa: BLE001
+                # Fail OPEN: a broken pool must not block legitimate outreach.
+                # The worst case is the pre-feature behaviour (a possible
+                # duplicate contact), not a silently blocked launch.
+                logger.warning(
+                    "cross-job suppression check failed for job %s (continuing): %s",
+                    job_id_from_payload,
+                    _pool_err,
+                )
+
         if skipped_already_sent:
             skip_set = set(skipped_already_sent)
             kept_indices = [
@@ -1346,7 +1563,6 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 f"engage idempotency: skipped {len(skipped_already_sent)} already-sent candidates for job {job_id_from_payload}"
             )
 
-        excluded_records: List[Dict[str, str]] = []
         if request.real_candidate_ids:
             excluded_candidate_ids = set()
             try:
@@ -1830,6 +2046,299 @@ class LaunchRequest(BaseModel):
     send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
     batch_size: Optional[int] = None
+    # Recruiter override: skip cross-job reuse for this launch and give everyone
+    # a full screen. The recruiter-decides escape hatch for a client that demands
+    # a fresh conversation, or when the reuse suggestion looks wrong.
+    force_full_screen: bool = False
+
+
+# Max distinct stale-fact signatures we will split the re-check cohort by.
+# Grouping by exact signature keeps each candidate's questions minimal, but every
+# extra group is another Pairbot call. In practice facts expire on similar
+# schedules so there are one or two groups; past this ceiling we fall back to the
+# union of stale facts, which over-asks a little instead of fragmenting the
+# launch into many tiny batches.
+_RECHECK_MAX_SIGNATURE_GROUPS = 3
+
+
+def _record_launch_outreach(
+    rows: List[Dict[str, Any]],
+    job_id: str,
+    tier_mode: str,
+) -> None:
+    """Write ledger rows for the candidates PAIR created interviews for.
+
+    Only rows that came back with an `interview_id` are recorded: a row without
+    one was never actually dispatched (the engage flow keeps those retryable), and
+    logging it as an attempt would spend the person's 90-day budget on a send that
+    never happened.
+    """
+    reachable = [
+        r for r in rows
+        if isinstance(r, dict) and str(r.get("interview_id") or "").strip()
+    ]
+    if not reachable:
+        return
+    try:
+        from core.db import get_db_connection as _get_conn
+        from services import candidate_identity, candidate_pool
+        from services.reuse_policy import load_job_context
+
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                job = load_job_context(job_id, cur=cur)
+                # `source_cid`-memoized lookup: these candidates were just
+                # resolved during cohort planning, so this is an index hit.
+                person_by_cid = candidate_identity.resolve_persons_bulk(
+                    [{"candidate_id": r.get("candidate_id")} for r in reachable], cur=cur
+                )
+                for row in reachable:
+                    cid = str(row.get("candidate_id") or "")
+                    person_id = person_by_cid.get(cid)
+                    if not person_id:
+                        continue
+                    candidate_pool.record_outreach(
+                        person_id=person_id,
+                        candidate_id=cid,
+                        jobdiva_id=job.jobdiva_id,
+                        interview_id=str(row.get("interview_id") or ""),
+                        tier="recheck" if tier_mode == "recheck" else "full",
+                        screening_level=(
+                            "L0.5" if tier_mode == "recheck" else job.screening_level
+                        ),
+                        status="sent",
+                        cur=cur,
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "launch: outreach ledger write failed for job %s (%s rows): %s",
+            job_id,
+            len(reachable),
+            e,
+        )
+
+
+def plan_launch_cohorts(
+    candidate_ids: List[str],
+    job_id: str,
+    force_full_screen: bool = False,
+) -> Dict[str, Any]:
+    """Split a launch selection into outreach cohorts.
+
+    Returns:
+        cohorts:    [(mode, stale_fact_keys, [candidate_id, …])] to send
+        tier_counts: {full, recheck, none, suppressed}
+        skipped:     TierDecision objects for the tiers that send nothing
+        reuse_enabled: whether reuse actually applied to this launch
+
+    `full` is one cohort. `recheck` is grouped by which facts went stale, because
+    those become extra questions in the payload and the payload is per-batch, not
+    per-candidate. `none` gets a `tier='none'` ledger row (auditable, not counted
+    as an attempt) and `suppressed` gets nothing at all.
+
+    Synchronous — the caller runs it in a thread.
+    """
+    from core.config import CANDIDATE_POOL_REUSE_ENABLED
+    from services import candidate_pool, reuse_policy
+
+    ids = [str(c).strip() for c in candidate_ids if str(c).strip()]
+    fallback = {
+        "cohorts": [("full", [], ids)] if ids else [],
+        "tier_counts": {"full": len(ids), "recheck": 0, "none": 0, "suppressed": 0},
+        "skipped": [],
+        "reuse_enabled": False,
+    }
+    if not ids:
+        return {**fallback, "cohorts": []}
+
+    if force_full_screen or not CANDIDATE_POOL_REUSE_ENABLED:
+        logger.info(
+            "launch: reuse bypassed for job %s (%s) — %s candidates get a full screen",
+            job_id,
+            "recruiter override" if force_full_screen else "reuse disabled",
+            len(ids),
+        )
+        return fallback
+
+    from core.db import get_db_connection as _get_conn
+
+    # One connection for the whole plan. Identity resolution, the tier decision
+    # and the Tier C ledger writes all share it — a connection per candidate
+    # would churn the 20-slot per-worker pool exactly when a launch is already
+    # contending with the candidate saves that preceded it.
+    conn = _get_conn()
+    # Everything from here to the return is inside try/finally so the pool slot is
+    # released on every path, including an unexpected raise in the cohort-building
+    # code below. A leaked slot out of a 20-slot per-worker pool is not a
+    # theoretical problem here: a launch runs right after the candidate saves that
+    # already loaded the pool.
+    try:
+        try:
+            # Load the candidate rows so identity resolution has contact fields
+            # and the data blob to work with; candidate_id alone resolves only for
+            # rows we have already seen.
+            rows = _load_candidates_for_identity(ids)
+            with conn.cursor() as cur:
+                decisions = reuse_policy.decide_tiers_for_job(rows, job_id, cur=cur)
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.error(
+                "launch: cohort planning failed for job %s — every candidate gets a "
+                "full screen: %s",
+                job_id,
+                e,
+            )
+            return fallback
+
+        # Candidates with no decision (not in sourced_candidates at all) still need
+        # launching; default them to a full screen rather than dropping them.
+        full_ids: List[str] = []
+        recheck: Dict[Tuple[str, ...], List[str]] = {}
+        skipped: List[Any] = []
+        # Within-launch person de-dup. This is the case the whole feature exists for:
+        # the same human sourced through JobDiva AND through LinkedIn appears twice in
+        # one selection under two different candidate_ids. Sending both means two
+        # calls to one person about one job. The cohort plan is computed up front, so
+        # only this check can catch it — by the time the second batch is sent, the
+        # first has already written a ledger row, but the plan is fixed.
+        persons_in_this_launch: Dict[int, str] = {}
+
+        for cid in ids:
+            decision = decisions.get(cid)
+
+            if decision is not None and decision.person_id:
+                first_cid = persons_in_this_launch.get(decision.person_id)
+                if first_cid is not None and first_cid != cid:
+                    decision.tier = reuse_policy.TIER_SUPPRESSED
+                    decision.reason_code = "duplicate_person_in_launch"
+                    decision.reason = (
+                        "Same person as another selected candidate "
+                        f"({first_cid}) — screening them once."
+                    )
+                    skipped.append(decision)
+                    continue
+                persons_in_this_launch[decision.person_id] = cid
+
+            if decision is None or decision.tier == reuse_policy.TIER_FULL:
+                full_ids.append(cid)
+            elif decision.tier == reuse_policy.TIER_RECHECK:
+                recheck.setdefault(tuple(sorted(decision.stale_fact_keys)), []).append(cid)
+            else:
+                skipped.append(decision)
+
+        if len(recheck) > _RECHECK_MAX_SIGNATURE_GROUPS:
+            merged_keys = tuple(sorted({k for sig in recheck for k in sig}))
+            merged_ids = [cid for group in recheck.values() for cid in group]
+            logger.info(
+                "launch: %s distinct stale-fact signatures for job %s — merging into one "
+                "re-check cohort asking about %s",
+                len(recheck),
+                job_id,
+                list(merged_keys),
+            )
+            recheck = {merged_keys: merged_ids}
+
+        cohorts: List[Tuple[str, List[str], List[str]]] = []
+        if full_ids:
+            cohorts.append(("full", [], full_ids))
+        for signature, group_ids in recheck.items():
+            cohorts.append(("recheck", list(signature), group_ids))
+
+        # Record the Tier C decisions we are acting on. Suppressed candidates get no
+        # ledger row — we neither contacted them nor reused anything.
+        reused = [
+            d for d in skipped
+            if d.tier == reuse_policy.TIER_NONE and d.person_id
+        ]
+        if reused:
+            try:
+                with conn.cursor() as cur:
+                    for decision in reused:
+                        candidate_pool.record_reuse_decision(
+                            person_id=decision.person_id,
+                            candidate_id=decision.candidate_id,
+                            jobdiva_id=job_id,
+                            cur=cur,
+                        )
+                conn.commit()
+            except Exception as e:  # noqa: BLE001
+                # Losing the audit trail must not change what we launch: the tiers are
+                # already decided and the send proceeds either way.
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "launch: reuse-decision ledger write failed for %s candidate(s): %s",
+                    len(reused),
+                    e,
+                )
+
+        counts = {
+            "full": len(full_ids),
+            "recheck": sum(len(g) for g in recheck.values()),
+            "none": sum(1 for d in skipped if d.tier == reuse_policy.TIER_NONE),
+            "suppressed": sum(1 for d in skipped if d.tier == reuse_policy.TIER_SUPPRESSED),
+        }
+        logger.info(
+            "launch: job %s cohort plan — %s full, %s re-check (%s groups), %s reused, "
+            "%s suppressed",
+            job_id,
+            counts["full"],
+            counts["recheck"],
+            len(recheck),
+            counts["none"],
+            counts["suppressed"],
+        )
+        return {
+            "cohorts": cohorts,
+            "tier_counts": counts,
+            "skipped": skipped,
+            "reuse_enabled": True,
+        }
+    finally:
+        conn.close()
+
+
+def _load_candidates_for_identity(candidate_ids: List[str]) -> List[Dict[str, Any]]:
+    """Fetch the fields identity resolution keys on, one row per candidate_id.
+
+    `DISTINCT ON (candidate_id) … ORDER BY updated_at DESC` because a candidate
+    sourced for several jobs has a row per job; for identity purposes any of them
+    will do, and the freshest is the most likely to carry enriched contact info.
+    """
+    from core.db import get_db_connection as _get_conn
+
+    if not candidate_ids:
+        return []
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (candidate_id)
+                       candidate_id, name, email, phone, headline, location,
+                       profile_url, source, data
+                FROM sourced_candidates
+                WHERE candidate_id = ANY(%s)
+                ORDER BY candidate_id, updated_at DESC
+                """,
+                (list(candidate_ids),),
+            )
+            return [dict(r) for r in cur.fetchall() or []]
+    finally:
+        conn.close()
 
 
 # Backend batch size for the launch orchestrator's per-batch Pairbot calls.
@@ -1866,16 +2375,47 @@ async def launch_bulk_interviews(request: LaunchRequest):
     async def _gen():
         ids = [str(c) for c in (request.candidate_ids or []) if str(c).strip()]
         batch_size = max(1, int(request.batch_size or _LAUNCH_PAIRBOT_BATCH_SIZE))
-        batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
+
+        # ---- Cross-job reuse: decide how much outreach each candidate needs ----
+        # Runs once per launch, before any batching, so cohorts are stable and a
+        # candidate can't be sent a full screen in one batch and a re-check in the
+        # next. Any failure inside plan_launch_cohorts degrades everyone to a full
+        # screen, which is the pre-feature behaviour.
+        plan = await asyncio.to_thread(
+            plan_launch_cohorts, ids, request.job_id, bool(request.force_full_screen)
+        )
+        cohorts = plan["cohorts"]           # [(mode, stale_fact_keys, [candidate_id, …])]
+        tier_counts = plan["tier_counts"]
+        skipped_decisions = plan["skipped"]  # tier 'none' / 'suppressed'
+
+        # Batch inside each cohort so a cohort larger than batch_size still
+        # respects the Pairbot batch limit.
+        batches: List[Tuple[str, List[str], List[str]]] = []
+        for mode, stale_keys, cohort_ids in cohorts:
+            for i in range(0, len(cohort_ids), batch_size):
+                batches.append((mode, stale_keys, cohort_ids[i:i + batch_size]))
 
         yield _sse({
             "type": "start",
             "total_candidates": len(ids),
             "total_batches": len(batches),
             "batch_size": batch_size,
+            # Tier plan up front so the progress modal can show "42 full screens,
+            # 18 short re-checks, 6 reused, 4 on cooldown" before anything fires.
+            "tier_counts": tier_counts,
+            "reuse_enabled": plan["reuse_enabled"],
         })
 
+        if skipped_decisions:
+            yield _sse({
+                "type": "tier_skipped",
+                "candidates": [d.to_dict() for d in skipped_decisions],
+            })
+
         totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0}
+        totals["reused_no_outreach"] = tier_counts.get("none", 0)
+        totals["suppressed"] = tier_counts.get("suppressed", 0)
+        totals["recheck_sent"] = 0
         all_skipped: List[str] = []
         all_excluded: List[Dict[str, str]] = []
         failed_candidate_ids: List[str] = []
@@ -1924,12 +2464,17 @@ async def launch_bulk_interviews(request: LaunchRequest):
                 logger.warning("launch: side-effect firing failed: %s", _se_err)
 
         try:
-            for idx, batch in enumerate(batches):
+            for idx, (batch_mode, batch_stale_keys, batch) in enumerate(batches):
                 if idx > 0:
                     await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
                 try:
                     gp = await _generate_payload_for(
-                        GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
+                        GeneratePayloadRequest(
+                            candidate_ids=batch,
+                            job_id=request.job_id,
+                            mode=batch_mode,
+                            recheck_fact_keys=batch_stale_keys,
+                        )
                     )
                     payload_str = gp.get("payload") if isinstance(gp, dict) else None
                     if not payload_str:
@@ -1976,10 +2521,26 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         totals["already_sent"] += len(skipped)
                         totals["no_interview"] += no_interview
                         totals["excluded"] += len(batch_excluded)
+                        if batch_mode == "recheck":
+                            totals["recheck_sent"] += sent
+
+                        # Ledger: one row per person actually reached, stamped
+                        # with the tier we used. Off-thread so the SSE stream
+                        # isn't blocked by DB work, and non-fatal — a launch that
+                        # reached PAIR must be reported as sent even if the pool
+                        # write fails, otherwise the recruiter retries and
+                        # double-contacts.
+                        await asyncio.to_thread(
+                            _record_launch_outreach,
+                            rows,
+                            request.job_id,
+                            batch_mode,
+                        )
                         yield _sse({
                             "type": "batch",
                             "index": idx,
                             "status": "completed",
+                            "mode": batch_mode,
                             "sent": sent,
                             "no_interview": no_interview,
                             "already_sent": len(skipped),

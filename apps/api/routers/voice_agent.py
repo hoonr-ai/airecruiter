@@ -227,20 +227,131 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     """,
                     (json.dumps(candidate_blob), target_candidate_id, target_job_id, target_job_id),
                 )
-                
-                # Fallback if job_id mapping missing
+
+                # Fallback ladder when the (candidate_id, jobdiva_id) pair didn't
+                # match a row. Each rung must stay scoped to ONE outreach: the
+                # same candidate_id legitimately has a row per job they were
+                # sourced for, so an unscoped `WHERE candidate_id = %s` (what
+                # this used to do) stamps one job's interview result — status,
+                # score, hard-filter verdict and full transcript — onto EVERY
+                # other job's row for that person. That silently fabricates
+                # "already screened" state on unrelated jobs, which the
+                # cross-job reuse gate then acts on.
                 if cur.rowcount == 0:
+                    # Rung 1: match on the interview id itself. An interview_id
+                    # identifies exactly one outreach, so this is job-agnostic
+                    # without being person-wide.
                     cur.execute(
                         """
                         UPDATE sourced_candidates
                         SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s
+                          AND data->>'engage_interview_id' = %s
                         """,
-                        (json.dumps(candidate_blob), target_candidate_id),
+                        (
+                            json.dumps(candidate_blob),
+                            target_candidate_id,
+                            str(payload.interview_id),
+                        ),
                     )
 
+                if cur.rowcount == 0:
+                    # Rung 2: the candidate has exactly one sourced row overall,
+                    # so "which job" is unambiguous. With more than one row we
+                    # cannot tell which outreach this result belongs to — log
+                    # and drop the blob rather than guess. engage_interview_audit
+                    # (updated above) still holds the authoritative result.
+                    cur.execute(
+                        "SELECT id FROM sourced_candidates WHERE candidate_id = %s LIMIT 2",
+                        (target_candidate_id,),
+                    )
+                    rows = cur.fetchall()
+                    if len(rows) == 1:
+                        cur.execute(
+                            """
+                            UPDATE sourced_candidates
+                            SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (json.dumps(candidate_blob), rows[0][0]),
+                        )
+                    else:
+                        logger.warning(
+                            "Webhook: could not scope interview %s to a single "
+                            "sourced_candidates row (candidate_id=%s job=%s, "
+                            "%s candidate rows) — skipping data blob write to "
+                            "avoid cross-job contamination",
+                            payload.interview_id,
+                            target_candidate_id,
+                            target_job_id,
+                            "0" if not rows else "2+",
+                        )
+
                 
+                # 3. Fold the result into the person-level pool: update the
+                # outreach ledger, extract the reusable logistics answers, and
+                # refresh the rollup. All inside the same transaction as the
+                # writes above so the Candidates page and the suppression gate
+                # can never observe a half-applied result.
+                #
+                # Wrapped defensively: a candidate whose result we already
+                # persisted must not 500 the webhook (PAIR would retry and we'd
+                # re-do the writes above) just because the pool is unavailable.
+                try:
+                    from services import candidate_pool, screen_facts
+
+                    pool_outcome = None
+                    if effective_status in ("passed", "completed"):
+                        pool_outcome = "pass"
+                    elif effective_status in ("failed", "rejected"):
+                        pool_outcome = "fail"
+
+                    pool_status = (
+                        "completed"
+                        if effective_status in ("passed", "failed", "completed", "rejected")
+                        else "in_progress"
+                    )
+
+                    person_id = candidate_pool.update_outreach_from_webhook(
+                        interview_id=str(payload.interview_id),
+                        status=pool_status,
+                        outcome=pool_outcome,
+                        score=payload.candidate_score,
+                        total_score=payload.total_score,
+                        # A completed_at from PAIR is a string; let the DB stamp
+                        # now() instead of trying to parse their format here.
+                        completed_at=(
+                            datetime.now(timezone.utc) if pool_status == "completed" else None
+                        ),
+                        # Any webhook at all proves the candidate engaged — that
+                        # is precisely what distinguishes "pending" from "never
+                        # responded".
+                        has_activity=True,
+                        cur=cur,
+                    )
+
+                    if person_id and pool_status == "completed":
+                        facts = screen_facts.facts_from_webhook_payload(detail_payload)
+                        if facts:
+                            screen_facts.write_facts(
+                                person_id,
+                                facts,
+                                interview_id=str(payload.interview_id),
+                                jobdiva_id=target_job_id,
+                                cur=cur,
+                            )
+                            # facts_fresh_until changed, so the rollup needs a
+                            # second pass now that the facts are in place.
+                            candidate_pool.refresh_pool_state(person_id, cur=cur)
+                except Exception as pool_err:  # noqa: BLE001
+                    logger.warning(
+                        "Webhook: candidate pool update failed for interview %s: %s",
+                        payload.interview_id,
+                        pool_err,
+                    )
+
             conn.commit()
 
         # Check for pass condition and fire email if needed.

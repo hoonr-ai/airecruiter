@@ -339,6 +339,64 @@ EMBEDDING_SKILL_MATCH = get_env_bool("EMBEDDING_SKILL_MATCH", False)
 EMBEDDING_MATCH_THRESHOLD = float(
     get_env_with_default("EMBEDDING_MATCH_THRESHOLD", "0.75")
 )
+
+# ---- Global candidate pool / reachout reuse ----
+# Master switch. When false, the pool is still WRITTEN (so the ledger stays
+# complete and the Candidates page keeps working) but the launch path never
+# downgrades anyone: every candidate gets a full screen, exactly as before.
+# This is the kill switch to reach for if reuse ever mis-fires in production.
+CANDIDATE_POOL_REUSE_ENABLED = get_env_bool("CANDIDATE_POOL_REUSE_ENABLED", True)
+
+# Days after an unanswered attempt before we may contact the person again.
+# Prevents outreach fatigue: a candidate who ignored a call last week should not
+# get another one for a different job tomorrow.
+POOL_COOLDOWN_DAYS = int(get_env_with_default("POOL_COOLDOWN_DAYS", "14"))
+
+# Days an attempt may sit with zero candidate activity before it is treated as
+# "never responded" and moved to the bottom section of the Candidates page.
+# Shorter than the cooldown on purpose: we want to *classify* someone as
+# unresponsive well before we are allowed to try again.
+POOL_NO_RESPONSE_DAYS = int(get_env_with_default("POOL_NO_RESPONSE_DAYS", "10"))
+
+# Hard cap on attempts within a rolling 90-day window, regardless of cooldown.
+POOL_MAX_ATTEMPTS_90D = int(get_env_with_default("POOL_MAX_ATTEMPTS_90D", "3"))
+
+# Tier C ("no outreach at all, show the prior result") only applies when the
+# person completed a screen within this window AND passed it. Outside it, a
+# known candidate still gets the short L0.5 re-check (Tier B) rather than
+# being submitted on the strength of a stale conversation.
+POOL_SKIP_OUTREACH_DAYS = int(get_env_with_default("POOL_SKIP_OUTREACH_DAYS", "14"))
+
+# Cross-client policy: logistics facts (work authorization, visa, arrangements,
+# pay band, location) are portable between clients, but interest in a specific
+# role never is. With this true, a screen done for Client A can only ever
+# downgrade a Client B job to Tier B — never to Tier C — because we always
+# re-ask "are you interested in THIS job".
+POOL_CROSS_CLIENT_REUSE_FACTS_ONLY = get_env_bool(
+    "POOL_CROSS_CLIENT_REUSE_FACTS_ONLY", True
+)
+
+# Per-fact freshness. A fact past its TTL is re-asked in the L0.5 re-check
+# instead of being reused. Work authorization and visa status change rarely;
+# availability and "are you actively looking" go stale in weeks.
+POOL_FACT_TTL_DAYS = {
+    "work_authorization":  int(get_env_with_default("POOL_TTL_WORK_AUTH_DAYS", "180")),
+    "visa_sponsorship":    int(get_env_with_default("POOL_TTL_VISA_DAYS", "180")),
+    "work_arrangements":   int(get_env_with_default("POOL_TTL_ARRANGEMENTS_DAYS", "90")),
+    "current_location":    int(get_env_with_default("POOL_TTL_LOCATION_DAYS", "90")),
+    "current_role":        int(get_env_with_default("POOL_TTL_ROLE_DAYS", "90")),
+    "expected_pay_rate":   int(get_env_with_default("POOL_TTL_PAY_DAYS", "60")),
+    "relocation":          int(get_env_with_default("POOL_TTL_RELOCATION_DAYS", "90")),
+    "availability":        int(get_env_with_default("POOL_TTL_AVAILABILITY_DAYS", "21")),
+    "actively_looking":    int(get_env_with_default("POOL_TTL_ACTIVELY_LOOKING_DAYS", "21")),
+}
+
+# How often the reconcile job ages open attempts into 'no_response' and repairs
+# rollup drift. DB-deduped via candidate_pool_reconcile_lock, because all 8
+# uvicorn workers run their own APScheduler.
+POOL_RECONCILE_INTERVAL_MINUTES = int(
+    get_env_with_default("POOL_RECONCILE_INTERVAL_MINUTES", "30")
+)
 OPENAI_EMBEDDING_MODEL = get_env_with_default(
     "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
 )

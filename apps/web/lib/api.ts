@@ -212,6 +212,33 @@ export const api = {
     // Multipart upload — callers pass FormData directly.
     bulkUploadUrl: (jobRef: string) => `${API_BASE}/jobs/${jobRef}/bulk-resumes`,
   },
+  // Global candidate pool: person-level view of who we've reached out to, for
+  // which job, and how it ended. Paths must stay under `/candidates/<sub>` —
+  // nginx routes `^/candidates/.+` to the API while the bare `/candidates` path
+  // is the Next.js page.
+  candidatePool: {
+    list: (params: {
+      bucket: string;
+      search?: string;
+      limit?: number;
+      cursor_sort_at?: string | null;
+      cursor_person_id?: number | null;
+    }) => {
+      const qs = new URLSearchParams({ bucket: params.bucket });
+      if (params.search) qs.set("search", params.search);
+      if (params.limit) qs.set("limit", String(params.limit));
+      // Keyset cursor: both parts or neither, or the backend ignores it.
+      if (params.cursor_sort_at && params.cursor_person_id != null) {
+        qs.set("cursor_sort_at", params.cursor_sort_at);
+        qs.set("cursor_person_id", String(params.cursor_person_id));
+      }
+      return req<any>(`/candidates/pool?${qs.toString()}`);
+    },
+    summary: () => req<any>(`/candidates/pool/summary`),
+    person: (personId: number) => req<any>(`/candidates/pool/person/${personId}`),
+    reusePreview: (body: { job_id: string; candidate_ids: string[] }) =>
+      req<any>(`/candidates/reuse-preview`, { method: "POST", body }),
+  },
   chat: {
     send: (body: unknown) => req<any>(`/chat`, { method: "POST", body }),
   },

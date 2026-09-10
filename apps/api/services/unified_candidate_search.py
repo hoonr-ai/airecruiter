@@ -1626,7 +1626,16 @@ class UnifiedCandidateSearch:
                         })
                         enriched += 1
                     else:
-                        new_id = f"exadeep_{idx}_{nurl[-32:] or 'unknown'}"
+                        # Stable id keyed on the full normalized profile URL, so
+                        # the same person found by deep search gets the same
+                        # candidate_id on every run and across jobs. The old
+                        # `exadeep_{idx}_{nurl[-32:]}` form baked in the result
+                        # POSITION (different id per run) and truncated the URL
+                        # to its last 32 chars (two profiles sharing a suffix
+                        # could collide), so cross-job de-dup missed this whole
+                        # cohort. Falls back to a positional id only when the
+                        # entry carries no URL at all.
+                        new_id = f"exadeep_{nurl}" if nurl else f"exadeep_idx{idx}_unknown"
                         # Pull skills out of recent_companies / fit_rationale
                         # so the scorer has something to compare against the
                         # JD's required skills. Without this, every deep-only

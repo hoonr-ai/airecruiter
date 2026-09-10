@@ -7356,7 +7356,9 @@ function NewJobPageContent() {
             if (evt.type === "start") {
               launchBatchSize = evt.batch_size || LAUNCH_BATCH_SIZE;
               // Preserve any save-failed rows (re-indexed) and append the
-              // backend's launch batches after them.
+              // backend's launch batches after them. `tier_counts` rides along
+              // into progress state — the backend plans reuse cohorts before any
+              // batch fires, so it is the real plan, not a prediction.
               setLaunchProgress(prev => {
                 const failedRows = prev.batches
                   .filter(b => b.status === "failed")
@@ -7378,6 +7380,7 @@ function NewJobPageContent() {
                   batchSize: evt.batch_size,
                   batches: [...failedRows, ...launchRows],
                   currentBatchIndex: failedRows.length,
+                  tierCounts: evt.tier_counts || prev.tierCounts,
                 };
               });
             } else if (evt.type === "batch") {

@@ -989,8 +989,21 @@ class ExaService:
             results = []
             for idx, result in enumerate(search_results):
                 fields = _common_people_fields(result)
+                # Stable id derived from the profile URL, matching
+                # search_candidates above. The old `dice_{idx}_{id}` form baked
+                # the result POSITION into the id, so the same Dice profile got a
+                # different candidate_id on every run and on every job — which
+                # defeats both the UNIQUE(jobdiva_id, candidate_id, source)
+                # upsert and any cross-job "have we already contacted them"
+                # lookup. Only the positional fallback keeps an index, and only
+                # when there is no URL and no provider id to key on.
+                stable_key = (
+                    _normalize_linkedin_url(fields.get("profile_url") or "")
+                    or str(getattr(result, "id", "") or "")
+                    or f"idx{idx}"
+                )
                 results.append({
-                    "id": f"dice_{idx}_{getattr(result, 'id', idx)}",
+                    "id": f"dice_{stable_key}",
                     "provider_id": getattr(result, "id", f"dice_{idx}"),
                     "source": "Dice",
                     "open_to_work": False,

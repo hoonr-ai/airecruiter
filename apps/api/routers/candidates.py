@@ -3021,22 +3021,17 @@ async def get_candidate_evaluation_report(
                     pair_data["transcriptions"] = transcription_data if isinstance(transcription_data, list) else (transcription_data or [])
                 if outreach_data: pair_data["outreach"] = outreach_data
 
-                # Dynamic mapping of questions to evaluation fields
+                # Dynamic mapping of questions to evaluation fields.
+                # The if/elif chain that used to live here now lives in
+                # services/screen_facts.FACT_SPECS, which is the same table the
+                # cross-job reuse path reads. Keeping one table means a question
+                # added for reuse can't silently miss this response — and the
+                # camelCase output keys the details UI consumes are unchanged.
+                from services.screen_facts import eval_map_from_qa
+
                 qa_list = pair_data.get("questions_answers") or []
-                eval_map = {}
-                for qa in qa_list:
-                    txt = (qa.get("question_text") or "").lower()
-                    ans = qa.get("answer_text") or ""
-                    if "open to exploring new job" in txt: eval_map["isActivelyLookingForJob"] = ans
-                    elif "current or most recent role" in txt: eval_map["currentRole"] = ans
-                    elif "current location" in txt: eval_map["currentLocation"] = ans
-                    elif "authorized to work" in txt and "united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
-                    elif "visa sponsorship" in txt: eval_map["requireVisaSponsorship"] = ans
-                    elif "working arrangements are you open to" in txt: eval_map["openWorkingArrangements"] = ans
-                    elif "onsite work arrangement" in txt: eval_map["isOpenToRelocation"] = ans
-                    elif "availability to start" in txt: eval_map["isAvailableToStartSoon"] = ans
-                    elif "compensation" in txt: eval_map["expectedPayRate"] = ans
-                
+                eval_map = eval_map_from_qa(qa_list)
+
                 # Merge into evaluation object
                 if isinstance(pair_data.get("evaluation"), dict):
                     pair_data["evaluation"].update(eval_map)

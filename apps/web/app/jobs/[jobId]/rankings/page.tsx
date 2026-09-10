@@ -25,7 +25,10 @@ import {
   Zap,
   Check,
   X,
-  Activity
+  Activity,
+  History,
+  Ban,
+  Clock3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,7 +53,7 @@ import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
-import { API_BASE, authFetch } from "@/lib/api";
+import { api, API_BASE, authFetch } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
@@ -84,6 +87,50 @@ const FINAL_ENGAGE_STATUSES = new Set([
 
 const normalizeStatusValue = (value: unknown): string =>
   String(value || "").trim().toLowerCase();
+
+/**
+ * Compact tier badge shown on a candidate row.
+ *
+ * `full` renders nothing on purpose: it is the default for the great majority of
+ * rows, and a badge on every row would be noise that hides the three tiers that
+ * actually change what happens.
+ */
+const ReuseTierBadge = ({ decision }: { decision?: ReuseDecision }) => {
+  if (!decision || decision.tier === "full") return null;
+
+  const styles: Record<string, { label: string; className: string }> = {
+    recheck: {
+      label: "Short re-check",
+      className: "bg-indigo-50 text-indigo-700 ring-indigo-200",
+    },
+    none: {
+      label: "Already known",
+      className: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    },
+    suppressed: {
+      label: "Don't contact",
+      className: "bg-rose-50 text-rose-700 ring-rose-200",
+    },
+  };
+  const style = styles[decision.tier];
+  if (!style) return null;
+
+  return (
+    <span
+      title={decision.reason}
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${style.className}`}
+    >
+      {decision.tier === "suppressed" ? (
+        <Ban className="w-2.5 h-2.5" />
+      ) : decision.tier === "recheck" ? (
+        <Clock3 className="w-2.5 h-2.5" />
+      ) : (
+        <History className="w-2.5 h-2.5" />
+      )}
+      {style.label}
+    </span>
+  );
+};
 
 const hasFinalEngageOutcome = (candidate: {
   engage_status?: string;
@@ -236,6 +283,31 @@ interface AppliedCriterion {
   priority_score?: number;
   is_required?: boolean;
   category?: string;
+}
+
+/** One candidate's cross-job reuse verdict, from POST /candidates/reuse-preview. */
+interface ReuseDecision {
+  candidate_id: string;
+  /** full = screen them properly · recheck = short L0.5 confirmation ·
+   *  none = don't call, review the prior result · suppressed = must not contact */
+  tier: "full" | "recheck" | "none" | "suppressed";
+  reason_code: string;
+  /** Recruiter-facing sentence, safe to render verbatim. */
+  reason: string;
+  person_id: number | null;
+  prior_jobdiva_id: string | null;
+  prior_job_title: string | null;
+  prior_customer_name: string | null;
+  /** True when the prior job is outside this user's scope, so its identity is hidden. */
+  prior_job_redacted: boolean;
+  prior_completed_at: string | null;
+  prior_outcome: "pass" | "fail" | null;
+  prior_score: number | null;
+  prior_is_other_client: boolean;
+  stale_fact_keys: string[];
+  stale_fact_labels: string[];
+  next_eligible_at: string | null;
+  attempts_90d: number;
 }
 
 interface Candidate {
@@ -838,6 +910,100 @@ export default function CandidateRankingsPage() {
     setMinScore(0);
     setColumnFilters({});
   };
+
+  // ── Cross-job reuse -----------------------------------------------------
+  // What each candidate on this page would get if screened right now: a full
+  // screen, a short L0.5 re-check, nothing at all (we already have a recent
+  // pass), or nothing because they're suppressed. Purely informational here —
+  // the launch path recomputes it server-side, so a stale value on screen can
+  // never cause a wrong send.
+  const [reuseDecisions, setReuseDecisions] = useState<Record<string, ReuseDecision>>({});
+  const [knownPanelOpen, setKnownPanelOpen] = useState(true);
+  const [escalatedCandidateIds, setEscalatedCandidateIds] = useState<Set<string>>(new Set());
+
+  // Load verdicts for the candidates on this page. Only for candidates who
+  // haven't been screened for THIS job yet — an already-launched row's tier is
+  // history, not a decision.
+  useEffect(() => {
+    const pending = candidates
+      .filter((c) => !deriveInterviewId(c))
+      .map((c) => String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim())
+      .filter(Boolean);
+
+    if (!jobId || pending.length === 0) {
+      setReuseDecisions({});
+      return;
+    }
+
+    let cancelled = false;
+    api.candidatePool
+      .reusePreview({ job_id: String(jobId), candidate_ids: pending })
+      .then((res) => {
+        if (cancelled) return;
+        const byId: Record<string, ReuseDecision> = {};
+        for (const d of (res?.decisions || []) as ReuseDecision[]) {
+          byId[d.candidate_id] = d;
+        }
+        setReuseDecisions(byId);
+      })
+      .catch(() => {
+        // Advisory only. If the preview is unavailable the table simply shows no
+        // tier badges; the launch path recomputes tiers server-side regardless.
+        if (!cancelled) setReuseDecisions({});
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [candidates, jobId]);
+
+  const decisionFor = useCallback(
+    (c: Candidate): ReuseDecision | undefined =>
+      reuseDecisions[String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim()],
+    [reuseDecisions]
+  );
+
+  /**
+   * Candidates we already know well enough not to call again for this job.
+   *
+   * Escalating one moves it out of this group and back into the normal table, so
+   * the recruiter can screen it after all — this group is a review queue, never
+   * an auto-submit. Interest in one role isn't interest in another, even at the
+   * same client, which is exactly why the decision stays with a human.
+   */
+  const knownCandidates = useMemo(
+    () =>
+      filteredCandidates.filter((c) => {
+        const d = decisionFor(c);
+        if (!d || d.tier !== "none") return false;
+        return !escalatedCandidateIds.has(d.candidate_id);
+      }),
+    [filteredCandidates, decisionFor, escalatedCandidateIds]
+  );
+
+  const knownCandidateIds = useMemo(
+    () => new Set(knownCandidates.map((c) => String(c.candidate_id || c.jobdiva_candidate_id || c.id || ""))),
+    [knownCandidates]
+  );
+
+  // The main table hides the "no outreach needed" group so a recruiter isn't
+  // reading the same person twice.
+  const tableCandidates = useMemo(
+    () =>
+      filteredCandidates.filter(
+        (c) => !knownCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id || ""))
+      ),
+    [filteredCandidates, knownCandidateIds]
+  );
+
+  const reuseSummary = useMemo(() => {
+    const counts = { full: 0, recheck: 0, none: 0, suppressed: 0 };
+    for (const c of filteredCandidates) {
+      const d = decisionFor(c);
+      if (d && d.tier in counts) counts[d.tier] += 1;
+    }
+    return counts;
+  }, [filteredCandidates, decisionFor]);
 
   // Modal states
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
@@ -1605,7 +1771,10 @@ export default function CandidateRankingsPage() {
   );
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
-  const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
+  // Subtract the candidates lifted into the "already known" panel, or the count
+  // under the table claims rows that aren't in it.
+  const displayedCount =
+    (hasActiveFilters ? filteredCandidates.length : candidates.length) - knownCandidates.length;
 
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
@@ -1852,6 +2021,138 @@ export default function CandidateRankingsPage() {
                 )}
               </div>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Known candidates — no outreach needed.
+          A review queue, not an auto-submit: these people passed a screen at this
+          client within the last two weeks and their reusable answers are still
+          fresh, so calling them again for this job adds nothing. Interest in one
+          role still isn't interest in another, so the recruiter decides — either
+          work from the prior result or escalate to a short re-check. */}
+      {knownCandidates.length > 0 && (
+        <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50/50 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setKnownPanelOpen((v) => !v)}
+            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+          >
+            <div className="flex items-start gap-2.5">
+              <History className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+              <div>
+                <p className="text-[13px] font-bold text-emerald-900">
+                  {knownCandidates.length} candidate{knownCandidates.length === 1 ? "" : "s"} already
+                  screened recently — no outreach needed
+                </p>
+                <p className="text-[12px] text-emerald-700/80">
+                  Passed a screen for this client in the last 14 days with reusable answers still
+                  fresh. Review their prior result, or escalate to a short re-check.
+                </p>
+              </div>
+            </div>
+            {knownPanelOpen ? (
+              <ChevronUp className="h-4 w-4 shrink-0 text-emerald-600" />
+            ) : (
+              <ChevronDown className="h-4 w-4 shrink-0 text-emerald-600" />
+            )}
+          </button>
+
+          {knownPanelOpen && (
+            <div className="divide-y divide-emerald-100 border-t border-emerald-100">
+              {knownCandidates.map((candidate) => {
+                const decision = decisionFor(candidate)!;
+                return (
+                  <div
+                    key={`known-${decision.candidate_id}`}
+                    className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Link
+                          href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(
+                            candidate.candidate_id || String(candidate.id)
+                          )}`}
+                          className="text-[13px] font-bold text-indigo-600 hover:underline"
+                        >
+                          {candidate.name}
+                        </Link>
+                        {decision.prior_score != null && (
+                          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-200">
+                            Prior screen {Math.round(decision.prior_score)}
+                          </span>
+                        )}
+                        <span className="text-[11px] text-slate-500">
+                          résumé match {Math.round(candidate.match_score ?? candidate.resume_match_percentage ?? 0)}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[12px] text-slate-600">{decision.reason}</p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {decision.prior_jobdiva_id ? (
+                        <Link
+                          href={`/jobs/${decision.prior_jobdiva_id}/rankings`}
+                          className="text-[12px] font-semibold text-slate-500 hover:text-slate-900 hover:underline"
+                        >
+                          View that job
+                        </Link>
+                      ) : (
+                        decision.prior_job_redacted && (
+                          <span
+                            className="text-[12px] italic text-slate-400"
+                            title="That job isn't assigned to you, so its title is hidden."
+                          >
+                            Another job
+                          </span>
+                        )
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEscalatedCandidateIds((prev) => {
+                            const next = new Set(prev);
+                            next.add(decision.candidate_id);
+                            return next;
+                          })
+                        }
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 text-[12px] font-semibold text-emerald-800 transition-colors hover:bg-emerald-50"
+                        title="Move them back into the table so you can screen them for this job after all"
+                      >
+                        <Clock3 className="h-3.5 w-3.5" />
+                        Screen anyway
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reuse plan summary. Tells the recruiter what a launch would actually do
+          before they click it, rather than after. */}
+      {(reuseSummary.recheck > 0 || reuseSummary.suppressed > 0) && (
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2.5 text-[12px] text-slate-600">
+          <span className="font-semibold text-slate-500">If you screen this list:</span>
+          {reuseSummary.full > 0 && <span>{reuseSummary.full} full screen{reuseSummary.full === 1 ? "" : "s"}</span>}
+          {reuseSummary.recheck > 0 && (
+            <span className="inline-flex items-center gap-1 text-indigo-700">
+              <Clock3 className="h-3 w-3" />
+              {reuseSummary.recheck} short re-check{reuseSummary.recheck === 1 ? "" : "s"}
+            </span>
+          )}
+          {reuseSummary.none > 0 && (
+            <span className="inline-flex items-center gap-1 text-emerald-700">
+              <History className="h-3 w-3" />
+              {reuseSummary.none} reused
+            </span>
+          )}
+          {reuseSummary.suppressed > 0 && (
+            <span className="inline-flex items-center gap-1 text-rose-700">
+              <Ban className="h-3 w-3" />
+              {reuseSummary.suppressed} won&apos;t be contacted
+            </span>
           )}
         </div>
       )}
@@ -2182,8 +2483,9 @@ export default function CandidateRankingsPage() {
                     </TableRow>
                   ))
                 ) : (
-                  filteredCandidates.map((candidate, idx) => {
+                  tableCandidates.map((candidate, idx) => {
                     const candidateKey = `${candidate.id || candidate.candidate_id || idx}`;
+                    const reuseDecision = decisionFor(candidate);
                     // Keep this in sync with the sort comparator's getScore so the
                     // displayed number always matches the sorted order.
                     const screeningScore = candidate.match_score ?? candidate.resume_match_percentage ?? 0;
@@ -2203,6 +2505,11 @@ export default function CandidateRankingsPage() {
                           >
                             {candidate.name}
                           </Link>
+                          {reuseDecision && reuseDecision.tier !== "full" && (
+                            <div className="mb-1 flex justify-center">
+                              <ReuseTierBadge decision={reuseDecision} />
+                            </div>
+                          )}
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center px-1 break-all whitespace-normal" title={candidate.email}>
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
                           </span>
@@ -2463,6 +2770,18 @@ export default function CandidateRankingsPage() {
                       </TableRow>
                     );
                   })
+                )}
+                {/* Every remaining candidate was lifted into the "already known"
+                    panel above. Without this the table renders as an empty box,
+                    which reads as a loading bug rather than a deliberate state. */}
+                {!isInitialLoading && tableCandidates.length === 0 && knownCandidates.length > 0 && (
+                  <TableRow>
+                    <TableCell colSpan={9} className="py-10 text-center text-[13px] text-slate-500">
+                      All {knownCandidates.length} matching candidate
+                      {knownCandidates.length === 1 ? " is" : "s are"} already screened — see the
+                      panel above.
+                    </TableCell>
+                  </TableRow>
                 )}
               </TableBody>
             </table>

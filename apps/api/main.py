@@ -276,6 +276,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.error(f"dnc_schema_init_failed: {e}; continuing")
 
+    # 6b. Provision the person-level candidate pool (candidate_person,
+    # candidate_identity_key, candidate_outreach, candidate_screen_fact,
+    # candidate_pool_state). Runs after sourced_candidates + dnc because the
+    # backfill and the suppression gate read both. CREATE-only and idempotent;
+    # the reviewable source of truth is
+    # scripts/migrations/001_global_candidate_pool.sql.
+    try:
+        from services import candidate_pool_schema as _cps
+        await asyncio.wait_for(_cps.init_candidate_pool_schema(), timeout=15)
+    except asyncio.TimeoutError:
+        logger.error("candidate_pool_schema_init_timeout (15s); continuing")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"candidate_pool_schema_init_failed: {e}; continuing")
+
+    # Reconcile open outreach attempts into 'no_response' and repair rollup
+    # drift. Silence produces no webhook, so this job is the ONLY thing that
+    # moves a never-answered attempt into the Candidates page's bottom section.
+    # DB-deduped via candidate_pool_reconcile_lock — all 8 uvicorn workers run
+    # this scheduler, so an unguarded job would fire 8x per interval.
+    try:
+        from core.config import POOL_RECONCILE_INTERVAL_MINUTES
+        from services.candidate_pool import reconcile_pool_state_async
+
+        scheduler.add_job(
+            reconcile_pool_state_async,
+            "interval",
+            minutes=POOL_RECONCILE_INTERVAL_MINUTES,
+            id="candidate_pool_reconcile",
+            replace_existing=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"candidate_pool_reconcile_schedule_failed: {e}; continuing")
+
     # 7. Provision `source` column on job_skills / job_education so the
     # Step 3 rubric chip can show "Recruiter" vs "PAIR" provenance
     # and have it survive save+reload. Idempotent ALTER TABLE ADD COLUMN
@@ -340,6 +373,7 @@ dnc_router = _safe_import("dnc")
 admin_analytics_router = _safe_import("admin_analytics")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
+candidate_pool_router = _safe_import("candidate_pool_api")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -383,6 +417,18 @@ _mount(chat_router, "chat")
 _mount(tira_router, "tira")
 _mount(job_criteria_router, "job_criteria")
 _mount(manual_candidates_router, "manual_candidates")
+# Mounted at the root so its paths stay `/candidates/pool…` and
+# `/candidates/reuse-preview`, both matched by nginx's existing
+# `location ~ ^/candidates/.+` passthrough — no nginx change needed. Keep new
+# routes under `/candidates/<something>`: the bare `/candidates` path is the
+# Next.js page and must keep falling through to the frontend.
+#
+# Mounted BEFORE `candidates` deliberately. FastAPI matches in registration
+# order, and candidates.py carries several `/candidates/{candidate_id:path}/…`
+# catch-alls; none collide with these literal paths today, but registering the
+# specific routes first means a future catch-all there can't silently swallow
+# `/candidates/pool`.
+_mount(candidate_pool_router, "candidate_pool_api")
 _mount(candidates_router, "candidates")
 _mount(jobs_router, "jobs")
 _mount(dnc_router, "dnc")

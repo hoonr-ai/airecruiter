@@ -90,6 +90,14 @@ export interface LaunchPairProgress {
   failedCandidates: LaunchFailedCandidate[];
   // JobDiva job id these candidates belong to (column in the export CSV)
   jobIdForRelaunch?: string;
+  // Cross-job reuse plan, from the launch stream's `start` event. The backend
+  // decides tiers server-side before any batch fires, so these are the real
+  // counts, not a client-side prediction.
+  //   full       screened normally
+  //   recheck    short L0.5 confirmation instead of a full screen
+  //   none       not contacted — a recent screen was reused
+  //   suppressed not contacted — DNC, cooldown, or the 90-day attempt cap
+  tierCounts?: { full: number; recheck: number; none: number; suppressed: number };
   // Finalization
   finalMessage?: string;
 }
@@ -389,6 +397,42 @@ export function LaunchPairProgressModal({
             )}
           </div>
         )}
+
+        {/* Cross-job reuse plan. Shown whenever anything was downgraded or
+            withheld, so the recruiter can see the launch reached fewer people on
+            purpose rather than wondering where candidates went. */}
+        {progress.tierCounts &&
+          (progress.tierCounts.recheck > 0 ||
+            progress.tierCounts.none > 0 ||
+            progress.tierCounts.suppressed > 0) && (
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 space-y-1.5">
+              <div className="text-[13px] font-semibold text-indigo-900">
+                Reused what we already know about these candidates
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-indigo-800">
+                {progress.tierCounts.full > 0 && (
+                  <span>{progress.tierCounts.full} full screen{progress.tierCounts.full === 1 ? "" : "s"}</span>
+                )}
+                {progress.tierCounts.recheck > 0 && (
+                  <span>
+                    {progress.tierCounts.recheck} short re-check
+                    {progress.tierCounts.recheck === 1 ? "" : "s"} instead of a full screen
+                  </span>
+                )}
+                {progress.tierCounts.none > 0 && (
+                  <span>
+                    {progress.tierCounts.none} not called — recent screen reused
+                  </span>
+                )}
+                {progress.tierCounts.suppressed > 0 && (
+                  <span>
+                    {progress.tierCounts.suppressed} withheld — already mid-screen, on cooldown, or
+                    at the attempt cap
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
         {/* Batch list */}
         {batches.length > 0 && (

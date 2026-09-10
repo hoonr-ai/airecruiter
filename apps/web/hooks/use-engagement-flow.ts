@@ -66,6 +66,18 @@ export type LaunchInput = {
   sendJobPostingEmail?: boolean;
   appBaseUrl?: string;
   batchSize?: number;
+  // Recruiter override: bypass cross-job reuse for this launch so every selected
+  // candidate gets a full screen. For a client that insists on a fresh
+  // conversation, or when the reuse suggestion looks wrong.
+  forceFullScreen?: boolean;
+};
+
+// Cross-job reuse plan the backend computes before any batch fires.
+export type LaunchTierCounts = {
+  full: number;
+  recheck: number;
+  none: number;
+  suppressed: number;
 };
 
 // A candidate the BACKEND excluded at launch time (employed by hiring
@@ -78,11 +90,24 @@ export type LaunchExcludedCandidate = {
 };
 
 export type LaunchEvent =
-  | { type: "start"; total_candidates: number; total_batches: number; batch_size: number }
+  | {
+      type: "start";
+      total_candidates: number;
+      total_batches: number;
+      batch_size: number;
+      // Absent when the backend predates this feature or reuse is disabled.
+      tier_counts?: LaunchTierCounts;
+      reuse_enabled?: boolean;
+    }
+  // Candidates the reuse policy decided not to contact at all: a recent screen
+  // was reused, or they're suppressed. Emitted once, right after `start`.
+  | { type: "tier_skipped"; candidates: Array<Record<string, unknown>> }
   | {
       type: "batch";
       index: number;
       status: "completed" | "failed";
+      // Which cohort this batch was: "full" or "recheck".
+      mode?: string;
       sent?: number;
       // Candidates PAIR accepted but returned no interview_id for. They are NOT
       // counted as sent and remain retryable on a subsequent launch.
@@ -172,6 +197,7 @@ export function useEngagementFlow() {
         send_job_posting_email: input.sendJobPostingEmail,
         app_base_url: input.appBaseUrl || (typeof window !== "undefined" ? window.location.origin : ""),
         batch_size: input.batchSize,
+        force_full_screen: input.forceFullScreen ?? false,
       }),
     });
     if (!res.ok || !res.body) {

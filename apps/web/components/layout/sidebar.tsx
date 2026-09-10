@@ -14,7 +14,7 @@ export function Sidebar() {
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
-        { label: "Candidates", href: "/candidates", icon: Users, disabled: true },
+        { label: "Candidates", href: "/candidates", icon: Users, disabled: false },
         // Admins get the full analytics + team management; team leads get the
         // same analytics page auto-scoped to their team by the backend.
         ...(isAdmin
