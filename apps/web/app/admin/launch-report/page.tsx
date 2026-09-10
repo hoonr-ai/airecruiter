@@ -89,6 +89,16 @@ function inclusiveDateSpanDays(start: string, end: string): number {
   return Math.floor((endTime - startTime) / (24 * 60 * 60 * 1000)) + 1;
 }
 
+function addIsoDays(date: string, days: number): string {
+  const next = new Date(`${date}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next.toISOString().slice(0, 10);
+}
+
+function earliestIsoDate(a: string, b: string): string {
+  return a < b ? a : b;
+}
+
 /** Yesterday's calendar date in Eastern time, as YYYY-MM-DD. */
 function yesterdayEastern(): string {
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -347,6 +357,10 @@ export default function LaunchReportPage() {
   const [data, setData] = useState<LaunchReportData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const maxRangeEndDate = useMemo(
+    () => earliestIsoDate(addIsoDays(selectedDate, MAX_LAUNCH_REPORT_RANGE_DAYS - 1), maxDate),
+    [selectedDate, maxDate],
+  );
 
   const generateReport = useCallback(() => {
     if (!selectedDate || (isRange && !selectedEndDate)) {
@@ -519,7 +533,7 @@ export default function LaunchReportPage() {
                 type="date"
                 lang="en-US"
                 value={selectedEndDate}
-                max={maxDate}
+                max={maxRangeEndDate}
                 min={selectedDate}
                 required
                 onChange={(e) => {
