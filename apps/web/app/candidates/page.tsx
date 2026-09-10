@@ -364,6 +364,21 @@ function HardFilterHoverCard({
   );
 }
 
+
+const formatRecruiterEmails = (emails: string | string[] | null | undefined): string => {
+  if (!emails) return "";
+  if (Array.isArray(emails)) return emails.join(", ");
+  if (typeof emails === "string") {
+    try {
+      const parsed = JSON.parse(emails);
+      if (Array.isArray(parsed)) return parsed.join(", ");
+    } catch (e) {
+      // ignore
+    }
+  }
+  return String(emails);
+};
+
 export default function GlobalCandidatesPage() {
   const CANDIDATE_PAGE_SIZE = 50;
 
@@ -657,7 +672,7 @@ export default function GlobalCandidatesPage() {
         escapeCsvField(statusInfo.label),
         escapeCsvField(engageScoreStr),
         escapeCsvField(totalFitScoreStr),
-        escapeCsvField(c.recruiter_emails || "N/A")
+        escapeCsvField(formatRecruiterEmails(c.recruiter_emails) || "N/A")
       ].join(",");
     });
 
@@ -760,7 +775,7 @@ export default function GlobalCandidatesPage() {
             escapeCsvField(statusInfo.label),
             escapeCsvField(engageScoreStr),
             escapeCsvField(totalFitScoreStr),
-            escapeCsvField(c.recruiter_emails || "N/A")
+            escapeCsvField(formatRecruiterEmails(c.recruiter_emails) || "N/A")
           ].join(",");
         });
 
@@ -1058,10 +1073,10 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 max-w-[180px] px-3">
-                        {c.recruiter_emails ? (
+                        {c.recruiter_emails && formatRecruiterEmails(c.recruiter_emails) ? (
                           <div className="flex items-center justify-center w-full">
                             <span className="inline-block break-words whitespace-normal leading-relaxed text-[11.5px] text-slate-500 w-full text-center">
-                              {Array.isArray(c.recruiter_emails) ? c.recruiter_emails.join(", ") : c.recruiter_emails}
+                              {formatRecruiterEmails(c.recruiter_emails)}
                             </span>
                           </div>
                         ) : (
