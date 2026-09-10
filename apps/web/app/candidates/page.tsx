@@ -110,8 +110,8 @@ const openCandidateProfileUrl = async (candidate: Candidate) => {
     String(candidate.data?.profile_url || "").trim();
 
   if (existingProfileUrl) {
-    const url = existingProfileUrl.startsWith('http://') || existingProfileUrl.startsWith('https://') 
-      ? existingProfileUrl 
+    const url = existingProfileUrl.startsWith('http://') || existingProfileUrl.startsWith('https://')
+      ? existingProfileUrl
       : `https://${existingProfileUrl}`;
     window.open(url, "_blank", "noopener,noreferrer");
     return;

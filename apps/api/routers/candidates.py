@@ -2976,7 +2976,10 @@ async def get_launched_candidates(
                     elif status.lower() == "in progress":
                         search_condition += " AND LOWER(la.status) IN ('in_progress', 'in-progress', 'inprogress', 'in progress')"
                     elif status.lower() == "pass":
-                        search_condition += " AND (LOWER(la.status) LIKE '%complete%' OR LOWER(la.status) IN ('passed', 'pass'))"
+                        # Keep this list aligned with the UI's terminal Pass
+                        # states. A substring match on "complete" incorrectly
+                        # includes "incomplete" interviews in Pass results.
+                        search_condition += " AND LOWER(la.status) IN ('complete', 'completed', 'passed', 'pass')"
                     elif status.lower() == "fail":
                         search_condition += " AND LOWER(la.status) IN ('failed', 'fail', 'rejected')"
                     else:

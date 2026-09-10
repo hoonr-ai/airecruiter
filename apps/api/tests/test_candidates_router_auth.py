@@ -279,3 +279,17 @@ def test_bulk_contacts_checks_job_access_per_item():
     assert body.index("_verify_job_access_by_id") < body.index("get_db_connection"), (
         "the access check must run before the first write"
     )
+
+
+def test_launched_pass_filter_excludes_incomplete_statuses():
+    """Pass filtering must use terminal states, not a broad `complete` substring."""
+    src = ROUTER_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    body = next(
+        ast.get_source_segment(src, node)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "get_launched_candidates"
+    )
+    assert "LIKE '%complete%'" not in body
+    assert "('complete', 'completed', 'passed', 'pass')" in body
