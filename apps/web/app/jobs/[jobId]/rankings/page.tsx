@@ -2398,13 +2398,13 @@ export default function CandidateRankingsPage() {
                     <TableRow key={i} className="h-20 bg-white">
                       <TableCell className="border-b border-slate-200 w-[50px] border-r border-slate-200/50 px-2 text-center"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
-                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
                     </TableRow>
                   ))
                 ) : (
@@ -2418,7 +2418,7 @@ export default function CandidateRankingsPage() {
                     const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : null;
 
                     return (
-                      <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
+                      <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-200 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
                         <TableCell className="border-b border-slate-200 w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-500 text-[12px] group-hover:bg-slate-50 transition-colors">
                           {idx + 1}
                         </TableCell>
@@ -2525,7 +2525,7 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell
-                          className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
+                          className="border-b border-slate-200 text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
                           onMouseEnter={() => {
                             if (screeningScore > 0) setHoveredResumeScoreKey(candidateKey);
                           }}
@@ -2603,7 +2603,7 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell
-                          className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
+                          className="border-b border-slate-200 text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
                           onMouseEnter={() => {
                             if (showEngageScore) setHoveredEngageScoreKey(candidateKey);
                           }}

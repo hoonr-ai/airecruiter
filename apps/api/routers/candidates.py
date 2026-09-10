@@ -3007,15 +3007,41 @@ async def get_launched_candidates(
                         search_condition += " AND la.status = %s"
                         params.append(status)
 
+                # Feedback filter: use an EXISTS subquery checked against ALL rows for a
+                # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
+                # and we only include candidates who match the feedback requirement on ANY row.
+                feedback_exists_condition = ""
                 if feedback:
                     if feedback.lower() == "no feedback":
-                        search_condition += " AND (sc.data->>'feedback_type' IS NULL OR sc.data->>'feedback_type' = '')"
+                        # Candidate has NO row with a non-empty feedback_type
+                        feedback_exists_condition = """
+                            AND NOT EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.data->>'feedback_type' IS NOT NULL
+                                  AND sc2.data->>'feedback_type' <> ''
+                            )"""
                     elif feedback.lower() == "submit":
-                        search_condition += " AND sc.data->>'feedback_type' = 'Submit'"
+                        feedback_exists_condition = """
+                            AND EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.data->>'feedback_type' = 'Submit'
+                            )"""
                     elif feedback.lower() == "reject":
-                        search_condition += " AND sc.data->>'feedback_type' LIKE 'Reject%'"
+                        feedback_exists_condition = """
+                            AND EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.data->>'feedback_type' LIKE 'Reject%'
+                            )"""
                     elif feedback.lower() == "unreachable":
-                        search_condition += " AND sc.data->>'feedback_type' = 'Unreachable'"
+                        feedback_exists_condition = """
+                            AND EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.data->>'feedback_type' = 'Unreachable'
+                            )"""
 
                 if source:
                     search_condition += " AND sc.source = %s"
@@ -3053,7 +3079,14 @@ async def get_launched_candidates(
 
                 params.extend([limit, offset])
 
-                BASE_CTE = """
+                # Single shared CTE used by both the results query and the count query,
+                # eliminating duplication and ensuring results/count are always in sync.
+                # DISTINCT ON always orders by created_at DESC (latest row wins), which
+                # is correct regardless of whether a feedback filter is active.
+                # The feedback_exists_condition uses EXISTS subqueries over all of a
+                # candidate's rows — so the latest row is always selected, but only
+                # candidates who match the feedback requirement (on any row) are included.
+                FULL_CTE = f"""
                     WITH latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
                             candidate_id,
@@ -3078,11 +3111,7 @@ async def get_launched_candidates(
                         ) x
                         WHERE lookup_id IS NOT NULL AND lookup_id <> ''
                         ORDER BY lookup_id
-                    )
-                """
-
-                query = f"""
-                    {BASE_CTE},
+                    ),
                     launched_candidates AS (
                         SELECT DISTINCT ON (sc.candidate_id)
                             sc.id,
@@ -3107,8 +3136,13 @@ async def get_launched_candidates(
                         LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
+                          {feedback_exists_condition}
                         ORDER BY sc.candidate_id, sc.created_at DESC
                     )
+                """
+
+                query = f"""
+                    WITH {FULL_CTE.split('WITH', 1)[1]}
                     SELECT * FROM launched_candidates
                     ORDER BY engage_created_at DESC NULLS LAST
                     LIMIT %s OFFSET %s;
@@ -3116,15 +3150,10 @@ async def get_launched_candidates(
                 cur.execute(query, tuple(params))
                 candidates = cur.fetchall()
 
-                # Get total count
+                # Count query reuses the same CTE — no duplication, guaranteed sync with results.
                 count_query = f"""
-                    {BASE_CTE}
-                    SELECT COUNT(DISTINCT sc.candidate_id) as total
-                    FROM sourced_candidates sc
-                    JOIN latest_audit la ON la.candidate_id = sc.candidate_id
-                    LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
-                    WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
-                      {search_condition}
+                    WITH {FULL_CTE.split('WITH', 1)[1]}
+                    SELECT COUNT(*) as total FROM launched_candidates
                 """
                 cur.execute(count_query, tuple(params[:-2]))
                 total_row = cur.fetchone()

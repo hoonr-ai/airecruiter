@@ -1102,11 +1102,11 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="border-b border-slate-200 text-center font-semibold text-slate-700 text-[12px]">
+                      <TableCell className="border-b border-slate-200 border-l border-slate-200 text-center font-semibold text-slate-700 text-[12px]">
                         {normalizeSourceLabel(c.source)}
                       </TableCell>
 
-                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px]">
+                      <TableCell className="border-b border-slate-200 border-l border-slate-200 text-center font-medium text-slate-600 text-[12px]">
                         {c.engage_created_at ? formatDate(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
                       </TableCell>
                       
@@ -1120,7 +1120,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-900 text-[13px]">
+                      <TableCell className="border-b border-slate-200 border-l border-slate-200 text-center font-medium text-slate-900 text-[13px]">
                         {resumeScore > 0 ? (
                           <div
                             className="relative group/score inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
@@ -1182,7 +1182,7 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
-                        {c.total_fit_score !== null && c.total_fit_score !== undefined ? (
+                        {c.total_fit_score !== null && c.total_fit_score !== undefined && c.engage_score !== null && c.engage_score !== undefined ? (
                           <span>{c.total_fit_score}/100</span>
                         ) : (
                           <span className="font-normal opacity-40 italic text-[13px]">Waiting</span>
