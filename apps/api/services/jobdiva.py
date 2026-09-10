@@ -17,6 +17,7 @@ from core import (
     JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH,
     JOBDIVA_PAIR_RECRUITER_ID
 )
+from core.config import clamp_search_radius
 from services.location_type import resolve_location_type
 
 logger = logging.getLogger(__name__)
@@ -1644,9 +1645,28 @@ class JobDivaService:
             # client-side verdict still measures true distance against the
             # recruiter's exact radius; this just cuts the wrong-coast noise
             # while keeping the near-miss band.
-            zip_radius_miles = max(1, min(100, int(within_miles or 25) * 2))
-            base_body["zipCode"] = zip5
-            base_body["withinMiles"] = zip_radius_miles
+            #
+            # The wire value is bounded by JOBDIVA_ZIP_RADIUS_MAX_MILES
+            # (JobDiva's own ceiling for this field is unprobed). If even the
+            # recruiter's bare radius exceeds that bound, sending the bound
+            # would filter out the far-out candidates they deliberately
+            # widened to reach — so drop the zip constraint entirely and let
+            # the client-side distance verdict do the narrowing.
+            requested_miles = clamp_search_radius(within_miles)
+            zip_ceiling = max(
+                1, int(getattr(_sc, "JOBDIVA_ZIP_RADIUS_MAX_MILES", 500) or 500)
+            )
+            if requested_miles > zip_ceiling:
+                logger.info(
+                    "JobDiva zip radius skipped — requested %smi exceeds the "
+                    "%smi wire ceiling; falling back to unscoped recall",
+                    requested_miles,
+                    zip_ceiling,
+                )
+            else:
+                zip_radius_miles = min(zip_ceiling, requested_miles * 2)
+                base_body["zipCode"] = zip5
+                base_body["withinMiles"] = zip_radius_miles
 
         # Title variants for the titleSearch recall pulls. Callers can pass a
         # ranked list (primary chip + its selected similar titles); the legacy
@@ -2265,7 +2285,7 @@ class JobDivaService:
                 # Native geo dialect instead of a location keyword — the
                 # quoted form only matches resumes containing the literal
                 # string (probe-gated, same flag as the translator rewrite).
-                miles = max(1, min(100, int(within_miles or 25)))
+                miles = clamp_search_radius(within_miles)
                 geo_clause = f"Within {miles} miles of {str(zip_code).strip()}"
             else:
                 terms.append(f'"{location.strip()}"')

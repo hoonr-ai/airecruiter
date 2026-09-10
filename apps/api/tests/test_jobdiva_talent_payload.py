@@ -22,6 +22,7 @@ from services.jobdiva_boolean_translator import (  # noqa: E402
     sanitize_talent_term,
 )
 from services.jobdiva import jobdiva_service  # noqa: E402
+from core import sourcing_config as _sc  # noqa: E402
 
 
 # ── sanitize_talent_term ──────────────────────────────────────────────────
@@ -110,10 +111,11 @@ def _run_pool(monkeypatch, **kwargs):
     (base_body, must_terms, title) handed to the fetcher."""
     captured = {}
 
-    async def fake_fetch(token, base_body, must_terms, title=""):
+    async def fake_fetch(token, base_body, must_terms, title="", titles=None, limit=0):
         captured["base_body"] = base_body
         captured["must_terms"] = must_terms
         captured["title"] = title
+        captured["titles"] = titles
         return []
 
     monkeypatch.setattr(jobdiva_service, "_fetch_talent_search_rows", fake_fetch)
@@ -161,7 +163,9 @@ def test_body_top_level_arrays_and_zip(monkeypatch):
     assert body["withinMiles"] == 50  # 2x headroom
     assert "skills" not in body  # terms ride separately, per-pull
     assert cap["must_terms"] == ["Java"]  # exclude term stays client-side
-    assert cap["title"] == "Java Developer"
+    # Titles ride as the ranked `titles` list (primary chip + similar titles);
+    # the legacy single `title` arg is folded into it.
+    assert cap["titles"] == ["Java Developer"]
 
 
 def test_body_states_array_without_zip(monkeypatch):
@@ -182,9 +186,30 @@ def test_terms_fall_back_to_boolean(monkeypatch):
     assert cap["must_terms"] == ["Kafka", "Flink"]
 
 
-def test_radius_clamped_to_100(monkeypatch):
+def test_radius_keeps_2x_headroom_past_the_old_100mi_cap(monkeypatch):
+    # The recruiter-facing radius is uncapped; the wire value only has to stay
+    # under JOBDIVA_ZIP_RADIUS_MAX_MILES. 80mi used to clamp to 100.
     cap = _run_pool(monkeypatch, skills=["Java"], zip_code="75019", within_miles=80)
-    assert cap["base_body"]["withinMiles"] == 100
+    assert cap["base_body"]["withinMiles"] == 160
+
+
+def test_radius_clamped_to_the_jobdiva_wire_ceiling(monkeypatch):
+    # 2x headroom would exceed the ceiling, but the recruiter's own radius
+    # still fits under it — send the ceiling, keeping the search no narrower
+    # than they asked for.
+    monkeypatch.setattr(_sc, "JOBDIVA_ZIP_RADIUS_MAX_MILES", 500, raising=False)
+    cap = _run_pool(monkeypatch, skills=["Java"], zip_code="75019", within_miles=400)
+    assert cap["base_body"]["withinMiles"] == 500
+
+
+def test_zip_dropped_when_radius_exceeds_the_wire_ceiling(monkeypatch):
+    # Sending the ceiling here would filter out exactly the far-out candidates
+    # the recruiter widened the search to reach, so send no zip constraint at
+    # all and let the client-side distance verdict narrow instead.
+    monkeypatch.setattr(_sc, "JOBDIVA_ZIP_RADIUS_MAX_MILES", 500, raising=False)
+    cap = _run_pool(monkeypatch, skills=["Java"], zip_code="75019", within_miles=600)
+    assert "zipCode" not in cap["base_body"]
+    assert "withinMiles" not in cap["base_body"]
 
 
 # ── must vs preferred chips in the server-side AND ────────────────────────

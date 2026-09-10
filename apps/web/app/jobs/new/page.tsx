@@ -92,6 +92,7 @@ import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
+import { clampSearchRadius, parseRadiusLabel } from "@/lib/search-radius";
 import { logger } from "@/lib/logger";
 
 const IS_QA_ENV =
@@ -1188,11 +1189,10 @@ function NewJobPageContent() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [locationFilterOpen]);
 
-  const currentWithinMiles = useMemo(() => {
-    const radius = sourceLocations[0]?.radius;
-    const parsed = typeof radius === "string" ? Number(radius.match(/(\d+)/)?.[1] ?? 25) : 25;
-    return Math.min(100, Math.max(1, parsed));
-  }, [sourceLocations]);
+  const currentWithinMiles = useMemo(
+    () => parseRadiusLabel(sourceLocations[0]?.radius),
+    [sourceLocations],
+  );
 
   const candidateHasSource = (cand: any, matcher: (src: string) => boolean) => {
     const seen = new Set<string>();
@@ -5045,7 +5045,7 @@ function NewJobPageContent() {
           setSourceLocations([{
             id: 1,
             value: loc,
-            radius: "within 25 mi"
+            radius: `within ${sourceLocationMiles} mi`
           }]);
         }
       }
@@ -5979,10 +5979,7 @@ function NewJobPageContent() {
       });
     }
     const primaryLocation = sourceLocations[0];
-    const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
-      ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
-      : 25;
-    const withinMiles = Math.min(100, Math.max(1, parsedRadius));
+    const withinMiles = parseRadiusLabel(primaryLocation?.radius);
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
       .map(f => ({
@@ -8955,7 +8952,6 @@ function NewJobPageContent() {
                       <Input
                         type="number"
                         min={1}
-                        max={100}
                         step={5}
                         value={sourceLocationMiles}
                         onChange={(e) => {
@@ -8965,15 +8961,29 @@ function NewJobPageContent() {
                           }
                         }}
                         onBlur={() => {
-                          setSourceLocationMiles((prev) => {
-                            const clamped = Math.min(100, Math.max(1, Math.round(prev || 25)));
-                            if (clamped !== prev) {
-                              trackEvent("job_wizard_step5_location_radius_changed", {
-                                step: 5,
-                                radius_miles: clamped,
-                              });
-                            }
-                            return clamped;
+                          const clamped = clampSearchRadius(sourceLocationMiles);
+                          // One control, one radius: the chips render their
+                          // radius read-only, so an edit here has to reach the
+                          // locations already added. Without this the typed
+                          // value only ever applied to the NEXT chip — and the
+                          // search payload reads the chip, not this input, so
+                          // widening the radius on a seeded location did
+                          // nothing at all.
+                          const chipsStale = sourceLocations.some(
+                            (l) => parseRadiusLabel(l.radius) !== clamped
+                          );
+                          if (clamped !== sourceLocationMiles) {
+                            setSourceLocationMiles(clamped);
+                          }
+                          if (!chipsStale && clamped === sourceLocationMiles) return;
+                          if (chipsStale) {
+                            setSourceLocations((prev) =>
+                              prev.map((l) => ({ ...l, radius: `within ${clamped} mi` }))
+                            );
+                          }
+                          trackEvent("job_wizard_step5_location_radius_changed", {
+                            step: 5,
+                            radius_miles: clamped,
                           });
                           setGeneratedBoolean("");
                         }}

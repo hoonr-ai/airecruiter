@@ -25,6 +25,7 @@ from models import (
 )
 from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
+from core.config import clamp_search_radius
 from routers.jobs import _verify_job_access_by_id
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
@@ -525,21 +526,18 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         require_resume = True if request.require_resume is None else bool(request.require_resume)
 
         # Resolve per-location radius if provided (fallback 25 miles).
-        within_miles = 25
+        # No product ceiling — recruiters set the catchment they're willing
+        # to work; clamp_search_radius only normalizes the value and honors
+        # the optional SEARCH_RADIUS_MAX_MILES override.
+        within_miles = None
         if request.within_miles is not None and int(request.within_miles) > 0:
-            within_miles = int(request.within_miles)
+            within_miles = request.within_miles
         elif request.locations:
             radius_match = str(request.locations[0].radius or "")
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
-                within_miles = int(digits)
-        # Hard cap 100 mi everywhere — clamp + log if a caller exceeds it.
-        if within_miles > 100:
-            logger.warning(
-                "within_miles=%s exceeds 100mi cap; clamping to 100",
-                within_miles,
-            )
-            within_miles = 100
+                within_miles = digits
+        within_miles = clamp_search_radius(within_miles)
 
         companies = request.companies or []
 

@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
+from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED, clamp_search_radius
 from exa_py import Exa
 from services.location import extract_us_location_from_text
 
@@ -807,7 +807,7 @@ class ExaService:
         if query_location and query_location.lower() not in (
             "united states", "the united states", "usa", "us",
         ):
-            radius = max(1, min(100, int(within_miles or 25)))
+            radius = clamp_search_radius(within_miles)
             radius_hint = (
                 f"LOCATION REQUIREMENT: candidates must CURRENTLY live in or within "
                 f"~{radius} miles of {query_location}. Verify against the LinkedIn "

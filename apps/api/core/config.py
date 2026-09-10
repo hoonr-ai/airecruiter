@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Any, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -234,6 +234,24 @@ SCORING_PARSING_GAP_FLOOR = float(get_env_with_default("SCORING_PARSING_GAP_FLOO
 # ordinary floored-mean, so weak fits still read as weak.
 SCORING_COVERAGE_BLEND_THRESHOLD = float(get_env_with_default("SCORING_COVERAGE_BLEND_THRESHOLD", "0.5"))
 
+# Required-coverage cap on synthetic score lifts (2026-08-27, job 26-26189).
+# `finalize_candidate` lifts the rubric score with signals that say nothing
+# about whether the candidate has what the job requires: the JobDiva JobAgent
+# rank floor, the source-tier bonus, the title boost, the open-to-work bump.
+# Stacked, they produced the reported "95% fit with 2 of 7 required skills"
+# (a JobDiva top-5 agent row: 85 rank floor + 10 source bonus, rubric ignored).
+#
+# The cap bounds the LIFTED score by what required-skill coverage supports:
+#
+#     ceiling = BASE + (matched_required / total_required) * (100 - BASE)
+#
+# so at BASE=40 a 2-of-7 row can reach at most 57 and a 6-of-7 row 91. It
+# never pulls a candidate below their honest rubric score — a genuinely
+# strong match the lifts didn't manufacture is untouched — and it's a no-op
+# for rubrics that declare no required groups.
+SCORING_COVERAGE_CAP_ENABLED = get_env_bool("SCORING_COVERAGE_CAP_ENABLED", True)
+SCORING_COVERAGE_CAP_BASE = float(get_env_with_default("SCORING_COVERAGE_CAP_BASE", "40"))
+
 # T2: per-group multipliers inside `_term_group_score`.
 #  - _UNKNOWN_MULT: applied when min_years > 0 but years_of_experience didn't parse.
 #  - _FLOOR:        applied as `max(FLOOR, years/min_years)` when years < min_years.
@@ -316,14 +334,53 @@ OPEN_TO_WORK_SCORE_BONUS = int(get_env_with_default("OPEN_TO_WORK_SCORE_BONUS", 
 # Tuning notes:
 #  - Floors below 50 are deliberately omitted so deep-tail candidates
 #    (api_rank > 29) fall back entirely on the rubric score.
-#  - The source-tier bonus runs AFTER the floor, so a JobDiva top-5 lands
-#    at min 85 + 10 (JobAgent bonus) = 95.
+#  - The source-tier bonus runs AFTER the floor, so a JobDiva top-5 would
+#    reach 85 + 10 (JobAgent bonus) = 95 on rank alone. That is exactly the
+#    inflation SCORING_COVERAGE_CAP_* bounds: the floor is a trust signal,
+#    not evidence, so it may not carry a row past what its required-skill
+#    coverage supports.
 JOBAGENT_RANK_SCORE_FLOOR = (
     (5, 85),   # api_rank 0..4   (top 5)
     (10, 75),  # api_rank 5..9   (next 5)
     (20, 65),  # api_rank 10..19
     (30, 55),  # api_rank 20..29
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Search radius (commute distance from the job location)
+# ─────────────────────────────────────────────────────────────────────────
+# The recruiter's "within N mi" value from Step 5. There is NO product
+# ceiling (2026-08-27, job 26-26189): the old hard 100mi cap silently reset
+# anything larger, so recruiters comfortable with a wider catchment had no
+# way to say so — and candidates just past 100mi were scored 0% by the
+# location hard gate with no recourse. Set SEARCH_RADIUS_MAX_MILES to a
+# positive number to re-impose a ceiling; 0 (the default) means uncapped.
+#
+# Note this is the radius we *measure* against. The radius sent to JobDiva's
+# TalentSearch has its own ceiling (JOBDIVA_ZIP_RADIUS_MAX_MILES in
+# core/sourcing_config.py) because that API's own limit is unverified.
+SEARCH_RADIUS_MAX_MILES = int(get_env_with_default("SEARCH_RADIUS_MAX_MILES", "0"))
+
+
+def clamp_search_radius(value: Any, default: int = 25) -> int:
+    """Normalize a requested radius to a positive whole number of miles.
+
+    Non-numeric, missing, and non-positive values fall back to `default`.
+    The optional SEARCH_RADIUS_MAX_MILES ceiling is applied last. Single
+    source of truth so the UI, the scoring gate, and each source adapter
+    can never disagree about what the recruiter asked for.
+    """
+    try:
+        miles = int(float(value))
+    except (TypeError, ValueError):
+        miles = default
+    if miles <= 0:
+        miles = default
+    if SEARCH_RADIUS_MAX_MILES > 0:
+        miles = min(SEARCH_RADIUS_MAX_MILES, miles)
+    return max(1, miles)
+
 
 # Embedding-based skill matching (PR-C). Off by default — when enabled,
 # `_fuzzy_term_score` augments its keyword-overlap signal with the cosine

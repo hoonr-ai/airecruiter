@@ -35,6 +35,8 @@ from core.config import (
     SCORING_UNMATCHED_PREFERRED_FLOOR,
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
+    SCORING_COVERAGE_CAP_ENABLED,
+    SCORING_COVERAGE_CAP_BASE,
     SOURCE_TIER_BONUS,
     OPEN_TO_WORK_SCORE_BONUS,
     JOBAGENT_RANK_SCORE_FLOOR,
@@ -42,6 +44,7 @@ from core.config import (
     EMBEDDING_MATCH_THRESHOLD,
     scoring_weights_for_family,
     embedding_skill_match_for_family,
+    clamp_search_radius,
 )
 from services import skill_embeddings
 from services import role_taxonomy
@@ -580,6 +583,11 @@ class UnifiedCandidateSearch:
 
             score_result = self._score_candidate(cand, criteria)
             base_score = score_result["score"]
+            # The honest, evidence-only score. `base_score` below is
+            # re-anchored by the JobAgent rank floor; this one never is, so
+            # the required-coverage cap can bound the lifts without ever
+            # pulling a candidate under what the rubric actually gave them.
+            rubric_score = base_score
             cand["match_score"] = base_score
             cand["missing_skills"] = score_result["missing_skills"]
             cand["matched_skills"] = score_result.get("matched_skills", [])
@@ -678,6 +686,12 @@ class UnifiedCandidateSearch:
                 hard_veto = (cand.get("match_score_details") or {}).get("hard_veto") or {}
                 if not hard_veto.get("triggered"):
                     cand["match_score"] = None
+
+            # Bound every lift above by the candidate's actual required-skill
+            # coverage — see _apply_required_coverage_cap. Runs last so it
+            # sees the final number and stays a no-op for the 0% and N/A rows
+            # settled above.
+            self._apply_required_coverage_cap(cand, rubric_score)
 
             return cand
 
@@ -3464,8 +3478,9 @@ class UnifiedCandidateSearch:
                 return True, "candidate_state_unknown_keep", None
             return False, "state_mismatch", None
 
-        # Hard cap 100 mi everywhere (defense-in-depth — UI also caps).
-        miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+        # The recruiter's radius, normalized (no product ceiling — see
+        # core.config.clamp_search_radius).
+        miles = clamp_search_radius(getattr(criteria, "within_miles", None))
         geocode_failure = False
         closest_distance: Optional[float] = None
 
@@ -4516,7 +4531,9 @@ class UnifiedCandidateSearch:
             )
         # Confirmed-outside reasons. "outside_radius_soft_keep" only counts as
         # confirmed when we have a real (non-sentinel) distance beyond the radius.
-        miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+        # `miles` is the recruiter's own radius — widening it in the UI is the
+        # supported way to stop vetoing far-out candidates.
+        miles = clamp_search_radius(getattr(criteria, "within_miles", None))
         # Stamp the badge fields for every scored candidate — previously only
         # the JobDiva LocationGate set them, so Exa/LinkedIn rows never showed
         # the out-of-radius badge even with a confirmed distance.
@@ -4541,6 +4558,83 @@ class UnifiedCandidateSearch:
             candidate["location_veto_reason"] = "outside_radius_confirmed"
             return f"location {round(float(distance))}mi outside {criteria.location} ({miles}mi radius)"
         return None
+
+    def _apply_required_coverage_cap(
+        self, cand: Dict[str, Any], rubric_score: int
+    ) -> None:
+        """Bound a lifted match_score by the candidate's required-skill coverage.
+
+        `finalize_candidate` lifts the rubric score with signals that say
+        nothing about whether the candidate has what the job asked for:
+        JobDiva's JobAgent rank floor, the source-tier bonus, the title boost,
+        the open-to-work bump. Stacked, they produce scores the rubric never
+        justified — a JobDiva top-5 agent row reaches 85 (rank floor) + 10
+        (source bonus) = 95 while its own MISSING list shows 5 of 7 required
+        skills absent. That contradiction is what recruiters reported on job
+        26-26189 as plainly wrong.
+
+        So a lifted score may not exceed what coverage supports:
+
+            ceiling = BASE + (matched / total) * (100 - BASE)
+
+        The cap only ever removes lift. `max(rubric_score, ceiling)` leaves a
+        genuinely strong rubric match untouched, so this can never invent a
+        penalty the scorer didn't already assign. No-op when the rubric
+        declares no required groups, when the row is hard-vetoed (score 0),
+        and when the row is unscored (score None).
+        """
+        if not SCORING_COVERAGE_CAP_ENABLED:
+            return
+        current = cand.get("match_score")
+        if not current or rubric_score <= 0:
+            return
+        coverage = self._required_coverage(cand.get("match_score_details") or {})
+        if coverage is None:
+            return
+        matched_req, total_req = coverage
+        ceiling = round(
+            SCORING_COVERAGE_CAP_BASE
+            + (matched_req / total_req) * (100.0 - SCORING_COVERAGE_CAP_BASE)
+        )
+        capped = max(rubric_score, ceiling)
+        if capped >= current:
+            return
+        cand.setdefault("match_score_details", {})["required_coverage_cap"] = {
+            "required_matched": matched_req,
+            "required_total": total_req,
+            "ceiling": ceiling,
+            "uncapped": current,
+            "rubric_score": rubric_score,
+        }
+        cand["match_score"] = capped
+        cand["explainability"] = [
+            f"Capped at {capped}% — matched {matched_req} of "
+            f"{total_req} required items"
+        ] + list(cand.get("explainability") or [])[:5]
+
+    @staticmethod
+    def _required_coverage(score_details: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+        """How many of the rubric's required groups the candidate actually hit.
+
+        Returns ``(matched, total)`` summed across every scored dimension, or
+        ``None`` when the rubric declared no required groups (nothing to
+        measure coverage against). Reads the same per-dimension counts
+        ``_score_candidate`` stamps into ``score_details`` — the counts that
+        also build the row's ``missing_skills`` list — so a score derived from
+        this can never contradict the MISSING chips shown next to it.
+        """
+        matched = 0
+        total = 0
+        for value in (score_details or {}).values():
+            if not isinstance(value, dict):
+                continue
+            dim_total = value.get("required_total")
+            if not isinstance(dim_total, int) or dim_total <= 0:
+                continue
+            dim_matched = value.get("required_matched")
+            total += dim_total
+            matched += max(0, min(dim_total, int(dim_matched or 0)))
+        return (matched, total) if total else None
 
     def _score_candidate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
         profile = self._candidate_profile(candidate)

@@ -312,6 +312,18 @@ def _env_bool_geo(var: str, default: bool) -> bool:
 # jobs.
 JOBDIVA_ZIP_RADIUS_ENABLED = _env_bool_geo("JOBDIVA_ZIP_RADIUS_ENABLED", True)
 
+# Ceiling on the `withinMiles` value we send to JobDiva TalentSearch. The
+# recruiter-facing radius is uncapped (core/config.SEARCH_RADIUS_MAX_MILES),
+# but JobDiva's own limit for this field has never been probed, so the wire
+# value stays bounded. When the recruiter's radius alone exceeds this
+# ceiling we send NO zip constraint at all rather than a smaller one:
+# narrowing below what they asked for would drop exactly the far-out
+# candidates they widened the search to reach. Recall then rests on the
+# client-side distance verdict plus JOBDIVA_SOURCE_CAP.
+JOBDIVA_ZIP_RADIUS_MAX_MILES = int(
+    _os_geo.getenv("JOBDIVA_ZIP_RADIUS_MAX_MILES") or 500
+)
+
 # DEAD FLAG (kept for env compat): the boolean geo dialect rewrite is moot
 # since the v2 TalentSearch payload no longer sends boolean strings at all —
 # and the probe showed the server never parsed the dialect anyway (arms
