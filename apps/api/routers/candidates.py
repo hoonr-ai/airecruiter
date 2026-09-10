@@ -3016,20 +3016,28 @@ async def get_launched_candidates(
                 import re
                 date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-                # Date range filters apply to engage_created_at (la.created_at).
-                # Note: engage_interview_audit.created_at is stored in UTC by the DB session.
-                # Converting (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')
-                # evaluates wall-clock date boundaries in America/New_York time matching the UI display.
+                # Convert input NY dates to UTC before querying the DB.
+                # This safely avoids the Postgres 'AT TIME ZONE' cast flipping based on whether the column is naive or timestamptz.
+                if start_date or end_date:
+                    from zoneinfo import ZoneInfo
+                    from datetime import datetime
+                    ny_tz = ZoneInfo("America/New_York")
+                    utc_tz = ZoneInfo("UTC")
+
                 if start_date:
                     if not date_pattern.match(start_date):
                         raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
-                    search_condition += " AND (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') >= %s"
-                    params.append(f"{start_date} 00:00:00")
+                    dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
+                    utc_start = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
+                    search_condition += " AND la.created_at >= %s"
+                    params.append(utc_start)
                 if end_date:
                     if not date_pattern.match(end_date):
                         raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
-                    search_condition += " AND (la.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') <= %s"
-                    params.append(f"{end_date} 23:59:59")
+                    dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
+                    utc_end = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
+                    search_condition += " AND la.created_at <= %s"
+                    params.append(utc_end)
 
                 params.extend([limit, offset])
 
