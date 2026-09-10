@@ -964,7 +964,7 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[120px] min-w-[120px] max-w-[120px] sticky left-[50px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB DIVA ID</TableHead>
                 <TableHead className="w-[200px] min-w-[200px] max-w-[200px] sticky left-[170px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB TITLE</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] sticky left-[370px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">CANDIDATE NAME</TableHead>
-                <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
+                <TableHead className="w-[300px] min-w-[300px] max-w-[300px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
                 <TableHead className="w-[160px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
                 <TableHead className="w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
@@ -1072,10 +1072,10 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 max-w-[180px] px-3">
+                      <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 max-w-[300px] px-3">
                         {c.recruiter_emails && formatRecruiterEmails(c.recruiter_emails) ? (
-                          <div className="flex items-center justify-center w-full">
-                            <span className="inline-block break-words whitespace-normal leading-relaxed text-[11.5px] text-slate-500 w-full text-center">
+                          <div className="flex items-center justify-center w-full overflow-x-auto scrollbar-thin scrollbar-thumb-slate-200 pb-1">
+                            <span className="inline-block whitespace-nowrap leading-relaxed text-[11.5px] text-slate-500 text-center">
                               {formatRecruiterEmails(c.recruiter_emails)}
                             </span>
                           </div>
