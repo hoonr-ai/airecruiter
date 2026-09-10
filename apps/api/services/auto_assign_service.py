@@ -3,7 +3,7 @@ import logging
 import json
 import psycopg2
 import psycopg2.extras
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, Any, List, Optional
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from core.db import get_db_connection
@@ -11,6 +11,57 @@ from services.unified_candidate_search import SearchCriteria, unified_search_ser
 from services.candidate_profiles_db import candidate_profiles_db
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_apply_date(received) -> Optional[date]:
+    """Parse JobDiva's RECEIVED ("ISO-ish" date string) into a date.
+
+    Returns None if the value is empty or can't be parsed. Tolerant of the
+    common shapes JobDiva emits (ISO date, ISO datetime, US MM/DD/YYYY).
+    """
+    if not received:
+        return None
+    s = str(received).strip()
+    if not s:
+        return None
+    # ISO-8601 first (date or datetime; tolerate a trailing 'Z').
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    # Last resort: leading YYYY-MM-DD prefix.
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _is_new_applicant(received, cutoff) -> bool:
+    """Whether an applicant should be auto-launched into PAIR.
+
+    We only auto-contact applicants who applied on/after the job entered
+    Pairbot; the pre-existing backlog is left for manual outreach.
+
+    - ``cutoff`` is ``monitored_jobs.pair_launched_at`` (the first-launch marker).
+      If it's None the job hasn't really been launched → return False (don't
+      auto-launch anyone this cycle).
+    - If the apply date is missing/unparseable → return True (fail open, per
+      product decision: contact when we can't confirm they're backlog).
+    - Otherwise contact when the apply date is on/after the cutoff date
+      (same-day counts as new).
+    """
+    if cutoff is None:
+        return False
+    applied = _parse_apply_date(received)
+    if applied is None:
+        return True
+    cutoff_date = cutoff.date() if hasattr(cutoff, "date") else cutoff
+    return applied >= cutoff_date
 
 class AutoAssignService:
     def __init__(self, db_url: str = DATABASE_URL):
@@ -194,6 +245,9 @@ class AutoAssignService:
             "explainability": cand.get("explainability") or existing_data.get("explainability") or "",
             "match_score_details": cand.get("match_score_details") or existing_data.get("match_score_details") or {},
             "enhanced_info": cand.get("enhanced_info") or existing_data.get("enhanced_info"),
+            # JobDiva RECEIVED (apply date). Kept for observability and the
+            # applicant-backlog guard; preserved across re-syncs.
+            "received": cand.get("received") or existing_data.get("received"),
             "auto_assigned": True,
         })
         if candidate_id:
@@ -427,12 +481,16 @@ class AutoAssignService:
             sourcing_filters = {}
             jobdiva_numeric_id = None
             job_location_type = ""
+            # When the job entered Pairbot (first-launch marker). Used as the
+            # cutoff for the applicant-backlog guard below: applicants who
+            # applied before this are not auto-launched. None = never launched.
+            pair_launched_at = None
 
             try:
                 with self._get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status, location_type, city FROM monitored_jobs "
+                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status, location_type, city, pair_launched_at FROM monitored_jobs "
                             "WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                             (job_id, job_id)
                         )
@@ -445,6 +503,7 @@ class AutoAssignService:
                             job_location_type = str(row[4] or "").strip()
                             if not job_location_type and str(row[5] or "").strip().upper() == "REMOTE":
                                 job_location_type = "Remote"
+                            pair_launched_at = row[6]
 
                             # Skip if job is clearly inactive
                             if job_status and job_status.lower() in ['closed', 'cancelled', 'filled', 'inactive']:
@@ -743,8 +802,22 @@ class AutoAssignService:
                         ))
                         total_assigned += 1
                         if candidate_id:
-                            newly_inserted_ids.append(candidate_id)
                             existing_ids.add(candidate_id)
+                            # Backlog guard: only auto-launch applicants who
+                            # applied on/after the job entered Pairbot
+                            # (pair_launched_at). Pre-cutoff applicants are
+                            # still INSERTed above (visible on the rank list
+                            # and manually launchable) but stay out of the
+                            # auto-launch feed. Unknown/missing apply date
+                            # fails open (contact); see _is_new_applicant.
+                            if _is_new_applicant(cand.get("received"), pair_launched_at):
+                                newly_inserted_ids.append(candidate_id)
+                            else:
+                                logger.info(
+                                    "[AutoAssignService] backlog applicant skipped from "
+                                    "auto-launch job=%s candidate=%s received=%s cutoff=%s",
+                                    target_job_id, candidate_id, cand.get("received"), pair_launched_at,
+                                )
 
                     # Populate normalized tables in the same batch
                     profile_batch.append(cand)
