@@ -381,7 +381,10 @@ export default function GlobalCandidatesPage() {
   useEffect(() => {
     api.candidates.getFilterOptions().then(res => {
       if (res.status === "success" && res.sources) {
-        const filtered = res.sources.filter((s: string) => s.toLowerCase() !== "upload resume");
+        const filtered = res.sources.filter((s: string) => 
+          s.toLowerCase() !== "upload resume" && 
+          s.toLowerCase() !== "upload-resume"
+        );
         setAvailableSources(filtered.sort());
       }
     }).catch(console.error);
