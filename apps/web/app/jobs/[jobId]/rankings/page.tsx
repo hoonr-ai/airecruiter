@@ -2085,7 +2085,7 @@ export default function CandidateRankingsPage() {
         {/* Filter bar: search + status + source + min-score. All filter state
             feeds into the `filteredCandidates` useMemo above. */}
         <div className="flex flex-wrap items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm mb-6">
-          <div className="relative min-w-[260px] flex-1 max-w-[380px]">
+          <div className="relative min-w-[160px] flex-1 max-w-[280px]">
             <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
               <Search className="h-4 w-4 text-slate-400" />
             </div>
@@ -2103,7 +2103,7 @@ export default function CandidateRankingsPage() {
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[80px]"
             >
               <option value="all">All</option>
               <option value="pass">Pass</option>
@@ -2123,7 +2123,7 @@ export default function CandidateRankingsPage() {
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[110px]"
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
             >
               <option value="all">All</option>
               {availableSources.map(s => (
@@ -2141,7 +2141,7 @@ export default function CandidateRankingsPage() {
           </div>
 
           <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min resume screening score</label>
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min Resume Score</label>
             <Input
               type="number"
               min={0}
