@@ -27,7 +27,8 @@ import {
   X,
   Activity,
   Ban,
-  AlertTriangle
+  AlertTriangle,
+  PhoneOff
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -576,6 +577,22 @@ export default function CandidateRankingsPage() {
         setActionCandidateId(null);
         setRejectReason('');
       }
+    }
+  };
+
+  const handleMarkUnreachable = async (candidateId: string) => {
+    try {
+      await api.candidates.feedback(jobId as string, candidateId, { feedback_type: 'Unreachable' });
+      setFeedbacks(prev => ({ ...prev, [candidateId]: 'Unreachable' }));
+      setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
+      setFeedbackReasons(prev => {
+        const next = { ...prev };
+        delete next[candidateId];
+        return next;
+      });
+    } catch (error) {
+      console.error('Error marking unreachable:', error);
+      setToast({ message: "Failed to save unreachable status", type: "error" });
     }
   };
 
@@ -2665,6 +2682,8 @@ export default function CandidateRankingsPage() {
                                 } else if (val === "Submit") {
                                   setActionCandidateId(candidate.id);
                                   setIntegrationModalOpen('submit');
+                                } else if (val === "Unreachable") {
+                                  handleMarkUnreachable(String(candidate.id));
                                 }
                               }}
                             >
@@ -2674,12 +2693,15 @@ export default function CandidateRankingsPage() {
                               <SelectContent>
                                 <SelectItem value="Submit" className="text-[12px] font-semibold cursor-pointer">Submit</SelectItem>
                                 <SelectItem value="Reject" className="text-[12px] font-semibold cursor-pointer">Reject</SelectItem>
+                                <SelectItem value="Unreachable" className="text-[12px] font-semibold cursor-pointer">Unreachable</SelectItem>
                               </SelectContent>
                             </Select>
                             {feedbacks[candidate.id] && (
                               <div className="flex flex-col items-center gap-2 mt-2">
-                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : feedbacks[candidate.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
+                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
+                                   feedbacks[candidate.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 
+                                   <><PhoneOff className="w-3 h-3" /> Unreachable</>}
                                 </div>
                                 {feedbackReasons[candidate.id] && (
                                   <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
