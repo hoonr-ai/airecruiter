@@ -14,6 +14,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
@@ -379,6 +386,10 @@ export default function GlobalCandidatesPage() {
   const [filterSource, setFilterSource] = useState("all");
   const [filterMinScore, handleFilterMinScoreChange, setFilterMinScore] = useClampedScoreInput("");
   const [availableSources, setAvailableSources] = useState<string[]>([]);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportStartDate, setExportStartDate] = useState("");
+  const [exportEndDate, setExportEndDate] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
 
   // Fetch global filter options on mount
   useEffect(() => {
@@ -613,13 +624,14 @@ export default function GlobalCandidatesPage() {
       "Email",
       "Phone",
       "Source",
+      "Launched Date",
       "Resume Screening Score",
       "Engage Status",
       "Engage Score",
       "Total Fit Score"
     ];
 
-    const rows = candidates.map((c) => {
+    const generateRows = (cands: any[]) => cands.map((c) => {
       const resumeScore = Math.round(c.match_score || 0);
       const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
       const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
@@ -632,6 +644,7 @@ export default function GlobalCandidatesPage() {
         escapeCsvField(c.email || ""),
         escapeCsvField(c.phone || ""),
         escapeCsvField(normalizeSourceLabel(c.source)),
+        escapeCsvField(c.engage_created_at ? formatDate(c.engage_created_at) : ""),
         escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
         escapeCsvField(statusInfo.label),
         escapeCsvField(engageScoreStr),
@@ -639,6 +652,7 @@ export default function GlobalCandidatesPage() {
       ].join(",");
     });
 
+    const rows = generateRows(candidates);
     const csvContent = [headers.join(","), ...rows].join("\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -651,6 +665,95 @@ export default function GlobalCandidatesPage() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleExportWithDateRange = async () => {
+    setIsExporting(true);
+    try {
+      const query = new URLSearchParams({
+        limit: "10000",
+        offset: "0",
+      });
+      if (searchQuery) query.append("search", searchQuery);
+      if (filterStatus) query.append("status", filterStatus);
+      if (filterFeedback) query.append("feedback", filterFeedback);
+      if (filterSource && filterSource !== "all") query.append("source", filterSource);
+      if (filterMinScore !== "") query.append("min_score", String(filterMinScore));
+      if (exportStartDate) query.append("start_date", exportStartDate);
+      if (exportEndDate) query.append("end_date", exportEndDate);
+
+      const candData = await api.candidates.getAllLaunched(query.toString());
+      if (candData.status === "success" && Array.isArray(candData.candidates) && candData.candidates.length > 0) {
+        
+        const escapeCsvField = (field: unknown) => {
+          if (field === null || field === undefined) return "";
+          let str = String(field);
+          if (/^[=+\-@]/.test(str)) {
+            str = "'" + str;
+          }
+          if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+            return `"${str.replace(/"/g, '""')}"`;
+          }
+          return str;
+        };
+
+        const headers = [
+          "JobDiva ID",
+          "Candidate Name",
+          "Email",
+          "Phone",
+          "Source",
+          "Launched Date",
+          "Resume Screening Score",
+          "Engage Status",
+          "Engage Score",
+          "Total Fit Score"
+        ];
+
+        const generateRows = (cands: any[]) => cands.map((c) => {
+          const resumeScore = Math.round(c.match_score || 0);
+          const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
+          const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
+
+          const statusInfo = normalizeInterviewStatus(c.engage_status);
+
+          return [
+            escapeCsvField(c.jobdiva_id || ""),
+            escapeCsvField(c.name || "Unknown"),
+            escapeCsvField(c.email || ""),
+            escapeCsvField(c.phone || ""),
+            escapeCsvField(normalizeSourceLabel(c.source)),
+            escapeCsvField(c.engage_created_at ? formatDate(c.engage_created_at) : ""),
+            escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
+            escapeCsvField(statusInfo.label),
+            escapeCsvField(engageScoreStr),
+            escapeCsvField(totalFitScoreStr)
+          ].join(",");
+        });
+
+        const rows = generateRows(candData.candidates);
+        const csvContent = [headers.join(","), ...rows].join("\n");
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute(
+          "download",
+          `Master_Candidate_Pool_${exportStartDate || "all"}_to_${exportEndDate || "all"}.csv`
+        );
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setIsExportModalOpen(false);
+      } else {
+        alert("No candidates found for the selected date range.");
+      }
+    } catch (error) {
+      console.error("Export failed:", error);
+      alert("Failed to export data.");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -698,7 +801,7 @@ export default function GlobalCandidatesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleExport}
+                onClick={() => setIsExportModalOpen(true)}
                 className="h-9 px-3 flex items-center gap-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-sm transition-colors rounded-lg font-medium text-[12.5px]"
                 title="Export current view to CSV"
               >
@@ -797,6 +900,7 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[200px] min-w-[200px] max-w-[200px] sticky left-[170px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOB TITLE</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] sticky left-[370px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">CANDIDATE NAME</TableHead>
                 <TableHead className="w-[160px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
+                <TableHead className="w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
                 <TableHead className="w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
@@ -818,6 +922,7 @@ export default function GlobalCandidatesPage() {
                       </div>
                     </TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
@@ -929,7 +1034,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center py-3">
+                      <TableCell className="text-center py-3 border-l border-slate-200">
                         <div className="flex justify-center items-center w-full">
                           <span
                             className="px-3 py-1 rounded-full text-[11px] font-bold border"
@@ -940,7 +1045,7 @@ export default function GlobalCandidatesPage() {
                         </div>
                       </TableCell>
 
-                      <TableCell className="text-center font-medium text-slate-700 text-[13px]">
+                      <TableCell className="text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
                         {c.engage_score !== null && c.engage_score !== undefined ? (
                           <div
                             className="relative group/engage inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
@@ -965,7 +1070,7 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="text-center font-bold text-slate-900 text-[14px]">
+                      <TableCell className="text-center font-bold text-slate-900 text-[14px] border-l border-slate-200">
                         {c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? (
                           <span>{Math.round((c.engage_score + resumeScore) / 2)}/100</span>
                         ) : (
@@ -1041,6 +1146,7 @@ export default function GlobalCandidatesPage() {
                       </div>
                     </TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
                     <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
@@ -1089,6 +1195,53 @@ export default function GlobalCandidatesPage() {
           candidateName={selectedCandidateForActivity.name}
         />
       )}
+
+      {/* Export Date Range Modal */}
+      <Dialog open={isExportModalOpen} onOpenChange={setIsExportModalOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Export Candidates</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <p className="text-sm text-slate-500">
+              Select a date range to download candidates launched within that period. Current filters (Status, Feedback, Source, Min Score) will also be applied. Leave dates blank to export all.
+            </p>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="start-date" className="text-right text-sm font-medium">
+                Start Date
+              </label>
+              <Input
+                id="start-date"
+                type="date"
+                className="col-span-3"
+                value={exportStartDate}
+                onChange={(e) => setExportStartDate(e.target.value)}
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="end-date" className="text-right text-sm font-medium">
+                End Date
+              </label>
+              <Input
+                id="end-date"
+                type="date"
+                className="col-span-3"
+                value={exportEndDate}
+                onChange={(e) => setExportEndDate(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setIsExportModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleExportWithDateRange} disabled={isExporting}>
+              {isExporting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {isExporting ? "Exporting..." : "Export"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Integration Modals */}
       {integrationModalOpen && actionCandidateId && (

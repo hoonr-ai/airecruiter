@@ -2928,13 +2928,15 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user
 @router.get("/candidates/launched")
 async def get_launched_candidates(
     user: UserIdentity = Depends(get_current_user),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     feedback: Optional[str] = Query(None),
     source: Optional[str] = Query(None),
     min_score: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
 ):
     """
     Fetches all launched candidates across all jobs.
@@ -3003,6 +3005,14 @@ async def get_launched_candidates(
                 if min_score is not None:
                     search_condition += " AND sc.resume_match_percentage >= %s"
                     params.append(min_score)
+                    
+                # Date range filters apply to the engage_created_at which is la.created_at
+                if start_date:
+                    search_condition += " AND la.created_at >= %s"
+                    params.append(f"{start_date} 00:00:00")
+                if end_date:
+                    search_condition += " AND la.created_at <= %s"
+                    params.append(f"{end_date} 23:59:59")
 
                 params.extend([limit, offset])
 
