@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from core.auth import UserIdentity, get_current_user
 from routers._helpers import (
@@ -394,14 +394,20 @@ def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str,
 
 
 def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-    """Per-job launched-interview rows (interview_id + launch time)."""
+    """All audit snapshots for the report's interviews.
+
+    An interview can have several rows as its status changes.  The caller uses
+    the earliest row to decide whether the interview was launched in the
+    requested period, and the latest row as its current status snapshot.
+    """
     if not job_keys:
         return {}
     sql = """
-        SELECT jobdiva_id, interview_id, candidate_id, created_at, response
+        SELECT id, jobdiva_id, interview_id, candidate_id, created_at, response, status
         FROM engage_interview_audit
         WHERE jobdiva_id = ANY(%s)
           AND NULLIF(interview_id, '') IS NOT NULL
+        ORDER BY interview_id ASC, created_at ASC, id ASC
     """
     out: Dict[str, List[Dict[str, Any]]] = {}
     with conn.cursor() as cur:
@@ -564,6 +570,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     first_response_minutes: List[float] = []
     response_timestamps: List[datetime.datetime] = []
     first_contact_timestamps: List[datetime.datetime] = []
+    first_attempted_timestamps: List[datetime.datetime] = []
+    first_completed_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
@@ -655,6 +663,22 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if elapsed is not None:
                     first_response_minutes.append(elapsed)
 
+        # Pair-bot is the current source of truth for these lifecycle stamps.
+        # The local candidate record is retained as a fallback below because
+        # older pair-bot responses may omit them.
+        attempted = _parse_iso(
+            merged.get("first_attempted_at") or merged.get("attempted_at")
+        )
+        if attempted:
+            first_attempted_timestamps.append(attempted)
+        completed = _parse_iso(
+            merged.get("first_completed_at")
+            or merged.get("engage_completed_at")
+            or merged.get("completed_at")
+        )
+        if completed:
+            first_completed_timestamps.append(completed)
+
     return {
         "buckets": buckets,
         "phases": phases,
@@ -666,6 +690,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         "earliest_response_at": min(response_timestamps) if response_timestamps else None,
         "responded_count": len(response_timestamps),
         "first_contact_at": min(first_contact_timestamps) if first_contact_timestamps else None,
+        "first_attempted_at": min(first_attempted_timestamps) if first_attempted_timestamps else None,
+        "first_completed_at": min(first_completed_timestamps) if first_completed_timestamps else None,
     }
 
 
@@ -828,8 +854,10 @@ def _build_row(
         "completed": buckets["completed"],
         "partial_complete": buckets["partial_complete"],
 
-        "first_attempted_at": _edt(cand["first_attempted_at"]),
-        "first_completed_at": _edt(cand["first_completed_at"]),
+        # Prefer Pair-bot's live lifecycle timestamps.  `sourced_candidates`
+        # is only a fallback when the live response does not expose a stamp.
+        "first_attempted_at": _edt(outreach["first_attempted_at"] or cand["first_attempted_at"]),
+        "first_completed_at": _edt(outreach["first_completed_at"] or cand["first_completed_at"]),
 
         "time_to_first_response_minutes": outreach["time_to_first_response_minutes"],
         "launch_to_response_minutes": _minutes_between(launch_at, outreach["earliest_response_at"]),
@@ -893,6 +921,79 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
     return keys
 
 
+def _audit_snapshot_sort_key(row: Dict[str, Any]) -> Tuple[datetime.datetime, int]:
+    """Chronological, deterministic ordering for audit snapshots.
+
+    `id` breaks ties for rows created within the same timestamp resolution.
+    A malformed timestamp sorts first so it cannot masquerade as the current
+    state; it is excluded when it cannot establish a launch date below.
+    """
+    created_at = _parse_iso(row.get("created_at"))
+    timestamp = created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    try:
+        audit_id = int(row.get("id") or 0)
+    except (TypeError, ValueError):
+        audit_id = 0
+    return timestamp, audit_id
+
+
+def _latest_audit_snapshots_in_range(
+    audit_rows: List[Dict[str, Any]],
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> List[Dict[str, Any]]:
+    """Select report interviews by launch date, then retain their latest state.
+
+    The first audit snapshot is the launch event, so its Eastern calendar date
+    determines whether an interview belongs in this report.  Once included,
+    its latest snapshot is deliberately *not* constrained by the report dates:
+    historical reports must show the interview's actual current status.
+    """
+    snapshots_by_interview: Dict[str, List[Dict[str, Any]]] = {}
+    seen_audit_ids = set()
+    for row in audit_rows:
+        interview_id = str(row.get("interview_id") or "").strip()
+        if not interview_id:
+            continue
+        # A job can be looked up under both its local and JobDiva keys.  Do
+        # not let that duplicate the same physical audit row.
+        audit_id = row.get("id")
+        if audit_id is not None:
+            if audit_id in seen_audit_ids:
+                continue
+            seen_audit_ids.add(audit_id)
+        snapshots_by_interview.setdefault(interview_id, []).append(row)
+
+    selected: List[Dict[str, Any]] = []
+    for snapshots in snapshots_by_interview.values():
+        snapshots.sort(key=_audit_snapshot_sort_key)
+        launch_date = _eastern_date(_parse_iso(snapshots[0].get("created_at")))
+        if launch_date is not None and start_date <= launch_date <= end_date:
+            selected.append(snapshots[-1])
+    return selected
+
+
+def _candidate_rows_as_of_first_launch(
+    candidate_rows: List[Dict[str, Any]], job: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Keep sourcing metrics historical to the job's initial launch.
+
+    The report has one row for that launch event.  Including candidates sourced
+    days or weeks later makes the row grow every time a historical report is
+    regenerated.  Rows without a usable source timestamp are excluded: there
+    is no defensible way to assign them to an as-of report.
+    """
+    first_launch_at = _parse_iso(job.get("first_launch_at"))
+    if first_launch_at is None:
+        return []
+    return [
+        row
+        for row in candidate_rows
+        if (created_at := _parse_iso(row.get("created_at"))) is not None
+        and created_at <= first_launch_at
+    ]
+
+
 @router.get("/launch-report")
 async def get_launch_report(
     date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; defaults to yesterday"),
@@ -900,6 +1001,7 @@ async def get_launch_report(
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with start_date"),
     team_id: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
+    response: Response = None,
 ):
     """PAIR launch report for jobs first launched on `date`, or between
     `start_date` and `end_date` inclusive (Eastern time). A single day is
@@ -910,6 +1012,12 @@ async def get_launch_report(
     - Team leads: always scoped to their own team (team_id is ignored).
     - Recruiters: 403.
     """
+    # A report contains live Pair-bot status.  Never let a browser, CDN, or
+    # reverse proxy serve an earlier generation for an identical date range.
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+
     if user.is_admin:
         scope_team_id = (team_id or "").strip() or None
     elif user.is_team_lead and user.team_id:
@@ -965,27 +1073,17 @@ async def get_launch_report(
     audit_by_job: Dict[str, List[Dict[str, Any]]] = {}
     interview_ids: List[str] = []
     for job in jobs:
-        rows = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
-        # A job matched under both keys yields the same interview twice.
-        deduped: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            iid = str(row.get("interview_id") or "").strip()
-            if iid:
-                deduped[iid] = row
+        all_snapshots = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
+        latest_snapshots = _latest_audit_snapshots_in_range(
+            all_snapshots, report_start_date, report_end_date
+        )
 
-        # Scoped to the requested report range rather than only the job's
-        # first-launch day, so later-day launches show up on their own report
-        # instead of vanishing (the job's row is keyed on first-launch day,
-        # but its later launches still fall inside a range that includes them).
-        day_rows = [
-            row
-            for row in deduped.values()
-            if (created_date := _eastern_date(_parse_iso(row.get("created_at")))) is not None
-            and report_start_date <= created_date <= report_end_date
-        ]
-
-        audit_by_job[str(job["job_id"])] = day_rows
-        interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
+        audit_by_job[str(job["job_id"])] = latest_snapshots
+        interview_ids.extend(
+            str(row.get("interview_id"))
+            for row in latest_snapshots
+            if row.get("interview_id")
+        )
 
     outreach_by_interview = await _fetch_all_outreach(sorted(set(interview_ids)))
 
@@ -999,7 +1097,7 @@ async def get_launch_report(
         rows.append(
             _build_row(
                 job,
-                list(candidate_rows.values()),
+                _candidate_rows_as_of_first_launch(list(candidate_rows.values()), job),
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
             )

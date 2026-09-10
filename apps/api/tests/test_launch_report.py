@@ -279,7 +279,7 @@ def test_total_candidates_launched_uses_day_scoped_audit_rows_not_sql_lifetime_c
     assert row["percentage"] == 50.0
 
 
-def test_launch_report_filters_audit_rows_to_the_jobs_first_launch_day(monkeypatch):
+def test_range_report_includes_each_interview_launched_in_the_range(monkeypatch):
     captured = {}
 
     first_launch = datetime.datetime(2026, 8, 28, 2, 2)  # 2026-08-27 in Eastern
@@ -305,16 +305,59 @@ def test_launch_report_filters_audit_rows_to_the_jobs_first_launch_day(monkeypat
         lr.get_launch_report(
             date=None,
             start_date="2026-08-27",
-            end_date="2026-08-27",
+            # Both launches fall in this range, so both interviews belong
+            # in the report even though the job's first launch is day one.
+            end_date="2026-08-28",
             team_id=None,
             user=_admin_user(),
         )
     )
 
     row = response["data"]["jobs"][0]
-    assert captured["ids"] == ["same-day"]
-    assert row["outreach_detail_expected"] == 1
-    assert row["total_candidates_launched"] == 1
+    assert captured["ids"] == ["next-day", "same-day"]
+    assert row["outreach_detail_expected"] == 2
+    assert row["total_candidates_launched"] == 2
+
+
+def test_report_uses_latest_snapshot_after_selecting_interview_by_launch_date():
+    rows = [
+        {
+            "id": 1,
+            "interview_id": "in-range",
+            "created_at": datetime.datetime(2026, 8, 27, 14, 0),
+            "status": "pending",
+        },
+        {
+            "id": 2,
+            "interview_id": "in-range",
+            # This is a later status update, outside the requested day.
+            "created_at": datetime.datetime(2026, 8, 30, 14, 0),
+            "status": "completed",
+        },
+        {
+            "id": 3,
+            "interview_id": "out-of-range",
+            "created_at": datetime.datetime(2026, 8, 30, 14, 0),
+            "status": "pending",
+        },
+    ]
+
+    selected = lr._latest_audit_snapshots_in_range(
+        rows, datetime.date(2026, 8, 27), datetime.date(2026, 8, 27)
+    )
+
+    assert [(row["interview_id"], row["status"])
+            for row in selected] == [("in-range", "completed")]
+
+
+def test_candidate_rows_stop_at_the_first_launch_timestamp():
+    job = {**_job(0), "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}
+    rows = [
+        {"candidate_id": "before", "created_at": datetime.datetime(2026, 8, 28, 2, 1)},
+        {"candidate_id": "after", "created_at": datetime.datetime(2026, 8, 28, 2, 3)},
+        {"candidate_id": "unknown", "created_at": None},
+    ]
+    assert [r["candidate_id"] for r in lr._candidate_rows_as_of_first_launch(rows, job)] == ["before"]
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +413,20 @@ def test_response_times_use_first_contact_and_first_reply():
     assert summary["time_to_first_response_minutes"] == 20.0   # fastest responder
     assert summary["overall_response_time_minutes"] == 40.0    # mean of 20 and 60
     assert summary["responded_count"] == 2
+
+
+def test_live_outreach_timestamps_are_exposed_for_the_report_row():
+    payload = {
+        "outreach": {
+            "outreach_status": "completed",
+            "first_attempted_at": "2026-08-27T14:00:00Z",
+            "first_completed_at": "2026-08-27T14:30:00Z",
+        },
+        "communications": [],
+    }
+    summary = lr._summarise_outreach([payload])
+    assert summary["first_attempted_at"] == _utc(2026, 8, 27, 14, 0)
+    assert summary["first_completed_at"] == _utc(2026, 8, 27, 14, 30)
 
 
 def test_phase_distribution_normalizes_phase_variants():
