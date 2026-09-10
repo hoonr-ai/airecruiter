@@ -807,7 +807,7 @@ export default function CandidateRankingsPage() {
       });
     }
     return rows;
-  }, [candidates, searchQuery, statusFilter, sourceFilter, minScore, sortField, sortDir]);
+  }, [candidates, searchQuery, statusFilter, sourceFilter, minScore, columnFilters, sortField, sortDir]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -1850,7 +1850,7 @@ export default function CandidateRankingsPage() {
             />
           </div>
 
-          {(searchQuery || statusFilter !== "all" || sourceFilter !== "all" || minScore > 0) && (
+          {(searchQuery || statusFilter !== "all" || sourceFilter !== "all" || minScore > 0 || Object.values(columnFilters).some(f => f?.value)) && (
             <button
               onClick={clearFilters}
               className="h-12 px-4 text-[13px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-2 transition-colors"
