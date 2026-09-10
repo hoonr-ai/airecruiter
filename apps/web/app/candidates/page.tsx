@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
+import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -376,7 +377,7 @@ export default function GlobalCandidatesPage() {
   const [filterStatus, setFilterStatus] = useState("");
   const [filterFeedback, setFilterFeedback] = useState("");
   const [filterSource, setFilterSource] = useState("all");
-  const [filterMinScore, setFilterMinScore] = useState<number | "">("");
+  const [filterMinScore, handleFilterMinScoreChange, setFilterMinScore] = useClampedScoreInput("");
   const [availableSources, setAvailableSources] = useState<string[]>([]);
 
   // Fetch global filter options on mount
@@ -775,13 +776,7 @@ export default function GlobalCandidatesPage() {
                 value={filterMinScore}
                 onChange={(e) => {
                   resetPagination();
-                  const val = e.target.value;
-                  if (val === "") {
-                    setFilterMinScore("");
-                  } else {
-                    const n = Number.parseInt(val, 10);
-                    setFilterMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
-                  }
+                  handleFilterMinScoreChange(e.target.value);
                 }}
                 className="h-7 text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center flex-1 w-full focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
               />

@@ -57,6 +57,7 @@ import { StopOutreachModal, type StopOutreachCandidate } from "@/components/Stop
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
+import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 
 // Utility function to format dates
@@ -615,7 +616,7 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
-  const [minScore, setMinScore] = useState<number | "">("");
+  const [minScore, handleMinScoreChange, setMinScore] = useClampedScoreInput("");
   // Default the rank list to fit-score descending so it actually ranks by
   // score rather than by the source-priority pre-sort applied at load time.
   const [sortField, setSortField] = useState<SortField>("total_score");
@@ -2147,13 +2148,7 @@ export default function CandidateRankingsPage() {
               max={100}
               value={minScore}
               onChange={(e) => {
-                const val = e.target.value;
-                if (val === "") {
-                  setMinScore("");
-                } else {
-                  const n = Number.parseInt(val, 10);
-                  setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
-                }
+                handleMinScoreChange(e.target.value);
               }}
               className="h-7 w-16 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
             />
