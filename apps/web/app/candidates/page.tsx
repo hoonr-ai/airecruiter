@@ -382,6 +382,14 @@ export default function GlobalCandidatesPage() {
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
   const [isExporting, setIsExporting] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
 
   // Fetch global filter options on mount
   useEffect(() => {
@@ -499,7 +507,7 @@ export default function GlobalCandidatesPage() {
 
   const fetchIdRef = useRef(0);
 
-  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", replace: boolean = false) => {
+  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, replace: boolean = false) => {
     fetchIdRef.current += 1;
     const currentFetchId = fetchIdRef.current;
 
@@ -528,6 +536,12 @@ export default function GlobalCandidatesPage() {
       }
       if (minScore !== "") {
         query.append("min_score", String(minScore));
+      }
+      if (startDate) {
+        query.append("start_date", startDate);
+      }
+      if (endDate) {
+        query.append("end_date", endDate);
       }
 
       const candData = await api.candidates.getAllLaunched(query.toString());
@@ -576,11 +590,11 @@ export default function GlobalCandidatesPage() {
 
   useEffect(() => {
     const request = window.setTimeout(() => {
-      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, true)
+      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, true)
         .finally(() => setIsLoading(false));
     }, 0);
     return () => window.clearTimeout(request);
-  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, fetchCandidates]);
+  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, fetchCandidates]);
 
   const loadMore = async () => {
     if (isFetchingMore) return;
@@ -589,7 +603,7 @@ export default function GlobalCandidatesPage() {
 
     setIsFetchingMore(true);
     setOffset(nextOffset);
-    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, false);
+    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, false);
     setIsFetchingMore(false);
   };
 
@@ -660,22 +674,44 @@ export default function GlobalCandidatesPage() {
   };
 
   const handleExportWithDateRange = async () => {
+    if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
+      setToast({ message: "Start Date cannot be after End Date.", type: "error" });
+      return;
+    }
+
     setIsExporting(true);
     try {
-      const query = new URLSearchParams({
-        limit: "10000",
-        offset: "0",
-      });
-      if (searchQuery) query.append("search", searchQuery);
-      if (filterStatus) query.append("status", filterStatus);
-      if (filterFeedback) query.append("feedback", filterFeedback);
-      if (filterSource && filterSource !== "all") query.append("source", filterSource);
-      if (filterMinScore !== "") query.append("min_score", String(filterMinScore));
-      if (exportStartDate) query.append("start_date", exportStartDate);
-      if (exportEndDate) query.append("end_date", exportEndDate);
+      const allExportCandidates: Candidate[] = [];
+      let currentOffset = 0;
+      const CHUNK_SIZE = 500;
+      let hasMore = true;
 
-      const candData = await api.candidates.getAllLaunched(query.toString());
-      if (candData.status === "success" && Array.isArray(candData.candidates) && candData.candidates.length > 0) {
+      while (hasMore) {
+        const query = new URLSearchParams({
+          limit: String(CHUNK_SIZE),
+          offset: String(currentOffset),
+        });
+        if (searchQuery) query.append("search", searchQuery);
+        if (filterStatus) query.append("status", filterStatus);
+        if (filterFeedback) query.append("feedback", filterFeedback);
+        if (filterSource && filterSource !== "all") query.append("source", filterSource);
+        if (filterMinScore !== "") query.append("min_score", String(filterMinScore));
+        if (exportStartDate) query.append("start_date", exportStartDate);
+        if (exportEndDate) query.append("end_date", exportEndDate);
+
+        const candData = await api.candidates.getAllLaunched(query.toString());
+        if (candData.status === "success" && Array.isArray(candData.candidates) && candData.candidates.length > 0) {
+          allExportCandidates.push(...candData.candidates);
+          currentOffset += CHUNK_SIZE;
+          if (allExportCandidates.length >= (candData.total || 0)) {
+            hasMore = false;
+          }
+        } else {
+          hasMore = false;
+        }
+      }
+
+      if (allExportCandidates.length > 0) {
         
         const escapeCsvField = (field: unknown) => {
           if (field === null || field === undefined) return "";
@@ -702,7 +738,7 @@ export default function GlobalCandidatesPage() {
           "Total Fit Score"
         ];
 
-        const generateRows = (cands: any[]) => cands.map((c) => {
+        const generateRows = (cands: Candidate[]) => cands.map((c) => {
           const resumeScore = Math.round(c.match_score || 0);
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
           const totalFitScoreStr = c.engage_score !== null && c.engage_score !== undefined && resumeScore > 0 ? `${Math.round((c.engage_score + resumeScore) / 2)}` : "Waiting";
@@ -723,7 +759,7 @@ export default function GlobalCandidatesPage() {
           ].join(",");
         });
 
-        const rows = generateRows(candData.candidates);
+        const rows = generateRows(allExportCandidates);
         const csvContent = [headers.join(","), ...rows].join("\n");
         const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -737,11 +773,11 @@ export default function GlobalCandidatesPage() {
         link.click();
         document.body.removeChild(link);
       } else {
-        alert("No candidates found for the selected date range.");
+        setToast({ message: "No candidates found for the selected date range.", type: "error" });
       }
     } catch (error) {
       console.error("Export failed:", error);
-      alert("Failed to export data.");
+      setToast({ message: "Failed to export data.", type: "error" });
     } finally {
       setIsExporting(false);
     }
@@ -1172,12 +1208,19 @@ export default function GlobalCandidatesPage() {
                 onClick={loadMore}
                 className="h-10 px-8 rounded-full bg-white border border-indigo-200 text-[13px] font-semibold text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm flex items-center gap-2"
               >
-                Load More
+                Load More Candidates
               </button>
             </div>
           )}
         </div>
       </div>
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed top-4 right-4 z-50 rounded-lg p-4 text-white ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} shadow-lg transition-all duration-300 transform translate-y-0 opacity-100`}>
+          {toast.message}
+        </div>
+      )}
 
       {/* Modals */}
       {selectedCandidate && (

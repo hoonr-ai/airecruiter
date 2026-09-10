@@ -2085,7 +2085,7 @@ export default function CandidateRankingsPage() {
         {/* Filter bar: search + status + source + min-score. All filter state
             feeds into the `filteredCandidates` useMemo above. */}
         <div className="flex flex-wrap items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm mb-6">
-          <div className="relative shrink-0 w-[220px]">
+          <div className="relative min-w-[260px] flex-1 max-w-[380px]">
             <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
               <Search className="h-4 w-4 text-slate-400" />
             </div>
@@ -2765,7 +2765,7 @@ export default function CandidateRankingsPage() {
                 </p>
                 <button
                   onClick={loadMoreCandidates}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-indigo-200 bg-white text-indigo-700 text-[12px] font-bold hover:bg-indigo-50 transition-colors shadow-sm"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-[12px] font-bold hover:bg-indigo-100 transition-colors shadow-sm"
                 >
                   <ChevronDown className="w-4 h-4" />
                   Load more

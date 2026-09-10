@@ -2928,7 +2928,7 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user
 @router.get("/candidates/launched")
 async def get_launched_candidates(
     user: UserIdentity = Depends(get_current_user),
-    limit: int = Query(50, ge=1, le=10000),
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -3006,11 +3006,18 @@ async def get_launched_candidates(
                     search_condition += " AND sc.resume_match_percentage >= %s"
                     params.append(min_score)
                     
+                import re
+                date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
                 # Date range filters apply to the engage_created_at which is la.created_at
                 if start_date:
+                    if not date_pattern.match(start_date):
+                        raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
                     search_condition += " AND la.created_at >= %s"
                     params.append(f"{start_date} 00:00:00")
                 if end_date:
+                    if not date_pattern.match(end_date):
+                        raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
                     search_condition += " AND la.created_at <= %s"
                     params.append(f"{end_date} 23:59:59")
 
