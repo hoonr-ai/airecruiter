@@ -1002,24 +1002,35 @@ export default function GlobalCandidatesPage() {
                   );
                 })
               )}
+              {isFetchingMore && Array.from({ length: 3 }).map((_, i) => (
+                  <TableRow key={`skel-more-${i}`}>
+                    <TableCell className="text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
+                    <TableCell className="text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
+                    <TableCell className="sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+                      <div className="space-y-2">
+                        <Skeleton className="h-4 w-40 mx-auto" />
+                        <Skeleton className="h-3 w-32 mx-auto" />
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
+                    <TableCell className="text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
+                  </TableRow>
+              ))}
             </TableBody>
           </Table>
 
-          {hasMore && !isLoading && (
+          {hasMore && !isLoading && !isFetchingMore && (
             <div className="p-6 flex justify-center border-t border-slate-100 pb-16">
               <button
                 onClick={loadMore}
-                disabled={isFetchingMore}
-                className="h-10 px-6 rounded-full bg-white border border-slate-200 text-[13px] font-semibold text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-all shadow-sm flex items-center gap-2 disabled:opacity-50"
+                className="h-10 px-8 rounded-full bg-indigo-50 border border-indigo-100 text-[13px] font-semibold text-indigo-600 hover:bg-indigo-100 transition-all shadow-sm flex items-center gap-2"
               >
-                {isFetchingMore ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Loading...
-                  </>
-                ) : (
-                  "Load More"
-                )}
+                Load More Candidates
               </button>
             </div>
           )}
