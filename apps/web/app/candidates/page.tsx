@@ -470,8 +470,8 @@ export default function GlobalCandidatesPage() {
   };
 
   const handleMarkUnreachable = async (candidateId: number, jobDivaId: string | null) => {
-    if (!jobDivaId) return;
     try {
+      if (!jobDivaId) throw new Error("No job ID found");
       await api.candidates.feedback(jobDivaId, String(candidateId), { feedback_type: 'Unreachable' });
       setFeedbacks(prev => ({ ...prev, [candidateId]: 'Unreachable' }));
       setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
@@ -736,6 +736,7 @@ export default function GlobalCandidatesPage() {
                 <option value="No Feedback">No Feedback</option>
                 <option value="Submit">Submitted</option>
                 <option value="Reject">Rejected</option>
+                <option value="Unreachable">Unreachable</option>
               </select>
             </div>
 

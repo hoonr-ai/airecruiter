@@ -2993,6 +2993,8 @@ async def get_launched_candidates(
                         search_condition += " AND sc.data->>'feedback_type' = 'Submit'"
                     elif feedback.lower() == "reject":
                         search_condition += " AND sc.data->>'feedback_type' LIKE 'Reject%'"
+                    elif feedback.lower() == "unreachable":
+                        search_condition += " AND sc.data->>'feedback_type' = 'Unreachable'"
 
                 if source:
                     search_condition += " AND sc.source = %s"
@@ -4057,19 +4059,23 @@ async def save_candidate_feedback(
     
     report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
 
-    jobdiva_result = await jobdiva_service.create_candidate_note(
-        candidate_id=jd_candidate_id,
-        job_id=jd_job_ref,
-        action=action_string,
-        note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
-        recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
-    )
-
-    if jobdiva_result.get("status") == "error":
-        logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+    if request.feedback_type == "Unreachable":
+        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
+        jobdiva_result = {"status": "success"}
     else:
-        logger.info(f"✅ JobDiva note created — action='{action_string}', "
-                    f"candidate={jd_candidate_id}, job={jd_job_ref}")
+        jobdiva_result = await jobdiva_service.create_candidate_note(
+            candidate_id=jd_candidate_id,
+            job_id=jd_job_ref,
+            action=action_string,
+            note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+        )
+
+        if jobdiva_result.get("status") == "error":
+            logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+        else:
+            logger.info(f"✅ JobDiva note created — action='{action_string}', "
+                        f"candidate={jd_candidate_id}, job={jd_job_ref}")
 
     # 4. Persist feedback locally in sourced_candidates.data (JSONB merge)
     try:
