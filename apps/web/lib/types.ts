@@ -98,6 +98,7 @@ export interface Candidate {
   distance_miles?: number | null;
   location_out_of_radius?: boolean;
   location_match_reason?: string;
+  sources?: string[];
   // Backend-stamped no-contact company flag: current/last employer is on the
   // code-managed no-contact list. Row renders greyed out, unselectable, all
   // actions disabled; never scored, never persisted server-side.

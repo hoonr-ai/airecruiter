@@ -2925,6 +2925,226 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user
         logger.error(f"update_candidate_contacts_bulk failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/candidates/launched")
+async def get_launched_candidates(
+    user: UserIdentity = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    feedback: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    min_score: Optional[int] = Query(None),
+):
+    """
+    Fetches all launched candidates across all jobs.
+    Returns data formatted for the Master Candidate Pool page.
+    """
+    # The sidebar is only a convenience layer. Enforce the same admin-only
+    # policy here so a recruiter cannot retrieve the global candidate pool
+    # by calling the API directly.
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        from psycopg2.extras import RealDictCursor
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Build search condition
+                search_condition = ""
+                params = []
+                if search:
+                    search_condition += """
+                        AND (
+                            sc.name ILIKE %s OR
+                            sc.email ILIKE %s OR
+                            sc.phone ILIKE %s OR
+                            sc.jobdiva_id ILIKE %s OR
+                            sc.candidate_id::text ILIKE %s OR
+                            mj.title ILIKE %s
+                        )
+                    """
+                    like_term = f"%{search.strip()}%"
+                    params.extend([like_term] * 6)
+
+                if status:
+                    if status.lower() == "waiting" or status.lower() == "initiated":
+                        search_condition += " AND (la.status IS NULL OR la.status = 'Waiting' OR la.status = 'Initiated')"
+                    elif status.lower() == "pending":
+                        search_condition += " AND LOWER(la.status) IN ('pending', 'sent', 'created', 'queued', 'scheduled', 'started')"
+                    elif status.lower() == "in progress":
+                        search_condition += " AND LOWER(la.status) IN ('in_progress', 'in-progress', 'inprogress', 'in progress')"
+                    elif status.lower() == "pass":
+                        # Keep this list aligned with the UI's terminal Pass
+                        # states. A substring match on "complete" incorrectly
+                        # includes "incomplete" interviews in Pass results.
+                        search_condition += " AND LOWER(la.status) IN ('complete', 'completed', 'passed', 'pass')"
+                    elif status.lower() == "fail":
+                        search_condition += " AND LOWER(la.status) IN ('failed', 'fail', 'rejected')"
+                    else:
+                        search_condition += " AND la.status = %s"
+                        params.append(status)
+
+                if feedback:
+                    if feedback.lower() == "no feedback":
+                        search_condition += " AND (sc.data->>'feedback_type' IS NULL OR sc.data->>'feedback_type' = '')"
+                    elif feedback.lower() == "submit":
+                        search_condition += " AND sc.data->>'feedback_type' = 'Submit'"
+                    elif feedback.lower() == "reject":
+                        search_condition += " AND sc.data->>'feedback_type' LIKE 'Reject%'"
+
+                if source:
+                    search_condition += " AND sc.source = %s"
+                    params.append(source)
+
+                if min_score is not None:
+                    search_condition += " AND sc.resume_match_percentage >= %s"
+                    params.append(min_score)
+
+                params.extend([limit, offset])
+
+                BASE_CTE = """
+                    WITH latest_audit AS (
+                        SELECT DISTINCT ON (candidate_id)
+                            candidate_id,
+                            interview_id,
+                            status,
+                            created_at,
+                            payload,
+                            response
+                        FROM engage_interview_audit
+                        ORDER BY candidate_id, id DESC
+                    ),
+                    monitored_jobs_lookup AS (
+                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level
+                        FROM (
+                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level
+                            FROM monitored_jobs mj
+                            WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
+                            UNION ALL
+                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level
+                            FROM monitored_jobs mj
+                            WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
+                        ) x
+                        WHERE lookup_id IS NOT NULL AND lookup_id <> ''
+                        ORDER BY lookup_id
+                    )
+                """
+
+                query = f"""
+                    {BASE_CTE},
+                    launched_candidates AS (
+                        SELECT DISTINCT ON (sc.candidate_id)
+                            sc.id,
+                            sc.jobdiva_id,
+                            sc.candidate_id,
+                            sc.name,
+                            sc.email,
+                            sc.phone,
+                            sc.source,
+                            sc.resume_match_percentage as match_score,
+                            sc.data,
+                            la.status as engage_status,
+                            la.interview_id as engage_interview_id,
+                            la.created_at as engage_created_at,
+                            la.payload as audit_payload,
+                            mj.title as job_title,
+                            mj.screening_level
+                        FROM sourced_candidates sc
+                        JOIN latest_audit la ON la.candidate_id = sc.candidate_id
+                        LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
+                        WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
+                          {search_condition}
+                        ORDER BY sc.candidate_id, sc.created_at DESC
+                    )
+                    SELECT * FROM launched_candidates
+                    ORDER BY engage_created_at DESC NULLS LAST
+                    LIMIT %s OFFSET %s;
+                """
+                cur.execute(query, tuple(params))
+                candidates = cur.fetchall()
+
+                # Get total count
+                count_query = f"""
+                    {BASE_CTE}
+                    SELECT COUNT(DISTINCT sc.candidate_id) as total
+                    FROM sourced_candidates sc
+                    JOIN latest_audit la ON la.candidate_id = sc.candidate_id
+                    LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
+                    WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
+                      {search_condition}
+                """
+                cur.execute(count_query, tuple(params[:-2]))
+                total_row = cur.fetchone()
+                total = total_row["total"] if total_row else 0
+
+        finally:
+            conn.close()
+
+        # Handle data blob unpacking and fetch live outreach if needed
+        # Collect interview IDs for live fallback.
+        import json
+        import asyncio
+
+        interview_ids = []
+        for cand in candidates:
+            if cand.get("data") and isinstance(cand["data"], str):
+                try:
+                    cand["data"] = json.loads(cand["data"])
+                except json.JSONDecodeError:
+                    pass
+            data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            iid = cand.get("engage_interview_id")
+            if iid and str(iid).strip():
+                interview_ids.append(str(iid).strip())
+
+        interview_ids = sorted(set(interview_ids))
+        try:
+            payloads_dict = (
+                await asyncio.wait_for(
+                    _fetch_all_outreach(interview_ids),
+                    timeout=3.0,
+                )
+                if interview_ids
+                else {}
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"CANDIDATES: live outreach lookup timed out after 3s "
+                f"for {len(interview_ids)} interviews — falling back to local DB data"
+            )
+            payloads_dict = {}
+
+        for cand in candidates:
+            data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            iid = cand.get("engage_interview_id")
+
+            # Live merge from API payload if available
+            live_payload = payloads_dict.get(iid) if iid else None
+
+            if live_payload:
+                cand["engage_status"] = live_payload.get("status") or cand.get("engage_status")
+                cand["engage_score"] = live_payload.get("evaluation", {}).get("total_score")
+            else:
+                cand["engage_score"] = data_blob.get("engage_score")
+
+            # Parse payload for attended_via
+            audit_payload = cand.get("audit_payload")
+            cand["attended_via"] = "Phone" # Defaulting for voice
+            if audit_payload and isinstance(audit_payload, dict):
+                if audit_payload.get("outreach_method") == "sms":
+                    cand["attended_via"] = "SMS"
+
+        return {
+            "status": "success",
+            "candidates": candidates,
+            "total": total
+        }
+    except Exception as e:
+        logger.error(f"Error fetching launched candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/candidates/list")
 async def get_all_candidates(
