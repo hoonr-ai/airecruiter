@@ -372,6 +372,7 @@ const getRecruiterEmailsArray = (emails: string | string[] | null | undefined): 
     try {
       const parsed = JSON.parse(emails);
       if (Array.isArray(parsed)) return parsed.map(String);
+      if (typeof parsed === "string") return [parsed]; // Fix: handle JSON-quoted single strings without falling through
     } catch (e) {
       // ignore
     }
@@ -1008,6 +1009,7 @@ export default function GlobalCandidatesPage() {
                 candidates.map((c, i) => {
                   const statusInfo = normalizeInterviewStatus(c.engage_status);
                   const resumeScore = Math.round(c.match_score || 0);
+                  const parsedRecruiterEmails = getRecruiterEmailsArray(c.recruiter_emails); // Cache parsed emails once per row
 
                   return (
                     <TableRow key={c.candidate_id} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px]">
@@ -1074,10 +1076,10 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="text-center font-medium text-slate-600 text-[12px] border-l border-slate-200 min-w-[300px] max-w-[300px] px-3 align-top py-4">
-                        {c.recruiter_emails && getRecruiterEmailsArray(c.recruiter_emails).length > 0 ? (
+                        {parsedRecruiterEmails.length > 0 ? (
                           <div className="flex flex-col items-center justify-center w-full h-full gap-2 py-1">
-                            {getRecruiterEmailsArray(c.recruiter_emails).map((email, i) => (
-                              <span key={i} className="inline-block whitespace-nowrap leading-relaxed text-[11.5px] text-slate-500 text-center bg-slate-50 px-2.5 py-1 rounded-md border border-slate-100 max-w-full overflow-hidden text-ellipsis shadow-sm" title={email}>
+                            {parsedRecruiterEmails.map((email) => (
+                              <span key={email} className="inline-block whitespace-nowrap leading-relaxed text-[11.5px] text-slate-500 text-center bg-slate-50 px-2.5 py-1 rounded-md border border-slate-100 max-w-full overflow-hidden text-ellipsis shadow-sm" title={email}>
                                 {email}
                               </span>
                             ))}
