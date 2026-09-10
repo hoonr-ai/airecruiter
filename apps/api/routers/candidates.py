@@ -3007,15 +3007,18 @@ async def get_launched_candidates(
                         search_condition += " AND la.status = %s"
                         params.append(status)
 
+                # Feedback filter applied AFTER the DISTINCT ON CTE resolves
+                # (cannot be in the inner WHERE — DISTINCT ON picks the row before the filter sees it)
+                feedback_condition = ""
                 if feedback:
                     if feedback.lower() == "no feedback":
-                        search_condition += " AND (sc.data->>'feedback_type' IS NULL OR sc.data->>'feedback_type' = '')"
+                        feedback_condition = " WHERE (data->>'feedback_type' IS NULL OR data->>'feedback_type' = '')"
                     elif feedback.lower() == "submit":
-                        search_condition += " AND sc.data->>'feedback_type' = 'Submit'"
+                        feedback_condition = " WHERE data->>'feedback_type' = 'Submit'"
                     elif feedback.lower() == "reject":
-                        search_condition += " AND sc.data->>'feedback_type' LIKE 'Reject%'"
+                        feedback_condition = " WHERE data->>'feedback_type' LIKE 'Reject%'"
                     elif feedback.lower() == "unreachable":
-                        search_condition += " AND sc.data->>'feedback_type' = 'Unreachable'"
+                        feedback_condition = " WHERE data->>'feedback_type' = 'Unreachable'"
 
                 if source:
                     search_condition += " AND sc.source = %s"
@@ -3107,9 +3110,12 @@ async def get_launched_candidates(
                         LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
-                        ORDER BY sc.candidate_id, sc.created_at DESC
+                        ORDER BY sc.candidate_id,
+                            (sc.data->>'feedback_type' IS NOT NULL AND sc.data->>'feedback_type' <> '') DESC,
+                            sc.created_at DESC
                     )
                     SELECT * FROM launched_candidates
+                    {feedback_condition}
                     ORDER BY engage_created_at DESC NULLS LAST
                     LIMIT %s OFFSET %s;
                 """
@@ -3117,14 +3123,24 @@ async def get_launched_candidates(
                 candidates = cur.fetchall()
 
                 # Get total count
+                # Wrap in a subquery so feedback_condition (post-DISTINCT ON) is applied correctly
                 count_query = f"""
-                    {BASE_CTE}
-                    SELECT COUNT(DISTINCT sc.candidate_id) as total
-                    FROM sourced_candidates sc
-                    JOIN latest_audit la ON la.candidate_id = sc.candidate_id
-                    LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
-                    WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
-                      {search_condition}
+                    {BASE_CTE},
+                    launched_candidates_for_count AS (
+                        SELECT DISTINCT ON (sc.candidate_id)
+                            sc.candidate_id,
+                            sc.data
+                        FROM sourced_candidates sc
+                        JOIN latest_audit la ON la.candidate_id = sc.candidate_id
+                        LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
+                        WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
+                          {search_condition}
+                        ORDER BY sc.candidate_id,
+                            (sc.data->>'feedback_type' IS NOT NULL AND sc.data->>'feedback_type' <> '') DESC,
+                            sc.created_at DESC
+                    )
+                    SELECT COUNT(*) as total FROM launched_candidates_for_count
+                    {feedback_condition}
                 """
                 cur.execute(count_query, tuple(params[:-2]))
                 total_row = cur.fetchone()
