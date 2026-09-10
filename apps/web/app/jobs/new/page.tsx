@@ -956,10 +956,13 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. The two JobDiva talent pools and LinkedIn are pre-ticked
-  // (LinkedIn sourcing now round-robins across all attached Unipile
-  // accounts, so default-on no longer risks burning a single account);
-  // the recruiter opts in to Dice/Exa explicitly.
+  // switchboard now. The two JobDiva talent pools, LinkedIn, and Exa are
+  // pre-ticked (LinkedIn sourcing round-robins across all attached Unipile
+  // accounts, so default-on no longer risks burning a single account; Exa
+  // was defaulted off in the April QA punch list and re-enabled 2026-08 —
+  // untick it per job to skip). The recruiter opts in to Dice explicitly
+  // (its checkbox is currently hidden). Saved drafts keep whatever they
+  // persisted — this default only applies to jobs that never saved Step 5.
   //
   // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
   // recruiter set inside JobDiva) and `jobdiva_talent` (the boolean string
@@ -972,7 +975,7 @@ function NewJobPageContent() {
     jobdiva_talent: true,
     linkedin: true,
     dice: false,
-    exa: false,
+    exa: true,
   });
   // Either JobDiva pool selected — for the bits of Step 5 that care about
   // "is JobDiva in play at all" (Search-more button, result chips).
