@@ -3171,72 +3171,60 @@ async def get_launched_candidates(
                 if data_blob.get("engage_hard_filter_status"):
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
 
-            iid = cand.get("engage_interview_id")
-            live_payload = payloads_dict.get(str(iid).strip()) if iid else None
+            from routers.launch_report import build_merged_outreach_payload
+            iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
+            raw_live_api = payloads_dict.get(iid_str) if iid_str else None
+            
+            merged = build_merged_outreach_payload(
+                cand, 
+                cand.get("audit_response"), 
+                cand.get("engage_status"), 
+                raw_live_api
+            )
+            
+            outreach_status = merged.get("outreach_status") or merged.get("status")
+            if outreach_status:
+                cand["engage_status"] = outreach_status
+                if isinstance(data_blob, dict):
+                    data_blob["engage_status"] = outreach_status
+                    
+            first_completed_at = merged.get("first_completed_at")
+            if first_completed_at:
+                cand["engage_completed_at"] = first_completed_at
+                if isinstance(data_blob, dict):
+                    data_blob["engage_completed_at"] = first_completed_at
 
-            if live_payload and isinstance(live_payload, dict):
-                if live_payload.get("status"):
-                    cand["engage_status"] = live_payload.get("status")
-                
-                eval_dict = live_payload.get("evaluation")
-                score_val = None
-                total_val = None
-                if isinstance(eval_dict, dict):
-                    score_val = _pick_first_not_none(
-                        eval_dict.get("total_score"),
-                        eval_dict.get("candidate_score"),
-                        eval_dict.get("score")
-                    )
-                    total_val = _pick_first_not_none(
-                        eval_dict.get("max_score"),
-                        eval_dict.get("total_score_possible")
-                    )
-                if score_val is None:
-                    score_val = _pick_first_not_none(
-                        live_payload.get("candidate_score"),
-                        live_payload.get("overall_score"),
-                        live_payload.get("score")
-                    )
-                if score_val is not None:
-                    cand["engage_score"] = score_val
-                if total_val is not None:
-                    cand["engage_total_score"] = total_val
+            if not cand.get("engage_interview_id") and cand.get("audit_interview_id"):
+                cand["engage_interview_id"] = cand.get("audit_interview_id")
+                if isinstance(data_blob, dict):
+                    data_blob["engage_interview_id"] = cand.get("audit_interview_id")
 
-            # Fallback to audit_response or original_payload if engage_score is still missing
-            if cand.get("engage_score") is None:
-                resp = cand.get("audit_response")
-                if isinstance(resp, str) and resp.strip():
-                    try:
-                        resp = json.loads(resp)
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        resp = {}
-                if isinstance(resp, dict):
-                    aud_score = _pick_first_not_none(
-                        resp.get("candidate_score"),
-                        resp.get("overall_score"),
-                        resp.get("score")
-                    )
-                    if aud_score is not None:
-                        cand["engage_score"] = aud_score
-                    if resp.get("total_score") is not None:
-                        cand["engage_total_score"] = resp.get("total_score")
+            if not cand.get("engage_created_at") and cand.get("audit_created_at"):
+                cand["engage_created_at"] = cand.get("audit_created_at")
 
-            # Normalize score safely (handling string numbers and preventing division errors)
-            raw_score = _pick_first_not_none(cand.get("engage_score"), cand.get("engage_candidate_score"))
-            raw_total = cand.get("engage_total_score")
-            if raw_score is not None and raw_total is not None:
-                try:
-                    f_score = float(raw_score)
-                    f_total = float(raw_total)
-                    if f_total > 0:
-                        cand["engage_score"] = round((f_score / f_total) * 100, 1)
-                except (TypeError, ValueError):
-                    pass
-
-            # --- Score / status logic (mirrors per-job rankings endpoint) ---
             is_boolean_job = str(cand.get("screening_level") or "").strip().lower() == "l0.5"
 
+            if merged.get("score") is not None:
+                cand["engage_score"] = merged.get("score")
+            if merged.get("total_score") is not None:
+                cand["engage_total_score"] = merged.get("total_score")
+
+            # read-side normalization for consistency across views
+            norm_engage_score = None
+            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
+            raw_total = cand.get("engage_total_score")
+            
+            if raw_score is not None and raw_total and raw_total > 0:
+                norm_engage_score = round((float(raw_score) / float(raw_total)) * 100, 1)
+                cand["engage_score"] = norm_engage_score
+                cand["engage_total_score"] = 100
+            elif raw_score is not None:
+                cand["engage_score"] = raw_score
+
             hf_display = str(cand.get("engage_hard_filter_status") or "").lower()
+            score_display = cand.get("engage_score")
+
+            # Format engage_status
             status_display = _format_engage_status(cand.get("engage_status"), cand.get("engage_score"), hf_display)
             cand["engage_status"] = status_display
 
