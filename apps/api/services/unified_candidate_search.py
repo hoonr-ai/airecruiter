@@ -896,7 +896,11 @@ class UnifiedCandidateSearch:
             criteria_unconfigured = False
 
             if criteria.job_id:
-                resume_count = max(200, (criteria.page_size or 50) * 4)
+                # JobDiva's JobAgentSearch scales super-linearly: for slow jobs,
+                # 50→15s, 100→89s, 150→114s, 200+→timeout. Cap at 150 to stay
+                # under the 300s httpx timeout with margin while still
+                # over-fetching for client-side filters.
+                resume_count = min(150, max(50, (criteria.page_size or 50) * 4))
                 ja_result = await self.jobdiva_service.search_via_job_agent(
                     job_id=criteria.job_id,
                     resume_count=resume_count,
@@ -3032,7 +3036,11 @@ class UnifiedCandidateSearch:
         ]
         self._log_stage("ResumeScreen", f"checking {len(jobdiva_candidates)} JobDiva candidate resume(s) before LLM")
 
-        semaphore = asyncio.Semaphore(5)
+        # Bumped from 5 to 30: the prior cap dominated wall-clock when running
+        # resume-fetch + LLM on 100+ JobDiva rows (100/5 * ~3s/candidate ~= 60s).
+        # OpenAI tolerates 30 concurrent extractions comfortably; the slowest
+        # per-candidate step is JobDiva's resume fetch, not LLM.
+        semaphore = asyncio.Semaphore(30)
         counters = {
             "screened": 0,
             "skipped": 0,

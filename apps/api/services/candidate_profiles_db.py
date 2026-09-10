@@ -18,10 +18,41 @@ logger = logging.getLogger(__name__)
 
 
 class CandidateProfilesDB:
+    # Local-dev parity: if the schema isn't applied locally (e.g., running
+    # against a fresh Postgres without the `candidate_profiles` table), the
+    # per-candidate INSERT failures cascade into "transaction aborted" loops
+    # that starve the event loop and kill streaming sourcing responses. A
+    # one-shot probe sets this flag so all subsequent writes become no-ops.
+    _table_probe_done: bool = False
+    _tables_available: bool = True
+
     def __init__(self):
         # Kept for API compatibility; not used directly. Connection routing
         # now goes through core.db.get_db_connection().
         pass
+
+    @classmethod
+    def _check_tables(cls) -> bool:
+        if cls._table_probe_done:
+            return cls._tables_available
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM candidate_profiles LIMIT 0")
+            cls._tables_available = True
+        except Exception as e:
+            if "does not exist" in str(e):
+                logger.warning(
+                    "[CandidateProfilesDB] candidate_profiles table missing — "
+                    "disabling profile writes for this process. Apply the prod "
+                    "schema locally to re-enable persistence."
+                )
+                cls._tables_available = False
+            else:
+                logger.warning(f"[CandidateProfilesDB] Table probe error: {e!r}")
+                return True  # transient — allow normal call path to retry
+        cls._table_probe_done = True
+        return cls._tables_available
 
     def _resolve_candidate_id(self, candidate: Dict[str, Any], source: str) -> str:
         cid = str(candidate.get("candidate_id") or candidate.get("id") or "")
@@ -56,6 +87,8 @@ class CandidateProfilesDB:
         constant number of round-trips inside the shared connection.
         """
         if not candidates:
+            return 0
+        if not self._check_tables():
             return 0
 
         saved = 0
