@@ -765,7 +765,7 @@ export default function GlobalCandidatesPage() {
             </div>
 
             <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[150px]">
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min score</label>
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min resume screening score</label>
               <Input
                 type="number"
                 min={0}
@@ -1178,6 +1178,7 @@ export default function GlobalCandidatesPage() {
                       <option value="Previously rejected by client">Previously rejected by client</option>
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
+                      <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
                     </select>
                   </div>
                 </div>

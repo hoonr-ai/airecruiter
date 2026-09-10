@@ -896,6 +896,7 @@ export default function CandidateEvaluationReportPage() {
                       <option value="Previously rejected by client">Previously rejected by client</option>
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
+                      <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
                     </select>
                   </div>
                 </div>

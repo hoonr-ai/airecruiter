@@ -2138,7 +2138,7 @@ export default function CandidateRankingsPage() {
           </div>
 
           <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min score</label>
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min resume screening score</label>
             <Input
               type="number"
               min={0}
@@ -2958,6 +2958,7 @@ export default function CandidateRankingsPage() {
                       <option value="Previously rejected by client">Previously rejected by client</option>
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
+                      <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
                     </select>
                   </div>
                 </div>

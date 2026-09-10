@@ -3968,6 +3968,7 @@ async def save_candidate_feedback(
             "Previously rejected by client": "PAIR Reject - Previously rejected by client",
             "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
             "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
+            "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
         action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
     
