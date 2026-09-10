@@ -11,16 +11,14 @@ import {
   TableBody,
   TableCell,
   TableHead,
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
@@ -386,7 +384,6 @@ export default function GlobalCandidatesPage() {
   const [filterSource, setFilterSource] = useState("all");
   const [filterMinScore, handleFilterMinScoreChange, setFilterMinScore] = useClampedScoreInput("");
   const [availableSources, setAvailableSources] = useState<string[]>([]);
-  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
   const [isExporting, setIsExporting] = useState(false);
@@ -744,7 +741,6 @@ export default function GlobalCandidatesPage() {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        setIsExportModalOpen(false);
       } else {
         alert("No candidates found for the selected date range.");
       }
@@ -792,6 +788,23 @@ export default function GlobalCandidatesPage() {
             </div>
 
             <div className="flex items-center gap-4 shrink-0">
+              <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-2 h-9 shadow-sm">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pl-1">Launched</label>
+                <input
+                  type="date"
+                  value={exportStartDate}
+                  onChange={(e) => setExportStartDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
+                />
+                <span className="text-slate-300 text-[11px] uppercase font-bold">to</span>
+                <input
+                  type="date"
+                  value={exportEndDate}
+                  onChange={(e) => setExportEndDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[110px]"
+                />
+              </div>
+
             {totalCount > 0 && !isLoading && (
               <span className="text-[13px] font-medium text-slate-500 whitespace-nowrap">
                 Showing {candidates.length} of {totalCount}
@@ -801,12 +814,13 @@ export default function GlobalCandidatesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setIsExportModalOpen(true)}
+                onClick={handleExportWithDateRange}
+                disabled={isExporting}
                 className="h-9 px-3 flex items-center gap-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-sm transition-colors rounded-lg font-medium text-[12.5px]"
-                title="Export current view to CSV"
+                title="Export candidates matching current filters and date range"
               >
-                <Download className="h-3.5 w-3.5" />
-                Export CSV
+                {isExporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                {isExporting ? "Exporting..." : "Export CSV"}
               </Button>
             )}
           </div>
@@ -1195,53 +1209,6 @@ export default function GlobalCandidatesPage() {
           candidateName={selectedCandidateForActivity.name}
         />
       )}
-
-      {/* Export Date Range Modal */}
-      <Dialog open={isExportModalOpen} onOpenChange={setIsExportModalOpen}>
-        <DialogContent className="sm:max-w-[425px]">
-          <DialogHeader>
-            <DialogTitle>Export Candidates</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <p className="text-sm text-slate-500">
-              Select a date range to download candidates launched within that period. Current filters (Status, Feedback, Source, Min Score) will also be applied. Leave dates blank to export all.
-            </p>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <label htmlFor="start-date" className="text-right text-sm font-medium">
-                Start Date
-              </label>
-              <Input
-                id="start-date"
-                type="date"
-                className="col-span-3"
-                value={exportStartDate}
-                onChange={(e) => setExportStartDate(e.target.value)}
-              />
-            </div>
-            <div className="grid grid-cols-4 items-center gap-4">
-              <label htmlFor="end-date" className="text-right text-sm font-medium">
-                End Date
-              </label>
-              <Input
-                id="end-date"
-                type="date"
-                className="col-span-3"
-                value={exportEndDate}
-                onChange={(e) => setExportEndDate(e.target.value)}
-              />
-            </div>
-          </div>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => setIsExportModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleExportWithDateRange} disabled={isExporting}>
-              {isExporting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isExporting ? "Exporting..." : "Export"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Integration Modals */}
       {integrationModalOpen && actionCandidateId && (
