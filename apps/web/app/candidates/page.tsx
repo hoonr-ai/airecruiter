@@ -710,7 +710,7 @@ export default function GlobalCandidatesPage() {
 
           {/* Row 2: Filters */}
           <div className="flex flex-wrap items-center gap-3 w-full">
-            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[180px]">
+            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-[200px] shrink-0">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
               <select
@@ -729,7 +729,7 @@ export default function GlobalCandidatesPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[180px]">
+            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-[200px] shrink-0">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
               <select
@@ -748,7 +748,7 @@ export default function GlobalCandidatesPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[180px]">
+            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-[200px] shrink-0">
               <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
               <select
@@ -766,7 +766,7 @@ export default function GlobalCandidatesPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[150px]">
+            <div className="flex items-center gap-2 bg-white rounded-lg px-3 h-9 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all flex-1 shadow-sm min-w-[250px]">
               <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min resume screening score</label>
               <Input
                 type="number"

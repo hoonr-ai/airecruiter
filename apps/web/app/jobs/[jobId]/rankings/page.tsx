@@ -615,7 +615,7 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
-  const [minScore, setMinScore] = useState<number>(0);
+  const [minScore, setMinScore] = useState<number | "">("");
   // Default the rank list to fit-score descending so it actually ranks by
   // score rather than by the source-priority pre-sort applied at load time.
   const [sortField, setSortField] = useState<SortField>("total_score");
@@ -816,7 +816,7 @@ export default function CandidateRankingsPage() {
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
       // Min score
       const score = c.match_score ?? c.resume_match_percentage ?? 0;
-      if (score < minScore) return false;
+      if (minScore !== "" && score < minScore) return false;
 
       // Column (Funnel) Filters
       for (const [field, filter] of Object.entries(columnFilters)) {
@@ -925,7 +925,7 @@ export default function CandidateRankingsPage() {
     setStatusFilter("all");
     setActivityFilter("all");
     setSourceFilter("all");
-    setMinScore(0);
+    setMinScore("");
     setColumnFilters({});
   };
 
@@ -1733,7 +1733,7 @@ export default function CandidateRankingsPage() {
     statusFilter !== "all" ||
     activityFilter !== "all" ||
     sourceFilter !== "all" ||
-    minScore > 0
+    minScore !== "" && minScore > 0
   );
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
@@ -2147,10 +2147,15 @@ export default function CandidateRankingsPage() {
               max={100}
               value={minScore}
               onChange={(e) => {
-                const n = Number.parseInt(e.target.value, 10);
-                setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
+                const val = e.target.value;
+                if (val === "") {
+                  setMinScore("");
+                } else {
+                  const n = Number.parseInt(val, 10);
+                  setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
+                }
               }}
-              className="h-7 w-14 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
+              className="h-7 w-16 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
             />
           </div>
 
