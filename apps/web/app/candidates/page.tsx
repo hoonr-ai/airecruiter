@@ -968,7 +968,7 @@ export default function GlobalCandidatesPage() {
             containerClassName="overflow-visible"
             className="min-w-[1750px] border-separate border-spacing-0"
           >
-            <TableHeader className="bg-slate-50/80 sticky top-0 z-40 backdrop-blur-sm shadow-sm">
+            <TableHeader className="bg-slate-50 sticky top-0 z-40 shadow-sm">
               <TableRow className="border-b-slate-200 hover:bg-transparent h-[50px]">
                 <TableHead className="w-[50px] min-w-[50px] max-w-[50px] sticky left-0 z-30 bg-slate-50 text-center font-bold text-slate-500 text-[12px] uppercase tracking-wider px-2">#</TableHead>
                 <TableHead className="w-[120px] min-w-[120px] max-w-[120px] sticky left-[50px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">JOBDIVA ID</TableHead>
