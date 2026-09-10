@@ -161,6 +161,44 @@ def resolve_jobdiva_sources(sources: Sequence[str]) -> Dict[str, bool]:
     }
 
 
+def apply_score_na_policy(cand: Dict[str, Any]) -> Dict[str, Any]:
+    """N/A policy — a displayed 0% must mean "assessed and failed a filter",
+    never "we had nothing to assess".
+
+    A genuine hard-veto (exclusion rule / out-of-radius) always takes
+    precedence and keeps its 0%, as does a 0 produced by soft exclusion
+    penalties (that is filter signal too). Everything else unscoreable
+    surfaces as N/A (match_score=None) so it renders as "N/A" in the UI and
+    isn't dropped at Launch PAIR:
+
+      1. ``detail_failed`` — the JobDiva detail/résumé fetch or LLM
+         extraction yielded no real data.
+      2. Any other exact-0 with no filter hit — the unmatched-group floors
+         mean an assessed candidate always lands above 0, so a 0 without a
+         veto/penalty is "limited data", not a verdict.
+
+    Mutates and returns ``cand``. Mirrored client-side in
+    ``apps/web/lib/match-score.ts``.
+    """
+    details = cand.get("match_score_details") or {}
+    hard_veto = details.get("hard_veto") or {}
+    if hard_veto.get("triggered"):
+        return cand
+    has_exclusion_penalty = any(
+        isinstance(d, dict) and d.get("exclusion_penalty")
+        for d in details.values()
+    )
+    if cand.get("detail_failed"):
+        cand["match_score"] = None
+    elif cand.get("match_score") == 0 and not has_exclusion_penalty:
+        cand["match_score"] = None
+        cand["explainability"] = [
+            "Not enough candidate data for a fair score — shown "
+            "as N/A (not a filter failure)"
+        ] + list(cand.get("explainability") or [])[:5]
+    return cand
+
+
 class SearchCriteria(BaseModel):
     job_id: str
     title_criteria: List[Dict[str, Any]] = []
@@ -668,18 +706,11 @@ class UnifiedCandidateSearch:
                 cand["match_score"] = min(100, prev_score + OPEN_TO_WORK_SCORE_BONUS)
                 cand["match_score_details"]["open_to_work_bonus"] = OPEN_TO_WORK_SCORE_BONUS
 
-            # Candidate-details failure: when the JobDiva detail/résumé fetch or
-            # LLM extraction yielded no real data (detail_failed), we can't fairly
-            # score the candidate. Surface "N/A" (match_score=None) instead of a
-            # misleading 0% / floored score so they aren't dropped at Launch PAIR.
-            # A genuine hard-veto (exclusion rule / out-of-radius) always takes
-            # precedence — those keep their 0% and are skipped at launch.
-            if cand.get("detail_failed"):
-                hard_veto = (cand.get("match_score_details") or {}).get("hard_veto") or {}
-                if not hard_veto.get("triggered"):
-                    cand["match_score"] = None
-
-            return cand
+            # N/A policy (see apply_score_na_policy): unscoreable rows —
+            # detail_failed, or an exact-0 with no hard-veto and no exclusion
+            # penalty — surface as N/A (match_score=None) instead of a
+            # misleading 0%. Genuine filter failures keep their 0%.
+            return apply_score_na_policy(cand)
 
         # Which JobDiva producers this request selects — see
         # resolve_jobdiva_sources for the source-name contract.

@@ -194,3 +194,64 @@ def test_career_stability_none_when_undated(scorer):
 def test_profile_linkedin_full_credit(scorer):
     assert scorer._score_profile({"urls": {"linkedin": "https://li/x"}}) == 1.0
     assert scorer._score_profile({}) is None
+
+
+# ---------------------------------------------------------------- N/A policy
+# apply_score_na_policy: a displayed 0% must mean "assessed and failed a
+# filter". Any other unscoreable shape (detail_failed, exact-0 with no
+# hard-veto and no exclusion penalty) becomes match_score=None → "N/A".
+def test_na_policy_zero_without_filter_hit_becomes_none():
+    from services.unified_candidate_search import apply_score_na_policy
+
+    cand = {
+        "match_score": 0,
+        "explainability": ["something"],
+        "match_score_details": {"hard_veto": {"triggered": False, "reasons": []}},
+    }
+    out = apply_score_na_policy(cand)
+    assert out["match_score"] is None
+    assert out["explainability"][0].startswith("Not enough candidate data")
+
+
+def test_na_policy_hard_veto_keeps_zero():
+    from services.unified_candidate_search import apply_score_na_policy
+
+    cand = {
+        "match_score": 0,
+        "match_score_details": {"hard_veto": {"triggered": True, "reasons": ["x"]}},
+    }
+    assert apply_score_na_policy(cand)["match_score"] == 0
+
+
+def test_na_policy_exclusion_penalty_keeps_zero():
+    from services.unified_candidate_search import apply_score_na_policy
+
+    cand = {
+        "match_score": 0,
+        "match_score_details": {
+            "hard_veto": {"triggered": False, "reasons": []},
+            "Skills Match": {"weight": 45.0, "score": 0.0, "exclusion_penalty": 12.0},
+        },
+    }
+    assert apply_score_na_policy(cand)["match_score"] == 0
+
+
+def test_na_policy_detail_failed_becomes_none_positive_score_kept():
+    from services.unified_candidate_search import apply_score_na_policy
+
+    failed = {"match_score": 34, "detail_failed": True, "match_score_details": {}}
+    assert apply_score_na_policy(failed)["match_score"] is None
+
+    scored = {"match_score": 34, "match_score_details": {}}
+    assert apply_score_na_policy(scored)["match_score"] == 34
+
+
+def test_na_policy_detail_failed_hard_veto_precedence():
+    from services.unified_candidate_search import apply_score_na_policy
+
+    cand = {
+        "match_score": 0,
+        "detail_failed": True,
+        "match_score_details": {"hard_veto": {"triggered": True, "reasons": ["x"]}},
+    }
+    assert apply_score_na_policy(cand)["match_score"] == 0

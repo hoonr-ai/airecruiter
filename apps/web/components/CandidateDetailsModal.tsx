@@ -20,6 +20,7 @@ import {
   DialogDescription
 } from "@/components/ui/dialog";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
+import { isScoreNA } from "@/lib/match-score";
 
 import { memo } from "react";
 
@@ -34,7 +35,7 @@ interface CandidateDetailsModalProps {
   workLocation?: string;
   experienceYears?: number | string | null;
   tags?: string[];
-  matchScore?: number;
+  matchScore?: number | null;
   missingSkills?: string[];
   matchedSkills?: string[];
   matchScoreDetails?: Record<string, any>;
@@ -68,20 +69,26 @@ function formatLocation(loc: string): string {
   return toTitleCase(loc);
 }
 
-function ScoreRing({ score }: { score: number }) {
+function ScoreRing({ score }: { score: number | null }) {
   const radius = 44;
   const stroke = 7;
   const normalizedRadius = radius - stroke / 2;
   const circumference = 2 * Math.PI * normalizedRadius;
-  const progress = Math.min(Math.max(score, 0), 100) / 100;
+  // null → unscoreable (limited data, no hard-filter failure): neutral grey
+  // "N/A" ring instead of a red 0 that reads as a failing verdict.
+  const isNA = score == null;
+  const progress = isNA ? 0 : Math.min(Math.max(score, 0), 100) / 100;
   const strokeDashoffset = circumference * (1 - progress);
 
-  const color =
-    score >= 85 ? "#10b981" : score >= 65 ? "#f59e0b" : "#f43f5e";
-  const bgColor =
-    score >= 85 ? "#d1fae5" : score >= 65 ? "#fef3c7" : "#ffe4e6";
-  const label =
-    score >= 85 ? "Excellent" : score >= 65 ? "Good Fit" : "Low Match";
+  const color = isNA
+    ? "#94a3b8"
+    : score >= 85 ? "#10b981" : score >= 65 ? "#f59e0b" : "#f43f5e";
+  const bgColor = isNA
+    ? "#e2e8f0"
+    : score >= 85 ? "#d1fae5" : score >= 65 ? "#fef3c7" : "#ffe4e6";
+  const label = isNA
+    ? "Not Scored"
+    : score >= 85 ? "Excellent" : score >= 65 ? "Good Fit" : "Low Match";
 
   return (
     <div className="flex flex-col items-center gap-1">
@@ -109,8 +116,12 @@ function ScoreRing({ score }: { score: number }) {
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-[22px] font-black leading-none" style={{ color }}>{score}</span>
-          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">/ 100</span>
+          <span className="text-[22px] font-black leading-none" style={{ color }}>
+            {isNA ? "N/A" : score}
+          </span>
+          {!isNA && (
+            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">/ 100</span>
+          )}
         </div>
       </div>
       <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color }}>{label}</span>
@@ -151,7 +162,7 @@ function CandidateDetailsModalBase({
   workLocation,
   experienceYears,
   tags,
-  matchScore = 0,
+  matchScore,
   missingSkills,
   matchedSkills,
   matchScoreDetails,
@@ -275,9 +286,14 @@ function CandidateDetailsModalBase({
             </div>
           </div>
 
-          {/* Score ring */}
+          {/* Score ring — N/A (grey) when there's no fair score and no
+              hard-filter failure; only genuine filter fails show a 0. */}
           <div className="shrink-0 ml-1">
-            <ScoreRing score={matchScore} />
+            <ScoreRing
+              score={
+                isScoreNA(matchScore, matchScoreDetails) ? null : (matchScore as number)
+              }
+            />
           </div>
         </div>
 

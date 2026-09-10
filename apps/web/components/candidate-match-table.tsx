@@ -30,6 +30,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { getCandidateLocations } from "@/lib/candidate-location";
+import { hasHardFilterFail } from "@/lib/match-score";
 
 export type CandidateMatchSortKey =
   | "match"
@@ -375,7 +376,12 @@ export function CandidateMatchTable({
               const moreMatchedCount = Math.max(0, matched.length - 3);
               const matchScore =
                 typeof candidate.match_score === "number" ? candidate.match_score : null;
-              const tone = getMatchTone(matchScore);
+              // 0% is only shown for genuine hard-filter failures (hard-veto /
+              // exclusion penalty). Any other 0/absent score renders as the
+              // grey "N/A" pill — limited data, not a verdict.
+              const hardFilterFail = hasHardFilterFail(candidate.match_score_details);
+              const showScore = matchScore != null && (matchScore > 0 || hardFilterFail);
+              const tone = getMatchTone(showScore ? matchScore : null);
               const { home: homeLocation, work: workLocation } = getCandidateLocations(candidate);
               const lastActiveDate = getLastActiveDate(candidate);
               const lastActiveShort = formatLastActiveShort(lastActiveDate);
@@ -485,7 +491,7 @@ export function CandidateMatchTable({
                       else scoreRefs.current.delete(id);
                     }}
                     onMouseEnter={(e) => {
-                      if (matchScore != null && tone) {
+                      if (showScore && tone) {
                         setHoveredId(id);
                         computePosition(e.currentTarget);
                       }
@@ -503,7 +509,7 @@ export function CandidateMatchTable({
                       >
                         —
                       </span>
-                    ) : matchScore != null && tone ? (
+                    ) : showScore && tone ? (
                       <button
                         type="button"
                         onClick={() => onOpenDetails(candidate)}
@@ -529,7 +535,16 @@ export function CandidateMatchTable({
                         data-testid="shimmer-score"
                       />
                     ) : (
-                      <span className="text-slate-300">—</span>
+                      // No usable score and no hard-filter failure (e.g. a 0
+                      // produced from too little data, or a row that was never
+                      // scored). N/A instead of a misleading red 0% — only
+                      // genuine hard-filter fails keep their 0%.
+                      <span
+                        className="inline-flex items-center justify-center w-12 h-12 rounded-full font-bold text-[12px] bg-slate-100 text-slate-500 border-2 border-slate-200"
+                        title="Couldn't fairly score — limited candidate data (not a hard filter failure). Still launchable."
+                      >
+                        N/A
+                      </span>
                     )}
                   </TableCell>
                   <TableCell>
@@ -804,7 +819,12 @@ function HoverDetailsCard({
 
   const matchScore =
     typeof candidate.match_score === "number" ? candidate.match_score : null;
-  const matchTone = getMatchTone(matchScore);
+  // Same N/A policy as the score column: only a hard-filter failure earns a
+  // visible 0% — a data-starved 0 shows no score chip here.
+  const showScore =
+    matchScore != null &&
+    (matchScore > 0 || hasHardFilterFail(candidate.match_score_details));
+  const matchTone = getMatchTone(showScore ? matchScore : null);
 
   const sourceBadge = getSourceBadge(candidate.source, candidate.sources);
   const hasDeepEnrichment =
@@ -866,7 +886,7 @@ function HoverDetailsCard({
                   </span>
                 </>
               )}
-              {matchScore != null && matchTone && (
+              {showScore && matchTone && (
                 <>
                   <span className="text-slate-300">·</span>
                   <span

@@ -79,6 +79,7 @@ import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 import { CandidateMatchTable, type CandidateMatchSortKey } from "@/components/candidate-match-table";
+import { isCandidateScoreNA } from "@/lib/match-score";
 import { MissingContactsModal, type MissingContactCandidate } from "@/components/missing-contacts-modal";
 import {
   LaunchPairProgressModal,
@@ -1566,9 +1567,11 @@ function NewJobPageContent() {
       const stage = String(c?._stage || "");
       const awaitingScore = stage === "agent_result" || stage === "details_loaded";
       const awaitingDetails = stage === "agent_result";
-      // Candidates we couldn't score (detail_failed → N/A) are exempt from the
-      // min-score filter — a failed detail lookup must not hide a JobDiva row.
-      if (minScore > 0 && !awaitingScore && !c?.detail_failed) {
+      // Candidates we couldn't score (detail_failed / limited data → N/A) are
+      // exempt from the min-score filter — an unscoreable row must not be
+      // hidden by a score threshold it never got a fair shot at. Hard-filter
+      // 0% rows still filter normally.
+      if (minScore > 0 && !awaitingScore && !c?.detail_failed && !isCandidateScoreNA(c)) {
         const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
@@ -2380,7 +2383,7 @@ function NewJobPageContent() {
       setPasteName("");
       setPasteEmail("");
       setPasteResumeText("");
-      showToast(`Saved ${cand.name} (score ${cand.match_score ?? "—"})`, "success");
+      showToast(`Saved ${cand.name} (score ${cand.match_score ?? "N/A"})`, "success");
     } catch (err) {
       console.error("Paste resume failed:", err);
       showToast("Failed to save resume", "error");
