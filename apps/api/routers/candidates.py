@@ -3018,6 +3018,7 @@ async def get_launched_candidates(
                             AND NOT EXISTS (
                                 SELECT 1 FROM sourced_candidates sc2
                                 WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.jobdiva_id = sc.jobdiva_id
                                   AND sc2.data->>'feedback_type' IS NOT NULL
                                   AND TRIM(sc2.data->>'feedback_type') <> ''
                             )"""
@@ -3026,6 +3027,7 @@ async def get_launched_candidates(
                             AND EXISTS (
                                 SELECT 1 FROM sourced_candidates sc2
                                 WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.jobdiva_id = sc.jobdiva_id
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
                             )"""
                     elif f_lower in ("reject", "rejected"):
@@ -3033,6 +3035,7 @@ async def get_launched_candidates(
                             AND EXISTS (
                                 SELECT 1 FROM sourced_candidates sc2
                                 WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.jobdiva_id = sc.jobdiva_id
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
                             )"""
                     elif f_lower in ("unreachable",):
@@ -3040,6 +3043,7 @@ async def get_launched_candidates(
                             AND EXISTS (
                                 SELECT 1 FROM sourced_candidates sc2
                                 WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.jobdiva_id = sc.jobdiva_id
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
                             )"""
 
