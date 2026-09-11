@@ -2,13 +2,41 @@ from services.outreach_normalization import normalize_channel, normalize_phase
 
 
 def test_normalize_phase_standard_and_aliases():
+    assert normalize_phase("contact_check") == "contact_check"
+    assert normalize_phase("contact check") == "contact_check"
     assert normalize_phase("phase1") == "phase1"
-    assert normalize_phase("PHASE 2") == "phase2"
+    assert normalize_phase("Phase 1") == "phase1"
+    assert normalize_phase("phase1_6hr") == "phase1_6hr"
+    assert normalize_phase("PHASE 2") == "phase1_6hr"
+    assert normalize_phase("6hr") == "phase1_6hr"
+    assert normalize_phase("phase2") == "phase2"
+    assert normalize_phase("Phase 3") == "phase2"
+    assert normalize_phase("phase3") == "phase3"
+    assert normalize_phase("Phase 4") == "phase3"
     assert normalize_phase("stage3") == "phase3"
-    assert normalize_phase("3") == "phase3"
-    assert normalize_phase("contact_check") == "phase1"
+    assert normalize_phase("phase1_extra") == "phase1_extra"
+    assert normalize_phase("Extra Outreach Phase 1") == "phase1_extra"
+    assert normalize_phase("phase1_6hr_extra") == "phase1_6hr_extra"
+    assert normalize_phase("Extra Outreach Phase 2") == "phase1_6hr_extra"
+    assert normalize_phase("phase2_extra") == "phase2_extra"
+    assert normalize_phase("Extra Outreach Phase 3") == "phase2_extra"
+    assert normalize_phase("high_score_extra") == "phase1_extra"
     assert normalize_phase("unknown_phase") is None
     assert normalize_phase(None) is None
+
+
+def test_normalize_phase_allow_pending_aliases():
+    assert normalize_phase("contact_check", allow_pending_aliases=True) == "contact_check"
+    assert normalize_phase("contact_check", allow_pending_aliases=False) is None
+    assert normalize_phase("queued", allow_pending_aliases=True) == "contact_check"
+    assert normalize_phase("queued", allow_pending_aliases=False) is None
+    assert normalize_phase("scheduled", allow_pending_aliases=False) is None
+    assert normalize_phase("not_started", allow_pending_aliases=False) is None
+    # Real phases should not be suppressed by allow_pending_aliases=False
+    assert normalize_phase("phase1", allow_pending_aliases=False) == "phase1"
+    assert normalize_phase("phase1_6hr", allow_pending_aliases=False) == "phase1_6hr"
+    assert normalize_phase("phase2", allow_pending_aliases=False) == "phase2"
+    assert normalize_phase("phase3", allow_pending_aliases=False) == "phase3"
 
 
 def test_normalize_channel_standard_and_aliases():
