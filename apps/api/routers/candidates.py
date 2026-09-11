@@ -3013,37 +3013,33 @@ async def get_launched_candidates(
                 feedback_exists_condition = ""
                 if feedback:
                     f_lower = feedback.strip().lower()
+                    
+                    # Shared correlation to scope feedback to the same candidate and job
+                    correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND sc2.jobdiva_id = sc.jobdiva_id"
+
                     if f_lower in ("no feedback", "none", "no_feedback"):
-                        feedback_exists_condition = """
+                        feedback_exists_condition = f"""
                             AND NOT EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND sc2.jobdiva_id = sc.jobdiva_id
+                                {correlation_scaffold}
                                   AND sc2.data->>'feedback_type' IS NOT NULL
                                   AND TRIM(sc2.data->>'feedback_type') <> ''
                             )"""
                     elif f_lower in ("submit", "submitted"):
-                        feedback_exists_condition = """
+                        feedback_exists_condition = f"""
                             AND EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND sc2.jobdiva_id = sc.jobdiva_id
+                                {correlation_scaffold}
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
                             )"""
                     elif f_lower in ("reject", "rejected"):
-                        feedback_exists_condition = """
+                        feedback_exists_condition = f"""
                             AND EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND sc2.jobdiva_id = sc.jobdiva_id
+                                {correlation_scaffold}
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
                             )"""
                     elif f_lower in ("unreachable",):
-                        feedback_exists_condition = """
+                        feedback_exists_condition = f"""
                             AND EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND sc2.jobdiva_id = sc.jobdiva_id
+                                {correlation_scaffold}
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
                             )"""
 
