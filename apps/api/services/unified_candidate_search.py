@@ -1264,6 +1264,10 @@ class UnifiedCandidateSearch:
                 # Geo verdict → UI "~N mi away" badge on the location cell.
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
+                # Résumé-is-final residence: which side won and, when the
+                # résumé overrode the profile, what the profile said → UI
+                # "résumé" badge + tooltip on the location cell.
+                "location_source", "profile_location", "location_conflict",
                 "qualifications", "employee_status", "available",
                 "availability_status", "current_company",
                 # Candidate-details failure flag → UI renders "N/A" + keeps the
@@ -1880,15 +1884,11 @@ class UnifiedCandidateSearch:
                             cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
                             cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
-                        # Source-native location is authoritative; the LLM's
-                        # resume-parsed current_location only fills a blank
-                        # (it can latch onto a past employer / education city).
-                        # Both sides sanitized: "Remote"/"Hybrid" is a work
-                        # arrangement, never a place.
-                        cand["location"] = (
-                            sanitize_candidate_location(cand.get("location"))
-                            or sanitize_candidate_location(cand["enhanced_info"].get("current_location"))
-                        )
+                        # Résumé is final for residence (see
+                        # _apply_resume_location): an explicitly stated
+                        # résumé location replaces the profile's; the profile
+                        # value only stands when the résumé is silent.
+                        self._apply_resume_location(cand)
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 
@@ -3658,6 +3658,67 @@ class UnifiedCandidateSearch:
             candidate["distance_miles"] = round(float(distance), 1)
         return is_match
 
+    @staticmethod
+    def _resume_location_authoritative() -> bool:
+        from core import sourcing_config as _sc_loc
+        return bool(getattr(_sc_loc, "RESUME_LOCATION_AUTHORITATIVE", True))
+
+    def _apply_resume_location(self, candidate: Dict[str, Any]) -> bool:
+        """Post-LLM residence resolution — the résumé is final.
+
+        When the extraction found an explicitly stated current location
+        (``enhanced_info.current_location``; the prompt forbids inferring it
+        from employers / education), it REPLACES the source-native location
+        (JobDiva CRM city/state, LinkedIn area) on ``candidate["location"]``
+        for display, scoring and the location / country gates. A JobDiva
+        record that says "Dallas, TX" for a résumé headed "Hyderabad, India"
+        is rated and launched as India. When the résumé is silent the source
+        value stands (legacy behaviour). Both sides go through the
+        work-arrangement sanitizer: "Remote"/"Hybrid" is never a place.
+
+        Stamps ``location_source`` ("resume" | "profile"); when the résumé
+        overrides a different source value, also ``profile_location`` and
+        ``location_conflict = {"resume", "profile"}`` (UI badge + score
+        popup line), and clears the cached geo verdict so the gates
+        recompute on the final value. Returns True when the résumé won.
+        ``RESUME_LOCATION_AUTHORITATIVE=False`` restores fill-blank-only.
+        """
+        enhanced = candidate.get("enhanced_info")
+        enhanced = enhanced if isinstance(enhanced, dict) else {}
+        source_loc = sanitize_candidate_location(candidate.get("location"))
+        if not source_loc:
+            source_loc = sanitize_candidate_location(", ".join(
+                p for p in [
+                    str(candidate.get("city") or "").strip(),
+                    str(candidate.get("state") or "").strip(),
+                ] if p
+            ))
+        resume_loc = sanitize_candidate_location(enhanced.get("current_location"))
+
+        if not resume_loc or not self._resume_location_authoritative():
+            candidate["location"] = source_loc or resume_loc
+            if candidate["location"]:
+                candidate["location_source"] = "profile" if source_loc else "resume"
+            return False
+
+        if source_loc and (
+            normalize_location_string(source_loc).lower()
+            != normalize_location_string(resume_loc).lower()
+        ):
+            candidate["profile_location"] = source_loc
+            candidate["location_conflict"] = {"resume": resume_loc, "profile": source_loc}
+        else:
+            candidate.pop("location_conflict", None)
+        candidate["location"] = resume_loc
+        candidate["location_source"] = "resume"
+        # The geo verdict cached against the source location is stale now.
+        for key in (
+            "distance_miles", "location_out_of_radius",
+            "location_match_reason", "location_veto_reason",
+        ):
+            candidate.pop(key, None)
+        return True
+
     def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
         """Return the candidate's current residence locations only.
 
@@ -3666,20 +3727,26 @@ class UnifiedCandidateSearch:
         so the radius filter doesn't accidentally match a candidate to a city
         they worked in five years ago.
 
-        Order of preference:
-        1. ``candidate.city + ", " + candidate.state`` (live source field —
-           for JobDiva rows this is the CRM record; background detail
-           hydration refreshes it)
-        2. ``candidate.location`` (live source field)
-        3. ``enhanced_info.current_location`` (LLM-extracted from resume) —
-           ONLY consulted when the source fields are blank. The LLM value can
-           latch onto a past-employer/education city, and because this list
-           feeds ``_is_likely_outside_country`` / radius verdicts, a wrong
-           entry here can veto a genuinely local candidate (or pass a remote
-           one), so it must never ride alongside authoritative source data.
+        Order of preference (RESUME_LOCATION_AUTHORITATIVE, the default):
+        1. ``enhanced_info.current_location`` — the residence the résumé
+           states explicitly. When present it is the ONLY value returned:
+           the source's city/state must not ride alongside it, or a US CRM
+           record would pass the country gate for an India résumé (the exact
+           case behind the 2026-09-11 "résumé is final" policy).
+        2. ``candidate.city + ", " + candidate.state`` (live source field —
+           for JobDiva rows this is the CRM record)
+        3. ``candidate.location`` (live source field)
+        With the flag off, the legacy order applies: source fields first and
+        the résumé value only when they are blank.
         """
         enhanced = candidate.get("enhanced_info") or {}
         enhanced_dict = enhanced if isinstance(enhanced, dict) else {}
+
+        if self._resume_location_authoritative():
+            resume_loc = sanitize_candidate_location(enhanced_dict.get("current_location"))
+            if resume_loc:
+                loc = normalize_location_string(resume_loc)
+                return [loc] if loc else []
 
         city = str(candidate.get("city") or "").strip()
         state = str(candidate.get("state") or "").strip()
@@ -4399,17 +4466,22 @@ class UnifiedCandidateSearch:
                 elif isinstance(item, str):
                     certification_terms.append(item)
 
-        # Source-native location first; LLM-extracted current_location is a
-        # last-resort fallback (it can name a past-employer/education city).
+        # Résumé is final for residence: the explicitly stated résumé
+        # location is the only location term when present (see
+        # _candidate_structured_locations). Otherwise source-native fields.
         # Arrangement strings are stripped — "Remote" must not be scored as a
         # place.
-        location_terms = unique_terms([
-            sanitize_candidate_location(
-                f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
-            ),
-            sanitize_candidate_location(candidate.get("location", "")),
-            sanitize_candidate_location(enhanced.get("current_location", "")),
-        ])
+        resume_location_term = sanitize_candidate_location(enhanced.get("current_location", ""))
+        if resume_location_term and self._resume_location_authoritative():
+            location_terms = unique_terms([resume_location_term])
+        else:
+            location_terms = unique_terms([
+                sanitize_candidate_location(
+                    f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
+                ),
+                sanitize_candidate_location(candidate.get("location", "")),
+                resume_location_term,
+            ])
 
         resume_years = 0
         raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
@@ -5005,10 +5077,17 @@ class UnifiedCandidateSearch:
         # their score — the badge fields stamped above still render the
         # distance and the recruiter filters via the UI chips. Every other
         # source falls through to the hard veto below.
+        # Résumé-is-final policy: the exemption trusts JobDiva's own location
+        # filtering, which is exactly what a conflicting résumé location just
+        # contradicted — then the mismatch vetoes like any other source.
         from core import sourcing_config as _sc_gate
+        resume_contradicts_profile = bool(
+            candidate.get("location_source") == "resume" and candidate.get("location_conflict")
+        )
         if (
             str(candidate.get("source") or "") == "JobDiva-JobAgent"
             and not getattr(_sc_gate, "JOBAGENT_LOCATION_HARD_VETO", False)
+            and not resume_contradicts_profile
         ):
             return None
         if reason in ("state_mismatch", "relocation_excluded_by_filter"):
@@ -5183,6 +5262,12 @@ class UnifiedCandidateSearch:
         score_details: Dict[str, Any] = {}
         hard_fail_reasons: List[str] = []
         hard_filters: Dict[str, str] = {}
+        # Buckets left out of the denominator, with why — the score is always
+        # normalized to 100 from whatever COULD be evaluated: a rubric with no
+        # preferred items, or a profile with no title to judge, must not drag
+        # a strong must-have match down. Surfaced in score_details and the
+        # popup so the recruiter sees why a 75-point match reads 100%.
+        not_evaluated: List[str] = []
 
         # ── Hard filter: exclusion rules ─────────────────────────────────
         # "Currently employed by client" / "must not be employed by X" ride
@@ -5285,12 +5370,22 @@ class UnifiedCandidateSearch:
                 hard_filters["must_have_skills"] = "unknown"
         else:
             hard_filters["must_have_skills"] = "n/a"
+            not_evaluated.append("Must-have skills (no must-have skills in the rubric)")
 
         # ── Bucket 2: Recent title / role relevancy (15) ─────────────────
         title_groups = _groups(title_dim, "required_groups") + _groups(title_dim, "preferred_groups")
         title_criteria = list(getattr(criteria, "title_criteria", []) or [])
         w_title = float(SCORING_MATRIX_WEIGHTS.get("title_recent", 15.0))
-        if title_groups or title_criteria:
+        has_title_data = bool(profile.get("titles")) or bool(_candidate_titles(candidate))
+        if (title_groups or title_criteria) and not has_title_data:
+            # Rubric asks for a title but the profile carries none to judge —
+            # a data gap, not a mismatch. Leave the bucket out (weight 0 hides
+            # it from the popup bars) and normalize on the rest.
+            score_details["Recent Title Relevance"] = {
+                "weight": 0.0, "score": 0.0, "skipped": "no title on profile",
+            }
+            not_evaluated.append("Title relevance (no title on the profile)")
+        elif title_groups or title_criteria:
             title_collections = title_dim.get("collections") or ["titles"]
             term_credit = 0.0
             best_title_label = ""
@@ -5331,6 +5426,8 @@ class UnifiedCandidateSearch:
                 explainability.append("Title relevance: no recent title match")
                 if best_title_label:
                     missing_required.append(f"Title: {best_title_label}")
+        else:
+            not_evaluated.append("Title relevance (no title criteria in the rubric)")
 
         # ── Bucket 3: Preferred (10) ─────────────────────────────────────
         # Preferred skills + domain/industry + education + preferred certs.
@@ -5351,7 +5448,23 @@ class UnifiedCandidateSearch:
             kind = g.get("kind") if isinstance(g, dict) else ""
             pref_items.append((g, edu_collections, "Certification" if kind == "certification" else "Education"))
         w_pref = float(SCORING_MATRIX_WEIGHTS.get("preferred", 10.0))
-        if pref_items:
+        # Evaluable only when the profile has SOMETHING the preferred items
+        # can be judged against — résumé text or data in any collection the
+        # items score on. An empty parse must not read as "missed every
+        # preferred item".
+        has_pref_data = has_text or any(
+            profile.get(collection)
+            for _group, collections, _prefix in pref_items
+            for collection in collections
+        )
+        if pref_items and not has_pref_data:
+            score_details["Preferred"] = {
+                "weight": 0.0, "score": 0.0, "skipped": "no profile data to judge preferred items",
+            }
+            not_evaluated.append("Preferred (no profile data to judge against)")
+        elif not pref_items:
+            not_evaluated.append("Preferred (no preferred skills / domain / education in the rubric)")
+        if pref_items and has_pref_data:
             weighted = 0.0
             total_w = 0.0
             pref_matched: List[str] = []
@@ -5405,6 +5518,15 @@ class UnifiedCandidateSearch:
             hard_filters["location"] = "fail"
         else:
             hard_filters["location"] = "pass" if self._should_enforce_location(criteria) else "n/a"
+        # Résumé-is-final residence: say which location was judged when the
+        # résumé overrode the profile, so a veto (or a pass) on "India"
+        # doesn't read as a contradiction of the "Dallas, TX" the CRM shows.
+        _conflict = candidate.get("location_conflict")
+        if isinstance(_conflict, dict) and _conflict.get("resume"):
+            explainability.append(
+                f"Location taken from résumé: {_conflict['resume']}"
+                + (f" (profile said {_conflict['profile']})" if _conflict.get("profile") else "")
+            )
 
         # ── Hard filter: minimum years floor (Step-5 "min experience") ──
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
@@ -5435,6 +5557,20 @@ class UnifiedCandidateSearch:
         }
         score_details["hard_filters"] = hard_filters
         score_details["matrix"] = "v2"
+        # Always scored out of 100: what was actually evaluated and what was
+        # left out (rubric gap or profile data gap), so the popup can say
+        # "normalized from 75 evaluated points".
+        full_weight = float(sum(SCORING_MATRIX_WEIGHTS.values())) or 100.0
+        score_details["normalization"] = {
+            "evaluated_weight": round(weighted_max, 2),
+            "full_weight": round(full_weight, 2),
+            "not_evaluated": not_evaluated,
+        }
+        if buckets and not_evaluated and weighted_max < full_weight:
+            explainability.append(
+                f"Normalized to 100% from {round(weighted_max):g} evaluated points — not evaluated: "
+                + "; ".join(not_evaluated[:3])
+            )
 
         if hard_fail_reasons:
             score = 0
@@ -6356,16 +6492,11 @@ class UnifiedCandidateSearch:
                     candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                    # JobDiva's structured city/state is authoritative for
-                    # residence; the LLM's resume-parsed current_location only
-                    # fills a blank (it can latch onto a past employer or
-                    # education city — e.g. a candidate living in Ajax, ON
-                    # whose resume mentions Hyderabad). Both sides sanitized:
-                    # a work-arrangement string is never a place.
-                    candidate["location"] = (
-                        sanitize_candidate_location(candidate.get("location"))
-                        or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
-                    )
+                    # Résumé is final for residence (see _apply_resume_location):
+                    # the résumé's explicitly stated location replaces
+                    # JobDiva's CRM city/state; the CRM value stands only when
+                    # the résumé is silent.
+                    self._apply_resume_location(candidate)
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -6782,14 +6913,8 @@ class UnifiedCandidateSearch:
                     candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                    # Source-native location wins; LLM extraction fills blanks
-                    # only (resume text can name past-employer/education
-                    # cities). Both sides sanitized: a work-arrangement string
-                    # is never a place.
-                    candidate["location"] = (
-                        sanitize_candidate_location(candidate.get("location"))
-                        or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
-                    )
+                    # Résumé is final for residence (see _apply_resume_location).
+                    self._apply_resume_location(candidate)
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -6896,13 +7021,11 @@ class UnifiedCandidateSearch:
                 candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                 candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                 candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                # LinkedIn profile location is authoritative; LLM extraction
-                # from the synthesized profile text only fills a blank. Both
-                # sides sanitized: LinkedIn areas can literally read "Remote".
-                candidate["location"] = (
-                    sanitize_candidate_location(candidate.get("location"))
-                    or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
-                )
+                # Résumé/profile-text location is final when explicitly
+                # stated (see _apply_resume_location); the LinkedIn area
+                # stands only when the extraction found none. Both sides
+                # sanitized: LinkedIn areas can literally read "Remote".
+                self._apply_resume_location(candidate)
                 candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                 candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                 candidate["urls"] = candidate["enhanced_info"].get("urls", {})

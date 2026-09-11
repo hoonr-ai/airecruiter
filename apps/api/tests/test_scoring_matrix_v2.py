@@ -94,7 +94,7 @@ def test_full_match_across_all_three_buckets_is_100(scorer):
     assert d["band"]["tier"] == "excellent"
 
 
-# ---------------------------------------------------------------- redistribution
+# ---------------------------------------------------------------- redistribution / normalization
 def test_only_must_have_rubric_redistributes_to_skills(scorer):
     crit = _criteria(skill_criteria=[{"value": "Python", "match_type": "must"}])
     cand = {"enhanced_info": {"structured_skills": _skills("Python")}}
@@ -102,6 +102,52 @@ def test_only_must_have_rubric_redistributes_to_skills(scorer):
     assert res["score"] == 100
     assert "Recent Title Relevance" not in res["score_details"]
     assert "Preferred" not in res["score_details"]
+    norm = res["score_details"]["normalization"]
+    assert norm["evaluated_weight"] == 75.0 and norm["full_weight"] == 100.0
+    assert any("no title criteria" in n for n in norm["not_evaluated"])
+    assert any("no preferred" in n for n in norm["not_evaluated"])
+    assert any(line.startswith("Normalized to 100% from 75 evaluated points") for line in res["explainability"])
+
+
+def test_title_bucket_skipped_when_profile_has_no_title(scorer):
+    """Rubric asks for a title but the profile carries none → data gap, not a
+    mismatch: the bucket is left out (weight 0) and the rest normalizes to 100."""
+    crit = _criteria(
+        title_criteria=[{"value": "Data Engineer", "match_type": "must"}],
+        skill_criteria=[{"value": "Python", "match_type": "must"}],
+    )
+    cand = {"enhanced_info": {"structured_skills": _skills("Python")}}
+    res = scorer._score_candidate(cand, crit)
+    assert res["score"] == 100
+    assert res["score_details"]["Recent Title Relevance"]["weight"] == 0.0
+    assert res["score_details"]["Recent Title Relevance"]["skipped"] == "no title on profile"
+    assert any("Title relevance (no title on the profile)" in n
+               for n in res["score_details"]["normalization"]["not_evaluated"])
+
+
+def test_title_bucket_scores_zero_when_profile_title_mismatches(scorer):
+    """A real title that doesn't match is a mismatch, not a gap — it stays in
+    the denominator (75 of 90 → 83)."""
+    crit = _criteria(
+        title_criteria=[{"value": "Data Engineer", "match_type": "must"}],
+        skill_criteria=[{"value": "Python", "match_type": "must"}],
+    )
+    cand = {"title": "Accountant", "enhanced_info": {"structured_skills": _skills("Python")}}
+    res = scorer._score_candidate(cand, crit)
+    assert res["score"] == 83
+    assert res["score_details"]["Recent Title Relevance"]["weight"] == 15.0
+
+
+def test_preferred_bucket_skipped_without_any_profile_data(scorer):
+    crit = _criteria(skill_criteria=[
+        {"value": "Python", "match_type": "must"},
+        {"value": "Rust", "match_type": "can"},
+    ])
+    # No résumé text, no parsed skills / education / companies at all.
+    cand = {"title": "Engineer"}
+    res = scorer._score_candidate(cand, crit)
+    assert res["score_details"]["Preferred"]["weight"] == 0.0
+    assert res["score_details"]["hard_filters"]["must_have_skills"] == "unknown"
 
 
 def test_partial_must_have_lands_in_expected_bands(scorer):
