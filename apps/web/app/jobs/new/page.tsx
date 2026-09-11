@@ -10299,7 +10299,8 @@ function NewJobPageContent() {
                   </Button>
                   {/* Source & Launch PAIR — the single launch action on Step 5.
                       sampled/restored → full search + auto-launch (≥ floor);
-                      complete → launch the not-yet-launched remainder, so a
+                      complete → reads "Launch PAIR" and launches the
+                      not-yet-launched remainder without re-searching, so a
                       recruiter coming back to this screen can launch more. */}
                   <Button
                     type="button"
@@ -10326,7 +10327,7 @@ function NewJobPageContent() {
                       : isSourceAndLaunchRunning
                         ? "Sourcing & Launching…"
                         : searchPhase === "complete"
-                          ? "Launch More PAIR"
+                          ? "Launch PAIR"
                           : "Source & Launch PAIR"}
                   </Button>
                 </div>
