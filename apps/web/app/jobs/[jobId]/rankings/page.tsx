@@ -1775,7 +1775,7 @@ export default function CandidateRankingsPage() {
       )}
 
       {/* Rankings Page Header matching the premium UI */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-8 shadow-sm">
+      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-4 shadow-sm">
         <div className="flex justify-between items-start mb-6">
           <div className="flex items-start gap-4">
             <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100/50">
@@ -2115,118 +2115,126 @@ export default function CandidateRankingsPage() {
 
       {/* Table Interface */}
       <div className="space-y-4">
-        {/* Filter bar: search + status + source + min-score. All filter state
-            feeds into the `filteredCandidates` useMemo above. */}
-        <div className="flex flex-wrap items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm mb-6">
-          <div className="relative min-w-[160px] flex-1 max-w-[280px]">
-            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-              <Search className="h-4 w-4 text-slate-400" />
+        {/* Filter bar: search + activity + candidate count in Row 1; filters in Row 2 */}
+        <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm mb-3 space-y-2.5">
+          {/* Row 1: Search bar, Activity History, Showing text */}
+          <div className="flex flex-wrap items-center justify-between gap-3 w-full">
+            <div className="flex items-center gap-2.5 flex-1 min-w-[280px]">
+              <div className="relative flex-1 max-w-[340px]">
+                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                  <Search className="h-4 w-4 text-slate-400" />
+                </div>
+                <Input
+                  placeholder="Search name, email, or location..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[12px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                />
+              </div>
+
+              <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none shrink-0 ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-slate-50 border-transparent hover:bg-slate-100 text-slate-500"}`}
+                onClick={() => setActivityFilter(activityFilter === "has_activity" ? "all" : "has_activity")}
+                title="Show only candidates with activity history"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
+              </div>
             </div>
-            <Input
-              placeholder="Search name, email, or location..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[12px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-            />
+
+            <div className="flex items-center gap-2.5 text-[12px] font-bold text-slate-500 shrink-0 whitespace-nowrap">
+              {hasActiveFilters && (
+                <button
+                  onClick={clearFilters}
+                  className="h-8 px-2.5 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" /> Clear
+                </button>
+              )}
+
+              <div>
+                {(hasActiveFilters || isPartiallyLoaded) ? (
+                  <>
+                    {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900">{displayedCount}</span> of <span className="text-slate-900">{totalCandidates}</span>
+                    <span className="text-slate-500"> total candidates</span>
+                  </>
+                ) : (
+                  <>
+                    Showing <span className="text-slate-900">{totalCandidates}</span>
+                    <span className="text-slate-500"> total candidates</span>
+                  </>
+                )}
+                {isPartiallyLoaded && (
+                  <span className="ml-1.5 text-[11px] font-medium text-slate-400">(Loaded {candidates.length} so far)</span>
+                )}
+              </div>
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[80px]"
-            >
-              <option value="all">All</option>
-              <option value="pass">Pass</option>
-              <option value="fail">Fail</option>
-              <option value="in_progress">In Progress</option>
-              <option value="pending">Pending</option>
-              <option value="n/a">N/A</option>
-              <option value="duplicate_candidate">Duplicate Candidate</option>
-              <option value="invalid_contact">Invalid Contact</option>
-              <option value="unreachable">Unreachable</option>
-            </select>
-          </div>
+          {/* Row 2: Status, Source, Feedback, Min Resume Score */}
+          <div className="flex flex-wrap items-center gap-2.5 w-full pt-1">
+            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+              <Filter className="w-3.5 h-3.5 text-slate-400" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[80px]"
+              >
+                <option value="all">All</option>
+                <option value="pass">Pass</option>
+                <option value="fail">Fail</option>
+                <option value="in_progress">In Progress</option>
+                <option value="pending">Pending</option>
+                <option value="n/a">N/A</option>
+                <option value="duplicate_candidate">Duplicate Candidate</option>
+                <option value="invalid_contact">Invalid Contact</option>
+              </select>
+            </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Source</label>
-            <select
-              value={sourceFilter}
-              onChange={(e) => setSourceFilter(e.target.value)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
-            >
-              <option value="all">All</option>
-              {availableSources.map(s => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </div>
+            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+              <Filter className="w-3.5 h-3.5 text-slate-400" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Source</label>
+              <select
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value)}
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
+              >
+                <option value="all">All</option>
+                {availableSources.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Feedback</label>
-            <select
-              value={feedbackFilter}
-              onChange={(e) => setFeedbackFilter(e.target.value)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[125px]"
-            >
-              <option value="">All</option>
-              <option value="no feedback">No Feedback</option>
-              <option value="submit">Submitted</option>
-              <option value="reject">Rejected</option>
-              <option value="unreachable">Unreachable</option>
-            </select>
-          </div>
+            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+              <Filter className="w-3.5 h-3.5 text-slate-400" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Feedback</label>
+              <select
+                value={feedbackFilter}
+                onChange={(e) => setFeedbackFilter(e.target.value)}
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[125px]"
+              >
+                <option value="">All</option>
+                <option value="no feedback">No Feedback</option>
+                <option value="submit">Submitted</option>
+                <option value="reject">Rejected</option>
+                <option value="unreachable">Unreachable</option>
+              </select>
+            </div>
 
-          <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none shrink-0 ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-slate-50 border-transparent hover:bg-slate-100 text-slate-500"}`}
-            onClick={() => setActivityFilter(activityFilter === "has_activity" ? "all" : "has_activity")}
-            title="Show only candidates with activity history"
-          >
-            <Activity className="w-3.5 h-3.5" />
-            <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
-          </div>
-
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min Resume Score</label>
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              value={minScore}
-              onChange={(e) => {
-                handleMinScoreChange(e.target.value);
-              }}
-              className="h-7 w-16 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
-            />
-          </div>
-
-          {hasActiveFilters && (
-            <button
-              onClick={clearFilters}
-              className="h-9 px-3 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
-            >
-              <X className="w-3.5 h-3.5" /> Clear
-            </button>
-          )}
-
-          <div className="ml-auto text-[12px] font-bold text-slate-500 px-2 text-right shrink-0 whitespace-nowrap">
-            {(hasActiveFilters || isPartiallyLoaded) ? (
-              <>
-                {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900">{displayedCount}</span> of <span className="text-slate-900">{totalCandidates}</span>
-                <span className="text-slate-500"> total candidates</span>
-              </>
-            ) : (
-              <>
-                Showing <span className="text-slate-900">{totalCandidates}</span>
-                <span className="text-slate-500"> total candidates</span>
-              </>
-            )}
-            {isPartiallyLoaded && (
-              <div className="text-[11px] font-medium text-slate-400">Loaded {candidates.length} so far</div>
-            )}
+            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min Resume Score</label>
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                value={minScore}
+                onChange={(e) => {
+                  handleMinScoreChange(e.target.value);
+                }}
+                className="h-7 w-16 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
+              />
+            </div>
           </div>
         </div>
 
