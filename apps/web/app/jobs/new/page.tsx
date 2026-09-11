@@ -1132,6 +1132,12 @@ function NewJobPageContent() {
   // "No outreach for less than 60%": the Source & Launch floor. Mirrors the
   // backend's SCORING_OUTREACH_MIN_SCORE / lib/match-score OUTREACH_MIN_SCORE.
   const AUTO_LAUNCH_MIN_SCORE = OUTREACH_MIN_SCORE;
+  // QA-only bypass: launch PAIR for the best 1 or 2 rows currently on screen
+  // (sample or full run), skipping the full search AND the 60% floor, so QA
+  // can exercise the launch pipeline end-to-end without sourcing hundreds of
+  // people. Hard exclusions (client employee / no-contact / already
+  // launched) still apply. Rendered and honoured only when IS_QA_ENV.
+  const [qaQuickLaunchCount, setQaQuickLaunchCount] = useState<1 | 2>(1);
   // Armed by handleSourceAndLaunch: the launch must fire AFTER the
   // auto-selection lands in selectedCandidates state (the launch flow reads
   // that state), so a selection-effect performs the actual launch call.
@@ -6737,6 +6743,49 @@ function NewJobPageContent() {
     };
   };
 
+  // QA bypass (see qaQuickLaunchCount): best N of the rows on screen, by
+  // score (unscored last), no search, no floor. Same arm-and-launch path as
+  // Source & Launch so enrichment / DNC / missing-contact handling is real.
+  const handleQaQuickLaunch = () => {
+    if (!IS_QA_ENV) return;
+    if (isSearching || isEnrichingContacts || launchProgress.open || isViewOnly) return;
+    const idOf = (c: Record<string, unknown>) =>
+      String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+    const seen = new Set<string>();
+    const eligible: { id: string; score: number }[] = [];
+    for (const c of candidatesRef.current) {
+      const id = idOf(c);
+      if (!id || seen.has(id)) continue;
+      if (getCandidateExclusionReason(c)) continue;
+      if (c?.no_contact === true) continue;
+      const launchedKey = `${c?.source ?? ""}:${id}`;
+      if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
+      seen.add(id);
+      eligible.push({ id, score: typeof c?.match_score === "number" ? c.match_score : -1 });
+    }
+    const ids = eligible
+      .sort((a, b) => b.score - a.score)
+      .slice(0, qaQuickLaunchCount)
+      .map((e) => e.id);
+    if (ids.length === 0) {
+      showToast("QA quick launch: no launchable rows on screen. Run Search first.", "info");
+      return;
+    }
+    trackEvent("job_wizard_step5_qa_quick_launch", {
+      step: 5,
+      requested: qaQuickLaunchCount,
+      selected_count: ids.length,
+      pool_size: candidatesRef.current.length,
+      search_phase: searchPhase,
+    });
+    showToast(
+      `QA bypass — launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} from the current rows (no full search, no ${AUTO_LAUNCH_MIN_SCORE}% floor)…`,
+      "info",
+    );
+    searchAndLaunchArmedRef.current = true;
+    setSelectedCandidates(new Set(ids));
+  };
+
   // Source & Launch PAIR (footer button). Two entry states:
   //   sampled / restored results → run the FULL search (normal limits +
   //     boolean relaxation, assess_all_sources), then auto-launch PAIR for
@@ -10250,6 +10299,80 @@ function NewJobPageContent() {
                 Step 5 to keep sourcing focused on the boolean-string workflow. */}
             </div>
 
+  {/* Legend — how the score and the launch decisions are made. Mirrors
+      core/config.py SCORING_MATRIX_* / score_band and lib/match-score.ts so
+      the recruiter can read the "why" without opening a score popup. */}
+  <div className="mt-8 rounded-xl border border-slate-200 bg-slate-50/70 px-5 py-4">
+    <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400 mb-3">
+      How scoring &amp; launch work
+    </p>
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-5 text-[12px] leading-relaxed text-slate-600">
+      <div>
+        <p className="font-bold text-slate-800 mb-1">Match score · out of 100</p>
+        <ul className="space-y-1">
+          <li className="flex gap-2">
+            <span className="w-6 shrink-0 font-extrabold text-slate-900">75</span>
+            <span>Recent must-have skills — the rubric&apos;s must-haves and their JobDiva-mapped similar skills, required years, and how recently they were used</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="w-6 shrink-0 font-extrabold text-slate-900">15</span>
+            <span>Recent title / role relevancy</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="w-6 shrink-0 font-extrabold text-slate-900">10</span>
+            <span>Preferred — preferred skills, domain / industry, education</span>
+          </li>
+        </ul>
+        <p className="mt-1.5 text-slate-500">
+          Skills and location are judged from the résumé; the JobDiva profile
+          fills in only when the résumé is silent. A bucket the rubric
+          doesn&apos;t define, or the profile has no data for, is left out and
+          the rest is normalized to 100%.
+        </p>
+      </div>
+      <div>
+        <p className="font-bold text-slate-800 mb-1">Hard filters · pass / fail → 0%</p>
+        <ul className="space-y-1 list-disc pl-4">
+          <li>Currently employed by the client</li>
+          <li>None of the must-have skills evidenced</li>
+          <li>Required certification missing</li>
+          <li>Confirmed outside the mandatory location</li>
+          <li>Below the minimum years of experience</li>
+          <li>Work authorization — asked by PAIR on the call</li>
+        </ul>
+        <p className="mt-1.5 text-slate-500">
+          0% rows stay visible for transparency and are never launched.
+        </p>
+      </div>
+      <div>
+        <p className="font-bold text-slate-800 mb-1">Ranking &amp; launch</p>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
+            {SCORE_BAND_EXCELLENT}–100 Excellent · Priority
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-bold">
+            {SCORE_BAND_STRONG}–{SCORE_BAND_EXCELLENT - 1} Strong · Recommended
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-bold">
+            {SCORE_BAND_GOOD}–{SCORE_BAND_STRONG - 1} Good · Recruiter review
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 font-bold">
+            &lt;{SCORE_BAND_GOOD} Low priority · No outreach
+          </span>
+        </div>
+        <p>
+          <span className="font-semibold text-slate-700">Run Search</span> previews the
+          best {SAMPLE_MIN_PER_SOURCE}–{SAMPLE_PER_SOURCE} candidates per source.{" "}
+          <span className="font-semibold text-slate-700">Source &amp; Launch PAIR</span> runs
+          the full search and launches the best {launchCount} (the &quot;Launch up to&quot;
+          number) at {AUTO_LAUNCH_MIN_SCORE}% or higher; afterwards{" "}
+          <span className="font-semibold text-slate-700">Launch PAIR</span> launches the
+          remaining ones. Unscored (N/A) rows are never auto-launched.
+        </p>
+      </div>
+    </div>
+  </div>
+
   {/* Launch Footer */ }
   < div className = "border-t border-slate-200 pt-6 mt-2 flex items-center justify-between" >
               <span className="text-[13px] font-medium text-slate-400 max-w-[46%]">
@@ -10275,6 +10398,7 @@ function NewJobPageContent() {
               </span>
               <div className="flex flex-col items-end gap-2">
                 {IS_QA_ENV && (
+                  <div className="flex items-center gap-4">
                   <button
                     type="button"
                     onClick={() => setQaOverrideEnabled(v => !v)}
@@ -10295,6 +10419,33 @@ function NewJobPageContent() {
                       {qaOverrideEnabled ? "ON" : "OFF"}
                     </span>
                   </button>
+                  {/* QA-only bypass: launch the best 1–2 rows on screen with
+                      no full search and no 60% floor. */}
+                  <label
+                    className="flex items-center gap-1.5 text-[12px] font-semibold text-slate-600 select-none"
+                    title="QA bypass: launch PAIR for the best 1 or 2 rows currently on screen — no full search, no 60% floor. Hard exclusions still apply."
+                  >
+                    QA launch
+                    <select
+                      value={qaQuickLaunchCount}
+                      onChange={(e) => setQaQuickLaunchCount(Number(e.target.value) === 2 ? 2 : 1)}
+                      disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
+                      aria-label="QA quick launch count"
+                      className="h-7 px-1.5 text-[12px] font-bold text-slate-800 border border-slate-200 rounded-md bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:bg-slate-50 disabled:text-slate-400"
+                    >
+                      <option value={1}>1</option>
+                      <option value={2}>2</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleQaQuickLaunch}
+                      disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open || !hasSearched || candidates.length === 0}
+                      className="h-7 px-2.5 rounded-md text-[12px] font-bold border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Quick launch (bypass)
+                    </button>
+                  </label>
+                  </div>
                 )}
                 <div className="flex items-center gap-2">
                   <Button
