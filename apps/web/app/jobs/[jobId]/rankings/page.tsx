@@ -2114,69 +2114,57 @@ export default function CandidateRankingsPage() {
       {/* Table Interface */}
       <div className="space-y-4">
         {/* Filter bar: search + activity + candidate count in Row 1; filters in Row 2 */}
-        <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm mb-3 space-y-2.5">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm mb-3 flex flex-col gap-4 p-4">
           {/* Row 1: Search bar, Activity History, Showing text */}
-          <div className="flex flex-wrap items-center justify-between gap-3 w-full">
-            <div className="flex items-center gap-2.5 flex-1 min-w-[280px]">
-              <div className="relative flex-1 max-w-[340px]">
-                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                  <Search className="h-4 w-4 text-slate-400" />
-                </div>
-                <Input
-                  placeholder="Search name, email, or location..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[12px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-                />
-              </div>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
+            <div className="relative shrink-0 min-w-[200px] flex-1 max-w-[460px]">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+              <Input
+                placeholder="Search name, email, or location..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 w-full h-9 text-[13px] bg-white border-slate-200 focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500 transition-all rounded-lg shadow-sm"
+              />
+            </div>
 
-              <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none shrink-0 ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-slate-50 border-transparent hover:bg-slate-100 text-slate-500"}`}
+            <div className="flex items-center gap-4 shrink-0">
+              <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-white border-slate-200 hover:bg-slate-50 text-slate-500 shadow-sm"}`}
                 onClick={() => setActivityFilter(activityFilter === "has_activity" ? "all" : "has_activity")}
                 title="Show only candidates with activity history"
               >
                 <Activity className="w-3.5 h-3.5" />
                 <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
               </div>
-            </div>
 
-            <div className="flex items-center gap-2.5 text-[12px] font-bold text-slate-500 shrink-0 whitespace-nowrap">
               {hasActiveFilters && (
                 <button
                   onClick={clearFilters}
-                  className="h-8 px-2.5 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
+                  className="h-9 px-3 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors border border-slate-200 bg-white shadow-sm"
                 >
                   <X className="w-3.5 h-3.5" /> Clear
                 </button>
               )}
 
-              <div>
-                {(hasActiveFilters || isPartiallyLoaded) ? (
-                  <>
-                    {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900">{displayedCount}</span> of <span className="text-slate-900">{totalCandidates}</span>
-                    <span className="text-slate-500"> total candidates</span>
-                  </>
-                ) : (
-                  <>
-                    Showing <span className="text-slate-900">{totalCandidates}</span>
-                    <span className="text-slate-500"> total candidates</span>
-                  </>
-                )}
-                {isPartiallyLoaded && (
-                  <span className="ml-1.5 text-[11px] font-medium text-slate-400">(Loaded {candidates.length} so far)</span>
-                )}
-              </div>
+              {(totalCandidates > 0 || hasActiveFilters) && (
+                <span className="text-[13px] font-medium text-slate-500 whitespace-nowrap">
+                  {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900 font-semibold">{hasActiveFilters ? displayedCount : totalCandidates}</span>
+                  {hasActiveFilters && <> of <span className="text-slate-900 font-semibold">{totalCandidates}</span></>}
+                  {" "}total candidates
+                  {isPartiallyLoaded && <span className="ml-1 text-[11px] text-slate-400">(Loading…)</span>}
+                </span>
+              )}
             </div>
           </div>
 
           {/* Row 2: Status, Source, Feedback, Min Resume Score */}
-          <div className="flex flex-wrap items-center gap-2.5 w-full pt-1">
-            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-              <Filter className="w-3.5 h-3.5 text-slate-400" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Status</label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[80px]"
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
               >
                 <option value="all">All</option>
                 <option value="pass">Pass</option>
@@ -2189,13 +2177,13 @@ export default function CandidateRankingsPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-              <Filter className="w-3.5 h-3.5 text-slate-400" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Source</label>
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
               <select
                 value={sourceFilter}
                 onChange={(e) => setSourceFilter(e.target.value)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
               >
                 <option value="all">All</option>
                 {availableSources.map(s => (
@@ -2204,13 +2192,13 @@ export default function CandidateRankingsPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-              <Filter className="w-3.5 h-3.5 text-slate-400" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Feedback</label>
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
               <select
                 value={feedbackFilter}
                 onChange={(e) => setFeedbackFilter(e.target.value)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[125px]"
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
               >
                 <option value="">All</option>
                 <option value="no feedback">No Feedback</option>
@@ -2220,8 +2208,8 @@ export default function CandidateRankingsPage() {
               </select>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min Resume Score</label>
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
               <Input
                 type="number"
                 min={0}
@@ -2230,7 +2218,7 @@ export default function CandidateRankingsPage() {
                 onChange={(e) => {
                   handleMinScoreChange(e.target.value);
                 }}
-                className="h-7 w-16 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
+                className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
               />
             </div>
           </div>
