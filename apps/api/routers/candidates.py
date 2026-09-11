@@ -3,11 +3,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime, timezone
+from email.utils import parseaddr
 import httpx
+import os
 import re
+from urllib.parse import quote
 
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service, jobdiva_profile_id
@@ -64,6 +68,41 @@ def _to_iso_z(dt_val) -> str:
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+MANAGER_EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+
+
+def _manager_email_domains() -> List[str]:
+    raw_domains = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
+    return [domain.strip().lower().lstrip("@") for domain in raw_domains.split(",") if domain.strip()]
+
+
+def _normalize_manager_email_for_internal_submission(manager_email: Optional[str]) -> str:
+    email = (manager_email or "").strip()
+    if not email:
+        raise HTTPException(status_code=422, detail="manager_email is required for internal submissions")
+
+    _, parsed_email = parseaddr(email)
+    if parsed_email != email or not MANAGER_EMAIL_RE.fullmatch(email):
+        raise HTTPException(status_code=422, detail="manager_email must be a valid email address")
+
+    local_part, domain = email.rsplit("@", 1)
+    normalized_email = f"{local_part}@{domain.lower()}"
+    allowed_domains = _manager_email_domains()
+    normalized_domain = domain.lower()
+    if allowed_domains and not any(
+        normalized_domain == allowed_domain or normalized_domain.endswith(f".{allowed_domain}")
+        for allowed_domain in allowed_domains
+    ):
+        raise HTTPException(status_code=422, detail="manager_email must use an approved company domain")
+
+    return normalized_email
+
+
+def _candidate_report_link(base_url: str, job_id_or_ref: str, candidate_id: str) -> str:
+    safe_job_ref = quote(str(job_id_or_ref or ""), safe="")
+    safe_candidate_id = quote(str(candidate_id or ""), safe="")
+    return f"{base_url}/jobs/{safe_job_ref}/report?candidateId={safe_candidate_id}"
 
 
 def _json_load_safe(value: Any, default: Any):
@@ -4115,6 +4154,9 @@ async def save_candidate_feedback(
     """
     _verify_job_access_by_id(job_id_or_ref, user)
     submission_mode = (request.submission_type or "external").lower().strip()
+    manager_email = None
+    if request.feedback_type == "Submit" and submission_mode == "internal":
+        manager_email = _normalize_manager_email_for_internal_submission(request.manager_email)
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
         f"{request.feedback_type} (mode={submission_mode}, by {user.email})"
@@ -4249,7 +4291,8 @@ async def save_candidate_feedback(
     from core import JOBDIVA_PAIR_RECRUITER_ID
     from core.email import resolve_app_base_url
     
-    report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = _candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     if request.feedback_type == "Unreachable":
         logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
@@ -4259,7 +4302,7 @@ async def save_candidate_feedback(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
 
@@ -4283,7 +4326,7 @@ async def save_candidate_feedback(
             if request.feedback_type == "Submit":
                 feedback_data["submission_type"] = submission_mode
                 if submission_mode == "internal":
-                    feedback_data["manager_email"] = (request.manager_email or "").strip()
+                    feedback_data["manager_email"] = manager_email
                     if request.recruiter_notes:
                         feedback_data["recruiter_notes"] = request.recruiter_notes.strip()
 
@@ -4312,13 +4355,13 @@ async def save_candidate_feedback(
         logger.error(f"❌ Failed to persist feedback locally: {e}")
 
     # 4b. If this is an internal submission, dispatch email notification to the manager
-    if request.feedback_type == "Submit" and submission_mode == "internal" and request.manager_email:
+    if request.feedback_type == "Submit" and submission_mode == "internal" and manager_email:
         try:
             from core.email import notify_internal_submission_to_manager
             recruiter_display_name = getattr(user, "name", None) or user.email
             await asyncio.to_thread(
                 notify_internal_submission_to_manager,
-                manager_email=request.manager_email.strip(),
+                manager_email=manager_email,
                 recruiter_name=recruiter_display_name,
                 recruiter_email=user.email,
                 candidate_name=cand_name,
@@ -4328,7 +4371,7 @@ async def save_candidate_feedback(
                 customer_name=customer_name_resolved,
                 recruiter_notes=request.recruiter_notes,
             )
-            logger.info(f"📧 Sent internal submission email to manager {request.manager_email} for candidate {jd_candidate_id}")
+            logger.info(f"📧 Sent internal submission email to manager {manager_email} for candidate {jd_candidate_id}")
         except Exception as e:
             logger.error(f"❌ Failed to send internal submission email to manager: {e}")
 

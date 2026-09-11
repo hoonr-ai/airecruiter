@@ -30,6 +30,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,11 @@ def resolve_app_base_url(override: Optional[str] = None) -> str:
     if candidate.startswith("http://") or candidate.startswith("https://"):
         return candidate
     return (APP_BASE_URL or "https://pair.pyramidci.com").rstrip("/")
+
+def candidate_report_link(base_url: str, job_id_or_ref: str, candidate_id: str) -> str:
+    safe_job_ref = quote(str(job_id_or_ref or ""), safe="")
+    safe_candidate_id = quote(str(candidate_id or ""), safe="")
+    return f"{base_url}/jobs/{safe_job_ref}/report?candidateId={safe_candidate_id}"
 
 def _smtp_configured() -> bool:
     """Return True only when enough SMTP settings are present to attempt a send."""
@@ -672,7 +678,8 @@ def notify_candidate_passed(
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
     rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings?source=email"
     # Deep link to the candidate evaluation report
-    report_link    = f"{base_url}/jobs/{jobdiva_id}/report?candidateId={candidate_id}"
+    report_link    = candidate_report_link(base_url, jobdiva_id, candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -879,7 +886,7 @@ def notify_candidate_passed(
     </table>
 
     <p style="margin:0 0 24px;text-align:center;">
-      {_btn(report_link, "View Full Candidate Report →")}
+          {_btn(safe_report_link, "View Full Candidate Report →")}
     </p>
 
     <div style="background:#fff7ed;border:1px solid #ffedd5;border-radius:8px;padding:12px;">
@@ -945,7 +952,8 @@ def notify_internal_submission_to_manager(
         return False
 
     base_url = resolve_app_base_url(app_base_url)
-    report_link = f"{base_url}/jobs/{job_id_or_ref}/report?candidateId={candidate_id}"
+    report_link = candidate_report_link(base_url, job_id_or_ref, candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     safe_candidate = html.escape(candidate_name or "Candidate")
     safe_recruiter = html.escape(recruiter_name or recruiter_email or "Recruiter")
@@ -987,11 +995,11 @@ def notify_internal_submission_to_manager(
     </p>
 
     <div style="text-align:center;margin:24px 0;">
-      {_btn(report_link, "Review Candidate &amp; Submit Externally", color="#4f46e5")}
+      {_btn(safe_report_link, "Review Candidate &amp; Submit Externally", color="#4f46e5")}
     </div>
 
     <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;line-height:1.5;">
-      Direct Report URL: <a href="{report_link}" style="color:#4f46e5;">{report_link}</a>
+            Direct Report URL: <a href="{safe_report_link}" style="color:#4f46e5;">{safe_report_link}</a>
     </p>
     """
 

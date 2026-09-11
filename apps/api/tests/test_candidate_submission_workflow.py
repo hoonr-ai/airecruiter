@@ -55,6 +55,47 @@ def test_notify_internal_submission_to_manager_email_formatting():
         assert "Review Candidate &amp; Submit Externally" in html_body
 
 
+def test_notify_internal_submission_report_link_encodes_untrusted_ids():
+    from core.email import notify_internal_submission_to_manager
+
+    with patch("core.email._send", return_value=True) as mock_send:
+        result = notify_internal_submission_to_manager(
+            manager_email="manager@pyramidci.com",
+            recruiter_name="John Recruiter",
+            recruiter_email="john@pyramidci.com",
+            candidate_name="Jane Doe",
+            candidate_id='123" onclick="alert(1)',
+            job_id_or_ref='26-28150"><img src=x>',
+            job_title="Senior Software Engineer",
+            customer_name="Acme Corp",
+            app_base_url="https://pairqa.pyramidci.com",
+        )
+
+        assert result is True
+        html_body = mock_send.call_args[0][2]
+        assert "26-28150%22%3E%3Cimg%20src%3Dx%3E" in html_body
+        assert "123%22%20onclick%3D%22alert%281%29" in html_body
+        assert 'onclick="alert(1)' not in html_body
+        assert "<img src=x>" not in html_body
+
+
+def test_internal_submission_manager_email_validation(monkeypatch):
+    from fastapi import HTTPException
+    from routers.candidates import _normalize_manager_email_for_internal_submission
+
+    monkeypatch.setenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
+
+    assert _normalize_manager_email_for_internal_submission("Manager@PyramidCI.com") == "Manager@pyramidci.com"
+
+    with pytest.raises(HTTPException) as invalid_format:
+        _normalize_manager_email_for_internal_submission('manager@example.com"><a>')
+    assert invalid_format.value.status_code == 422
+
+    with pytest.raises(HTTPException) as external_domain:
+        _normalize_manager_email_for_internal_submission("manager@example.com")
+    assert external_domain.value.status_code == 422
+
+
 def test_notify_internal_submission_empty_manager_email():
     from core.email import notify_internal_submission_to_manager
     
