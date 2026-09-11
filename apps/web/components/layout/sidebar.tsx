@@ -14,11 +14,11 @@ export function Sidebar() {
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
-        { label: "Candidates", href: "/candidates", icon: Users, disabled: true },
         // Admins get the full analytics + team management; team leads get the
         // same analytics page auto-scoped to their team by the backend.
         ...(isAdmin
             ? [
+                  { label: "Candidates", href: "/candidates", icon: Users, disabled: false },
                   { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
                   { label: "Teams", href: "/admin/teams", icon: UsersRound, disabled: false },
