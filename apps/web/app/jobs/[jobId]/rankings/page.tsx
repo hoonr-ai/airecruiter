@@ -617,6 +617,7 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [feedbackFilter, setFeedbackFilter] = useState<string>("");
   const [minScore, handleMinScoreChange, setMinScore] = useClampedScoreInput("");
   // Default the rank list to fit-score descending so it actually ranks by
   // score rather than by the source-priority pre-sort applied at load time.
@@ -816,6 +817,19 @@ export default function CandidateRankingsPage() {
       if (activityFilter === "has_activity" && !deriveInterviewId(c)) return false;
       // Source
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
+      // Feedback filter
+      if (feedbackFilter) {
+        const ft = (c.data?.feedback_type || feedbacks[c.id] || "").toLowerCase();
+        if (feedbackFilter === "no feedback") {
+          if (ft) return false;
+        } else if (feedbackFilter === "submit") {
+          if (!ft.startsWith("submit")) return false;
+        } else if (feedbackFilter === "reject") {
+          if (!ft.startsWith("reject")) return false;
+        } else if (feedbackFilter === "unreachable") {
+          if (ft !== "unreachable") return false;
+        }
+      }
       // Min score
       const score = c.match_score ?? c.resume_match_percentage ?? 0;
       if (minScore !== "" && score < minScore) return false;
@@ -911,7 +925,7 @@ export default function CandidateRankingsPage() {
       });
     }
     return rows;
-  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, minScore, sortField, sortDir, columnFilters]);
+  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, feedbackFilter, minScore, sortField, sortDir, columnFilters, feedbacks]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -927,6 +941,7 @@ export default function CandidateRankingsPage() {
     setStatusFilter("all");
     setActivityFilter("all");
     setSourceFilter("all");
+    setFeedbackFilter("");
     setMinScore("");
     setColumnFilters({});
   };
@@ -1736,6 +1751,7 @@ export default function CandidateRankingsPage() {
     statusFilter !== "all" ||
     activityFilter !== "all" ||
     sourceFilter !== "all" ||
+    feedbackFilter !== "" ||
     minScore !== "" && minScore > 0
   );
   const totalCandidates = candidateTotalCount || candidates.length;
@@ -2144,6 +2160,22 @@ export default function CandidateRankingsPage() {
               {availableSources.map(s => (
                 <option key={s} value={s}>{s}</option>
               ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Feedback</label>
+            <select
+              value={feedbackFilter}
+              onChange={(e) => setFeedbackFilter(e.target.value)}
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[110px]"
+            >
+              <option value="">All</option>
+              <option value="no feedback">No Feedback</option>
+              <option value="submit">Submitted</option>
+              <option value="reject">Rejected</option>
+              <option value="unreachable">Unreachable</option>
             </select>
           </div>
 
