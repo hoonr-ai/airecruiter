@@ -1116,6 +1116,7 @@ function NewJobPageContent() {
   // When OFF, Launch PAIR behaves exactly like production (auto-enrich +
   // launch for everyone). Has no effect outside QA (gated by IS_QA_ENV).
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
+  const [contactDetailsOverride, setContactDetailsOverride] = useState(false);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
   // Source & Launch auto-selection guard rails. The launch is confirmation-
@@ -10286,6 +10287,26 @@ function NewJobPageContent() {
                     </span>
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setContactDetailsOverride(v => !v)}
+                  className="flex items-center gap-2 select-none"
+                  title={contactDetailsOverride
+                    ? "Contact Override ON — replaces real candidate contact details with test data"
+                    : "Contact Override OFF — uses real candidate contact information"}
+                >
+                  <span className="text-[12px] font-semibold text-slate-600">Contact Override</span>
+                  <span
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${contactDetailsOverride ? "bg-amber-500" : "bg-slate-300"}`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${contactDetailsOverride ? "translate-x-[18px]" : "translate-x-0.5"}`}
+                    />
+                  </span>
+                  <span className={`text-[11px] font-bold ${contactDetailsOverride ? "text-amber-500" : "text-slate-400"}`}>
+                    {contactDetailsOverride ? "ON" : "OFF"}
+                  </span>
+                </button>
                 <div className="flex items-center gap-2">
                   <Button
                     type="button"
