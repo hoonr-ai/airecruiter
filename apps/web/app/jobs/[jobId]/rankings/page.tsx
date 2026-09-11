@@ -27,7 +27,8 @@ import {
   X,
   Activity,
   Ban,
-  AlertTriangle
+  AlertTriangle,
+  PhoneOff
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,6 +57,7 @@ import { StopOutreachModal, type StopOutreachCandidate } from "@/components/Stop
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
+import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 
 // Utility function to format dates
@@ -66,13 +68,15 @@ const formatDate = (dateStr: string) => {
     if (isNaN(date.getTime())) return dateStr;
     return date.toLocaleString('en-US', {
       timeZone: 'America/New_York',
-      month: 'short',
-      day: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-      hour12: true
-    });
+      second: '2-digit',
+      hour12: false,
+      timeZoneName: 'short'
+    }).replace(",", "");
   } catch {
     return dateStr;
   }
@@ -226,6 +230,7 @@ interface JobDetails {
   customer_name?: string;
   openings?: number;
   max_allowed_submittals?: number;
+  screening_level?: string;
 }
 
 // B5: applied-filters panel — surfaces context set on Step 3 (criteria) and
@@ -579,6 +584,25 @@ export default function CandidateRankingsPage() {
     }
   };
 
+  const handleMarkUnreachable = async (candidateId: string) => {
+    setSyncingCandidateId(Number(candidateId));
+    try {
+      await api.candidates.feedback(jobId as string, candidateId, { feedback_type: 'Unreachable' });
+      setFeedbacks(prev => ({ ...prev, [candidateId]: 'Unreachable' }));
+      setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
+      setFeedbackReasons(prev => {
+        const next = { ...prev };
+        delete next[candidateId];
+        return next;
+      });
+    } catch (error) {
+      console.error('Error marking unreachable:', error);
+      setToast({ message: "Failed to save unreachable status", type: "error" });
+    } finally {
+      setSyncingCandidateId(null);
+    }
+  };
+
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
   type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
@@ -593,7 +617,8 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
-  const [minScore, setMinScore] = useState<number>(0);
+  const [feedbackFilter, setFeedbackFilter] = useState<string>("");
+  const [minScore, handleMinScoreChange, setMinScore] = useClampedScoreInput("");
   // Default the rank list to fit-score descending so it actually ranks by
   // score rather than by the source-priority pre-sort applied at load time.
   const [sortField, setSortField] = useState<SortField>("total_score");
@@ -641,7 +666,7 @@ export default function CandidateRankingsPage() {
   const normalizeSourceLabel = (source: string | null | undefined): string => {
     const raw = String(source || "").trim();
     const s = raw.toLowerCase();
-    if (!s) return "—";
+    if (!s) return "Unknown";
     if (s.includes("applicant")) return "Job-Diva Applicant";
     if (s.includes("talentsearch") || s.includes("talent_search")) return "Job-Diva Candidate";
     if (s.includes("linkedin")) return "LinkedIn";
@@ -790,9 +815,22 @@ export default function CandidateRankingsPage() {
       if (activityFilter === "has_activity" && !deriveInterviewId(c)) return false;
       // Source
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
+      // Feedback filter
+      if (feedbackFilter) {
+        const ft = (c.data?.feedback_type || feedbacks[c.id] || "").toLowerCase();
+        if (feedbackFilter === "no feedback") {
+          if (ft) return false;
+        } else if (feedbackFilter === "submit") {
+          if (!ft.startsWith("submit")) return false;
+        } else if (feedbackFilter === "reject") {
+          if (!ft.startsWith("reject")) return false;
+        } else if (feedbackFilter === "unreachable") {
+          if (ft !== "unreachable") return false;
+        }
+      }
       // Min score
       const score = c.match_score ?? c.resume_match_percentage ?? 0;
-      if (score < minScore) return false;
+      if (minScore !== "" && score < minScore) return false;
 
       // Column (Funnel) Filters
       for (const [field, filter] of Object.entries(columnFilters)) {
@@ -885,7 +923,7 @@ export default function CandidateRankingsPage() {
       });
     }
     return rows;
-  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, minScore, sortField, sortDir, columnFilters]);
+  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, feedbackFilter, minScore, sortField, sortDir, columnFilters, feedbacks]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -901,7 +939,8 @@ export default function CandidateRankingsPage() {
     setStatusFilter("all");
     setActivityFilter("all");
     setSourceFilter("all");
-    setMinScore(0);
+    setFeedbackFilter("");
+    setMinScore("");
     setColumnFilters({});
   };
 
@@ -1608,7 +1647,8 @@ export default function CandidateRankingsPage() {
           title: data.enhanced_title || data.title || `Job ${jobId}`,
           customer_name: data.customer_name,
           openings: data.openings,
-          max_allowed_submittals: data.max_allowed_submittals
+          max_allowed_submittals: data.max_allowed_submittals,
+          screening_level: data.screening_level,
         });
         // B5: surface step-5 sourcing filters on this page.
         const sf = data.sourcing_filters || {};
@@ -1709,7 +1749,8 @@ export default function CandidateRankingsPage() {
     statusFilter !== "all" ||
     activityFilter !== "all" ||
     sourceFilter !== "all" ||
-    minScore > 0
+    feedbackFilter !== "" ||
+    minScore !== "" && minScore > 0
   );
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
@@ -1732,14 +1773,14 @@ export default function CandidateRankingsPage() {
       )}
 
       {/* Rankings Page Header matching the premium UI */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-8 shadow-sm">
+      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-4 shadow-sm">
         <div className="flex justify-between items-start mb-6">
           <div className="flex items-start gap-4">
             <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100/50">
               <Medal className="w-8 h-8 text-indigo-600" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
+              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2 flex-wrap">
                 {isInitialLoading ? <Skeleton className="h-8 w-64 bg-slate-100" /> : job?.title}
                 {!isInitialLoading && (
                   <span className="text-slate-500 font-medium text-lg flex items-center">
@@ -1758,7 +1799,22 @@ export default function CandidateRankingsPage() {
                   </span>
                 )}
               </h2>
-              <div className="text-sm text-slate-500 font-medium mt-1">Candidate Rank List</div>
+              <div className="flex items-center gap-3 mt-1">
+                <div className="text-sm text-slate-500 font-medium">Candidate Rank List</div>
+                {!isInitialLoading && job?.screening_level && (
+                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded text-xs font-bold border uppercase tracking-wide ${
+                    ((level) => {
+                      if (level === 'l0.5') return 'bg-purple-50 text-purple-700 border-purple-200';
+                      if (level === 'l1') return 'bg-blue-50 text-blue-700 border-blue-200';
+                      if (level === 'l1.5') return 'bg-cyan-50 text-cyan-700 border-cyan-200';
+                      if (level === 'l2') return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+                      return 'bg-slate-100 text-slate-600 border-slate-300';
+                    })(job.screening_level.toLowerCase())
+                  }`}>
+                    {job.screening_level}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <Button
@@ -2057,102 +2113,114 @@ export default function CandidateRankingsPage() {
 
       {/* Table Interface */}
       <div className="space-y-4">
-        {/* Filter bar: search + status + source + min-score. All filter state
-            feeds into the `filteredCandidates` useMemo above. */}
-        <div className="flex flex-wrap items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm mb-6">
-          <div className="relative shrink-0 min-w-[260px] flex-1 max-w-[380px]">
-            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-              <Search className="h-4 w-4 text-slate-400" />
+        {/* Filter bar: search + activity + candidate count in Row 1; filters in Row 2 */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm mb-3 flex flex-col gap-4 p-4">
+          {/* Row 1: Search bar, Activity History, Showing text */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
+            <div className="relative shrink-0 min-w-[200px] flex-1 max-w-[460px]">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+              <Input
+                placeholder="Search name, email, or location..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 w-full h-9 text-[13px] bg-white border-slate-200 focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500 transition-all rounded-lg shadow-sm"
+              />
             </div>
-            <Input
-              placeholder="Search name, email, or location..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[12px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-            />
+
+            <div className="flex items-center gap-4 shrink-0">
+              <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-white border-slate-200 hover:bg-slate-50 text-slate-500 shadow-sm"}`}
+                onClick={() => setActivityFilter(activityFilter === "has_activity" ? "all" : "has_activity")}
+                title="Show only candidates with activity history"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
+              </div>
+
+              {hasActiveFilters && (
+                <button
+                  onClick={clearFilters}
+                  className="h-9 px-3 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors border border-slate-200 bg-white shadow-sm"
+                >
+                  <X className="w-3.5 h-3.5" /> Clear
+                </button>
+              )}
+
+              {(totalCandidates > 0 || hasActiveFilters) && (
+                <span className="text-[13px] font-medium text-slate-500 whitespace-nowrap">
+                  {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900 font-semibold">{hasActiveFilters ? displayedCount : totalCandidates}</span>
+                  {hasActiveFilters && <> of <span className="text-slate-900 font-semibold">{totalCandidates}</span></>}
+                  {" "}total candidates
+                  {isPartiallyLoaded && <span className="ml-1 text-[11px] text-slate-400">(Loading…)</span>}
+                </span>
+              )}
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
-            >
-              <option value="all">All</option>
-              <option value="pass">Pass</option>
-              <option value="fail">Fail</option>
-              <option value="in_progress">In Progress</option>
-              <option value="pending">Pending</option>
-              <option value="n/a">N/A</option>
-              <option value="duplicate_candidate">Duplicate Candidate</option>
-              <option value="invalid_contact">Invalid Contact</option>
-            </select>
-          </div>
+          {/* Row 2: Status, Source, Feedback, Min Resume Score */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+              >
+                <option value="all">All</option>
+                <option value="pass">Pass</option>
+                <option value="fail">Fail</option>
+                <option value="in_progress">In Progress</option>
+                <option value="pending">Pending</option>
+                <option value="n/a">N/A</option>
+                <option value="duplicate_candidate">Duplicate Candidate</option>
+                <option value="invalid_contact">Invalid Contact</option>
+              </select>
+            </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Source</label>
-            <select
-              value={sourceFilter}
-              onChange={(e) => setSourceFilter(e.target.value)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[110px]"
-            >
-              <option value="all">All</option>
-              {availableSources.map(s => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </div>
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
+              <select
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value)}
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+              >
+                <option value="all">All</option>
+                {availableSources.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
 
-          <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none shrink-0 ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-slate-50 border-transparent hover:bg-slate-100 text-slate-500"}`}
-            onClick={() => setActivityFilter(activityFilter === "has_activity" ? "all" : "has_activity")}
-            title="Show only candidates with activity history"
-          >
-            <Activity className="w-3.5 h-3.5" />
-            <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
-          </div>
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
+              <select
+                value={feedbackFilter}
+                onChange={(e) => setFeedbackFilter(e.target.value)}
+                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+              >
+                <option value="">All</option>
+                <option value="no feedback">No Feedback</option>
+                <option value="submit">Submitted</option>
+                <option value="reject">Rejected</option>
+                <option value="unreachable">Unreachable</option>
+              </select>
+            </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
-            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min score</label>
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              value={minScore}
-              onChange={(e) => {
-                const n = Number.parseInt(e.target.value, 10);
-                setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
-              }}
-              className="h-7 w-14 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
-            />
-          </div>
-
-          {hasActiveFilters && (
-            <button
-              onClick={clearFilters}
-              className="h-9 px-3 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
-            >
-              <X className="w-3.5 h-3.5" /> Clear
-            </button>
-          )}
-
-          <div className="ml-auto text-[12px] font-bold text-slate-500 px-2 text-right shrink-0 whitespace-nowrap">
-            {(hasActiveFilters || isPartiallyLoaded) ? (
-              <>
-                {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900">{displayedCount}</span> of <span className="text-slate-900">{totalCandidates}</span>
-                <span className="text-slate-500"> total candidates</span>
-              </>
-            ) : (
-              <>
-                Showing <span className="text-slate-900">{totalCandidates}</span>
-                <span className="text-slate-500"> total candidates</span>
-              </>
-            )}
-            {isPartiallyLoaded && (
-              <div className="text-[11px] font-medium text-slate-400">Loaded {candidates.length} so far</div>
-            )}
+            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                value={minScore}
+                onChange={(e) => {
+                  handleMinScoreChange(e.target.value);
+                }}
+                className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
+              />
+            </div>
           </div>
         </div>
 
@@ -2371,15 +2439,15 @@ export default function CandidateRankingsPage() {
                 {isInitialLoading ? (
                   Array.from({ length: 8 }).map((_, i) => (
                     <TableRow key={i} className="h-20 bg-white">
-                      <TableCell className="w-[50px] border-r border-slate-200/50 px-2 text-center"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
-                      <TableCell className="w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
-                      <TableCell className="w-[160px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
-                      <TableCell className="w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
-                      <TableCell className="w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
-                      <TableCell className="w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell className="w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell className="w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
-                      <TableCell className="w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[50px] border-r border-slate-200/50 px-2 text-center"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
                     </TableRow>
                   ))
                 ) : (
@@ -2393,11 +2461,11 @@ export default function CandidateRankingsPage() {
                     const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : null;
 
                     return (
-                      <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
-                        <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-500 text-[12px] group-hover:bg-slate-50 transition-colors">
+                      <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-200 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
+                        <TableCell className="border-b border-slate-200 w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-500 text-[12px] group-hover:bg-slate-50 transition-colors">
                           {idx + 1}
                         </TableCell>
-                        <TableCell className="sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                        <TableCell className="border-b border-slate-200 sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
                           <Link
                             href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-1"
@@ -2491,7 +2559,7 @@ export default function CandidateRankingsPage() {
                           )}
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-2 px-2 border-l border-slate-200">
+                        <TableCell className="border-b border-slate-200 text-center align-middle py-2 px-2 border-l border-slate-200">
                           <span className="text-[12px] font-semibold text-slate-700">
                             {normalizeSourceLabel(candidate.source)}
                           </span>
@@ -2500,7 +2568,7 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell
-                          className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
+                          className="border-b border-slate-200 text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
                           onMouseEnter={() => {
                             if (screeningScore > 0) setHoveredResumeScoreKey(candidateKey);
                           }}
@@ -2527,7 +2595,7 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-3 px-2 group-hover:bg-indigo-50/5 transition-colors border-l border-slate-200">
+                        <TableCell className="border-b border-slate-200 text-center align-middle py-3 px-2 group-hover:bg-indigo-50/5 transition-colors border-l border-slate-200">
                           {(() => {
                             const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
                             // If in outreach phase, show the timeline
@@ -2578,7 +2646,7 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell
-                          className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
+                          className="border-b border-slate-200 text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
                           onMouseEnter={() => {
                             if (showEngageScore) setHoveredEngageScoreKey(candidateKey);
                           }}
@@ -2608,7 +2676,7 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center font-bold text-slate-900 text-[14px] align-middle py-3 px-2 transition-colors border-l border-slate-200">
+                        <TableCell className="border-b border-slate-200 text-center font-bold text-slate-900 text-[14px] align-middle py-3 px-2 transition-colors border-l border-slate-200">
                           {totalScore !== null ? (
                             <span>{totalScore}/100</span>
                           ) : (
@@ -2618,7 +2686,7 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center pr-3 pl-3 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
+                        <TableCell className="border-b border-slate-200 text-center pr-3 pl-3 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-wrap items-center justify-center gap-2">
 
                             <Button
@@ -2653,9 +2721,10 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center pr-4 pl-4 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
-                          <div className="flex flex-col items-center gap-2">
+                        <TableCell className="border-b border-slate-200 text-center pr-4 pl-4 border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex flex-col items-center gap-1.5">
                             <Select
+                              disabled={syncingCandidateId === candidate.id}
                               value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || undefined}
                               onValueChange={(val) => {
                                 if (val === "Reject") {
@@ -2665,6 +2734,8 @@ export default function CandidateRankingsPage() {
                                 } else if (val === "Submit") {
                                   setActionCandidateId(candidate.id);
                                   setIntegrationModalOpen('submit');
+                                } else if (val === "Unreachable") {
+                                  handleMarkUnreachable(String(candidate.id));
                                 }
                               }}
                             >
@@ -2674,12 +2745,15 @@ export default function CandidateRankingsPage() {
                               <SelectContent>
                                 <SelectItem value="Submit" className="text-[12px] font-semibold cursor-pointer">Submit</SelectItem>
                                 <SelectItem value="Reject" className="text-[12px] font-semibold cursor-pointer">Reject</SelectItem>
+                                <SelectItem value="Unreachable" className="text-[12px] font-semibold cursor-pointer">Unreachable</SelectItem>
                               </SelectContent>
                             </Select>
                             {feedbacks[candidate.id] && (
-                              <div className="flex flex-col items-center gap-2 mt-2">
-                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                              <div className="flex flex-col items-center gap-1 mt-1.5">
+                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : feedbacks[candidate.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
+                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
+                                   feedbacks[candidate.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 
+                                   <><PhoneOff className="w-3 h-3" /> Unreachable</>}
                                 </div>
                                 {feedbackReasons[candidate.id] && (
                                   <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
@@ -2929,6 +3003,7 @@ export default function CandidateRankingsPage() {
                       <option value="Previously rejected by client">Previously rejected by client</option>
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
+                      <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
                     </select>
                   </div>
                 </div>

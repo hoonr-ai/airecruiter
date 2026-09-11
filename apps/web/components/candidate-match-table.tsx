@@ -14,6 +14,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getScoreBand, getScoreTone } from "@/lib/match-score";
 import {
   Linkedin,
   ShieldCheck,
@@ -125,11 +126,10 @@ function formatLastActiveShort(d: Date | null): string {
   return d.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "2-digit", day: "2-digit", year: "numeric" });
 }
 
+// Colours follow the recruiter ranking bands (lib/match-score.ts):
+// 85+ Excellent · 75–84 Strong · 60–74 Good · <60 Low priority.
 function getMatchTone(score: number | null) {
-  if (score == null) return null;
-  if (score >= 80) return { ring: "#2563eb", bg: "#dbeafe", text: "#1d4ed8" };
-  if (score >= 60) return { ring: "#d97706", bg: "#fef3c7", text: "#b45309" };
-  return { ring: "#e11d48", bg: "#ffe4e6", text: "#be123c" };
+  return getScoreTone(score);
 }
 
 function getMatchedSkills(c: any): string[] {
@@ -193,17 +193,19 @@ function getSourceBadge(source: string | undefined, sources?: string[]) {
           : isJobDiva
             ? "bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]"
             : "bg-slate-50 text-slate-700 border-slate-200";
+  let defaultJobDivaLabel = src || "JobDiva";
+  if (src.toLowerCase().startsWith("jobdiva-")) {
+    const parts = src.split("-").slice(1);
+    defaultJobDivaLabel = `JobDiva ${parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ")}`;
+  }
+
   const label = isBothExa
     ? "LinkedIn + Deep"
     : isDeepOnly
       ? "LinkedIn Deep"
       : isLinkedIn
         ? "LinkedIn"
-        : isJobAgent
-          ? "JobDiva Agent"
-          : isJobDivaTalent
-            ? "JobDiva"
-            : src || "JobDiva";
+        : defaultJobDivaLabel;
   const Icon = isLinkedIn ? Linkedin : isJobDivaTalent || isJobAgent ? Zap : ShieldCheck;
   return { colors, label, Icon, isLinkedIn };
 }
@@ -544,7 +546,7 @@ export function CandidateMatchTable({
                         onClick={() => onOpenDetails(candidate)}
                         className="inline-flex items-center justify-center w-12 h-12 rounded-full font-extrabold text-[13px] hover:scale-105 transition-transform shadow-sm"
                         style={{ backgroundColor: tone.bg, color: tone.text, border: `2px solid ${tone.ring}` }}
-                        title="View match score breakdown"
+                        title={`${getScoreBand(matchScore).label} — ${getScoreBand(matchScore).action}. View match score breakdown`}
                       >
                         {matchScore}%
                       </button>
@@ -601,10 +603,29 @@ export function CandidateMatchTable({
                         {homeLocation && (
                           <span
                             className="inline-flex items-center gap-1 text-slate-600 truncate"
-                            title={`Location: ${homeLocation}`}
+                            title={
+                              candidate.location_source === "resume"
+                                ? `Location from résumé: ${homeLocation}${
+                                    candidate.location_conflict?.profile
+                                      ? ` (JobDiva/profile said ${candidate.location_conflict.profile})`
+                                      : ""
+                                  }`
+                                : `Location: ${homeLocation}`
+                            }
                           >
                             <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
                             <span className="truncate">{homeLocation}</span>
+                            {/* Résumé-is-final: the résumé's stated location
+                                overrode a different profile location — the
+                                score and the location gate used the résumé. */}
+                            {candidate.location_conflict?.profile && (
+                              <span
+                                className="shrink-0 px-1 py-px rounded bg-violet-50 text-violet-700 text-[9px] font-bold uppercase tracking-wider border border-violet-200"
+                                title={`Résumé says ${homeLocation}; JobDiva/profile said ${candidate.location_conflict.profile}. Scored on the résumé.`}
+                              >
+                                résumé
+                              </span>
+                            )}
                           </span>
                         )}
                         {workLocation && (

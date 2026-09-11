@@ -149,9 +149,12 @@ class CandidateSearchRequest(BaseModel):
     # customer_name from monitored_jobs. Powers the "Same client / industry"
     # scoring dimension and the currently-employed-by-client veto.
     client_name: Optional[str] = None
-    # Sample-first flow: "sample" probes each selected source and emits only
-    # `sample_per_source` fully-scored rows per source so the recruiter can
-    # approve source quality cheaply; "full" (default) is the normal run.
+    # Sample-first flow: "sample" probes each selected source, scores the whole
+    # probe pool and emits the best rows per source — at most
+    # `sample_per_source` (the Step-5 UI sends 5), always the top
+    # SAMPLE_MIN_ROWS_PER_SOURCE, beyond that only rows at/above
+    # SAMPLE_QUALITY_FLOOR (see core/sourcing_config.py) — so the recruiter
+    # can judge source quality cheaply; "full" (default) is the normal run.
     search_mode: str = "full"
     sample_per_source: int = 2
     # When True, every source gets the full LLM skills-match assessment and a
@@ -203,6 +206,11 @@ class CandidateSaveRecord(BaseModel):
     company_experience: Optional[Any] = None
     urls: Optional[Any] = None
     enhanced_info: Optional[Any] = None
+    # Stamped by the JobDiva pool emitters (services/jobdiva.py
+    # `jobdiva_profile_stamp`) and passed through by the frontend. Trusted at
+    # save only when it equals candidate_id -- a label-independent proof that
+    # this row's id is a JobDiva profile id (see `jobdiva_profile_id`).
+    jobdiva_candidate_id: Optional[str] = None
 
 class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str

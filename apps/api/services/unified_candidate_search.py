@@ -36,6 +36,17 @@ from core.config import (
     SCORING_UNMATCHED_PREFERRED_FLOOR,
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
+    SCORING_RECENCY_WINDOW_YEARS,
+    SCORING_MATRIX_V2,
+    SCORING_MATRIX_WEIGHTS,
+    SCORING_MATRIX_REQUIRED_FLOOR,
+    SCORING_MATRIX_RECENCY_DECAY,
+    SCORING_MATRIX_YEARS_UNKNOWN_MULT,
+    SCORING_MATRIX_YEARS_FLOOR,
+    SCORING_MATRIX_TITLE_TIER_CREDIT,
+    SCORING_BAND_EXCELLENT,
+    SCORING_BAND_STRONG,
+    SCORING_BAND_GOOD,
     SOURCE_TIER_BONUS,
     OPEN_TO_WORK_SCORE_BONUS,
     JOBAGENT_RANK_SCORE_FLOOR,
@@ -43,6 +54,7 @@ from core.config import (
     EMBEDDING_MATCH_THRESHOLD,
     scoring_weights_for_family,
     embedding_skill_match_for_family,
+    score_band,
 )
 from services import skill_embeddings
 from services import role_taxonomy
@@ -51,6 +63,17 @@ from services.role_family import detect_role_family
 
 
 _TITLE_BOOST_BY_RELEVANCE = {"exact": 30, "similar": 20, "related": 10}
+
+# First explainability line under the scoring matrix, keyed by band tier
+# (core.config.score_band). The high-level JobAgent branch in
+# finalize_candidate strips these (it withholds the % they describe).
+_MATRIX_BAND_LINES = {
+    "excellent": f"Excellent match ({SCORING_BAND_EXCELLENT}–100) — priority outreach",
+    "strong": f"Strong match ({SCORING_BAND_STRONG}–{SCORING_BAND_EXCELLENT - 1}) — recommended",
+    "good": f"Good match ({SCORING_BAND_GOOD}–{SCORING_BAND_STRONG - 1}) — recruiter review",
+    "low": f"Low priority (<{SCORING_BAND_GOOD}) — below the outreach floor",
+    "unscored": "Unscored — limited data",
+}
 
 
 _TITLE_SEPARATORS = re.compile(r"[/|·,;]+")
@@ -623,6 +646,7 @@ class UnifiedCandidateSearch:
                     "Strong overall fit across active filters",
                     "Partial fit; review missing rubric requirements",
                     "Limited fit against active rubric and sourcing filters",
+                    *_MATRIX_BAND_LINES.values(),
                 }
                 _expl = [
                     line for line in (cand["explainability"] or [])
@@ -647,10 +671,14 @@ class UnifiedCandidateSearch:
             #
             # Skipped when hard-veto fired (base_score == 0): exclusion
             # rules always trump rank trust.
+            # Scoring matrix v2: the percentage IS the matrix — none of the
+            # additive floors/bonuses below apply (title relevance lives inside
+            # the 15% bucket; source trust is not a rubric signal).
             source = str(cand.get("source") or "")
             api_rank = cand.get("api_rank")
             if (
-                source == "JobDiva-JobAgent"
+                not SCORING_MATRIX_V2
+                and source == "JobDiva-JobAgent"
                 and base_score > 0
                 and isinstance(api_rank, int)
             ):
@@ -676,7 +704,7 @@ class UnifiedCandidateSearch:
             # raw scores are close. Only applied when base_score > 0 so
             # excluded / hard-vetoed candidates aren't promoted.
             bonus = SOURCE_TIER_BONUS.get(source, 0)
-            if bonus and base_score > 0:
+            if bonus and base_score > 0 and not SCORING_MATRIX_V2:
                 boosted = min(100, cand["match_score"] + bonus)
                 cand["match_score"] = boosted
                 cand["match_score_details"]["source_tier_bonus"] = {
@@ -688,7 +716,7 @@ class UnifiedCandidateSearch:
             # Title-match boost via role taxonomy. Without this, a SQL dev
             # whose resume happens to mention "program management" can outrank
             # a Senior Program Manager whose title actually matches the search.
-            if base_score > 0 and criteria.title_criteria:
+            if base_score > 0 and criteria.title_criteria and not SCORING_MATRIX_V2:
                 title_boost = _compute_title_boost(cand, criteria.title_criteria)
                 if title_boost > 0:
                     prev_score = cand["match_score"]
@@ -704,7 +732,12 @@ class UnifiedCandidateSearch:
             # status resolves asynchronously after this scoring pass (cold Apify
             # cache), the UI still shows the badge via polling; the score bump
             # lands on the warm path / subsequent searches.
-            if base_score > 0 and OPEN_TO_WORK_SCORE_BONUS and cand.get("open_to_work") is True:
+            if (
+                base_score > 0
+                and OPEN_TO_WORK_SCORE_BONUS
+                and cand.get("open_to_work") is True
+                and not SCORING_MATRIX_V2
+            ):
                 prev_score = cand["match_score"]
                 cand["match_score"] = min(100, prev_score + OPEN_TO_WORK_SCORE_BONUS)
                 cand["match_score_details"]["open_to_work_bonus"] = OPEN_TO_WORK_SCORE_BONUS
@@ -1012,6 +1045,61 @@ class UnifiedCandidateSearch:
                 },
             })
 
+        async def _emit_sample_best(rows, emit_fn, stage_name: str) -> int:
+            """Sample mode: the whole probe pool is scored first, then the
+            best rows are emitted — always the top SAMPLE_MIN_ROWS_PER_SOURCE
+            (a weak source still shows what it has), beyond that only rows
+            at/above SAMPLE_QUALITY_FLOOR, never more than `sample_cap`.
+            Hard-filter fails / no-contact / client-conflict rows never take
+            a slot (the full run still shows them at 0%). `emit_fn` is the
+            source's normal emitter (dedup, min-score gate, queue) and may
+            decline a row, in which case the next-best one is tried.
+
+            `rows` are (candidate, assessment) pairs collected from the
+            source's enrichment stream instead of being emitted on arrival.
+            """
+            from core import sourcing_config as _sc_smp
+            min_rows = max(0, int(getattr(_sc_smp, "SAMPLE_MIN_ROWS_PER_SOURCE", 2) or 0))
+            floor = getattr(_sc_smp, "SAMPLE_QUALITY_FLOOR", None)
+            scored: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for cand, assessment in rows:
+                try:
+                    finalize_candidate(cand)
+                except Exception as exc:  # scoring must never kill the stream
+                    logger.warning(
+                        f"sample pre-score failed for candidate_id={cand.get('candidate_id')}: {exc}"
+                    )
+                scored.append((cand, assessment))
+
+            def _sort_key(item):
+                s = item[0].get("match_score")
+                return -1.0 if s is None else float(s)
+
+            scored.sort(key=_sort_key, reverse=True)
+            emitted = 0
+            skipped_hard = 0
+            for cand, assessment in scored:
+                if emitted >= sample_cap:
+                    break
+                if self._sample_row_hard_failed(cand):
+                    skipped_hard += 1
+                    continue
+                s = cand.get("match_score")
+                if (
+                    emitted >= min_rows
+                    and floor is not None
+                    and (s is None or float(s) < float(floor))
+                ):
+                    break
+                if await emit_fn(cand, assessment):
+                    emitted += 1
+            self._log_stage(
+                "SampleMode",
+                f"{stage_name}: pool={len(rows)} emitted={emitted} "
+                f"hard_fails_skipped={skipped_hard} cap={sample_cap} min={min_rows} floor={floor}",
+            )
+            return emitted
+
         async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None, min_score=None, as_full_row=False):
             """Stage 3 of progressive JobDiva flow: score the (now-enriched)
             candidate and emit a ``candidate_detail`` patch with the scored
@@ -1176,6 +1264,10 @@ class UnifiedCandidateSearch:
                 # Geo verdict → UI "~N mi away" badge on the location cell.
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
+                # Résumé-is-final residence: which side won and, when the
+                # résumé overrode the profile, what the profile said → UI
+                # "résumé" badge + tooltip on the location cell.
+                "location_source", "profile_location", "location_conflict",
                 "qualifications", "employee_status", "available",
                 "availability_status", "current_company",
                 # Candidate-details failure flag → UI renders "N/A" + keeps the
@@ -1425,6 +1517,11 @@ class UnifiedCandidateSearch:
                     enrich_gen = self._enrich_filtered_jobdiva_progressive(
                         fresh_talent, criteria, skip_llm=high_level_scoring
                     )
+                    # Sample mode: rows are held back until the whole probe
+                    # pool is scored, then the best ones are emitted
+                    # (_emit_sample_best) — "the 2-5 best per source", not
+                    # "the first 2-5 to finish enriching".
+                    sample_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
                     try:
                         async for event in enrich_gen:
                             ev_type = event.get("type")
@@ -1444,21 +1541,30 @@ class UnifiedCandidateSearch:
                                         stage_name,
                                         f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
                                     )
+                                if sample_mode:
+                                    sample_rows.append((cand, assessment))
+                                    continue
                                 if await emit_jobdiva_scored(
                                     cand, assessment, "qualified_talent",
-                                    min_score=min_score, as_full_row=sample_mode
+                                    min_score=min_score,
                                 ):
                                     emitted += 1
-                                    if sample_mode and emitted >= sample_cap:
-                                        # Cap reached — stop enriching.
-                                        break
                     finally:
-                        # Deterministically close the generator: a bare break
-                        # would leave its in-flight enrichment tasks (resume
-                        # fetches / LLM calls) running until GC finalization.
-                        # aclose() raises GeneratorExit inside it, whose finally
-                        # cancels those tasks immediately.
+                        # Deterministically close the generator: an exception
+                        # mid-stream would otherwise leave its in-flight
+                        # enrichment tasks (resume fetches / LLM calls) running
+                        # until GC finalization. aclose() raises GeneratorExit
+                        # inside it, whose finally cancels those tasks.
                         await enrich_gen.aclose()
+                    if sample_mode:
+                        emitted = await _emit_sample_best(
+                            sample_rows,
+                            lambda c, a: emit_jobdiva_scored(
+                                c, a, "qualified_talent",
+                                min_score=min_score, as_full_row=True,
+                            ),
+                            stage_name,
+                        )
                     return emitted
 
                 async def _run_jobagent_pool():
@@ -1778,15 +1884,11 @@ class UnifiedCandidateSearch:
                             cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
                             cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
-                        # Source-native location is authoritative; the LLM's
-                        # resume-parsed current_location only fills a blank
-                        # (it can latch onto a past employer / education city).
-                        # Both sides sanitized: "Remote"/"Hybrid" is a work
-                        # arrangement, never a place.
-                        cand["location"] = (
-                            sanitize_candidate_location(cand.get("location"))
-                            or sanitize_candidate_location(cand["enhanced_info"].get("current_location"))
-                        )
+                        # Résumé is final for residence (see
+                        # _apply_resume_location): an explicitly stated
+                        # résumé location replaces the profile's; the profile
+                        # value only stands when the résumé is silent.
+                        self._apply_resume_location(cand)
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 
@@ -1869,6 +1971,9 @@ class UnifiedCandidateSearch:
                 # with no counter or log line, so "Exa found 50, UI shows 1"
                 # was undiagnosable from the stream log.
                 _status_counts: Dict[str, int] = {}
+                # Sample mode: hold rows until the whole probe pool is
+                # scored, then emit the best ones (_emit_sample_best).
+                _ext_sample_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
                 try:
                     for task in asyncio.as_completed(process_tasks):
                         result = await task
@@ -1876,18 +1981,23 @@ class UnifiedCandidateSearch:
                         if result["status"] in ("success", "no_contact_shown"):
                             cand = result["candidate"]
                             assessment = self._filter_assessment(cand, criteria, enforce_years=False)
+                            if sample_mode:
+                                _ext_sample_rows.append((cand, assessment))
+                                continue
                             if await emit_candidate(cand, assessment):
                                 _ext_emitted += 1
-                                if sample_mode and _ext_emitted >= sample_cap:
-                                    break
                 finally:
-                    # Sample early-stop (or an exception) can leave pool tasks
-                    # in flight — cancel and drain so no work leaks past the
-                    # producer. No-op when the loop ran to completion.
+                    # An exception mid-loop can leave pool tasks in flight —
+                    # cancel and drain so no work leaks past the producer.
+                    # No-op when the loop ran to completion.
                     for _t in process_tasks:
                         if not _t.done():
                             _t.cancel()
                     await asyncio.gather(*process_tasks, return_exceptions=True)
+                if sample_mode:
+                    _ext_emitted = await _emit_sample_best(
+                        _ext_sample_rows, emit_candidate, source_type
+                    )
                 if _status_counts:
                     self._log_stage(
                         name,
@@ -3548,6 +3658,67 @@ class UnifiedCandidateSearch:
             candidate["distance_miles"] = round(float(distance), 1)
         return is_match
 
+    @staticmethod
+    def _resume_location_authoritative() -> bool:
+        from core import sourcing_config as _sc_loc
+        return bool(getattr(_sc_loc, "RESUME_LOCATION_AUTHORITATIVE", True))
+
+    def _apply_resume_location(self, candidate: Dict[str, Any]) -> bool:
+        """Post-LLM residence resolution — the résumé is final.
+
+        When the extraction found an explicitly stated current location
+        (``enhanced_info.current_location``; the prompt forbids inferring it
+        from employers / education), it REPLACES the source-native location
+        (JobDiva CRM city/state, LinkedIn area) on ``candidate["location"]``
+        for display, scoring and the location / country gates. A JobDiva
+        record that says "Dallas, TX" for a résumé headed "Hyderabad, India"
+        is rated and launched as India. When the résumé is silent the source
+        value stands (legacy behaviour). Both sides go through the
+        work-arrangement sanitizer: "Remote"/"Hybrid" is never a place.
+
+        Stamps ``location_source`` ("resume" | "profile"); when the résumé
+        overrides a different source value, also ``profile_location`` and
+        ``location_conflict = {"resume", "profile"}`` (UI badge + score
+        popup line), and clears the cached geo verdict so the gates
+        recompute on the final value. Returns True when the résumé won.
+        ``RESUME_LOCATION_AUTHORITATIVE=False`` restores fill-blank-only.
+        """
+        enhanced = candidate.get("enhanced_info")
+        enhanced = enhanced if isinstance(enhanced, dict) else {}
+        source_loc = sanitize_candidate_location(candidate.get("location"))
+        if not source_loc:
+            source_loc = sanitize_candidate_location(", ".join(
+                p for p in [
+                    str(candidate.get("city") or "").strip(),
+                    str(candidate.get("state") or "").strip(),
+                ] if p
+            ))
+        resume_loc = sanitize_candidate_location(enhanced.get("current_location"))
+
+        if not resume_loc or not self._resume_location_authoritative():
+            candidate["location"] = source_loc or resume_loc
+            if candidate["location"]:
+                candidate["location_source"] = "profile" if source_loc else "resume"
+            return False
+
+        if source_loc and (
+            normalize_location_string(source_loc).lower()
+            != normalize_location_string(resume_loc).lower()
+        ):
+            candidate["profile_location"] = source_loc
+            candidate["location_conflict"] = {"resume": resume_loc, "profile": source_loc}
+        else:
+            candidate.pop("location_conflict", None)
+        candidate["location"] = resume_loc
+        candidate["location_source"] = "resume"
+        # The geo verdict cached against the source location is stale now.
+        for key in (
+            "distance_miles", "location_out_of_radius",
+            "location_match_reason", "location_veto_reason",
+        ):
+            candidate.pop(key, None)
+        return True
+
     def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
         """Return the candidate's current residence locations only.
 
@@ -3556,20 +3727,26 @@ class UnifiedCandidateSearch:
         so the radius filter doesn't accidentally match a candidate to a city
         they worked in five years ago.
 
-        Order of preference:
-        1. ``candidate.city + ", " + candidate.state`` (live source field —
-           for JobDiva rows this is the CRM record; background detail
-           hydration refreshes it)
-        2. ``candidate.location`` (live source field)
-        3. ``enhanced_info.current_location`` (LLM-extracted from resume) —
-           ONLY consulted when the source fields are blank. The LLM value can
-           latch onto a past-employer/education city, and because this list
-           feeds ``_is_likely_outside_country`` / radius verdicts, a wrong
-           entry here can veto a genuinely local candidate (or pass a remote
-           one), so it must never ride alongside authoritative source data.
+        Order of preference (RESUME_LOCATION_AUTHORITATIVE, the default):
+        1. ``enhanced_info.current_location`` — the residence the résumé
+           states explicitly. When present it is the ONLY value returned:
+           the source's city/state must not ride alongside it, or a US CRM
+           record would pass the country gate for an India résumé (the exact
+           case behind the 2026-09-11 "résumé is final" policy).
+        2. ``candidate.city + ", " + candidate.state`` (live source field —
+           for JobDiva rows this is the CRM record)
+        3. ``candidate.location`` (live source field)
+        With the flag off, the legacy order applies: source fields first and
+        the résumé value only when they are blank.
         """
         enhanced = candidate.get("enhanced_info") or {}
         enhanced_dict = enhanced if isinstance(enhanced, dict) else {}
+
+        if self._resume_location_authoritative():
+            resume_loc = sanitize_candidate_location(enhanced_dict.get("current_location"))
+            if resume_loc:
+                loc = normalize_location_string(resume_loc)
+                return [loc] if loc else []
 
         city = str(candidate.get("city") or "").strip()
         state = str(candidate.get("state") or "").strip()
@@ -4172,15 +4349,43 @@ class UnifiedCandidateSearch:
             return ordered
 
         skill_terms: List[str] = []
+        # Per-skill years / last-used year from the résumé parse (see
+        # sourced_candidates_storage._normalize_llm_skills), keyed by the
+        # normalized skill name. Feeds the "recent must-have skills" bucket of
+        # the scoring matrix; absent for older cache entries and for sources
+        # whose skills arrive as bare strings (the scorer then falls back to
+        # total YOE + the recent-text proxy).
+        skill_meta: Dict[str, Dict[str, Any]] = {}
         for source in [enhanced.get("key_skills", []), enhanced.get("structured_skills", []), enhanced.get("skills", []), candidate.get("skills", [])]:
             if not isinstance(source, list):
                 continue
             for item in source:
                 if isinstance(item, dict):
+                    names: List[str] = []
                     if item.get("skill"):
                         skill_terms.append(str(item.get("skill")))
+                        names.append(str(item.get("skill")))
                     if item.get("name"):
                         skill_terms.append(str(item.get("name")))
+                        names.append(str(item.get("name")))
+                    years_used = item.get("years_used")
+                    last_used = item.get("last_used_year")
+                    if names and (years_used is not None or last_used is not None):
+                        for raw_name in names:
+                            key = self._normalize_term(raw_name)
+                            if not key:
+                                continue
+                            meta = skill_meta.setdefault(key, {"years": None, "last_used": None})
+                            try:
+                                if years_used is not None and float(years_used) > 0:
+                                    meta["years"] = max(float(meta["years"] or 0), float(years_used))
+                            except (TypeError, ValueError):
+                                pass
+                            try:
+                                if last_used is not None and int(last_used) > 1900:
+                                    meta["last_used"] = max(int(meta["last_used"] or 0), int(last_used))
+                            except (TypeError, ValueError):
+                                pass
                 elif isinstance(item, str):
                     skill_terms.append(item)
 
@@ -4261,17 +4466,22 @@ class UnifiedCandidateSearch:
                 elif isinstance(item, str):
                     certification_terms.append(item)
 
-        # Source-native location first; LLM-extracted current_location is a
-        # last-resort fallback (it can name a past-employer/education city).
+        # Résumé is final for residence: the explicitly stated résumé
+        # location is the only location term when present (see
+        # _candidate_structured_locations). Otherwise source-native fields.
         # Arrangement strings are stripped — "Remote" must not be scored as a
         # place.
-        location_terms = unique_terms([
-            sanitize_candidate_location(
-                f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
-            ),
-            sanitize_candidate_location(candidate.get("location", "")),
-            sanitize_candidate_location(enhanced.get("current_location", "")),
-        ])
+        resume_location_term = sanitize_candidate_location(enhanced.get("current_location", ""))
+        if resume_location_term and self._resume_location_authoritative():
+            location_terms = unique_terms([resume_location_term])
+        else:
+            location_terms = unique_terms([
+                sanitize_candidate_location(
+                    f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
+                ),
+                sanitize_candidate_location(candidate.get("location", "")),
+                resume_location_term,
+            ])
 
         resume_years = 0
         raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
@@ -4283,6 +4493,7 @@ class UnifiedCandidateSearch:
             except Exception:
                 resume_years = 0
 
+        match_text = self._candidate_match_text(candidate)
         return {
             "titles": title_terms,
             "skills": unique_terms(skill_terms),
@@ -4292,8 +4503,9 @@ class UnifiedCandidateSearch:
             "certifications": unique_terms(certification_terms),
             "locations": location_terms,
             "years_of_experience": resume_years,
-            "text": self._candidate_match_text(candidate),
-            "recent_text": self._candidate_match_text(candidate)[:3000],
+            "skill_meta": skill_meta,
+            "text": match_text,
+            "recent_text": match_text[:3000],
         }
 
     def _contains_term(self, profile: Dict[str, Any], term: str, *collections: str) -> bool:
@@ -4865,10 +5077,17 @@ class UnifiedCandidateSearch:
         # their score — the badge fields stamped above still render the
         # distance and the recruiter filters via the UI chips. Every other
         # source falls through to the hard veto below.
+        # Résumé-is-final policy: the exemption trusts JobDiva's own location
+        # filtering, which is exactly what a conflicting résumé location just
+        # contradicted — then the mismatch vetoes like any other source.
         from core import sourcing_config as _sc_gate
+        resume_contradicts_profile = bool(
+            candidate.get("location_source") == "resume" and candidate.get("location_conflict")
+        )
         if (
             str(candidate.get("source") or "") == "JobDiva-JobAgent"
             and not getattr(_sc_gate, "JOBAGENT_LOCATION_HARD_VETO", False)
+            and not resume_contradicts_profile
         ):
             return None
         if reason in ("state_mismatch", "relocation_excluded_by_filter"):
@@ -4886,7 +5105,519 @@ class UnifiedCandidateSearch:
             return f"location {round(float(distance))}mi outside {criteria.location} ({miles}mi radius)"
         return None
 
+    # ------------------------------------------------------------------
+    # Scoring Matrix v2 (recruiter rubric, 2026-09-11) — see core.config
+    # SCORING_MATRIX_* for the weights / knobs and the rationale.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sample_row_hard_failed(cand: Dict[str, Any]) -> bool:
+        """Rows that must never take a sample-preview slot: hard-filter fails
+        (0% with hard_veto), no-contact companies and client-conflict rows.
+        The full run still shows them greyed out / at 0%; the preview is
+        about the *best* a source has to offer."""
+        if cand.get("no_contact") is True or cand.get("client_conflict") is True:
+            return True
+        details = cand.get("match_score_details") or {}
+        veto = details.get("hard_veto") if isinstance(details, dict) else None
+        return bool(isinstance(veto, dict) and veto.get("triggered"))
+
+    def _matrix_skill_meta(self, profile: Dict[str, Any], group: Any) -> Dict[str, Any]:
+        """Per-skill {years, last_used} the résumé parse attached to whichever
+        of the group's terms (rubric skill + its JobDiva-mapped similar terms)
+        the candidate carries. Empty when the parse has no per-skill data
+        (older cache entries, external profiles) — callers fall back to total
+        YOE and the recent-text proxy."""
+        meta_map = profile.get("skill_meta") or {}
+        if not meta_map:
+            return {}
+        best: Dict[str, Any] = {}
+        for term in self._group_terms(group):
+            if not term:
+                continue
+            for key, meta in meta_map.items():
+                if not (term == key or term in key or key in term):
+                    continue
+                for field in ("years", "last_used"):
+                    val = meta.get(field)
+                    if val is None:
+                        continue
+                    if best.get(field) is None or val > best[field]:
+                        best[field] = val
+        return best
+
+    def _matrix_years_factor(
+        self, profile: Dict[str, Any], group: Any, meta: Dict[str, Any]
+    ) -> Tuple[float, str]:
+        """Credit multiplier for a must-have skill's required years.
+        Per-skill years from the parse win; otherwise total YOE stands in.
+        Returns (multiplier, note) — note is non-empty when years fall short
+        or are unproven, for the Gaps list."""
+        required = self._group_min_years(group)
+        if required <= 0:
+            return 1.0, ""
+        label = self._group_label(group)
+        years = meta.get("years")
+        basis = "skill"
+        if years is None:
+            total = float(profile.get("years_of_experience") or 0)
+            years = total if total > 0 else None
+            basis = "total"
+        if years is None:
+            return SCORING_MATRIX_YEARS_UNKNOWN_MULT, f"{label}: {required}+ yrs required, years not proven"
+        if years >= required:
+            return 1.0, ""
+        shown = f"{years:g}{' total' if basis == 'total' else ''}"
+        return (
+            max(SCORING_MATRIX_YEARS_FLOOR, float(years) / float(required)),
+            f"{label}: needs {required}+ yrs (shows {shown})",
+        )
+
+    def _matrix_recency_factor(
+        self,
+        profile: Dict[str, Any],
+        group: Any,
+        meta: Dict[str, Any],
+        judge_text: bool = True,
+    ) -> Tuple[float, bool]:
+        """Credit multiplier for whether a must-have skill is RECENT.
+        Per-skill last-used year (within SCORING_RECENCY_WINDOW_YEARS) wins;
+        otherwise the head of the match text (most recent roles) is the
+        proxy — but only when `judge_text` says there is real résumé /
+        profile narrative to judge from (a bare skills list carries no
+        recency signal, so it earns no penalty). Returns (multiplier,
+        judged) — judged is False when nothing could be judged."""
+        last_used = meta.get("last_used")
+        if last_used:
+            try:
+                from datetime import datetime, timezone
+                age = datetime.now(timezone.utc).year - int(last_used)
+            except Exception:
+                age = None
+            if age is not None:
+                return (
+                    1.0 if age <= SCORING_RECENCY_WINDOW_YEARS else SCORING_MATRIX_RECENCY_DECAY
+                ), True
+        recent_text = profile.get("recent_text", "") or ""
+        if not judge_text or not recent_text.strip():
+            return 1.0, False
+        for term in self._group_terms(group):
+            if term and term in recent_text:
+                return 1.0, True
+            words = [w for w in term.split() if len(w) > 2]
+            if words and all(w in recent_text for w in words):
+                return 1.0, True
+        return SCORING_MATRIX_RECENCY_DECAY, True
+
+    def _score_candidate_matrix(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
+        """Score against the recruiter matrix:
+
+            Recent Must-Have Skills 75 · Recent Title/Role 15 · Preferred 10
+
+        plus pass/fail hard filters (score → 0): exclusion rules (currently
+        employed by client / "must not have"), no must-have skill evidenced,
+        required certification missing, confirmed outside the mandatory
+        location, below the minimum-years floor. Work authorization is a
+        Pairbot screening hard filter (asked on the call) and is only
+        reported here as such.
+
+        A bucket with no rubric input drops out of the denominator so the
+        remaining buckets carry its weight (a rubric with no preferred
+        skills is scored on must-haves + title alone). Same return shape as
+        the legacy scorer: score, missing_skills, explainability,
+        matched_skills, score_details.
+        """
+        profile = self._candidate_profile(candidate)
+        dims: Dict[str, Dict[str, Any]] = {}
+        for dim in self._collect_scoring_dimensions(criteria):
+            dims[str(dim.get("key") or dim.get("label"))] = dim
+        skills_dim = dims.get("skills") or {}
+        title_dim = dims.get("title_recent") or {}
+        domain_dim = dims.get("domain") or {}
+        edu_dim = dims.get("education_certs") or {}
+
+        def _groups(dim: Dict[str, Any], bucket: str) -> List[Any]:
+            return [g for g in (dim.get(bucket) or []) if self._group_terms(g)]
+
+        def _group_weight(group: Any) -> float:
+            try:
+                w = float(group.get("weight") or 1.0) if isinstance(group, dict) else 1.0
+            except (TypeError, ValueError):
+                w = 1.0
+            return w if w > 0 else 1.0
+
+        # "Evidence" = something to judge skills from. Without it (no résumé
+        # text, no parsed skills) the evidence-based hard filters stay
+        # unknown rather than failing the candidate on a data gap. Recency
+        # is judged from narrative text only — a bare skills list says
+        # nothing about WHEN a skill was used.
+        has_text = bool(
+            str(candidate.get("resume_text") or candidate.get("deep_text") or "").strip()
+        )
+        has_evidence = has_text or bool(profile.get("skills"))
+
+        buckets: List[Tuple[str, float, float]] = []
+        explainability: List[str] = []
+        missing_required: List[str] = []
+        matched_terms: List[str] = []
+        score_details: Dict[str, Any] = {}
+        hard_fail_reasons: List[str] = []
+        hard_filters: Dict[str, str] = {}
+        # Buckets left out of the denominator, with why — the score is always
+        # normalized to 100 from whatever COULD be evaluated: a rubric with no
+        # preferred items, or a profile with no title to judge, must not drag
+        # a strong must-have match down. Surfaced in score_details and the
+        # popup so the recruiter sees why a 75-point match reads 100%.
+        not_evaluated: List[str] = []
+
+        # ── Hard filter: exclusion rules ─────────────────────────────────
+        # "Currently employed by client" / "must not be employed by X" ride
+        # the company_exclusion dimension (current employers only); "must not
+        # have X" skill exclusions ride their own dimension. Any excluded
+        # group matching at/above the veto threshold fails the candidate.
+        exclusion_hits: List[str] = []
+        client_rule_present = False
+        client_hit = False
+        for key, dim in dims.items():
+            excluded_groups = _groups(dim, "excluded_groups")
+            if not excluded_groups:
+                continue
+            if key == "company_exclusion":
+                client_rule_present = True
+            excl_collections = dim.get("excluded_collections", dim.get("collections") or [])
+            for group in excluded_groups:
+                strength = self._term_group_score(profile, group, excl_collections)
+                if strength >= SCORING_EXCLUSION_HARD_VETO_THRESHOLD:
+                    exclusion_hits.append(f"{dim.get('label')}: {self._group_label(group)}")
+                    if key == "company_exclusion":
+                        client_hit = True
+        if exclusion_hits:
+            hard_fail_reasons.extend(
+                f"matches exclusion rule ({hit})" for hit in exclusion_hits[:2]
+            )
+        hard_filters["client_employee"] = (
+            "fail" if client_hit else ("pass" if client_rule_present else "n/a")
+        )
+
+        # ── Bucket 1: Recent must-have skills (75) ───────────────────────
+        must_groups = _groups(skills_dim, "required_groups")
+        skills_collections = skills_dim.get("collections") or ["skills"]
+        w_must = float(SCORING_MATRIX_WEIGHTS.get("must_have_skills", 75.0))
+        if must_groups:
+            weighted = 0.0
+            total_w = 0.0
+            matched_labels: List[str] = []
+            not_recent: List[str] = []
+            items: List[Dict[str, Any]] = []
+            for group in must_groups:
+                label = self._group_label(group)
+                w = _group_weight(group)
+                raw = self._term_group_fuzzy_score(profile, group, skills_collections)
+                meta = self._matrix_skill_meta(profile, group)
+                item: Dict[str, Any] = {"skill": label, "match": round(raw, 3), "weight": w}
+                if raw > 0.5:
+                    years_mult, years_note = self._matrix_years_factor(profile, group, meta)
+                    recency_mult, judged = self._matrix_recency_factor(
+                        profile, group, meta, judge_text=has_text
+                    )
+                    credit = raw * years_mult * recency_mult
+                    matched_labels.append(label)
+                    matched_terms.append(label)
+                    if years_note:
+                        missing_required.append(years_note)
+                    if judged and recency_mult < 1.0:
+                        not_recent.append(label)
+                    item.update({
+                        "matched": True,
+                        "years_factor": round(years_mult, 2),
+                        "recency_factor": round(recency_mult, 2),
+                    })
+                    if meta.get("years") is not None:
+                        item["years_used"] = meta["years"]
+                    if meta.get("last_used") is not None:
+                        item["last_used_year"] = meta["last_used"]
+                else:
+                    credit = max(raw, SCORING_MATRIX_REQUIRED_FLOOR)
+                    missing_required.append(label)
+                    item["matched"] = False
+                item["credit"] = round(credit, 3)
+                items.append(item)
+                weighted += credit * w
+                total_w += w
+            must_ratio = weighted / total_w if total_w > 0 else 0.0
+            buckets.append(("Recent Must-Have Skills", w_must, must_ratio))
+            score_details["Recent Must-Have Skills"] = {
+                "weight": w_must,
+                "score": round(w_must * must_ratio, 2),
+                "required_matched": len(matched_labels),
+                "required_total": len(must_groups),
+                "items": items,
+            }
+            line = f"Must-have skills: matched {len(matched_labels)}/{len(must_groups)}"
+            if matched_labels:
+                line += f" ({', '.join(matched_labels[:4])}{'…' if len(matched_labels) > 4 else ''})"
+            explainability.append(line)
+            if not_recent:
+                explainability.append(
+                    f"Not in recent experience (last {SCORING_RECENCY_WINDOW_YEARS}y): "
+                    + ", ".join(not_recent[:3])
+                )
+            if matched_labels:
+                hard_filters["must_have_skills"] = "pass"
+            elif has_evidence:
+                hard_fail_reasons.append("no must-have skill evidenced in the profile")
+                hard_filters["must_have_skills"] = "fail"
+            else:
+                hard_filters["must_have_skills"] = "unknown"
+        else:
+            hard_filters["must_have_skills"] = "n/a"
+            not_evaluated.append("Must-have skills (no must-have skills in the rubric)")
+
+        # ── Bucket 2: Recent title / role relevancy (15) ─────────────────
+        title_groups = _groups(title_dim, "required_groups") + _groups(title_dim, "preferred_groups")
+        title_criteria = list(getattr(criteria, "title_criteria", []) or [])
+        w_title = float(SCORING_MATRIX_WEIGHTS.get("title_recent", 15.0))
+        has_title_data = bool(profile.get("titles")) or bool(_candidate_titles(candidate))
+        if (title_groups or title_criteria) and not has_title_data:
+            # Rubric asks for a title but the profile carries none to judge —
+            # a data gap, not a mismatch. Leave the bucket out (weight 0 hides
+            # it from the popup bars) and normalize on the rest.
+            score_details["Recent Title Relevance"] = {
+                "weight": 0.0, "score": 0.0, "skipped": "no title on profile",
+            }
+            not_evaluated.append("Title relevance (no title on the profile)")
+        elif title_groups or title_criteria:
+            title_collections = title_dim.get("collections") or ["titles"]
+            term_credit = 0.0
+            best_title_label = ""
+            for group in title_groups:
+                s = self._term_group_score(profile, group, title_collections)
+                if s > term_credit:
+                    term_credit = s
+                    best_title_label = self._group_label(group)
+            tier = ""
+            cand_title = ""
+            if title_criteria:
+                candidate.pop("title_match_source", None)
+                _compute_title_boost(candidate, title_criteria)
+                src = candidate.get("title_match_source") or {}
+                tier = str(src.get("relevance") or "")
+                cand_title = str(src.get("candidate") or "")
+            tier_credit = float(SCORING_MATRIX_TITLE_TIER_CREDIT.get(tier, 0.0))
+            title_ratio = max(term_credit, tier_credit)
+            buckets.append(("Recent Title Relevance", w_title, title_ratio))
+            score_details["Recent Title Relevance"] = {
+                "weight": w_title,
+                "score": round(w_title * title_ratio, 2),
+                "required_matched": 1 if title_ratio > 0.5 else 0,
+                "required_total": 1,
+                "taxonomy_tier": tier or None,
+                "term_match": round(term_credit, 3),
+            }
+            if tier and tier_credit >= term_credit:
+                explainability.append(
+                    f"Title relevance: {tier} role match"
+                    + (f" — {cand_title}" if cand_title else "")
+                )
+                matched_terms.append(f"Title: {cand_title or best_title_label or tier}")
+            elif term_credit > 0.5:
+                explainability.append(f"Title relevance: matched {best_title_label}")
+                matched_terms.append(f"Title: {best_title_label}")
+            else:
+                explainability.append("Title relevance: no recent title match")
+                if best_title_label:
+                    missing_required.append(f"Title: {best_title_label}")
+        else:
+            not_evaluated.append("Title relevance (no title criteria in the rubric)")
+
+        # ── Bucket 3: Preferred (10) ─────────────────────────────────────
+        # Preferred skills + domain/industry + education + preferred certs.
+        pref_items: List[Tuple[Any, List[str], str]] = []
+        for g in _groups(skills_dim, "preferred_groups"):
+            pref_items.append((g, skills_collections, "Preferred skill"))
+        domain_collections = domain_dim.get("collections") or ["skills", "titles", "companies"]
+        for g in _groups(domain_dim, "required_groups") + _groups(domain_dim, "preferred_groups"):
+            pref_items.append((g, domain_collections, "Domain"))
+        edu_collections = edu_dim.get("collections") or ["education", "certifications"]
+        edu_required = _groups(edu_dim, "required_groups")
+        cert_required = [g for g in edu_required if isinstance(g, dict) and g.get("kind") == "certification"]
+        for g in edu_required:
+            if isinstance(g, dict) and g.get("kind") == "certification":
+                continue
+            pref_items.append((g, edu_collections, "Education"))
+        for g in _groups(edu_dim, "preferred_groups"):
+            kind = g.get("kind") if isinstance(g, dict) else ""
+            pref_items.append((g, edu_collections, "Certification" if kind == "certification" else "Education"))
+        w_pref = float(SCORING_MATRIX_WEIGHTS.get("preferred", 10.0))
+        # Evaluable only when the profile has SOMETHING the preferred items
+        # can be judged against — résumé text or data in any collection the
+        # items score on. An empty parse must not read as "missed every
+        # preferred item".
+        has_pref_data = has_text or any(
+            profile.get(collection)
+            for _group, collections, _prefix in pref_items
+            for collection in collections
+        )
+        if pref_items and not has_pref_data:
+            score_details["Preferred"] = {
+                "weight": 0.0, "score": 0.0, "skipped": "no profile data to judge preferred items",
+            }
+            not_evaluated.append("Preferred (no profile data to judge against)")
+        elif not pref_items:
+            not_evaluated.append("Preferred (no preferred skills / domain / education in the rubric)")
+        if pref_items and has_pref_data:
+            weighted = 0.0
+            total_w = 0.0
+            pref_matched: List[str] = []
+            for group, collections, prefix in pref_items:
+                w = _group_weight(group)
+                raw = self._term_group_fuzzy_score(profile, group, collections)
+                weighted += raw * w
+                total_w += w
+                label = self._group_label(group)
+                if raw > 0.5:
+                    pref_matched.append(label)
+                    matched_terms.append(f"{prefix}: {label}")
+            pref_ratio = weighted / total_w if total_w > 0 else 0.0
+            buckets.append(("Preferred", w_pref, pref_ratio))
+            score_details["Preferred"] = {
+                "weight": w_pref,
+                "score": round(w_pref * pref_ratio, 2),
+                "preferred_matched": len(pref_matched),
+                "preferred_total": len(pref_items),
+            }
+            explainability.append(
+                f"Preferred (skills / domain / education): matched {len(pref_matched)}/{len(pref_items)}"
+            )
+
+        # ── Hard filter: required certifications ────────────────────────
+        if cert_required:
+            missing_certs = [
+                self._group_label(g) for g in cert_required
+                if not self._term_group_matches(profile, g, edu_collections)
+            ]
+            for g in cert_required:
+                label = self._group_label(g)
+                if label not in missing_certs:
+                    matched_terms.append(f"Certification: {label}")
+            if missing_certs and has_evidence:
+                hard_fail_reasons.append(f"required certification missing: {', '.join(missing_certs[:2])}")
+                hard_filters["certifications"] = "fail"
+                missing_required.extend(f"Certification: {c}" for c in missing_certs)
+            elif missing_certs:
+                hard_filters["certifications"] = "unknown"
+                missing_required.extend(f"Certification: {c}" for c in missing_certs)
+            else:
+                hard_filters["certifications"] = "pass"
+        else:
+            hard_filters["certifications"] = "n/a"
+
+        # ── Hard filter: mandatory location (evidence-based) ─────────────
+        location_veto = self._location_hard_gate(candidate, criteria)
+        if location_veto:
+            hard_fail_reasons.append(location_veto)
+            hard_filters["location"] = "fail"
+        else:
+            hard_filters["location"] = "pass" if self._should_enforce_location(criteria) else "n/a"
+        # Résumé-is-final residence: say which location was judged when the
+        # résumé overrode the profile, so a veto (or a pass) on "India"
+        # doesn't read as a contradiction of the "Dallas, TX" the CRM shows.
+        _conflict = candidate.get("location_conflict")
+        if isinstance(_conflict, dict) and _conflict.get("resume"):
+            explainability.append(
+                f"Location taken from résumé: {_conflict['resume']}"
+                + (f" (profile said {_conflict['profile']})" if _conflict.get("profile") else "")
+            )
+
+        # ── Hard filter: minimum years floor (Step-5 "min experience") ──
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        total_years = float(profile.get("years_of_experience") or 0)
+        if min_years > 0:
+            if 0 < total_years < min_years:
+                hard_fail_reasons.append(
+                    f"below minimum experience ({total_years:g} yrs < {min_years} required)"
+                )
+                hard_filters["min_years"] = "fail"
+            else:
+                hard_filters["min_years"] = "pass" if total_years >= min_years else "unknown"
+        else:
+            hard_filters["min_years"] = "n/a"
+        # Asked by Pairbot during screening; not parsed from résumés.
+        hard_filters["work_authorization"] = "screening"
+
+        # ── Compose ──────────────────────────────────────────────────────
+        weighted_sum = sum(w * r for _, w, r in buckets)
+        weighted_max = sum(w for _, w, _ in buckets)
+        score = 0
+        if weighted_max > 0:
+            score = round(max(0.0, min(100.0, (weighted_sum / weighted_max) * 100)))
+
+        score_details["hard_veto"] = {
+            "triggered": bool(hard_fail_reasons),
+            "reasons": hard_fail_reasons[:3],
+        }
+        score_details["hard_filters"] = hard_filters
+        score_details["matrix"] = "v2"
+        # Always scored out of 100: what was actually evaluated and what was
+        # left out (rubric gap or profile data gap), so the popup can say
+        # "normalized from 75 evaluated points".
+        full_weight = float(sum(SCORING_MATRIX_WEIGHTS.values())) or 100.0
+        score_details["normalization"] = {
+            "evaluated_weight": round(weighted_max, 2),
+            "full_weight": round(full_weight, 2),
+            "not_evaluated": not_evaluated,
+        }
+        if buckets and not_evaluated and weighted_max < full_weight:
+            explainability.append(
+                f"Normalized to 100% from {round(weighted_max):g} evaluated points — not evaluated: "
+                + "; ".join(not_evaluated[:3])
+            )
+
+        if hard_fail_reasons:
+            score = 0
+            score_details["band"] = {
+                "tier": "excluded", "label": "Excluded", "action": "Hard filter", "min": None,
+            }
+            explainability.insert(0, f"Hard exclusion: {hard_fail_reasons[0]}")
+        else:
+            band = score_band(score)
+            score_details["band"] = band
+            explainability.insert(0, _MATRIX_BAND_LINES.get(band["tier"], ""))
+
+        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
+        # _location_hard_gate exemption) — say so in the score popup, so the
+        # distance badge and a non-zero score don't read as a contradiction.
+        if (
+            not hard_fail_reasons
+            and candidate.get("location_out_of_radius")
+            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
+        ):
+            _dist = candidate.get("distance_miles")
+            _note = (
+                f"~{round(float(_dist))} mi from the job location"
+                if isinstance(_dist, (int, float))
+                else "Outside the job's location radius"
+            )
+            explainability.insert(
+                1,
+                f"{_note} — kept: JobDiva agent results follow the "
+                "recruiter's own criteria, so location isn't hard-enforced",
+            )
+
+        explainability = [line for line in explainability if line]
+        if not explainability or (len(explainability) == 1 and not buckets):
+            explainability = ["No active rubric criteria were available for scoring"]
+
+        return {
+            "score": score,
+            "missing_skills": self._dedupe_terms(missing_required),
+            "explainability": explainability[:6],
+            "matched_skills": self._dedupe_terms(matched_terms),
+            "score_details": score_details,
+        }
+
     def _score_candidate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
+        if SCORING_MATRIX_V2:
+            return self._score_candidate_matrix(candidate, criteria)
         profile = self._candidate_profile(candidate)
         dimensions = self._collect_scoring_dimensions(criteria)  # Use scoring dimensions for evaluation
         weights = scoring_weights_for_family(self._current_family)
@@ -5435,21 +6166,25 @@ class UnifiedCandidateSearch:
             # company signal is split into the same_client synthetic dimension
             # plus the company_exclusion veto below.
             "title_recent": {
+                "key": "title_recent",
                 "label": "Recent Title Relevance",
                 "weight": weights["title_recent"],
                 "collections": ["titles"],
             },
             "skills": {
+                "key": "skills",
                 "label": "Skills Match",
                 "weight": weights["skills"],
                 "collections": ["skills"],
             },
             "domain": {
+                "key": "domain",
                 "label": "Domain Experience",
                 "weight": weights["domain"],
                 "collections": ["skills", "titles", "companies", "education", "certifications", "locations"],
             },
             "education_certs": {
+                "key": "education_certs",
                 "label": "Education & Certifications",
                 "weight": weights["education_certs"],
                 "collections": ["education", "certifications"],
@@ -5459,6 +6194,7 @@ class UnifiedCandidateSearch:
             # path. Scoped to CURRENT employers only (excluded_collections) so a
             # candidate who merely worked at the client in the past is not vetoed.
             "company_exclusion": {
+                "key": "company_exclusion",
                 "label": "Currently Employed by Client",
                 "weight": 0.0,
                 "collections": ["companies"],
@@ -5479,6 +6215,7 @@ class UnifiedCandidateSearch:
             years: int = 0,
             recent: bool = False,
             weight: float = 1.0,
+            kind: str = "",
         ) -> None:
             clean_values = [value for value in values if str(value).strip()]
             if not clean_values:
@@ -5515,6 +6252,11 @@ class UnifiedCandidateSearch:
                 "years": years or 0,
                 "recent": recent,
                 "weight": w,
+                # "certification" / "education" inside the merged
+                # education_certs dimension — the scoring matrix treats a
+                # required certification as a hard filter, education as a
+                # preferred signal. Empty for every other dimension.
+                "kind": kind,
             })
 
         # 1. Include Page 5 Sourcing Criteria (as baseline relevance)
@@ -5557,9 +6299,9 @@ class UnifiedCandidateSearch:
             elif "skill" in category:
                 add_terms("skills", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "edu" in category:
-                add_terms("education_certs", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
+                add_terms("education_certs", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw, kind="education")
             elif "cert" in category or "license" in category:
-                add_terms("education_certs", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
+                add_terms("education_certs", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw, kind="certification")
             elif "domain" in category:
                 add_terms("domain", "can", [term], weight=fw)
             elif "local" in term.lower() or "location" in category:
@@ -5750,16 +6492,11 @@ class UnifiedCandidateSearch:
                     candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                    # JobDiva's structured city/state is authoritative for
-                    # residence; the LLM's resume-parsed current_location only
-                    # fills a blank (it can latch onto a past employer or
-                    # education city — e.g. a candidate living in Ajax, ON
-                    # whose resume mentions Hyderabad). Both sides sanitized:
-                    # a work-arrangement string is never a place.
-                    candidate["location"] = (
-                        sanitize_candidate_location(candidate.get("location"))
-                        or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
-                    )
+                    # Résumé is final for residence (see _apply_resume_location):
+                    # the résumé's explicitly stated location replaces
+                    # JobDiva's CRM city/state; the CRM value stands only when
+                    # the résumé is silent.
+                    self._apply_resume_location(candidate)
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -6176,14 +6913,8 @@ class UnifiedCandidateSearch:
                     candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                    # Source-native location wins; LLM extraction fills blanks
-                    # only (resume text can name past-employer/education
-                    # cities). Both sides sanitized: a work-arrangement string
-                    # is never a place.
-                    candidate["location"] = (
-                        sanitize_candidate_location(candidate.get("location"))
-                        or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
-                    )
+                    # Résumé is final for residence (see _apply_resume_location).
+                    self._apply_resume_location(candidate)
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -6290,13 +7021,11 @@ class UnifiedCandidateSearch:
                 candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                 candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                 candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                # LinkedIn profile location is authoritative; LLM extraction
-                # from the synthesized profile text only fills a blank. Both
-                # sides sanitized: LinkedIn areas can literally read "Remote".
-                candidate["location"] = (
-                    sanitize_candidate_location(candidate.get("location"))
-                    or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
-                )
+                # Résumé/profile-text location is final when explicitly
+                # stated (see _apply_resume_location); the LinkedIn area
+                # stands only when the extraction found none. Both sides
+                # sanitized: LinkedIn areas can literally read "Remote".
+                self._apply_resume_location(candidate)
                 candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                 candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                 candidate["urls"] = candidate["enhanced_info"].get("urls", {})

@@ -2,6 +2,13 @@
 // by the FastAPI backend (apps/api/models.py + routers/*). Hand-written, not
 // auto-generated — keep in sync when backend models change.
 
+// Labels starting with "JobDiva" are load-bearing: the backend treats a numeric
+// candidate_id under such a label as the person's real JobDiva profile id and
+// ATTACHES Launch PAIR applications to it (services/jobdiva.py
+// `jobdiva_profile_id`). Renaming one of these labels without updating that
+// helper would make JobDiva mint duplicate profiles again. The emitter-stamped
+// `jobdiva_candidate_id` field is the label-independent backstop -- keep passing
+// it through on /candidates/save.
 export type Source =
   | "JobDiva"
   | "JobDiva-JobAgent"
@@ -98,6 +105,7 @@ export interface Candidate {
   distance_miles?: number | null;
   location_out_of_radius?: boolean;
   location_match_reason?: string;
+  sources?: string[];
   // Backend-stamped no-contact company flag: current/last employer is on the
   // code-managed no-contact list. Row renders greyed out, unselectable, all
   // actions disabled; never scored, never persisted server-side.

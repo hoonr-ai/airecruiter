@@ -21,6 +21,7 @@ import {
   DialogDescription
 } from "@/components/ui/dialog";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
+import { getScoreBand, getScoreTone } from "@/lib/match-score";
 
 import { memo } from "react";
 
@@ -42,8 +43,6 @@ interface CandidateDetailsModalProps {
   explainability?: string[];
   jobdivaCandidateId?: string;
   source?: string;
-  /** "high_level" when the backend skipped the detailed AI skills match
-   *  (JobDiva agent-search results are scored on cheap signals only). */
   scoringMode?: string;
 }
 
@@ -77,12 +76,13 @@ function ScoreRing({ score }: { score: number }) {
   const progress = Math.min(Math.max(score, 0), 100) / 100;
   const strokeDashoffset = circumference * (1 - progress);
 
-  const color =
-    score >= 85 ? "#10b981" : score >= 65 ? "#f59e0b" : "#f43f5e";
-  const bgColor =
-    score >= 85 ? "#d1fae5" : score >= 65 ? "#fef3c7" : "#ffe4e6";
-  const label =
-    score >= 85 ? "Excellent" : score >= 65 ? "Good Fit" : "Low Match";
+  // Recruiter ranking bands (lib/match-score.ts): 85+ Excellent · 75–84
+  // Strong · 60–74 Good · <60 Low priority (no outreach).
+  const band = getScoreBand(score);
+  const tone = getScoreTone(score);
+  const color = tone?.ring ?? "#94a3b8";
+  const bgColor = tone?.bg ?? "#f1f5f9";
+  const label = band.tier === "unscored" ? band.label : `${band.label} · ${band.action}`;
 
   return (
     <div className="flex flex-col items-center gap-1">

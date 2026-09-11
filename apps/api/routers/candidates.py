@@ -52,6 +52,16 @@ def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
         merged_trans.append(live_item)
     return merged_trans
 
+from routers.launch_report import build_merged_outreach_payload
+
+def _to_iso_z(dt_val) -> str:
+    from datetime import datetime
+    if isinstance(dt_val, datetime):
+        return dt_val.isoformat() + "Z"
+    elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+        return dt_val.replace(" ", "T") + "Z"
+    return dt_val if isinstance(dt_val, str) else None
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -1422,7 +1432,6 @@ async def get_job_candidates(
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
-            from routers.launch_report import build_merged_outreach_payload
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
             
@@ -1492,15 +1501,25 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
-            scores_to_avg = [float(r_score)]
-            if is_engage_done and cand.get("engage_score") is not None:
-                scores_to_avg.append(float(cand["engage_score"]))
+            try:
+                scores_to_avg = [float(r_score)]
+                if is_engage_done and cand.get("engage_score") is not None:
+                    scores_to_avg.append(float(cand["engage_score"]))
 
-            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+                cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+            except (TypeError, ValueError):
+                pass
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
                 cand["engage_hard_filter_status"] = None
+
+            import datetime
+            dt_val = cand.get("engage_created_at")
+            if isinstance(dt_val, datetime.datetime):
+                cand["engage_created_at"] = dt_val.isoformat() + "Z"
+            elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+                cand["engage_created_at"] = dt_val.replace(" ", "T") + "Z"
 
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob
@@ -1988,7 +2007,9 @@ async def save_candidates(
                         # (routers/engagement.py `_resolve_link_candidate_id`).
                         # Recomputed on every save, so it self-heals rows whose
                         # blob predates this and survives the upsert either way.
-                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+                        jd_profile_id = jobdiva_profile_id(
+                            c.source, c.candidate_id, getattr(c, "jobdiva_candidate_id", None)
+                        )
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
@@ -2925,6 +2946,395 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user
         logger.error(f"update_candidate_contacts_bulk failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/candidates/launched")
+async def get_launched_candidates(
+    user: UserIdentity = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    feedback: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    min_score: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    """
+    Fetches all launched candidates across all jobs.
+    Returns data formatted for the Master Candidate Pool page.
+    """
+    # The sidebar is only a convenience layer. Enforce the same admin-only
+    # policy here so a recruiter cannot retrieve the global candidate pool
+    # by calling the API directly.
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        from psycopg2.extras import RealDictCursor
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Build search condition
+                search_condition = ""
+                params = []
+                if search:
+                    search_condition += """
+                        AND (
+                            sc.name ILIKE %s OR
+                            sc.email ILIKE %s OR
+                            sc.phone ILIKE %s OR
+                            sc.jobdiva_id ILIKE %s OR
+                            sc.candidate_id::text ILIKE %s OR
+                            mj.title ILIKE %s
+                        )
+                    """
+                    like_term = f"%{search.strip()}%"
+                    params.extend([like_term] * 6)
+
+                if status:
+                    if status.lower() == "waiting" or status.lower() == "initiated":
+                        search_condition += " AND (la.status IS NULL OR la.status = 'Waiting' OR la.status = 'Initiated')"
+                    elif status.lower() == "pending":
+                        search_condition += " AND LOWER(la.status) IN ('pending', 'sent', 'created', 'queued', 'scheduled', 'started')"
+                    elif status.lower() == "in progress":
+                        search_condition += " AND LOWER(la.status) IN ('in_progress', 'in-progress', 'inprogress', 'in progress')"
+                    elif status.lower() == "pass":
+                        # Keep this list aligned with the UI's terminal Pass
+                        # states. A substring match on "complete" incorrectly
+                        # includes "incomplete" interviews in Pass results.
+                        search_condition += " AND LOWER(la.status) IN ('complete', 'completed', 'passed', 'pass')"
+                    elif status.lower() == "fail":
+                        search_condition += " AND LOWER(la.status) IN ('failed', 'fail', 'rejected')"
+                    else:
+                        search_condition += " AND la.status = %s"
+                        params.append(status)
+
+                # Feedback filter: use an EXISTS subquery checked against ALL rows for a
+                # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
+                # and we only include candidates who match the feedback requirement on ANY row.
+                feedback_exists_condition = ""
+                # Shared SQL predicate: true when a sourced_candidates row has a
+                # non-empty feedback_type.  Used in the "No Feedback" EXISTS clause
+                # and conditionally in ORDER BY to prefer rows with feedback.
+                _HAS_FEEDBACK_PRED = "(sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '')"
+                if feedback:
+                    f_lower = feedback.strip().lower()
+                    
+                    # Shared correlation to scope feedback to the same candidate and job
+                    correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND sc2.jobdiva_id = sc.jobdiva_id"
+
+                    if f_lower in ("no feedback", "none", "no_feedback"):
+                        feedback_exists_condition = f"""
+                            AND NOT EXISTS (
+                                {correlation_scaffold}
+                                  AND sc2.data->>'feedback_type' IS NOT NULL
+                                  AND TRIM(sc2.data->>'feedback_type') <> ''
+                            )"""
+                    elif f_lower in ("submit", "submitted"):
+                        feedback_exists_condition = f"""
+                            AND EXISTS (
+                                {correlation_scaffold}
+                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
+                            )"""
+                    elif f_lower in ("reject", "rejected"):
+                        feedback_exists_condition = f"""
+                            AND EXISTS (
+                                {correlation_scaffold}
+                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
+                            )"""
+                    elif f_lower in ("unreachable",):
+                        feedback_exists_condition = f"""
+                            AND EXISTS (
+                                {correlation_scaffold}
+                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
+                            )"""
+
+                if source:
+                    search_condition += " AND sc.source = %s"
+                    params.append(source)
+
+                if min_score is not None:
+                    search_condition += " AND sc.resume_match_percentage >= %s"
+                    params.append(min_score)
+                    
+                import re
+                date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+                # Convert input NY dates to UTC before querying the DB.
+                # This safely avoids the Postgres 'AT TIME ZONE' cast flipping based on whether the column is naive or timestamptz.
+                if start_date or end_date:
+                    from zoneinfo import ZoneInfo
+                    from datetime import datetime
+                    ny_tz = ZoneInfo("America/New_York")
+                    utc_tz = ZoneInfo("UTC")
+
+                if start_date:
+                    if not date_pattern.match(start_date):
+                        raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
+                    dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
+                    utc_start = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
+                    search_condition += " AND la.created_at >= %s"
+                    params.append(utc_start)
+                if end_date:
+                    if not date_pattern.match(end_date):
+                        raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
+                    dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
+                    utc_end = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
+                    search_condition += " AND la.created_at <= %s"
+                    params.append(utc_end)
+
+                params.extend([limit, offset])
+
+                # CTE_BODY defines the shared CTEs without a leading 'WITH'.
+                # This makes the downstream queries cleaner to construct.
+                CTE_BODY = f"""
+                    latest_audit AS (
+                        SELECT DISTINCT ON (candidate_id)
+                            candidate_id,
+                            interview_id,
+                            status,
+                            created_at,
+                            payload,
+                            response
+                        FROM engage_interview_audit
+                        ORDER BY candidate_id, id DESC
+                    ),
+                    monitored_jobs_lookup AS (
+                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level, recruiter_emails
+                        FROM (
+                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
+                            FROM monitored_jobs mj
+                            WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
+                            UNION ALL
+                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
+                            FROM monitored_jobs mj
+                            WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
+                        ) x
+                        WHERE lookup_id IS NOT NULL AND lookup_id <> ''
+                        ORDER BY lookup_id
+                    ),
+                    launched_candidates AS (
+                        SELECT DISTINCT ON (sc.candidate_id)
+                            sc.id,
+                            sc.jobdiva_id,
+                            sc.candidate_id,
+                            sc.name,
+                            sc.email,
+                            sc.phone,
+                            sc.source,
+                            sc.resume_match_percentage as match_score,
+                            sc.data,
+                            la.status as engage_status,
+                            la.interview_id as engage_interview_id,
+                            la.created_at as engage_created_at,
+                            la.payload as audit_payload,
+                            la.response as audit_response,
+                            mj.title as job_title,
+                            mj.screening_level,
+                            mj.recruiter_emails
+                        FROM sourced_candidates sc
+                        JOIN latest_audit la ON la.candidate_id = sc.candidate_id
+                        LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
+                        WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
+                          {search_condition}
+                          {feedback_exists_condition}
+                        -- When a feedback filter is active, prefer the row that
+                        -- carries actual feedback data so the UI column matches
+                        -- the filter.  Without a filter, fall back to pure
+                        -- created_at DESC to use the existing index and avoid
+                        -- surfacing stale cross-job feedback rows.
+                        ORDER BY sc.candidate_id, {f'{_HAS_FEEDBACK_PRED} DESC,' if feedback_exists_condition else ''} sc.created_at DESC
+                    )
+                """
+
+                query = f"""
+                    WITH {CTE_BODY}
+                    SELECT * FROM launched_candidates
+                    ORDER BY engage_created_at DESC NULLS LAST
+                    LIMIT %s OFFSET %s;
+                """
+                cur.execute(query, tuple(params))
+                candidates = cur.fetchall()
+
+                # Count query reuses the same CTE — no duplication, guaranteed sync with results.
+                count_query = f"""
+                    WITH {CTE_BODY}
+                    SELECT COUNT(*) as total FROM launched_candidates
+                """
+                cur.execute(count_query, tuple(params[:-2]))
+                total_row = cur.fetchone()
+                total = total_row["total"] if total_row else 0
+
+        finally:
+            conn.close()
+
+        # Helper to pick first non-None score value (preventing 0 scores from being treated as falsy)
+        def _pick_first_not_none(*vals):
+            for v in vals:
+                if v is not None:
+                    return v
+            return None
+
+        # Handle data blob unpacking and fetch live outreach if needed
+        # Collect interview IDs for live fallback.
+        import json
+        import asyncio
+
+        interview_ids = []
+        for cand in candidates:
+            if cand.get("data") and isinstance(cand["data"], str):
+                try:
+                    cand["data"] = json.loads(cand["data"])
+                except json.JSONDecodeError:
+                    pass
+            data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            iid = cand.get("engage_interview_id")
+            if iid and str(iid).strip():
+                interview_ids.append(str(iid).strip())
+
+        interview_ids = sorted(set(interview_ids))
+        try:
+            payloads_dict = (
+                await asyncio.wait_for(
+                    _fetch_all_outreach(interview_ids),
+                    timeout=3.0,
+                )
+                if interview_ids
+                else {}
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"CANDIDATES: live outreach lookup timed out after 3s "
+                f"for {len(interview_ids)} interviews — falling back to local DB data"
+            )
+            payloads_dict = {}
+
+        for cand in candidates:
+            data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            original_payload = cand.get("audit_payload") if isinstance(cand.get("audit_payload"), dict) else {}
+            
+            # Promote persisted values from data_blob
+            if isinstance(data_blob, dict):
+                if data_blob.get("engage_status"):
+                    cand["engage_status"] = data_blob.get("engage_status")
+                if data_blob.get("engage_score") is not None:
+                    cand["engage_score"] = data_blob.get("engage_score")
+                if data_blob.get("engage_candidate_score") is not None:
+                    cand["engage_candidate_score"] = data_blob.get("engage_candidate_score")
+                if data_blob.get("engage_total_score") is not None:
+                    cand["engage_total_score"] = data_blob.get("engage_total_score")
+                if data_blob.get("engage_hard_filter_status"):
+                    cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
+
+            iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
+            raw_live_api = payloads_dict.get(iid_str) if iid_str else None
+            
+            merged = build_merged_outreach_payload(
+                cand, 
+                cand.get("audit_response"), 
+                cand.get("engage_status"), 
+                raw_live_api
+            )
+            
+            outreach_status = merged.get("outreach_status") or merged.get("status")
+            if outreach_status:
+                cand["engage_status"] = outreach_status
+                if isinstance(data_blob, dict):
+                    data_blob["engage_status"] = outreach_status
+                    
+            first_completed_at = merged.get("first_completed_at")
+            if first_completed_at:
+                cand["engage_completed_at"] = first_completed_at
+                if isinstance(data_blob, dict):
+                    data_blob["engage_completed_at"] = first_completed_at
+
+            if not cand.get("engage_interview_id") and cand.get("audit_interview_id"):
+                cand["engage_interview_id"] = cand.get("audit_interview_id")
+                if isinstance(data_blob, dict):
+                    data_blob["engage_interview_id"] = cand.get("audit_interview_id")
+
+            if not cand.get("engage_created_at") and cand.get("audit_created_at"):
+                cand["engage_created_at"] = cand.get("audit_created_at")
+
+            is_boolean_job = str(cand.get("screening_level") or "").strip().lower() == "l0.5"
+
+            if merged.get("score") is not None:
+                cand["engage_score"] = merged.get("score")
+            if merged.get("total_score") is not None:
+                cand["engage_total_score"] = merged.get("total_score")
+
+            # read-side normalization for consistency across views
+            norm_engage_score = None
+            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
+            raw_total = cand.get("engage_total_score")
+            
+            if raw_score is not None and raw_total and raw_total > 0:
+                norm_engage_score = round((float(raw_score) / float(raw_total)) * 100, 1)
+                cand["engage_score"] = norm_engage_score
+                cand["engage_total_score"] = 100
+            elif raw_score is not None:
+                cand["engage_score"] = raw_score
+
+            hf_display = str(cand.get("engage_hard_filter_status") or "").lower()
+            score_display = cand.get("engage_score")
+
+            # Format engage_status
+            status_display = _format_engage_status(cand.get("engage_status"), cand.get("engage_score"), hf_display)
+            cand["engage_status"] = status_display
+
+            r_score = cand.get("match_score") or 0
+            is_engage_done = _is_engage_done(cand.get("engage_status"), cand.get("engage_score"), is_boolean_job)
+
+            # Boolean (L0.5) interviews: 100 for pass, 0 for fail
+            if is_boolean_job and is_engage_done:
+                if status_display == "Pass":
+                    cand["engage_score"] = 100.0
+                elif status_display == "Fail":
+                    cand["engage_score"] = 0.0
+                cand["engage_total_score"] = 100
+
+            try:
+                scores_to_avg = [float(r_score)]
+                if is_engage_done and cand.get("engage_score") is not None:
+                    scores_to_avg.append(float(cand["engage_score"]))
+
+                cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+            except (TypeError, ValueError):
+                pass
+
+            # Suppress hard filter for in progress
+            if status_display == "In Progress":
+                cand["engage_hard_filter_status"] = None
+
+            # Parse outreach method before replacing audit_payload
+            cand["attended_via"] = "SMS" if original_payload.get("outreach_method") == "sms" else "Phone"
+
+            import datetime
+            dt_val = cand.get("engage_created_at")
+            if isinstance(dt_val, datetime.datetime):
+                cand["engage_created_at"] = dt_val.isoformat() + "Z"
+            elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
+                cand["engage_created_at"] = dt_val.replace(" ", "T") + "Z"
+
+            # Format audit_payload for frontend hover card
+            hf_details = _extract_rankings_hard_filter_details(
+                data_blob,
+                cand.get("audit_response") or {},
+                original_payload
+            )
+            cand["audit_payload"] = {
+                "hard_filter_details": hf_details
+            }
+
+        return {
+            "status": "success",
+            "candidates": candidates,
+            "total": total
+        }
+    except Exception as e:
+        logger.error(f"Error fetching launched candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/candidates/list")
 async def get_all_candidates(
@@ -3461,6 +3871,7 @@ async def get_candidate_evaluation_report(
                 "ai_description":    job_row.get("ai_description") or job_row.get("jobdiva_description"),
                 "recruiter_notes":   job_row.get("recruiter_notes"),
                 "bot_introduction":  job_row.get("bot_introduction"),
+                "recruiter_emails":  job_row.get("recruiter_emails"),
                 "rubric":            rubric,
                 "sourcing_filters":  sourcing_filters,
                 "resume_match_filters": resume_match_filters,
@@ -3655,8 +4066,8 @@ async def get_candidate_evaluation_report(
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1) if total_fit_score is not None else None,
             "engage_interview_id":   engage_interview_id,
-            "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
-            "engage_created_at":     str(engage_created_at) if engage_created_at else None,
+            "engage_completed_at":   _to_iso_z(engage_completed_at),
+            "engage_created_at":     _to_iso_z(engage_created_at),
             "is_boolean_interview":  is_l05,
             # Same data source as the hover card — avoids a separate live-fetch failure
             "engage_hard_filter_details": _extract_rankings_hard_filter_details(
@@ -3746,6 +4157,7 @@ async def save_candidate_feedback(
             "Previously rejected by client": "PAIR Reject - Previously rejected by client",
             "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
             "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
+            "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
         action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
     
@@ -3837,19 +4249,23 @@ async def save_candidate_feedback(
     
     report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
 
-    jobdiva_result = await jobdiva_service.create_candidate_note(
-        candidate_id=jd_candidate_id,
-        job_id=jd_job_ref,
-        action=action_string,
-        note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
-        recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
-    )
-
-    if jobdiva_result.get("status") == "error":
-        logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+    if request.feedback_type == "Unreachable":
+        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
+        jobdiva_result = {"status": "success"}
     else:
-        logger.info(f"✅ JobDiva note created — action='{action_string}', "
-                    f"candidate={jd_candidate_id}, job={jd_job_ref}")
+        jobdiva_result = await jobdiva_service.create_candidate_note(
+            candidate_id=jd_candidate_id,
+            job_id=jd_job_ref,
+            action=action_string,
+            note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+        )
+
+        if jobdiva_result.get("status") == "error":
+            logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+        else:
+            logger.info(f"✅ JobDiva note created — action='{action_string}', "
+                        f"candidate={jd_candidate_id}, job={jd_job_ref}")
 
     # 4. Persist feedback locally in sourced_candidates.data (JSONB merge)
     try:
