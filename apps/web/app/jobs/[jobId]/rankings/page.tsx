@@ -605,7 +605,7 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact" | "unreachable";
+  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -804,9 +804,7 @@ export default function CandidateRankingsPage() {
         else if (statusFilter === "duplicate_candidate") sf = "duplicate candidate";
         else if (statusFilter === "invalid_contact") sf = "invalid contact";
 
-        if (sf === "unreachable") {
-          if (feedbacks[c.id] !== "Unreachable") return false;
-        } else if (sf === "n/a") {
+        if (sf === "n/a") {
           const droppedLabels = ["n/a", "non-us candidate", "below min score", "merged"];
           if (!droppedLabels.includes(engageLabel)) return false;
         } else {
