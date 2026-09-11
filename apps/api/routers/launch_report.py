@@ -73,12 +73,25 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # same population — mixing pair's engage_status with pair-bot's status would
 # let a candidate land in two buckets and break the Percentage denominator.
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
-_PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started"}
-_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "active", "sent"}
+_PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started", "initiated"}
+_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent", "call_in_progress"}
 _COMPLETED_STATUSES = {"completed", "passed", "failed", "pass", "fail", "complete"}
 _PARTIAL_STATUSES = {
     "outreach_incomplete", "partial", "partial_complete", "incomplete",
-    "expired", "no_response", "unreachable", "abandoned",
+    "expired", "no_response", "unreachable", "abandoned", "outreach_failed",
+}
+
+_STATUS_HIERARCHY = {
+    # Completed states rank highest
+    "completed": 4, "passed": 4, "failed": 4, "pass": 4, "fail": 4, "complete": 4,
+    # Partial states
+    "partial_complete": 3, "outreach_incomplete": 3, "partial": 3, "incomplete": 3,
+    "expired": 3, "no_response": 3, "unreachable": 3, "abandoned": 3, "outreach_failed": 3,
+    # In progress states
+    "in_progress": 2, "phase1": 2, "phase2": 2, "phase3": 2, "phase4": 2,
+    "active": 2, "sent": 2, "call_in_progress": 2,
+    # Pending states
+    "pending": 1, "scheduled": 1, "queued": 1, "contact_check": 1, "not_started": 1, "initiated": 1,
 }
 
 _CHANNEL_COLUMNS = {"call": "call", "sms": "sms", "email": "web"}
@@ -232,9 +245,9 @@ def _bucket_status(raw: Optional[str]) -> str:
         return "partial_complete"
     # Deliberately visible: the status vocabulary lives in pair-bot and can
     # grow without pair knowing. Logging the unknown value is how the sets
-    # above get corrected.
-    logger.warning(f"LAUNCH-REPORT: unrecognised pair-bot outreach_status {status!r} — bucketed as partial_complete")
-    return "partial_complete"
+    # above get corrected. Defaults to pending so unknown states do not falsely inflate completion percentage.
+    logger.warning(f"LAUNCH-REPORT: unrecognised pair-bot outreach_status {status!r} — bucketed as pending")
+    return "pending"
 
 
 def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
@@ -297,8 +310,8 @@ def _fetch_jobs_launched_on(
         end_date = start_date
 
     mj_cond, mj_params = _mj_filter(scope, "mj")
-    launch_date_expr = _eastern_date_expr('l.first_launch_at')
-    launch_date_filter = f"{launch_date_expr} = %s" if single_day_query else f"{launch_date_expr} BETWEEN %s AND %s"
+    audit_date_expr = _eastern_date_expr('a.created_at')
+    audit_date_filter = f"{audit_date_expr} = %s" if single_day_query else f"{audit_date_expr} BETWEEN %s AND %s"
     sql = f"""
         WITH launches AS (
             SELECT
@@ -314,6 +327,7 @@ def _fetch_jobs_launched_on(
               ON NULLIF(a.jobdiva_id, '') IS NOT NULL
              AND (a.jobdiva_id = NULLIF(mj.jobdiva_id, '') OR a.jobdiva_id = mj.job_id::text)
             WHERE {mj_cond}
+              AND {audit_date_filter}
             GROUP BY mj.job_id
         )
         SELECT
@@ -341,7 +355,6 @@ def _fetch_jobs_launched_on(
             l.total_launched
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
-        WHERE {launch_date_filter}
         ORDER BY l.first_launch_at ASC
     """
     params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date]
@@ -398,7 +411,7 @@ def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any
     if not job_keys:
         return {}
     sql = """
-        SELECT jobdiva_id, interview_id, candidate_id, created_at, response
+        SELECT jobdiva_id, interview_id, candidate_id, created_at, status, response
         FROM engage_interview_audit
         WHERE jobdiva_id = ANY(%s)
           AND NULLIF(interview_id, '') IS NOT NULL
@@ -475,25 +488,49 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     return fetched
 
 
-def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[str, Any], live_api: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _extract_audit_status(row: Dict[str, Any]) -> str:
+    """Extract outreach or audit status from row dict or its response payload."""
+    st = str(row.get("status") or "").strip()
+    if st:
+        return st
+    resp = row.get("response")
+    if isinstance(resp, dict):
+        return str(resp.get("outreach_status") or resp.get("status") or "").strip()
+    if isinstance(resp, str) and resp.strip():
+        try:
+            parsed = json.loads(resp)
+            if isinstance(parsed, dict):
+                return str(parsed.get("outreach_status") or parsed.get("status") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def merge_outreach_payloads(
+    cand_fallback: Dict[str, Any],
+    audit_fallback: Dict[str, Any],
+    live_api: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
     """
-    Merge outreach data from 3 layers with the *last layer winning*:
+    Merge outreach data from 3 layers:
       Candidate DB (lowest priority) → Audit DB → Live API (highest priority).
 
-    This means live_api fields override everything, which is intentional: the
-    live pair-bot response is the ground truth for a candidate's current outreach
-    state. Local DB fields serve as a best-effort fallback when the API is
-    unavailable or returns no data for an interview.
-
-    Callers that need first-available semantics should use the individual layers
-    directly before calling this helper.
+    State hierarchy protection: A lower progression status cannot overwrite a
+    higher one (e.g. if candidate has completed, an earlier or un-synced pending
+    status will not downgrade it).
     """
     merged_payload = {**cand_fallback}
     for source in (audit_fallback, live_api):
         if isinstance(source, dict):
             for k, v in source.items():
                 if v is not None:
-                    merged_payload[k] = v
+                    if k in ("outreach_status", "status"):
+                        existing_st = str(merged_payload.get(k) or "").strip().lower()
+                        new_st = str(v).strip().lower()
+                        if _STATUS_HIERARCHY.get(new_st, 0) >= _STATUS_HIERARCHY.get(existing_st, 0):
+                            merged_payload[k] = v
+                    else:
+                        merged_payload[k] = v
     return merged_payload
 
 
@@ -535,10 +572,14 @@ def build_merged_outreach_payload(
             audit_fallback = {}
             
     if audit_status:
-        if "outreach_status" not in audit_fallback:
+        st_hier = _STATUS_HIERARCHY.get(str(audit_status).strip().lower(), 0)
+        curr_st = audit_fallback.get("outreach_status") or audit_fallback.get("status")
+        curr_hier = _STATUS_HIERARCHY.get(str(curr_st or "").strip().lower(), 0)
+        if st_hier >= curr_hier:
             audit_fallback["outreach_status"] = audit_status
-        if "status" not in audit_fallback:
             audit_fallback["status"] = audit_status
+        elif "outreach_status" not in audit_fallback:
+            audit_fallback["outreach_status"] = audit_status
 
     # Layer 3: Live PairBot HTTP API Response
     # Unwrap nested `outreach` key from live API payload if present
@@ -736,17 +777,27 @@ def _build_row(
         for c in candidate_rows
         if c.get("engage_interview_id")
     }
+    cand_by_id = {
+        str(c["candidate_id"]): c
+        for c in candidate_rows
+        if c.get("candidate_id")
+    }
 
     payloads = []
+    num_resolved = 0
     for a in audit_rows:
         iid = str(a.get("interview_id") or "")
         if not iid:
             continue
 
-        cand_data = cand_by_interview.get(iid) or {}
+        cid = str(a.get("candidate_id") or "")
+        cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
         raw_resp = a.get("response")
         audit_status = a.get("status")
         live_api = outreach_by_interview.get(iid)
+
+        if live_api is not None or cand_data or raw_resp or audit_status:
+            num_resolved += 1
 
         merged_payload = build_merged_outreach_payload(
             cand_data,
@@ -755,8 +806,11 @@ def _build_row(
             live_api
         )
 
-        if merged_payload:
-            payloads.append(merged_payload)
+        # Enforce total fallback contract: an unresolved or empty payload must
+        # never be dropped. Default to pending so sum(buckets) == total_launched.
+        if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
+            merged_payload = {**merged_payload, "outreach_status": "pending"}
+        payloads.append(merged_payload)
 
     outreach = _summarise_outreach(payloads)
 
@@ -782,16 +836,9 @@ def _build_row(
     # Undefined rather than 0 when nothing launched, and undefined when the
     # outreach fan-out resolved nothing — a 0% that only means "pair-bot did
     # not answer" would read as a real result.
-    #
-    # Note the asymmetry when the fan-out only PARTIALLY resolves: the
-    # numerator counts just the interviews pair-bot answered for, while the
-    # denominator stays the full launched count, so the figure reads low. That
-    # is deliberate — inferring the unanswered ones would invent data — and the
-    # row carries outreach_detail_resolved/_expected so the UI can mark it.
-    resolved = sum(buckets.values())
     percentage = (
         round((buckets["completed"] + buckets["partial_complete"]) / total_launched * 100, 1)
-        if total_launched and resolved
+        if total_launched and num_resolved
         else None
     )
 
@@ -859,7 +906,7 @@ def _build_row(
 
         # Lets the UI mark a row whose outreach columns are partial rather
         # than showing dashes that look like real zeros.
-        "outreach_detail_resolved": len(payloads),
+        "outreach_detail_resolved": num_resolved,
         "outreach_detail_expected": len(audit_rows),
     }
 
@@ -967,11 +1014,34 @@ async def get_launch_report(
     for job in jobs:
         rows = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
         # A job matched under both keys yields the same interview twice.
+        # Preserve earliest launch timestamp and prioritize higher status progression.
         deduped: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             iid = str(row.get("interview_id") or "").strip()
-            if iid:
-                deduped[iid] = row
+            if not iid:
+                continue
+            if iid not in deduped:
+                deduped[iid] = dict(row)
+            else:
+                existing = deduped[iid]
+                # Preserve earliest created_at for true launch timestamp
+                ex_dt = _parse_iso(existing.get("created_at"))
+                row_dt = _parse_iso(row.get("created_at"))
+                if ex_dt and row_dt:
+                    if row_dt < ex_dt:
+                        existing["created_at"] = row["created_at"]
+                elif row_dt and not ex_dt:
+                    existing["created_at"] = row["created_at"]
+
+                # Prioritize higher status rank
+                row_st = _extract_audit_status(row).lower()
+                ex_st = _extract_audit_status(existing).lower()
+                if _STATUS_HIERARCHY.get(row_st, 0) > _STATUS_HIERARCHY.get(ex_st, 0):
+                    existing["status"] = row.get("status") or row_st
+                    if row.get("response"):
+                        existing["response"] = row.get("response")
+                elif row.get("response") and not existing.get("response"):
+                    existing["response"] = row.get("response")
 
         # Scoped to the requested report range rather than only the job's
         # first-launch day, so later-day launches show up on their own report

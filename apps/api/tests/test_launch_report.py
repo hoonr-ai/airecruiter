@@ -64,7 +64,7 @@ def test_bucket_status_unknown_value_falls_back_and_warns(caplog):
     bucket sets need updating, so it has to be both counted and logged.
     """
     with caplog.at_level("WARNING"):
-        assert lr._bucket_status("some_brand_new_state") == "partial_complete"
+        assert lr._bucket_status("some_brand_new_state") == "pending"
     assert "some_brand_new_state" in caplog.text
 
 
@@ -858,3 +858,101 @@ def test_fetch_outreach_status_handles_legacy_unwrapped_payload():
         result = await lr._fetch_outreach_status(client, semaphore, deadline, "123")
         assert result == {"outreach_status": "pass", "outreach_phase": "phase2"}
     asyncio.run(_test())
+
+
+# ---------------------------------------------------------------------------
+# Status bucketing and fallback invariant tests (fix/launch-report-metrics)
+# ---------------------------------------------------------------------------
+def test_bucket_status_extended_mappings():
+    assert lr._bucket_status("initiated") == "pending"
+    assert lr._bucket_status("not_started") == "pending"
+    assert lr._bucket_status("call_in_progress") == "in_progress"
+    assert lr._bucket_status("phase4") == "in_progress"
+    assert lr._bucket_status("outreach_failed") == "partial_complete"
+
+
+def test_status_buckets_sum_to_total_launched_under_all_conditions():
+    """Invariant: Pending + In Progress + Completed + Partial Complete == Total Launched."""
+    job = _job(4)
+    audit = [{"interview_id": str(i), "candidate_id": f"c_{i}"} for i in range(1, 5)]
+    # Interview 1: Completed from live API
+    # Interview 2: Call in progress from live API
+    # Interview 3: Unresolved from live API, has DB fallback 'initiated'
+    # Interview 4: Completely unresolved (live API None, DB None) -> defaults to 'pending'
+    cand_rows = [
+        {"engage_interview_id": "3", "candidate_id": "c_3", "engage_status": "initiated"}
+    ]
+    live_outreach = {
+        "1": {"outreach_status": "completed"},
+        "2": {"outreach_status": "call_in_progress"},
+    }
+    row = lr._build_row(job, cand_rows, audit, live_outreach)
+    assert row["total_candidates_launched"] == 4
+    assert row["completed"] == 1
+    assert row["in_progress"] == 1
+    assert row["pending"] == 2  # c_3 (initiated) and c_4 (unresolved fallback)
+    assert row["partial_complete"] == 0
+    assert row["pending"] + row["in_progress"] + row["completed"] + row["partial_complete"] == 4
+    assert row["percentage"] == 25.0  # 1 of 4 completed
+    assert row["outreach_detail_resolved"] == 3  # 1, 2 (live) and 3 (DB) resolved
+
+
+def test_deduplication_preserves_earliest_created_at_and_highest_status(monkeypatch):
+    """When an interview has multiple audit events across days, keep earliest launch date and highest status."""
+    jobs = [{**_job(999), "job_id": "55", "jobdiva_id": "26-01234", "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}]
+    audit_by_key = {
+        "26-01234": [
+            # Later event on Aug 29 with 'completed'
+            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 29, 14, 0), "status": "completed", "response": '{"status": "completed"}'},
+            # Earlier launch event on Aug 27 with 'initiated'
+            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "status": "Initiated", "response": None},
+        ]
+    }
+
+    def _load_inputs(_start, _end, _scope):
+        return jobs, {}, audit_by_key
+
+    async def _fake_outreach(_iids):
+        return {}
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _fake_outreach)
+
+    # Query for Aug 27 in Eastern (Aug 28 02:10 UTC)
+    response = asyncio.run(
+        lr.get_launch_report(
+            date=None,
+            start_date="2026-08-27",
+            end_date="2026-08-27",
+            team_id=None,
+            user=_admin_user(),
+        )
+    )
+    row = response["data"]["jobs"][0]
+    # Candidate should still belong to Aug 27 report because earliest created_at was preserved
+    assert row["total_candidates_launched"] == 1
+    # Status progression retained 'completed' rather than being clobbered by 'Initiated'
+    assert row["completed"] == 1
+
+
+def test_merge_outreach_payloads_monotonic_state_progression():
+    """Higher progression status (e.g. completed) cannot be downgraded by lower status (e.g. initiated or pending)."""
+    cand = {"outreach_status": "completed"}
+    audit = {"outreach_status": "initiated", "status": "initiated"}
+    live = {"outreach_status": "pending"}
+
+    merged = lr.merge_outreach_payloads(cand, audit, live)
+    assert merged["outreach_status"] == "completed"
+
+    # Conversely, live completed status upgrades pending candidate
+    cand2 = {"outreach_status": "pending"}
+    live2 = {"outreach_status": "completed"}
+    merged2 = lr.merge_outreach_payloads(cand2, {}, live2)
+    assert merged2["outreach_status"] == "completed"
+
+
+def test_eastern_date_expr_sql():
+    """Explicit timezone conversion in SQL query matches project defaults."""
+    expr = lr._eastern_date_expr("a.created_at")
+    assert expr == "((a.created_at AT TIME ZONE %s) AT TIME ZONE %s)::date"
+
