@@ -3079,15 +3079,10 @@ async def get_launched_candidates(
 
                 params.extend([limit, offset])
 
-                # Single shared CTE used by both the results query and the count query,
-                # eliminating duplication and ensuring results/count are always in sync.
-                # DISTINCT ON always orders by created_at DESC (latest row wins), which
-                # is correct regardless of whether a feedback filter is active.
-                # The feedback_exists_condition uses EXISTS subqueries over all of a
-                # candidate's rows — so the latest row is always selected, but only
-                # candidates who match the feedback requirement (on any row) are included.
-                FULL_CTE = f"""
-                    WITH latest_audit AS (
+                # CTE_BODY does NOT include the leading 'WITH' — it is added per-query below.
+                # This avoids the double-WITH bug that caused the feedback filter to silently fail.
+                CTE_BODY = f"""
+                    latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
                             candidate_id,
                             interview_id,
@@ -3142,7 +3137,7 @@ async def get_launched_candidates(
                 """
 
                 query = f"""
-                    WITH {FULL_CTE.split('WITH', 1)[1]}
+                    WITH {CTE_BODY}
                     SELECT * FROM launched_candidates
                     ORDER BY engage_created_at DESC NULLS LAST
                     LIMIT %s OFFSET %s;
@@ -3152,7 +3147,7 @@ async def get_launched_candidates(
 
                 # Count query reuses the same CTE — no duplication, guaranteed sync with results.
                 count_query = f"""
-                    WITH {FULL_CTE.split('WITH', 1)[1]}
+                    WITH {CTE_BODY}
                     SELECT COUNT(*) as total FROM launched_candidates
                 """
                 cur.execute(count_query, tuple(params[:-2]))

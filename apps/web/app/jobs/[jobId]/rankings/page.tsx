@@ -230,6 +230,7 @@ interface JobDetails {
   customer_name?: string;
   openings?: number;
   max_allowed_submittals?: number;
+  screening_level?: string;
 }
 
 // B5: applied-filters panel — surfaces context set on Step 3 (criteria) and
@@ -1633,7 +1634,8 @@ export default function CandidateRankingsPage() {
           title: data.enhanced_title || data.title || `Job ${jobId}`,
           customer_name: data.customer_name,
           openings: data.openings,
-          max_allowed_submittals: data.max_allowed_submittals
+          max_allowed_submittals: data.max_allowed_submittals,
+          screening_level: data.screening_level,
         });
         // B5: surface step-5 sourcing filters on this page.
         const sf = data.sourcing_filters || {};
@@ -1764,7 +1766,7 @@ export default function CandidateRankingsPage() {
               <Medal className="w-8 h-8 text-indigo-600" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
+              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2 flex-wrap">
                 {isInitialLoading ? <Skeleton className="h-8 w-64 bg-slate-100" /> : job?.title}
                 {!isInitialLoading && (
                   <span className="text-slate-500 font-medium text-lg flex items-center">
@@ -1783,7 +1785,20 @@ export default function CandidateRankingsPage() {
                   </span>
                 )}
               </h2>
-              <div className="text-sm text-slate-500 font-medium mt-1">Candidate Rank List</div>
+              <div className="flex items-center gap-3 mt-1">
+                <div className="text-sm text-slate-500 font-medium">Candidate Rank List</div>
+                {!isInitialLoading && job?.screening_level && (
+                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded text-xs font-bold border uppercase tracking-wide ${
+                    job.screening_level.toLowerCase() === 'l0.5' ? 'bg-purple-50 text-purple-700 border-purple-200' :
+                    job.screening_level.toLowerCase() === 'l1' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                    job.screening_level.toLowerCase() === 'l1.5' ? 'bg-cyan-50 text-cyan-700 border-cyan-200' :
+                    job.screening_level.toLowerCase() === 'l2' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
+                    'bg-slate-100 text-slate-600 border-slate-300'
+                  }`}>
+                    {job.screening_level}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <Button
