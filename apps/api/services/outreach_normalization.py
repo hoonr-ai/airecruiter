@@ -1,7 +1,8 @@
 """Shared normalization helpers for outreach phase and communication channel.
 
 Used across routers (e.g. launch_report, voice_agent) to map PairBot status,
-phase, and channel variants onto canonical values (phase1/phase2/phase3 and call/sms/web).
+phase, and channel variants onto canonical values (contact_check, phase1/phase1_6hr/phase2/phase3,
+extra outreach phases, and call/sms/web).
 """
 import logging
 from typing import Any, Dict, Optional
@@ -21,7 +22,8 @@ _CHANNEL_ALIASES = {
     "web": "web",
 }
 
-# Standard 4 phases, contact check, and extra outreach phases (>80% match)
+# Canonical phases: contact check, initial outreach (phase1), retry phases (phase1_6hr, phase2, phase3),
+# and extra outreach phases (>80% match: phase1_extra, phase1_6hr_extra, phase2_extra).
 _CANONICAL_PHASES = {
     "contact_check",
     "phase1",
@@ -91,10 +93,10 @@ def normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -
     value = (raw or "").strip().lower()
     if not value:
         return None
+    if not allow_pending_aliases and (value in _PENDING_STATUSES or value == "contact_check"):
+        return None
     if value in _CANONICAL_PHASES:
         return value
-    if not allow_pending_aliases and value in _PENDING_STATUSES:
-        return None
     aliased = _PHASE_ALIASES.get(value)
     if aliased:
         return aliased

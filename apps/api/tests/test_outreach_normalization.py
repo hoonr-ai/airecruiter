@@ -25,6 +25,20 @@ def test_normalize_phase_standard_and_aliases():
     assert normalize_phase(None) is None
 
 
+def test_normalize_phase_allow_pending_aliases():
+    assert normalize_phase("contact_check", allow_pending_aliases=True) == "contact_check"
+    assert normalize_phase("contact_check", allow_pending_aliases=False) is None
+    assert normalize_phase("queued", allow_pending_aliases=True) == "contact_check"
+    assert normalize_phase("queued", allow_pending_aliases=False) is None
+    assert normalize_phase("scheduled", allow_pending_aliases=False) is None
+    assert normalize_phase("not_started", allow_pending_aliases=False) is None
+    # Real phases should not be suppressed by allow_pending_aliases=False
+    assert normalize_phase("phase1", allow_pending_aliases=False) == "phase1"
+    assert normalize_phase("phase1_6hr", allow_pending_aliases=False) == "phase1_6hr"
+    assert normalize_phase("phase2", allow_pending_aliases=False) == "phase2"
+    assert normalize_phase("phase3", allow_pending_aliases=False) == "phase3"
+
+
 def test_normalize_channel_standard_and_aliases():
     assert normalize_channel("call") == "call"
     assert normalize_channel("voice") == "call"

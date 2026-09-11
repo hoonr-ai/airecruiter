@@ -74,7 +74,7 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # let a candidate land in two buckets and break the Percentage denominator.
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
 _PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started"}
-_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "active", "sent"}
+_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent"}
 _COMPLETED_STATUSES = {"completed", "passed", "failed", "pass", "fail", "complete"}
 _PARTIAL_STATUSES = {
     "outreach_incomplete", "partial", "partial_complete", "incomplete",
@@ -91,7 +91,6 @@ _CHANNEL_ALIASES = {
     "mail": "web",
     "web": "web",
 }
-
 
 
 # ---------------------------------------------------------------------------
@@ -220,39 +219,80 @@ def _bucket_status(raw: Optional[str]) -> str:
     return "partial_complete"
 
 
-def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
-    """Map phase variants onto phase1/phase2/phase3/phase4/extra."""
+def _normalize_phase(
+    raw: Optional[str],
+    *,
+    allow_pending_aliases: bool = True,
+    shift_phases: bool = True,
+) -> Optional[str]:
+    """Map phase variants onto phase1/phase2/phase3/phase4/extra.
+
+    When shift_phases=True (Launch Report mode), PairBot retry phases are shifted
+    into Launch Report column indices:
+      contact_check / phase1 -> phase1
+      phase1_6hr             -> phase2
+      phase2                 -> phase3
+      phase3                 -> phase4
+      phase1_extra           -> extra1
+      phase1_6hr_extra       -> extra2
+      phase2_extra           -> extra3
+
+    When shift_phases=False (standard mode for routers.jobs::get_job_outreach_stats):
+      contact_check / phase1 -> phase1
+      phase1_6hr             -> phase1_6hr
+      phase2                 -> phase2
+      phase3                 -> phase3
+      phase1_extra           -> extra1
+      phase1_6hr_extra       -> extra2
+      phase2_extra           -> extra3
+    """
     norm = normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
     if not norm:
         return None
-    if norm in ("contact_check", "phase1"):
-        return "phase1"
-    if norm == "phase1_6hr":
-        return "phase2"
-    if norm == "phase2":
-        return "phase3"
-    if norm == "phase3":
-        return "phase4"
-    if norm == "phase1_extra":
-        return "extra1"
-    if norm == "phase1_6hr_extra":
-        return "extra2"
-    if norm == "phase2_extra":
-        return "extra3"
+    if shift_phases:
+        if norm in ("contact_check", "phase1"):
+            return "phase1"
+        if norm == "phase1_6hr":
+            return "phase2"
+        if norm == "phase2":
+            return "phase3"
+        if norm == "phase3":
+            return "phase4"
+        if norm == "phase1_extra":
+            return "extra1"
+        if norm == "phase1_6hr_extra":
+            return "extra2"
+        if norm == "phase2_extra":
+            return "extra3"
+    else:
+        if norm in ("contact_check", "phase1"):
+            return "phase1"
+        if norm in ("phase1_6hr", "phase2", "phase3"):
+            return norm
+        if norm == "phase1_extra":
+            return "extra1"
+        if norm == "phase1_6hr_extra":
+            return "extra2"
+        if norm == "phase2_extra":
+            return "extra3"
     return None
 
 
-def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
+def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Optional[str]:
     """Pick phase from known keys, then fall back to status-shaped phase values."""
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
-    phase = _normalize_phase(raw)
+    phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
-    return _normalize_phase(outreach.get("outreach_status"), allow_pending_aliases=False)
+    return _normalize_phase(
+        outreach.get("outreach_status"),
+        allow_pending_aliases=False,
+        shift_phases=shift_phases,
+    )
 
 
 def _normalize_channel(raw: Optional[str]) -> Optional[str]:
@@ -551,7 +591,7 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -622,7 +662,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         elif normalized_status in ("failed", "fail"):
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged)
+        phase = _extract_phase(merged, shift_phases=shift_phases)
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
@@ -769,7 +809,7 @@ def _build_row(
         if merged_payload:
             payloads.append(merged_payload)
 
-    outreach = _summarise_outreach(payloads)
+    outreach = _summarise_outreach(payloads, shift_phases=True)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -866,11 +906,11 @@ def _build_row(
         "phase1": outreach["phases"]["phase1"],
         "phase2": outreach["phases"]["phase2"],
         "phase3": outreach["phases"]["phase3"],
-        "phase4": outreach["phases"].get("phase4", 0),
-        "extra": outreach["phases"].get("extra", 0),
-        "extra1": outreach["phases"].get("extra1", 0),
-        "extra2": outreach["phases"].get("extra2", 0),
-        "extra3": outreach["phases"].get("extra3", 0),
+        "phase4": outreach["phases"]["phase4"],
+        "extra": outreach["phases"]["extra"],
+        "extra1": outreach["phases"]["extra1"],
+        "extra2": outreach["phases"]["extra2"],
+        "extra3": outreach["phases"]["extra3"],
         "percentage": percentage,
 
         # Lets the UI mark a row whose outreach columns are partial rather
