@@ -14,6 +14,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getScoreBand, getScoreTone } from "@/lib/match-score";
 import {
   Linkedin,
   ShieldCheck,
@@ -125,11 +126,10 @@ function formatLastActiveShort(d: Date | null): string {
   return d.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "2-digit", day: "2-digit", year: "numeric" });
 }
 
+// Colours follow the recruiter ranking bands (lib/match-score.ts):
+// 85+ Excellent · 75–84 Strong · 60–74 Good · <60 Low priority.
 function getMatchTone(score: number | null) {
-  if (score == null) return null;
-  if (score >= 80) return { ring: "#2563eb", bg: "#dbeafe", text: "#1d4ed8" };
-  if (score >= 60) return { ring: "#d97706", bg: "#fef3c7", text: "#b45309" };
-  return { ring: "#e11d48", bg: "#ffe4e6", text: "#be123c" };
+  return getScoreTone(score);
 }
 
 function getMatchedSkills(c: any): string[] {
@@ -546,7 +546,7 @@ export function CandidateMatchTable({
                         onClick={() => onOpenDetails(candidate)}
                         className="inline-flex items-center justify-center w-12 h-12 rounded-full font-extrabold text-[13px] hover:scale-105 transition-transform shadow-sm"
                         style={{ backgroundColor: tone.bg, color: tone.text, border: `2px solid ${tone.ring}` }}
-                        title="View match score breakdown"
+                        title={`${getScoreBand(matchScore).label} — ${getScoreBand(matchScore).action}. View match score breakdown`}
                       >
                         {matchScore}%
                       </button>

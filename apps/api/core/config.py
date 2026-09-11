@@ -272,6 +272,94 @@ SCORING_EXCLUSION_HARD_VETO_THRESHOLD = float(
     get_env_with_default("SCORING_EXCLUSION_HARD_VETO_THRESHOLD", "0.85")
 )
 
+# ---- Scoring Matrix v2 (recruiter rubric, 2026-09-11) ----
+# Replaces the 9-dimension weight sets below with the three buckets the
+# recruiting team signed off on, plus pass/fail hard filters:
+#
+#   Recent Must-Have Skills   75%  (rubric must-have skills incl. their
+#                                   JobDiva-mapped similar terms; per-skill
+#                                   years + recency when the résumé parse
+#                                   provides them, total YOE / recent-text
+#                                   proxies otherwise)
+#   Recent Title/Role          15%  (rubric titles + role-taxonomy tier)
+#   Preferred                  10%  (preferred skills, domain/industry,
+#                                   education, preferred certifications)
+#
+#   Hard filters (score → 0, launch-excluded):
+#     currently employed by the client, no must-have skill evidenced,
+#     required certification missing, confirmed outside the mandatory
+#     location, below the minimum years floor. Work authorization stays a
+#     Pairbot screening hard filter (it is asked on the call, not parsed
+#     from résumés).
+#
+#   Bands: 85-100 Excellent (priority) · 75-84 Strong (recommended) ·
+#          60-74 Good (recruiter review) · <60 Low priority, no outreach.
+#
+# Additive boosts that the legacy scorer stacked on top (JobAgent rank
+# floor, source-tier bonus, title boost, open-to-work bump) are NOT applied
+# under the matrix — the percentage has to be the matrix. Set
+# SCORING_MATRIX_V2=false to fall back to the legacy 9-dimension scorer.
+SCORING_MATRIX_V2 = get_env_bool("SCORING_MATRIX_V2", True)
+SCORING_MATRIX_WEIGHTS = {
+    "must_have_skills": float(get_env_with_default("SCORING_MATRIX_W_MUST_HAVE", "75")),
+    "title_recent": float(get_env_with_default("SCORING_MATRIX_W_TITLE", "15")),
+    "preferred": float(get_env_with_default("SCORING_MATRIX_W_PREFERRED", "10")),
+}
+# Credit an unmatched must-have still earns (synonym / parsing misses are
+# common; a real gap should still read as a gap). 0.15 → 4 of 5 must-haves
+# scores ~62/75 on the skills bucket, 3 of 5 ~47/75.
+SCORING_MATRIX_REQUIRED_FLOOR = float(
+    get_env_with_default("SCORING_MATRIX_REQUIRED_FLOOR", "0.15")
+)
+# Multiplier when a must-have skill is evidenced but not in the candidate's
+# recent experience (per-skill last-used year outside the recency window, or
+# — when the parse has no per-skill data — absent from the recent-text head).
+SCORING_MATRIX_RECENCY_DECAY = float(
+    get_env_with_default("SCORING_MATRIX_RECENCY_DECAY", "0.70")
+)
+# Multiplier when a must-have skill's required years are unknown for the
+# candidate (parse has no per-skill years and total YOE is unknown).
+SCORING_MATRIX_YEARS_UNKNOWN_MULT = float(
+    get_env_with_default("SCORING_MATRIX_YEARS_UNKNOWN_MULT", "0.90")
+)
+# Floor on the years ratio (candidate years / required years) when below.
+SCORING_MATRIX_YEARS_FLOOR = float(
+    get_env_with_default("SCORING_MATRIX_YEARS_FLOOR", "0.50")
+)
+# Role-taxonomy tier → title-relevance credit (see _compute_title_boost).
+SCORING_MATRIX_TITLE_TIER_CREDIT = {"exact": 1.0, "similar": 0.8, "related": 0.5}
+
+SCORING_BAND_EXCELLENT = int(get_env_with_default("SCORING_BAND_EXCELLENT", "85"))
+SCORING_BAND_STRONG = int(get_env_with_default("SCORING_BAND_STRONG", "75"))
+SCORING_BAND_GOOD = int(get_env_with_default("SCORING_BAND_GOOD", "60"))
+# No PAIR outreach below this score (the auto-launch floor; the frontend
+# mirrors it in AUTO_LAUNCH_MIN_SCORE).
+SCORING_OUTREACH_MIN_SCORE = int(
+    get_env_with_default("SCORING_OUTREACH_MIN_SCORE", str(SCORING_BAND_GOOD))
+)
+
+
+def score_band(score) -> dict:
+    """Map a 0-100 match score onto the recruiter ranking bands.
+
+    Returns ``{"tier", "label", "action", "min"}``; ``tier`` is a stable
+    machine key (excellent / strong / good / low) for the UI and telemetry.
+    ``None`` (unscored) maps to the ``unscored`` tier.
+    """
+    if score is None:
+        return {"tier": "unscored", "label": "Unscored", "action": "Limited data", "min": None}
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return {"tier": "unscored", "label": "Unscored", "action": "Limited data", "min": None}
+    if s >= SCORING_BAND_EXCELLENT:
+        return {"tier": "excellent", "label": "Excellent", "action": "Priority", "min": SCORING_BAND_EXCELLENT}
+    if s >= SCORING_BAND_STRONG:
+        return {"tier": "strong", "label": "Strong", "action": "Recommended", "min": SCORING_BAND_STRONG}
+    if s >= SCORING_BAND_GOOD:
+        return {"tier": "good", "label": "Good", "action": "Recruiter Review", "min": SCORING_BAND_GOOD}
+    return {"tier": "low", "label": "Low Priority", "action": "No outreach", "min": 0}
+
 # Additive source-tier bonus applied to match_score in `finalize_candidate`.
 # Warm leads (recruiter's own applicants) and curated pools should rank
 # above cold scrapes when raw scores are close. Bonus is only applied when

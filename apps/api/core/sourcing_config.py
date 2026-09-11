@@ -261,15 +261,29 @@ JOBAGENT_LOCATION_HARD_VETO = False
 JOBAGENT_HIGH_LEVEL_SCORING = True
 
 # ─────────────────────────────────────────────────────────────────────────
-# Sample-first search flow (Step 5 "show me 2 per source before committing")
+# Sample-first search flow (Step 5 "show me the 2-5 best per source first")
 # ─────────────────────────────────────────────────────────────────────────
 # When SearchCriteria.search_mode == "sample", each selected source probes a
-# small ranked pool (SAMPLE_MODE_POOL_SIZE), fully enriches + scores it, and
-# emits only the first `sample_per_source` rows that clear the normal quality
-# gates — so the recruiter can approve source quality before paying for the
-# full run. Pool > per-source cap because gate failures (score floor,
-# dedup, no-resume) must not leave a source looking empty when it isn't.
-SAMPLE_MODE_POOL_SIZE = int(_os.getenv("SAMPLE_MODE_POOL_SIZE", "8").strip() or "8")
+# small ranked pool (SAMPLE_MODE_POOL_SIZE), fully enriches + scores EVERY
+# row of it, then emits the best-scoring rows: always the top
+# SAMPLE_MIN_ROWS_PER_SOURCE (so a weak source still shows what it has),
+# and beyond that only rows at or above SAMPLE_QUALITY_FLOOR, up to the
+# request's `sample_per_source` cap (the frontend sends 5). Hard-filter
+# fails (client employee, no must-have skill, outside the mandatory
+# location, no-contact company) never take a sample slot.
+#
+# Pool > per-source cap because the "best" rows are only known after the
+# whole pool is scored, and gate failures (dedup, no-resume, hard filters)
+# must not leave a source looking empty when it isn't. 12 keeps the JobAgent
+# probe (latency scales with resumeCount) in the seconds range.
+SAMPLE_MODE_POOL_SIZE = int(_os.getenv("SAMPLE_MODE_POOL_SIZE", "12").strip() or "12")
+SAMPLE_MIN_ROWS_PER_SOURCE = int(
+    _os.getenv("SAMPLE_MIN_ROWS_PER_SOURCE", "2").strip() or "2"
+)
+# Score floor for sample rows beyond the guaranteed minimum. Mirrors the
+# "no outreach below 60%" band: the preview shows what the full run would
+# actually launch to. Set to 0 to show the top `sample_per_source` regardless.
+SAMPLE_QUALITY_FLOOR = int(_os.getenv("SAMPLE_QUALITY_FLOOR", "60").strip() or "60")
 
 # ─────────────────────────────────────────────────────────────────────────
 # Per-candidate processing concurrency

@@ -1,8 +1,14 @@
-"""Unit tests for the 2026-06 rubric rework of `_score_candidate`.
+"""Unit tests for the 2026-06 rubric rework of `_score_candidate` (the
+LEGACY 9-dimension scorer).
 
 Covers: weight-set integrity, redistribution of absent dimensions, the
 must-have/preferred blend, recency, the evidence-based location hard gate,
 and the currently-employed-by-client veto.
+
+Since 2026-09-11 the default scorer is the recruiter scoring matrix
+(SCORING_MATRIX_V2, see test_scoring_matrix_v2.py); this module pins the
+legacy path, which stays selectable via SCORING_MATRIX_V2=false, so every
+test here runs with the flag forced off.
 
 The service's __init__ touches external clients, so we build a bare instance
 via object.__new__ and exercise the pure scoring methods directly.
@@ -13,10 +19,16 @@ from core.config import (  # noqa: E402
     SCORING_WEIGHTS_DEFAULT,
     SCORING_WEIGHTS_BY_FAMILY,
 )
+import services.unified_candidate_search as ucs  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     UnifiedCandidateSearch,
     SearchCriteria,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_scorer(monkeypatch):
+    monkeypatch.setattr(ucs, "SCORING_MATRIX_V2", False)
 
 
 @pytest.fixture
