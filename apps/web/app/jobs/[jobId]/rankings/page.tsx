@@ -230,6 +230,7 @@ interface JobDetails {
   customer_name?: string;
   openings?: number;
   max_allowed_submittals?: number;
+  screening_level?: string;
 }
 
 // B5: applied-filters panel — surfaces context set on Step 3 (criteria) and
@@ -616,6 +617,7 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [feedbackFilter, setFeedbackFilter] = useState<string>("");
   const [minScore, handleMinScoreChange, setMinScore] = useClampedScoreInput("");
   // Default the rank list to fit-score descending so it actually ranks by
   // score rather than by the source-priority pre-sort applied at load time.
@@ -815,6 +817,19 @@ export default function CandidateRankingsPage() {
       if (activityFilter === "has_activity" && !deriveInterviewId(c)) return false;
       // Source
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
+      // Feedback filter
+      if (feedbackFilter) {
+        const ft = (c.data?.feedback_type || feedbacks[c.id] || "").toLowerCase();
+        if (feedbackFilter === "no feedback") {
+          if (ft) return false;
+        } else if (feedbackFilter === "submit") {
+          if (!ft.startsWith("submit")) return false;
+        } else if (feedbackFilter === "reject") {
+          if (!ft.startsWith("reject")) return false;
+        } else if (feedbackFilter === "unreachable") {
+          if (ft !== "unreachable") return false;
+        }
+      }
       // Min score
       const score = c.match_score ?? c.resume_match_percentage ?? 0;
       if (minScore !== "" && score < minScore) return false;
@@ -910,7 +925,7 @@ export default function CandidateRankingsPage() {
       });
     }
     return rows;
-  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, minScore, sortField, sortDir, columnFilters]);
+  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, feedbackFilter, minScore, sortField, sortDir, columnFilters, feedbacks]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -926,6 +941,7 @@ export default function CandidateRankingsPage() {
     setStatusFilter("all");
     setActivityFilter("all");
     setSourceFilter("all");
+    setFeedbackFilter("");
     setMinScore("");
     setColumnFilters({});
   };
@@ -1633,7 +1649,8 @@ export default function CandidateRankingsPage() {
           title: data.enhanced_title || data.title || `Job ${jobId}`,
           customer_name: data.customer_name,
           openings: data.openings,
-          max_allowed_submittals: data.max_allowed_submittals
+          max_allowed_submittals: data.max_allowed_submittals,
+          screening_level: data.screening_level,
         });
         // B5: surface step-5 sourcing filters on this page.
         const sf = data.sourcing_filters || {};
@@ -1734,6 +1751,7 @@ export default function CandidateRankingsPage() {
     statusFilter !== "all" ||
     activityFilter !== "all" ||
     sourceFilter !== "all" ||
+    feedbackFilter !== "" ||
     minScore !== "" && minScore > 0
   );
   const totalCandidates = candidateTotalCount || candidates.length;
@@ -1764,7 +1782,7 @@ export default function CandidateRankingsPage() {
               <Medal className="w-8 h-8 text-indigo-600" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
+              <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2 flex-wrap">
                 {isInitialLoading ? <Skeleton className="h-8 w-64 bg-slate-100" /> : job?.title}
                 {!isInitialLoading && (
                   <span className="text-slate-500 font-medium text-lg flex items-center">
@@ -1783,7 +1801,22 @@ export default function CandidateRankingsPage() {
                   </span>
                 )}
               </h2>
-              <div className="text-sm text-slate-500 font-medium mt-1">Candidate Rank List</div>
+              <div className="flex items-center gap-3 mt-1">
+                <div className="text-sm text-slate-500 font-medium">Candidate Rank List</div>
+                {!isInitialLoading && job?.screening_level && (
+                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded text-xs font-bold border uppercase tracking-wide ${
+                    ((level) => {
+                      if (level === 'l0.5') return 'bg-purple-50 text-purple-700 border-purple-200';
+                      if (level === 'l1') return 'bg-blue-50 text-blue-700 border-blue-200';
+                      if (level === 'l1.5') return 'bg-cyan-50 text-cyan-700 border-cyan-200';
+                      if (level === 'l2') return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+                      return 'bg-slate-100 text-slate-600 border-slate-300';
+                    })(job.screening_level.toLowerCase())
+                  }`}>
+                    {job.screening_level}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <Button
@@ -2129,6 +2162,22 @@ export default function CandidateRankingsPage() {
               {availableSources.map(s => (
                 <option key={s} value={s}>{s}</option>
               ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Feedback</label>
+            <select
+              value={feedbackFilter}
+              onChange={(e) => setFeedbackFilter(e.target.value)}
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[125px]"
+            >
+              <option value="">All</option>
+              <option value="no feedback">No Feedback</option>
+              <option value="submit">Submitted</option>
+              <option value="reject">Rejected</option>
+              <option value="unreachable">Unreachable</option>
             </select>
           </div>
 
