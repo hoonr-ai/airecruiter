@@ -42,6 +42,7 @@ from services.jobdiva import (
 from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
 from core.auth import UserIdentity, get_current_user
+from routers.jobs import _verify_job_access_by_id
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -742,6 +743,72 @@ async def init_engagement_tables() -> None:
 def _get_db_connection():
     return get_db_connection()
 
+
+# ---------------------------------------------------------------------------
+# Authorization helpers
+# ---------------------------------------------------------------------------
+# This router is mounted without router-level dependencies and the app has no
+# global auth middleware, so EVERY handler declares
+# `user: UserIdentity = Depends(get_current_user)` itself — pinned by
+# tests/test_engagement_router_auth.py, which also requires each route to be
+# classified as job-scoped (`_verify_job_access_by_id`), interview-scoped
+# (`_verify_interview_access`), admin-only (`_require_admin`) or auth-only.
+# Until 2026-09 none of the pre-existing routes carried a guard: Launch PAIR,
+# JobDiva re-provisioning and every interview transcript were public.
+
+def _job_id_from_engage_payload(payload: str) -> Optional[str]:
+    """The job an editable Pairbot payload targets (`jd.job_id` / `jd.jobdiva_id`), or None.
+
+    Mirrors the extraction in `_send_bulk_interview_core`; malformed JSON is left
+    for the core to reject with its own 400.
+    """
+    try:
+        jd_block = (json.loads(payload or "{}") or {}).get("jd") or {}
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return None
+    if not isinstance(jd_block, dict):
+        return None
+    job_id = jd_block.get("job_id") or jd_block.get("jobdiva_id")
+    return str(job_id).strip() if job_id else None
+
+
+def _verify_interview_access(interview_id: str, user: UserIdentity) -> None:
+    """Allow `user` to read or act on an interview only if they may access its job.
+
+    Interview ids are Pairbot's; engage_interview_audit records the job each one
+    was launched for. Admins pass. When the audit knows the job, the regular
+    job-access rule applies (403 otherwise). An interview the audit has never
+    seen (pre-audit history, or launched outside PAIR) stays readable to any
+    authenticated user — the authentication requirement itself never relaxes.
+    A failed lookup fails closed.
+    """
+    if user.is_admin:
+        return
+    jobdiva_id: Optional[str] = None
+    try:
+        conn = _get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT jobdiva_id FROM engage_interview_audit
+                WHERE interview_id = %s AND COALESCE(jobdiva_id, '') NOT IN ('', 'unknown')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (str(interview_id),),
+            )
+            row = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+        if row:
+            jobdiva_id = str(row[0] if not isinstance(row, dict) else row.get("jobdiva_id") or "")
+    except Exception as e:  # noqa: BLE001 — fail closed on lookup errors
+        logger.error("interview access lookup failed for %s: %s", interview_id, e)
+        raise HTTPException(status_code=403, detail="Access denied. Could not verify interview ownership.")
+    if jobdiva_id:
+        _verify_job_access_by_id(jobdiva_id, user, allow_not_found=True)
+
 # ---------------------------------------------------------------------------
 # Request / Response Models
 # ---------------------------------------------------------------------------
@@ -770,10 +837,16 @@ class SendBulkInterviewRequest(BaseModel):
 # 1. POST /engage/generate-payload
 # ---------------------------------------------------------------------------
 @router.post("/engage/generate-payload")
-async def generate_engage_payload(request: GeneratePayloadRequest):
+async def generate_engage_payload(
+    request: GeneratePayloadRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Thin HTTP wrapper. The QA/edit modal fetches an editable payload here;
-    the batched launch orchestrator (`/engage/launch`) calls
-    `_generate_payload_for` directly, with no browser round-trip."""
+    the batched launch orchestrator (`/engage/launch`) and the applicant
+    auto-launch call `_generate_payload_for` directly, with no browser round-trip."""
+    # allow_not_found: the rankings / general-sourcing flows pass pseudo job ids
+    # (e.g. GENERAL_SOURCING) that have no monitored_jobs row.
+    _verify_job_access_by_id(request.job_id, user, allow_not_found=True)
     return await _generate_payload_for(request)
 
 
@@ -1866,10 +1939,20 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
 
 
 @router.post("/engage/send-bulk-interview")
-async def send_bulk_interview(request: SendBulkInterviewRequest):
+async def send_bulk_interview(
+    request: SendBulkInterviewRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Thin HTTP wrapper — the QA/edit modal and rankings Engage clicks call
-    this. The batched launch orchestrator calls `_send_bulk_interview_core`
-    directly, once per internal batch."""
+    this. The batched launch orchestrator and the applicant auto-launch call
+    `_send_bulk_interview_core` directly."""
+    job_id = _job_id_from_engage_payload(request.payload)
+    if not job_id:
+        # "Nothing to authorize against" is not a pass: a payload whose jd block
+        # names no job would launch outreach to arbitrary contacts unscoped.
+        # Every generate-payload output carries jd.job_id / jd.jobdiva_id.
+        raise HTTPException(status_code=400, detail="payload.jd.job_id (or jobdiva_id) is required")
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
     return await _send_bulk_interview_core(request)
 
 
@@ -2608,7 +2691,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 pass
 
 @router.get("/engage/bulk-status/stream")
-async def stream_engagement_status(bulk_id: str):
+async def stream_engagement_status(bulk_id: str, user: UserIdentity = Depends(get_current_user)):
     from fastapi.responses import StreamingResponse
     import httpx
     
@@ -2653,7 +2736,7 @@ _LAUNCH_BATCH_DELAY_SECONDS = 0.35
 
 
 @router.post("/engage/launch")
-async def launch_bulk_interviews(request: LaunchRequest):
+async def launch_bulk_interviews(request: LaunchRequest, user: UserIdentity = Depends(get_current_user)):
     """Single-call, backend-owned Launch PAIR orchestration.
 
     Replaces the frontend's per-batch generate -> send -> SSE loop: the browser
@@ -2669,6 +2752,10 @@ async def launch_bulk_interviews(request: LaunchRequest):
     / send_job_posting_email = False) and the orchestrator fires them a single
     time after the loop.
     """
+    # Authorize before the SSE stream opens so a refusal is a plain 403, not a
+    # mid-stream error event.
+    _verify_job_access_by_id(request.job_id, user, allow_not_found=True)
+
     from fastapi.responses import StreamingResponse
 
     def _sse(obj: Dict[str, Any]) -> str:
@@ -3230,7 +3317,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
 
         # Generate payload via the existing builder so JD context, rubric
         # and pre-screen questions stay in sync with manual launches.
-        payload_result = await generate_engage_payload(
+        payload_result = await _generate_payload_for(
             GeneratePayloadRequest(candidate_ids=eligible_ids, job_id=job_id)
         )
         payload_str = payload_result.get("payload", "")
@@ -3245,7 +3332,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
             "auto_launch_dispatch job_id=%s candidate_count=%d",
             job_id, len(eligible_ids),
         )
-        result = await send_bulk_interview(
+        result = await _send_bulk_interview_core(
             SendBulkInterviewRequest(
                 payload=payload_str,
                 real_candidate_ids=eligible_ids,
@@ -3268,7 +3355,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
 
 
 @router.get("/latest-interview/by-id/{candidate_id}")
-async def get_latest_interview(candidate_id: str):
+async def get_latest_interview(candidate_id: str, user: UserIdentity = Depends(get_current_user)):
     """
     Look up the latest interview_id for a candidate from the audit table.
     Used by the Assess button to determine which interview to display.
@@ -3288,27 +3375,31 @@ async def get_latest_interview(candidate_id: str):
         row = cur.fetchone()
         cur.close()
         conn.close()
-
-        if row:
-            return {
-                "success": True,
-                "interview_id": row["interview_id"],
-                "candidate_name": row.get("candidate_name", ""),
-                "candidate_email": row.get("candidate_email", ""),
-                "job_id": row.get("job_id", ""),
-                "status": row.get("status", ""),
-                "created_at": str(row.get("created_at", ""))
-            }
-        else:
-            return {
-                "success": False,
-                "interview_id": None,
-                "message": "No interview found for this candidate"
-            }
-
     except Exception as e:
         logger.error(f"❌ latest-interview lookup failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+    # Job-scoped: the interview belongs to the job it was launched for. Kept
+    # outside the try above so the 403 is not rewritten into a 500.
+    job_ref = str((row or {}).get("jobdiva_id") or "")
+    if job_ref and job_ref != "unknown":
+        _verify_job_access_by_id(job_ref, user, allow_not_found=True)
+
+    if row:
+        return {
+            "success": True,
+            "interview_id": row["interview_id"],
+            "candidate_name": row.get("candidate_name", ""),
+            "candidate_email": row.get("candidate_email", ""),
+            "job_id": row.get("job_id", ""),
+            "status": row.get("status", ""),
+            "created_at": str(row.get("created_at", ""))
+        }
+    return {
+        "success": False,
+        "interview_id": None,
+        "message": "No interview found for this candidate"
+    }
 
 
 
@@ -3317,7 +3408,7 @@ async def get_latest_interview(candidate_id: str):
 # 5. GET /assess/{interview_id}  (Proxy for PAIR dashboard data)
 # ---------------------------------------------------------------------------
 @router.get("/assess/{interview_id}")
-async def get_assessment_data(interview_id: str):
+async def get_assessment_data(interview_id: str, user: UserIdentity = Depends(get_current_user)):
     """
     Aggregates data from multiple PAIR dashboard endpoints into a single response
     for the Assess modal:
@@ -3326,6 +3417,7 @@ async def get_assessment_data(interview_id: str):
       - Transcriptions (conversation messages)
       - Outreach status (communication timeline)
     """
+    _verify_interview_access(interview_id, user)
     base_url = EXTERNAL_INTERVIEW_API_URL
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -3434,33 +3526,39 @@ async def _proxy_post(path: str, json_data: dict = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/dashboard/pair-outreach")
-async def get_pair_outreach(status: Optional[str] = None, phase: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, jd_id: Optional[str] = None, search: Optional[str] = None):
+async def get_pair_outreach(status: Optional[str] = None, phase: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, jd_id: Optional[str] = None, search: Optional[str] = None, user: UserIdentity = Depends(get_current_user)):
+    if jd_id:
+        _verify_job_access_by_id(jd_id, user, allow_not_found=True)
     params = {k: v for k, v in {"status": status, "phase": phase, "date_from": date_from, "date_to": date_to, "jd_id": jd_id, "search": search}.items() if v is not None}
     return await _proxy_get("/api/dashboard/pair-outreach", params=params)
 
 @router.get("/dashboard/pair-outreach/{jd_id}")
-async def get_pair_outreach_jd(jd_id: str):
+async def get_pair_outreach_jd(jd_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_job_access_by_id(jd_id, user, allow_not_found=True)
     return await _proxy_get(f"/api/dashboard/pair-outreach/{jd_id}")
 
 @router.get("/dashboard/pair-metrics")
-async def get_pair_metrics():
+async def get_pair_metrics(user: UserIdentity = Depends(get_current_user)):
     return await _proxy_get("/api/dashboard/pair-metrics")
 
 @router.get("/dashboard/pair-passed")
-async def get_pair_passed(score_threshold: Optional[int] = None):
+async def get_pair_passed(score_threshold: Optional[int] = None, user: UserIdentity = Depends(get_current_user)):
     params = {"score_threshold": score_threshold} if score_threshold is not None else {}
     return await _proxy_get("/api/dashboard/pair-passed", params=params)
 
 @router.get("/interviews/{interview_id}/outreach-status")
-async def get_outreach_status(interview_id: str):
+async def get_outreach_status(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_interview_access(interview_id, user)
     return await _proxy_get(f"/api/interviews/{interview_id}/outreach-status")
 
 @router.post("/outreach/start-scheduler")
-async def start_scheduler():
+async def start_scheduler(user: UserIdentity = Depends(get_current_user)):
+    _require_admin(user)
     return await _proxy_post("/api/outreach/start-scheduler")
 
 @router.post("/interviews/{interview_id}/trigger-phase2")
-async def trigger_phase2(interview_id: str):
+async def trigger_phase2(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _require_admin(user)
     return await _proxy_post(f"/api/interviews/{interview_id}/trigger-phase2")
 
 
@@ -3468,25 +3566,30 @@ async def trigger_phase2(interview_id: str):
 # 7. Retrieval of Transcripts API Proxies
 # ---------------------------------------------------------------------------
 @router.get("/interviews/{interview_id}/transcriptions")
-async def get_transcriptions(interview_id: str):
+async def get_transcriptions(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_interview_access(interview_id, user)
     return await _proxy_get(f"/api/interviews/{interview_id}/transcriptions")
 
 @router.get("/interviews/{interview_id}/evaluation")
-async def get_interview_evaluation(interview_id: str):
+async def get_interview_evaluation(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_interview_access(interview_id, user)
     return await _proxy_get(f"/api/interviews/{interview_id}/evaluation")
 
 @router.get("/interviews/{interview_id}/score-summary")
-async def get_interview_score_summary(interview_id: str):
+async def get_interview_score_summary(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_interview_access(interview_id, user)
     return await _proxy_get(f"/api/interviews/{interview_id}/score-summary")
 
 @router.get("/interviews/{interview_id}/activity-logs")
-async def get_activity_logs(interview_id: str):
+async def get_activity_logs(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_interview_access(interview_id, user)
     return await _proxy_get(f"/api/interviews/{interview_id}/activity-logs")
 
 from fastapi.responses import StreamingResponse
 
 @router.get("/interviews/{interview_id}/transcriptions/download")
-async def download_transcriptions(interview_id: str):
+async def download_transcriptions(interview_id: str, user: UserIdentity = Depends(get_current_user)):
+    _verify_interview_access(interview_id, user)
     try:
         client = httpx.AsyncClient(timeout=30.0)
         req = client.build_request("GET", f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/transcriptions/download")
@@ -3861,7 +3964,7 @@ class ReProvisionRequest(BaseModel):
 
 
 @router.post("/engage/re-provision")
-async def re_provision_candidates(request: ReProvisionRequest):
+async def re_provision_candidates(request: ReProvisionRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Re-runs JobDiva provisioning for all launched candidates for a job.
 
@@ -3872,6 +3975,7 @@ async def re_provision_candidates(request: ReProvisionRequest):
 
     Returns counts of { success, skipped, failed, total }.
     """
+    _require_admin(user)
     job_id = (request.job_id or "").strip()
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id is required")
