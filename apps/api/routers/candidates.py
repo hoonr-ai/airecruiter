@@ -1298,7 +1298,7 @@ async def get_job_candidates(
                                         = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
                               )
                           )
-                        ORDER BY candidate_id, created_at DESC, id DESC
+                        ORDER BY candidate_id, (data->>'feedback_at') DESC NULLS LAST, (data->>'feedback_type' IS NOT NULL) DESC, created_at DESC, id DESC
                     )
                     SELECT
                         sc.id,
@@ -3139,9 +3139,10 @@ async def get_launched_candidates(
                           {feedback_exists_condition}
                         -- When a feedback filter is active, prefer the row that
                         -- carries matching feedback data so the UI column matches
-                        -- the filter.  Without a filter, fall back to pure
-                        -- created_at DESC to use the existing index.
-                        ORDER BY sc.candidate_id, {f'{matching_feedback_pred} DESC,' if matching_feedback_pred else ''} sc.created_at DESC
+                        -- the filter.  Without a filter, fall back to the most
+                        -- recently added feedback (feedback_at) or the presence
+                        -- of any feedback, and finally pure created_at DESC.
+                        ORDER BY sc.candidate_id, {f'{matching_feedback_pred} DESC,' if matching_feedback_pred else ''} (sc.data->>'feedback_at') DESC NULLS LAST, (sc.data->>'feedback_type' IS NOT NULL) DESC, sc.created_at DESC
                     )
                 """
 
