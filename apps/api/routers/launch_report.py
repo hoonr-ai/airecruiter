@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from core.auth import UserIdentity, get_current_user
 from routers._helpers import (
@@ -605,6 +605,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     first_response_minutes: List[float] = []
     response_timestamps: List[datetime.datetime] = []
     first_contact_timestamps: List[datetime.datetime] = []
+    first_attempted_timestamps: List[datetime.datetime] = []
+    first_completed_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
@@ -696,6 +698,22 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if elapsed is not None:
                     first_response_minutes.append(elapsed)
 
+        # Pair-bot is the current source of truth for these lifecycle stamps.
+        # The local candidate record is retained as a fallback below because
+        # older pair-bot responses may omit them.
+        attempted = _parse_iso(
+            merged.get("first_attempted_at") or merged.get("attempted_at")
+        )
+        if attempted:
+            first_attempted_timestamps.append(attempted)
+        completed = _parse_iso(
+            merged.get("first_completed_at")
+            or merged.get("engage_completed_at")
+            or merged.get("completed_at")
+        )
+        if completed:
+            first_completed_timestamps.append(completed)
+
     return {
         "buckets": buckets,
         "phases": phases,
@@ -707,6 +725,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         "earliest_response_at": min(response_timestamps) if response_timestamps else None,
         "responded_count": len(response_timestamps),
         "first_contact_at": min(first_contact_timestamps) if first_contact_timestamps else None,
+        "first_attempted_at": min(first_attempted_timestamps) if first_attempted_timestamps else None,
+        "first_completed_at": min(first_completed_timestamps) if first_completed_timestamps else None,
     }
 
 
@@ -875,8 +895,10 @@ def _build_row(
         "completed": buckets["completed"],
         "partial_complete": buckets["partial_complete"],
 
-        "first_attempted_at": _edt(cand["first_attempted_at"]),
-        "first_completed_at": _edt(cand["first_completed_at"]),
+        # Prefer Pair-bot's live lifecycle timestamps.  `sourced_candidates`
+        # is only a fallback when the live response does not expose a stamp.
+        "first_attempted_at": _edt(outreach["first_attempted_at"] or cand["first_attempted_at"]),
+        "first_completed_at": _edt(outreach["first_completed_at"] or cand["first_completed_at"]),
 
         "time_to_first_response_minutes": outreach["time_to_first_response_minutes"],
         "launch_to_response_minutes": _minutes_between(launch_at, outreach["earliest_response_at"]),
@@ -940,6 +962,27 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
     return keys
 
 
+def _candidate_rows_as_of_first_launch(
+    candidate_rows: List[Dict[str, Any]], job: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Keep sourcing metrics historical to the job's initial launch.
+
+    The report has one row for that launch event. Including candidates sourced
+    days or weeks later makes the row grow every time a historical report is
+    regenerated. Rows without a usable source timestamp are excluded: there
+    is no defensible way to assign them to an as-of report.
+    """
+    first_launch_at = _parse_iso(job.get("first_launch_at"))
+    if first_launch_at is None:
+        return []
+    return [
+        row
+        for row in candidate_rows
+        if (created_at := _parse_iso(row.get("created_at"))) is not None
+        and created_at <= first_launch_at
+    ]
+
+
 @router.get("/launch-report")
 async def get_launch_report(
     date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; defaults to yesterday"),
@@ -947,6 +990,7 @@ async def get_launch_report(
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with start_date"),
     team_id: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
+    response: Response = None,
 ):
     """PAIR launch report for jobs first launched on `date`, or between
     `start_date` and `end_date` inclusive (Eastern time). A single day is
@@ -957,6 +1001,11 @@ async def get_launch_report(
     - Team leads: always scoped to their own team (team_id is ignored).
     - Recruiters: 403.
     """
+    # A report contains live Pair-bot status. Never let a browser, CDN, or
+    # reverse proxy serve an earlier generation for an identical date range.
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
     if user.is_admin:
         scope_team_id = (team_id or "").strip() or None
     elif user.is_team_lead and user.team_id:
@@ -1069,7 +1118,7 @@ async def get_launch_report(
         rows.append(
             _build_row(
                 job,
-                list(candidate_rows.values()),
+                _candidate_rows_as_of_first_launch(list(candidate_rows.values()), job),
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
             )

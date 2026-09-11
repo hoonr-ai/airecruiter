@@ -956,3 +956,30 @@ def test_eastern_date_expr_sql():
     expr = lr._eastern_date_expr("a.created_at")
     assert expr == "((a.created_at AT TIME ZONE %s) AT TIME ZONE %s)::date"
 
+
+def test_candidate_rows_stop_at_the_first_launch_timestamp():
+    """Sourcing metrics are capped to the initial launch timestamp to prevent inflation."""
+    job = {**_job(0), "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}
+    rows = [
+        {"candidate_id": "before", "created_at": datetime.datetime(2026, 8, 28, 2, 1)},
+        {"candidate_id": "after", "created_at": datetime.datetime(2026, 8, 28, 2, 3)},
+        {"candidate_id": "unknown", "created_at": None},
+    ]
+    assert [r["candidate_id"] for r in lr._candidate_rows_as_of_first_launch(rows, job)] == ["before"]
+
+
+def test_live_outreach_timestamps_are_exposed_for_the_report_row():
+    """Live outreach timestamps from PairBot are exposed and parsed."""
+    payload = {
+        "outreach": {
+            "outreach_status": "completed",
+            "first_attempted_at": "2026-08-27T14:00:00Z",
+            "first_completed_at": "2026-08-27T14:30:00Z",
+        },
+        "communications": [],
+    }
+    summary = lr._summarise_outreach([payload])
+    assert summary["first_attempted_at"] == datetime.datetime(2026, 8, 27, 14, 0, tzinfo=datetime.timezone.utc)
+    assert summary["first_completed_at"] == datetime.datetime(2026, 8, 27, 14, 30, tzinfo=datetime.timezone.utc)
+
+
