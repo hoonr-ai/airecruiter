@@ -441,5 +441,8 @@ class ManualCandidateRequest(BaseModel):
     resume_text: str
 
 class CandidateFeedbackRequest(BaseModel):
-    feedback_type: str # 'Submit' or 'Reject'
+    feedback_type: str  # 'Submit', 'Reject', 'Unreachable'
     reason: Optional[str] = None
+    submission_type: Optional[str] = "external"  # 'internal' or 'external' (when feedback_type == 'Submit')
+    manager_email: Optional[str] = None          # Required when submission_type == 'internal'
+    recruiter_notes: Optional[str] = None        # Optional notes from recruiter to manager

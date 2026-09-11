@@ -26,6 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SubmissionModal } from "@/components/SubmissionModal";
 
 const formatDate = (dateStr: string) => {
   if (!dateStr) return "—";
@@ -466,14 +467,23 @@ export default function GlobalCandidatesPage() {
     setIsLoading(true);
   };
 
-  const handleConfirmSubmit = async () => {
+  const handleConfirmSubmit = async (submissionData: {
+    submission_type: 'internal' | 'external';
+    manager_email?: string;
+    recruiter_notes?: string;
+  }) => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
       try {
         const c = candidates.find(cand => cand.id === actionCandidateId);
         if (!c?.jobdiva_id) throw new Error("No job ID found");
-        await api.candidates.feedback(c.jobdiva_id, String(actionCandidateId), { feedback_type: 'Submit' });
+        await api.candidates.feedback(c.jobdiva_id, String(actionCandidateId), {
+          feedback_type: 'Submit',
+          submission_type: submissionData.submission_type,
+          manager_email: submissionData.manager_email,
+          recruiter_notes: submissionData.recruiter_notes,
+        });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
       } catch (error) {
@@ -1315,58 +1325,32 @@ export default function GlobalCandidatesPage() {
       )}
 
       {/* Integration Modals */}
-      {integrationModalOpen && actionCandidateId && (
+      <SubmissionModal
+        isOpen={integrationModalOpen === 'submit' && !!actionCandidateId}
+        onClose={() => {
+          setIntegrationModalOpen(null);
+          setActionCandidateId(null);
+        }}
+        candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
+        candidateId={actionCandidateId || undefined}
+        jobTitle={candidates.find(c => c.id === actionCandidateId)?.job_title || "Job"}
+        jobRef={candidates.find(c => c.id === actionCandidateId)?.jobdiva_id || ""}
+        clientName={String(candidates.find(c => c.id === actionCandidateId)?.company || "—")}
+        onConfirmSubmit={handleConfirmSubmit}
+        isSubmitting={syncingCandidateId === actionCandidateId}
+      />
+
+      {integrationModalOpen === 'reject' && actionCandidateId && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            {integrationModalOpen === 'submit' ? (
-              <>
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <ExternalLink className="w-5 h-5 text-indigo-600" />
-                    Submit to JobDiva
-                  </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
-                </div>
-                <div className="p-6 space-y-4">
-                  <p className="text-sm text-slate-500">
-                    This action will initiate an <strong className="text-slate-900 font-semibold">external submission in JobDiva</strong> for:
-                  </p>
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-3 text-sm text-slate-700">
-                    <div className="flex items-center gap-2.5">
-                      <User className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Candidate:</strong> {candidates.find(c => c.id === actionCandidateId)?.name}</p>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                      <Briefcase className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Job:</strong> {candidates.find(c => c.id === actionCandidateId)?.job_title}</p>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                      <Zap className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Action:</strong> Create external submission record in JobDiva</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold"
-                    onClick={handleConfirmSubmit}
-                    disabled={syncingCandidateId === actionCandidateId}
-                  >
-                    {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm & Submit to JobDiva'}
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
-                    Reject Candidate
-                  </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
-                </div>
-                <div className="p-6 space-y-4">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                Reject Candidate
+              </h3>
+              <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
+            </div>
+            <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
@@ -1414,8 +1398,6 @@ export default function GlobalCandidatesPage() {
                     {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}
                   </Button>
                 </div>
-              </>
-            )}
           </div>
         </div>
       )}

@@ -11,6 +11,7 @@ Auto-creates the engage_interview_audit table on startup.
 """
 
 import asyncio
+import html
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
@@ -28,6 +29,7 @@ from core.email import (
     notify_job_posting,
     notify_candidate_passed,
     _build_word_resume_document,
+    candidate_report_link,
     resolve_app_base_url,
 )
 from services.gender_logic import normalize_gender_prediction, infer_gender_from_name_ai
@@ -3721,8 +3723,10 @@ async def _check_and_fire_candidate_passed_notification(
         # Note: We use the job title from job_row for the message
         base_url = resolve_app_base_url(request.app_base_url if 'request' in locals() else "")
         pair_job_title = job_row.get("enhanced_title") or job_row.get("title") or "the"
-        report_link = f"{base_url}/jobs/{jd_job_id}/report?candidateId={candidate_id}"
-        note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
+        report_link = candidate_report_link(base_url, jd_job_id, candidate_id)
+        safe_report_link = html.escape(report_link, quote=True)
+        safe_pair_job_title = html.escape(str(pair_job_title))
+        note_text = f"Candidate completed Phone Screen for {safe_pair_job_title} position. <a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
         async def create_and_pin_note():
             note_res = await jobdiva_service.create_candidate_note(

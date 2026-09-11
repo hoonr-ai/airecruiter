@@ -446,8 +446,8 @@ class AutoAssignService:
 
           feedback_completed — any recruiter decision (Submit or Reject)
           pair_submits       — the Submits only; each one is mirrored into
-                               JobDiva as a "PAIR Submit - Externally
-                               Submitted" note
+                               JobDiva as a "PAIR External Submission" or
+                               "PAIR Internal Submission" note
 
         `pair_submits` is reported next to `pair_external_subs` (the
         JobDiva-verified count) so the dashboard shows both what PAIR

@@ -3,11 +3,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime, timezone
+from email.utils import parseaddr
 import httpx
+import os
 import re
+from urllib.parse import quote
 
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service, jobdiva_profile_id
@@ -64,6 +68,41 @@ def _to_iso_z(dt_val) -> str:
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+MANAGER_EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+
+
+def _manager_email_domains() -> List[str]:
+    raw_domains = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
+    return [domain.strip().lower().lstrip("@") for domain in raw_domains.split(",") if domain.strip()]
+
+
+def _normalize_manager_email_for_internal_submission(manager_email: Optional[str]) -> str:
+    email = (manager_email or "").strip()
+    if not email:
+        raise HTTPException(status_code=422, detail="manager_email is required for internal submissions")
+
+    _, parsed_email = parseaddr(email)
+    if parsed_email != email or not MANAGER_EMAIL_RE.fullmatch(email):
+        raise HTTPException(status_code=422, detail="manager_email must be a valid email address")
+
+    local_part, domain = email.rsplit("@", 1)
+    normalized_email = f"{local_part}@{domain.lower()}"
+    allowed_domains = _manager_email_domains()
+    normalized_domain = domain.lower()
+    if allowed_domains and not any(
+        normalized_domain == allowed_domain or normalized_domain.endswith(f".{allowed_domain}")
+        for allowed_domain in allowed_domains
+    ):
+        raise HTTPException(status_code=422, detail="manager_email must use an approved company domain")
+
+    return normalized_email
+
+
+def _candidate_report_link(base_url: str, job_id_or_ref: str, candidate_id: str) -> str:
+    safe_job_ref = quote(str(job_id_or_ref or ""), safe="")
+    safe_candidate_id = quote(str(candidate_id or ""), safe="")
+    return f"{base_url}/jobs/{safe_job_ref}/report?candidateId={safe_candidate_id}"
 
 
 def _json_load_safe(value: Any, default: Any):
@@ -4123,15 +4162,22 @@ async def save_candidate_feedback(
     with no assignees.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
+    submission_mode = (request.submission_type or "external").lower().strip()
+    manager_email = None
+    if request.feedback_type == "Submit" and submission_mode == "internal":
+        manager_email = _normalize_manager_email_for_internal_submission(request.manager_email)
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
-        f"{request.feedback_type} (by {user.email})"
+        f"{request.feedback_type} (mode={submission_mode}, by {user.email})"
     )
 
     # 1. Map to JobDiva Action String
     action_string = ""
     if request.feedback_type == "Submit":
-        action_string = "PAIR Submit - Externally Submitted"
+        if submission_mode == "internal":
+            action_string = "PAIR Internal Submission"
+        else:
+            action_string = "PAIR External Submission"
     elif request.feedback_type == "Reject":
         rejection_mapping = {
             "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
@@ -4167,6 +4213,9 @@ async def save_candidate_feedback(
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+    cand_name = "Candidate"
+    job_title_resolved = "Job"
+    customer_name_resolved = ""
 
     try:
         _conn = get_db_connection()
@@ -4177,7 +4226,7 @@ async def save_candidate_feedback(
                     pk_int = int(candidate_id)
                     _cur.execute(
                         """
-                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id, sc.name, mj.title, mj.customer_name
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -4193,6 +4242,9 @@ async def save_candidate_feedback(
                         sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
                         app_job_ref    = str(row[4]) if row[4] else app_job_ref
+                        cand_name      = row[5] or cand_name
+                        job_title_resolved = row[6] or job_title_resolved
+                        customer_name_resolved = row[7] or customer_name_resolved
                         
                         # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -4205,7 +4257,7 @@ async def save_candidate_feedback(
                     # candidate_id is not an integer PK – try matching as a candidate_id string
                     _cur.execute(
                         """
-                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id, sc.name, mj.title, mj.customer_name
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -4225,6 +4277,9 @@ async def save_candidate_feedback(
                         sc_candidate_id = str(row[1])
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
                         app_job_ref    = str(row[4]) if row[4] else app_job_ref
+                        cand_name      = row[5] or cand_name
+                        job_title_resolved = row[6] or job_title_resolved
+                        customer_name_resolved = row[7] or customer_name_resolved
                         
                         # Use JobDiva candidate ID if available in data blob
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -4245,7 +4300,8 @@ async def save_candidate_feedback(
     from core import JOBDIVA_PAIR_RECRUITER_ID
     from core.email import resolve_app_base_url
     
-    report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = _candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     if request.feedback_type == "Unreachable":
         logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
@@ -4255,7 +4311,7 @@ async def save_candidate_feedback(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
 
@@ -4269,12 +4325,21 @@ async def save_candidate_feedback(
     try:
         _conn2 = get_db_connection()
         with _conn2.cursor() as _cur2:
-            feedback_payload = json.dumps({
+            feedback_data = {
                 "feedback_type": request.feedback_type,
                 "feedback_reason": request.reason,
                 "feedback_synced": jobdiva_result.get("status") == "success",
-                "feedback_at": datetime.now(timezone.utc).isoformat()
-            })
+                "feedback_at": datetime.now(timezone.utc).isoformat(),
+                "submitted_by": user.email,
+            }
+            if request.feedback_type == "Submit":
+                feedback_data["submission_type"] = submission_mode
+                if submission_mode == "internal":
+                    feedback_data["manager_email"] = manager_email
+                    if request.recruiter_notes:
+                        feedback_data["recruiter_notes"] = request.recruiter_notes.strip()
+
+            feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved
                 _cur2.execute(
@@ -4297,6 +4362,27 @@ async def save_candidate_feedback(
         _conn2.close()
     except Exception as e:
         logger.error(f"❌ Failed to persist feedback locally: {e}")
+
+    # 4b. If this is an internal submission, dispatch email notification to the manager
+    if request.feedback_type == "Submit" and submission_mode == "internal" and manager_email:
+        try:
+            from core.email import notify_internal_submission_to_manager
+            recruiter_display_name = getattr(user, "name", None) or user.email
+            await asyncio.to_thread(
+                notify_internal_submission_to_manager,
+                manager_email=manager_email,
+                recruiter_name=recruiter_display_name,
+                recruiter_email=user.email,
+                candidate_name=cand_name,
+                candidate_id=jd_candidate_id,
+                job_id_or_ref=app_job_ref or jd_job_ref,
+                job_title=job_title_resolved,
+                customer_name=customer_name_resolved,
+                recruiter_notes=request.recruiter_notes,
+            )
+            logger.info(f"📧 Sent internal submission email to manager {manager_email} for candidate {jd_candidate_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send internal submission email to manager: {e}")
 
     # 5. Write through to the dashboard's FEEDBACK COMPLETED and PAIR
     #    SUBMITS columns now. Both are denormalized on monitored_jobs (the
