@@ -227,7 +227,9 @@ class AutoAssignService:
         # linked as `link_candidate_id` at launch would attach the application
         # to an unrelated JobDiva profile.
         jd_profile_id = jobdiva_profile_id(
-            cand.get("source") or "JobDiva-Applicants", candidate_id
+            cand.get("source") or "JobDiva-Applicants",
+            candidate_id,
+            cand.get("jobdiva_candidate_id"),
         )
         if jd_profile_id:
             payload["jobdiva_candidate_id"] = jd_profile_id

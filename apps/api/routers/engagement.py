@@ -11,7 +11,7 @@ Auto-creates the engage_interview_audit table on startup.
 """
 
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
@@ -32,13 +32,16 @@ from core.email import (
 )
 from services.gender_logic import normalize_gender_prediction, infer_gender_from_name_ai
 from services.jobdiva import (
+    JOBDIVA_PROFILE_INVARIANT,
     jobdiva_service,
+    jobdiva_profile_id,
     get_field as _jd_get_field,
     _get_candidate_email as _jd_candidate_email,
     _get_candidate_phone as _jd_candidate_phone,
 )
 from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
+from core.auth import UserIdentity, get_current_user
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -1438,41 +1441,69 @@ def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[st
         conn.close()
 
 
+def _report_jobdiva_profile_invariant(kind: str, **attrs: Any) -> None:
+    """Loud, alertable record of a JobDiva profile-identity invariant breach.
+
+    Always logs at ERROR with the grep-able ``JOBDIVA_PROFILE_INVARIANT`` marker
+    (services/jobdiva.py); additionally emits a New Relic custom event
+    ``JobDivaProfileInvariant`` plus an error-level message when NR is enabled,
+    so an alert can be set on either. Never raises -- this sits inside the
+    provisioning path.
+    """
+    payload = {"kind": kind}
+    payload.update({k: ("" if v is None else str(v)) for k, v in attrs.items()})
+    logger.error("%s %s", JOBDIVA_PROFILE_INVARIANT, json.dumps(payload, default=str))
+    try:
+        from core.newrelic import is_enabled, record_custom_event, record_message
+        if not is_enabled():
+            return
+        record_custom_event("JobDivaProfileInvariant", payload)
+        record_message(f"{JOBDIVA_PROFILE_INVARIANT}: {kind}", attributes=payload, level="error")
+    except Exception:
+        return
+
+
 def _resolve_link_candidate_id(
     source: Optional[str],
     cand_data: Optional[Dict[str, Any]],
-    existing_jd_id: Optional[str],
+    candidate_id: Optional[str],
 ) -> Optional[str]:
-    """Return the JobDiva candidate id to link a new application to, or None.
+    """Return the JobDiva profile id to attach the application to, or None.
 
-    Only returns an id we trust to be a real JobDiva candidate id: one explicitly
-    stored as ``jobdiva_candidate_id`` or belonging to a JobDiva-sourced candidate
-    (whose internal id IS the JobDiva id). This prevents linking a non-JobDiva
-    candidate's numeric internal id to an unrelated JobDiva profile.
+    ``candidate_id`` is the row's own ``sourced_candidates.candidate_id``. Only an
+    id we trust to be a real JobDiva profile id is returned, in this order:
+
+    1. A JobDiva-sourced row's own id. Every JobDiva pool (TalentSearch / JobAgent /
+       Applicants) sets ``candidate_id`` from JobDiva's own response
+       (``get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])`` in
+       services/jobdiva.py), so it IS the profile id -- and it beats a stored
+       ``jobdiva_candidate_id`` that disagrees. Until the createJobApplication fix,
+       ``CreateJobApplicationWithResume`` ignored the id we passed, minted a
+       duplicate profile, and the provisioner persisted the duplicate's id here.
+       Preferring the row's own id self-heals those rows on their next launch
+       instead of attaching yet another job to the duplicate; the disagreement is
+       logged so the pair can be merged in JobDiva.
+    2. An explicitly stored ``jobdiva_candidate_id``: a profile PAIR created for a
+       non-JobDiva row, or one learned from the job's applicant list.
+
+    A non-JobDiva row's numeric-looking internal id is never returned -- linking
+    it would attach the application to an unrelated JobDiva profile.
     """
-    # The id is trusted if it was explicitly persisted from a previous JobDiva interaction.
-    explicitly_stored_jd_id = str((cand_data or {}).get("jobdiva_candidate_id") or "")
-    if existing_jd_id and str(existing_jd_id).isdigit():
-        if existing_jd_id == explicitly_stored_jd_id:
-            return str(existing_jd_id)
-
-        # Fallback: if not explicitly stored, we can trust the internal numeric
-        # id when the candidate was sourced from JobDiva, because every JobDiva
-        # pool sets candidate_id from JobDiva's own response
-        # (`get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"])` in
-        # services/jobdiva.py `_search_talent_pool` / `_search_with_job_agent` /
-        # `_get_all_job_applicants`).
-        #
-        # JobAgent is included deliberately. PR #493 excluded it on the premise
-        # that PAIR mints its own ids for JobAgent rows; the code does not — and
-        # the sourcing stream relies on the opposite, deduping all three pools
-        # against one shared `seen_ids` set and testing JobAgent ids against
-        # TalentSearch rows via `jobagent_matched_ids`
-        # (services/unified_candidate_search.py). Excluding JobAgent here is what
-        # made JobDiva mint a duplicate profile for every JobAgent launch.
-        if str(source or "").lower().startswith("jobdiva"):
-            return str(existing_jd_id)
-
+    stored = str((cand_data or {}).get("jobdiva_candidate_id") or "").strip()
+    # `stored == own id` is the emitter stamp carried through save; it proves
+    # JobDiva provenance even if the `source` label was renamed.
+    own_id = jobdiva_profile_id(source, candidate_id, stored)
+    if own_id:
+        if stored and stored != own_id:
+            logger.warning(
+                "jobdiva link: row %s (%s) stores jobdiva_candidate_id=%s but its own id "
+                "is the JobDiva profile id — linking %s; %s is likely a duplicate profile "
+                "to merge in JobDiva",
+                candidate_id, source, stored, own_id, stored,
+            )
+        return own_id
+    if stored.isdigit():
+        return stored
     return None
 
 
@@ -1542,7 +1573,7 @@ async def _provision_batch_to_jobdiva(
 
     Returns a dict with 'success', 'skipped', 'failed' counts.
     """
-    results: Dict[str, int] = {"success": 0, "skipped": 0, "failed": 0}
+    results: Dict[str, int] = {"success": 0, "skipped": 0, "failed": 0, "duplicate_suspected": 0}
     if not candidate_ids:
         return results
 
@@ -1650,11 +1681,17 @@ async def _provision_batch_to_jobdiva(
 
                 email = (row.get("email") or "").strip()
                 phone = (row.get("phone") or "").strip()
-                # Only trust an id that was explicitly stored as jobdiva_candidate_id.
-                # The PAIR internal cand_id for JobAgent candidates is NOT a real JobDiva
-                # profile id — using it as link_candidate_id causes JD to create a
-                # duplicate 'Unknown Unknown' profile instead of linking the real one.
-                existing_jd_id = str(cand_data.get("jobdiva_candidate_id") or "")
+                existing_jd_id = str(cand_data.get("jobdiva_candidate_id") or "").strip()
+                # The profile to attach this job to, if we know it: a JobDiva-sourced
+                # row's own id (which beats a stale stored id — see the resolver),
+                # else an explicitly stored jobdiva_candidate_id. None for a
+                # LinkedIn/Exa/Dice row never matched to JobDiva.
+                link_candidate_id = _resolve_link_candidate_id(
+                    row.get("source"), cand_data, str(cand_id)
+                )
+                # Non-empty iff this row is a JobDiva-sourced person (own id IS the
+                # profile id). Drives the two tripwires below.
+                own_jd_id = jobdiva_profile_id(row.get("source"), cand_id, existing_jd_id)
 
                 phone_norm = "".join(ch for ch in phone if ch.isdigit())
                 
@@ -1665,8 +1702,14 @@ async def _provision_batch_to_jobdiva(
 
                 email_lower = email.lower()
 
-                # Check against pre-fetched applicant sets (no extra API call)
-                jcid_match = bool(existing_jd_id and existing_jd_id in existing_jd_ids)
+                # Check against pre-fetched applicant sets (no extra API call).
+                # Test both the resolved link id and the stored id: for a JobDiva
+                # row whose stored id points at a duplicate profile, whichever of
+                # the two JobDiva lists as the applicant counts.
+                jcid_match = bool(
+                    (link_candidate_id and link_candidate_id in existing_jd_ids)
+                    or (existing_jd_id and existing_jd_id in existing_jd_ids)
+                )
                 email_match = bool(
                     email_lower
                     and not email_lower.startswith("auto_")
@@ -1681,18 +1724,19 @@ async def _provision_batch_to_jobdiva(
                         f"✅ [{label}] Candidate {cand_id} already in JobDiva "
                         f"(jcid={jcid_match} email={email_match} phone={phone_match})"
                     )
-                    # Persist the matched applicant's real JobDiva id if we don't
-                    # have one yet. The previous guard here read
-                    # `cand_data.get("jobdiva_candidate_id")` and `existing_jd_id`,
-                    # which are the same value — so it could never fire, and an
-                    # email/phone match learned nothing even though the id was
-                    # sitting right there in the applicant list.
+                    # Persist the profile id this row should carry: the resolved
+                    # link id when we have one (for a JobDiva row that is its own
+                    # id, which also re-stamps a stored duplicate's id), else the
+                    # matched applicant's real id from the email/phone index —
+                    # without this an email/phone match learned nothing and
+                    # /engage/re-provision re-attempted the same people forever.
                     matched_jd_id = (
-                        existing_jd_id
+                        link_candidate_id
+                        or existing_jd_id
                         or existing_emails.get(email_lower, "")
                         or existing_phones.get(phone_norm, "")
                     )
-                    if matched_jd_id and not cand_data.get("jobdiva_candidate_id"):
+                    if matched_jd_id and existing_jd_id != str(matched_jd_id):
                         cand_data["jobdiva_candidate_id"] = matched_jd_id
                         _persist_jobdiva_candidate_id(
                             cand_id, {"jobdiva_candidate_id": matched_jd_id}
@@ -1713,23 +1757,26 @@ async def _provision_batch_to_jobdiva(
                     + (actual_resume or "(Profile sourced via PAIR)")
                 )
 
-                # Link to the candidate's existing JobDiva profile when we already
-                # know its id, so JobDiva attaches this job to the real profile
-                # instead of spawning a duplicate "Unknown Unknown" applicant.
-                # If the linked id is stale/invalid, create_job_application_with_resume
-                # falls back to an email-based candidate lookup before creating anew.
-                # Pass the row's own id as the fallback. For a JobDiva-sourced
-                # row candidate_id IS the JobDiva profile id, and without this
-                # `_resolve_link_candidate_id` could only ever see the stored
-                # `jobdiva_candidate_id` — which is empty on a first launch and
-                # on any row saved before that key was persisted, so its
-                # source-aware carve-out was unreachable and every launch asked
-                # JobDiva to mint a new profile. Non-JobDiva sources are still
-                # rejected inside the resolver.
-                link_candidate_id = _resolve_link_candidate_id(
-                    row.get("source"), cand_data, existing_jd_id or str(cand_id)
-                )
+                # Fail closed: a JobDiva-sourced row must never reach the call
+                # that can mint a profile. Structurally link_candidate_id is
+                # always set for such a row; this is the tripwire for a future
+                # refactor of the resolver (PR #493 was exactly that regression).
+                if own_jd_id and not link_candidate_id:
+                    _report_jobdiva_profile_invariant(
+                        "jobdiva_row_without_link_id",
+                        candidate_id=cand_id, source=row.get("source"), job_id=jd_job_id,
+                        stored_jobdiva_candidate_id=existing_jd_id,
+                    )
+                    return "failed"
 
+                # With a known profile id, create_job_application_with_resume calls
+                # JobDiva's createJobApplication (attach to the existing profile —
+                # it cannot create one) and never falls back to minting a profile;
+                # allow_profile_creation=False makes the service refuse the create
+                # path outright even if that link-first logic ever regresses.
+                # Only a row with no link id (LinkedIn/Exa/Dice, and not matched to
+                # JobDiva by email/phone either) reaches CreateJobApplicationWithResume,
+                # the call that parses the resume into a NEW profile.
                 try:
                     success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
                         candidate_id=link_candidate_id,
@@ -1740,28 +1787,47 @@ async def _provision_batch_to_jobdiva(
                         last_name=last_name,
                         email=email or "",
                         phone=phone or "",
+                        allow_profile_creation=link_candidate_id is None,
                     )
                 except Exception as exc:
                     logger.error(f"❌ [{label}] Exception for {cand_id}: {exc}", exc_info=True)
                     return "failed"
 
                 if success and new_jd_id:
-                    logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {new_jd_id}")
-                    cand_data["jobdiva_candidate_id"] = new_jd_id
+                    persisted_id = str(new_jd_id)
+                    status = "success"
+                    if own_jd_id and persisted_id != own_jd_id:
+                        # JobDiva answered with a profile id that is not this
+                        # JobDiva-sourced person's own id: a duplicate profile was
+                        # minted, or the application went to the wrong profile.
+                        # Keep the real id — persisting the stranger's id is what
+                        # made the pre-fix duplicates self-perpetuating — and shout.
+                        _report_jobdiva_profile_invariant(
+                            "unexpected_profile_id",
+                            candidate_id=cand_id, source=row.get("source"), job_id=jd_job_id,
+                            expected_jobdiva_candidate_id=own_jd_id,
+                            returned_jobdiva_candidate_id=persisted_id,
+                        )
+                        persisted_id = own_jd_id
+                        status = "duplicate_suspected"
+                    logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {persisted_id}")
+                    cand_data["jobdiva_candidate_id"] = persisted_id
                     _persist_jobdiva_candidate_id(
-                        cand_id, {"jobdiva_candidate_id": new_jd_id}
+                        cand_id, {"jobdiva_candidate_id": persisted_id}
                     )
                     # Add to in-memory sets so concurrent siblings don't re-create the same person.
                     # This covers both newly created AND pre-existing profiles that were linked.
-                    existing_jd_ids.add(str(new_jd_id))
+                    existing_jd_ids.add(persisted_id)
                     if email_lower and not email_lower.startswith("auto_") and not is_placeholder_email(email_lower):
-                        existing_emails[email_lower] = str(new_jd_id)
+                        existing_emails[email_lower] = persisted_id
                     if phone_norm and len(phone_norm) >= 7:
-                        existing_phones[phone_norm] = str(new_jd_id)
-                    return "success"
+                        existing_phones[phone_norm] = persisted_id
+                    return status
                 elif success:
-                    # Linked to existing profile but JD returned no ID — treat as success
-                    logger.warning(f"⚠️ [{label}] Linked for {cand_id} but got no new_jd_id from JobDiva")
+                    # Only the create path can get here (linking always returns the
+                    # linked id): JobDiva made the application but sent no profile id,
+                    # so there is nothing to persist — treat as success.
+                    logger.warning(f"⚠️ [{label}] Application created for {cand_id} but JobDiva returned no candidate id")
                     return "success"
                 else:
                     logger.error(f"❌ [{label}] create_job_application_with_resume returned False for {cand_id}")
@@ -1774,6 +1840,11 @@ async def _provision_batch_to_jobdiva(
                 results["failed"] += 1
             elif s == "success":
                 results["success"] += 1
+            elif s == "duplicate_suspected":
+                # The application exists, so it counts as provisioned — but the
+                # id JobDiva returned was not the person's own; see the ERROR log.
+                results["success"] += 1
+                results["duplicate_suspected"] += 1
             elif s == "skipped":
                 results["skipped"] += 1
             else:
@@ -3873,6 +3944,7 @@ async def re_provision_candidates(request: ReProvisionRequest):
             "success_count": results.get("success", 0),
             "skipped": results.get("skipped", 0),
             "failed": results.get("failed", 0),
+            "duplicate_suspected": results.get("duplicate_suspected", 0),
             "message": (
                 f"Re-provisioning complete. "
                 f"{results.get('success', 0)} created, "
@@ -3886,3 +3958,128 @@ async def re_provision_candidates(request: ReProvisionRequest):
     except Exception as e:
         logger.error(f"❌ [Re-Provision] error for job {job_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# JobDiva profile-identity audit (admin)
+# ---------------------------------------------------------------------------
+# A JobDiva-sourced row's own candidate_id IS the person's JobDiva profile id.
+# If its stored `jobdiva_candidate_id` says something else, JobDiva has (or
+# had) a second profile for that person — the duplicates the pre-
+# createJobApplication provisioner minted, or a fresh breach of the invariant
+# (see _report_jobdiva_profile_invariant). The audit lists the pairs so they
+# can be merged in JobDiva; the repair re-stamps the real id so every reader
+# (feedback-note push, passed email, applicant sync) stops routing to the
+# duplicate. Neither touches JobDiva itself.
+
+_JOBDIVA_PROFILE_AUDIT_WHERE = """
+              lower(sc.source) LIKE 'jobdiva%%'
+              AND sc.candidate_id ~ '^[0-9]+$'
+              AND sc.data->>'jobdiva_candidate_id' IS NOT NULL
+              AND sc.data->>'jobdiva_candidate_id' <> sc.candidate_id"""
+
+
+def _require_admin(user: UserIdentity) -> None:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+async def _jobdiva_profile_audit_job_filter(job_id: Optional[str]) -> Tuple[str, list]:
+    """SQL fragment + params scoping an audit query to one job (any id form), or none."""
+    job_id = str(job_id or "").strip()
+    if not job_id:
+        return "", []
+    numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(job_id)
+    ids = [job_id] + [str(x) for x in (numeric_job_id, ref_job_id) if x and str(x) != job_id]
+    return " AND sc.jobdiva_id = ANY(%s)", [ids]
+
+
+class JobDivaProfileAuditRepairRequest(BaseModel):
+    job_id: Optional[str] = None
+
+
+@router.get("/engage/jobdiva-profile-audit")
+async def jobdiva_profile_audit(
+    job_id: Optional[str] = None,
+    limit: int = 200,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Admin: JobDiva-sourced rows whose stored jobdiva_candidate_id is not their own id.
+
+    Each row is a suspected duplicate JobDiva profile: `real_profile_id` is the
+    profile the recruiter's search returned, `duplicate_profile_id` the one the
+    provisioner persisted after JobDiva minted or linked something else. Merge
+    the pair in JobDiva, then call the repair endpoint (or re-launch) to re-stamp.
+    """
+    _require_admin(user)
+    limit = max(1, min(int(limit or 200), 2000))
+    job_sql, job_params = await _jobdiva_profile_audit_job_filter(job_id)
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM sourced_candidates sc
+            WHERE {_JOBDIVA_PROFILE_AUDIT_WHERE}{job_sql}
+            """,
+            job_params,
+        )
+        total = int((cur.fetchone() or {}).get("n") or 0)
+        cur.execute(
+            f"""
+            SELECT sc.jobdiva_id AS job_id,
+                   sc.candidate_id AS real_profile_id,
+                   sc.data->>'jobdiva_candidate_id' AS duplicate_profile_id,
+                   sc.source, sc.name, sc.updated_at
+            FROM sourced_candidates sc
+            WHERE {_JOBDIVA_PROFILE_AUDIT_WHERE}{job_sql}
+            ORDER BY sc.updated_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            job_params + [limit],
+        )
+        rows = [dict(r) for r in (cur.fetchall() or [])]
+        cur.close()
+    finally:
+        conn.close()
+    return {"success": True, "job_id": job_id or None, "total": total, "returned": len(rows), "rows": rows}
+
+
+@router.post("/engage/jobdiva-profile-audit/repair")
+async def jobdiva_profile_audit_repair(
+    request: JobDivaProfileAuditRepairRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Admin: re-stamp every JobDiva-sourced row's jobdiva_candidate_id with its own id.
+
+    Idempotent; touches only rows where the stored id is missing or differs.
+    Merging the duplicate profiles inside JobDiva stays a recruiter action —
+    run the audit first to get the list.
+    """
+    _require_admin(user)
+    job_sql, job_params = await _jobdiva_profile_audit_job_filter(request.job_id)
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            UPDATE sourced_candidates sc
+            SET data = COALESCE(sc.data, '{{}}'::jsonb)
+                       || jsonb_build_object('jobdiva_candidate_id', sc.candidate_id)
+            WHERE lower(sc.source) LIKE 'jobdiva%%'
+              AND sc.candidate_id ~ '^[0-9]+$'
+              AND sc.data->>'jobdiva_candidate_id' IS DISTINCT FROM sc.candidate_id{job_sql}
+            """,
+            job_params,
+        )
+        repaired = cur.rowcount
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+    logger.info(
+        "jobdiva profile audit repair: job=%s rows=%s by=%s",
+        request.job_id or "ALL", repaired, user.email,
+    )
+    return {"success": True, "job_id": request.job_id or None, "repaired": repaired}

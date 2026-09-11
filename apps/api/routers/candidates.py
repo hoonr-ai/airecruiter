@@ -2007,7 +2007,9 @@ async def save_candidates(
                         # (routers/engagement.py `_resolve_link_candidate_id`).
                         # Recomputed on every save, so it self-heals rows whose
                         # blob predates this and survives the upsert either way.
-                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+                        jd_profile_id = jobdiva_profile_id(
+                            c.source, c.candidate_id, getattr(c, "jobdiva_candidate_id", None)
+                        )
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
