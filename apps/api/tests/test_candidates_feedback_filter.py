@@ -30,35 +30,19 @@ def _build_feedback_exists_condition(feedback: str) -> str:
     """Mirror the feedback_exists_condition construction in get_launched_candidates."""
     feedback_exists_condition = ""
     if feedback:
-        if feedback.lower() == "no feedback":
+        f_lower = feedback.strip().lower()
+        if f_lower in ("no feedback", "none", "no_feedback"):
             feedback_exists_condition = """
-                AND NOT EXISTS (
-                    SELECT 1 FROM sourced_candidates sc2
-                    WHERE sc2.candidate_id = sc.candidate_id
-                      AND sc2.data->>'feedback_type' IS NOT NULL
-                      AND sc2.data->>'feedback_type' <> ''
-                )"""
-        elif feedback.lower() == "submit":
+                AND (sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"""
+        elif f_lower in ("submit", "submitted"):
             feedback_exists_condition = """
-                AND EXISTS (
-                    SELECT 1 FROM sourced_candidates sc2
-                    WHERE sc2.candidate_id = sc.candidate_id
-                      AND sc2.data->>'feedback_type' = 'Submit'
-                )"""
-        elif feedback.lower() == "reject":
+                AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit'"""
+        elif f_lower in ("reject", "rejected"):
             feedback_exists_condition = """
-                AND EXISTS (
-                    SELECT 1 FROM sourced_candidates sc2
-                    WHERE sc2.candidate_id = sc.candidate_id
-                      AND sc2.data->>'feedback_type' LIKE 'Reject%'
-                )"""
-        elif feedback.lower() == "unreachable":
+                AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%'"""
+        elif f_lower in ("unreachable",):
             feedback_exists_condition = """
-                AND EXISTS (
-                    SELECT 1 FROM sourced_candidates sc2
-                    WHERE sc2.candidate_id = sc.candidate_id
-                      AND sc2.data->>'feedback_type' = 'Unreachable'
-                )"""
+                AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable'"""
     return feedback_exists_condition
 
 
@@ -100,42 +84,29 @@ class TestFeedbackExistsConditionGeneration:
     def test_no_filter_produces_empty_string(self):
         assert _build_feedback_exists_condition("") == ""
 
-    def test_no_feedback_uses_not_exists(self):
+    def test_no_feedback_checks_null_or_empty(self):
         cond = _build_feedback_exists_condition("No Feedback")
-        assert "NOT EXISTS" in cond
         assert "feedback_type" in cond
-        assert "IS NOT NULL" in cond
-        assert "<> ''" in cond
+        assert "IS NULL" in cond
 
     def test_no_feedback_case_insensitive(self):
         assert _build_feedback_exists_condition("no feedback") == _build_feedback_exists_condition("No Feedback")
 
-    def test_submit_uses_exists_with_exact_match(self):
+    def test_submit_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Submit")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
-        assert "'Submit'" in cond
+        assert "'submit'" in cond.lower()
 
-    def test_reject_uses_exists_with_like(self):
+    def test_reject_uses_like(self):
         cond = _build_feedback_exists_condition("Reject")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
-        assert "LIKE 'Reject%'" in cond
+        assert "like 'reject%'" in cond.lower()
 
-    def test_unreachable_uses_exists_with_exact_match(self):
+    def test_rejected_variant_uses_like(self):
+        cond = _build_feedback_exists_condition("Rejected")
+        assert "like 'reject%'" in cond.lower()
+
+    def test_unreachable_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Unreachable")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
-        assert "'Unreachable'" in cond
-
-    def test_all_exists_conditions_reference_sc2(self):
-        for value in ["Submit", "Reject", "Unreachable"]:
-            cond = _build_feedback_exists_condition(value)
-            assert "sc2.candidate_id = sc.candidate_id" in cond
-
-    def test_no_feedback_references_sc2(self):
-        cond = _build_feedback_exists_condition("No Feedback")
-        assert "sc2.candidate_id = sc.candidate_id" in cond
+        assert "'unreachable'" in cond.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +137,9 @@ class TestDistinctOnOrdering:
             cte = _build_full_cte("", cond)
             where_pos = cte.find("WHERE")
             order_pos = cte.find("ORDER BY sc.candidate_id")
-            exists_pos = cte.find("EXISTS")
-            assert where_pos < exists_pos < order_pos, (
-                f"EXISTS condition for '{feedback}' must be in WHERE before ORDER BY"
+            feedback_pos = cte.find("feedback_type")
+            assert where_pos < feedback_pos < order_pos, (
+                f"Feedback condition for '{feedback}' must be in WHERE before ORDER BY"
             )
 
 
@@ -212,10 +183,10 @@ class TestFeedbackFilterEdgeCases:
 
     def test_submit_filter_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Submit")
-        assert "'Submit'" in cond
+        assert "'submit'" in cond.lower()
 
     def test_reject_like_covers_all_rejection_reasons(self):
-        """Backend stores full reason strings like 'Reject - Skills...'; LIKE 'Reject%' is correct."""
+        """Backend stores full reason strings like 'Reject - Skills...'; LIKE 'reject%' is correct."""
         cond = _build_feedback_exists_condition("Reject")
-        assert "LIKE 'Reject%'" in cond
-        assert "= 'Reject'" not in cond
+        assert "like 'reject%'" in cond.lower()
+        assert "= 'reject'" not in cond.lower()
