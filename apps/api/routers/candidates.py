@@ -3015,16 +3015,33 @@ async def get_launched_candidates(
                     f_lower = feedback.strip().lower()
                     if f_lower in ("no feedback", "none", "no_feedback"):
                         feedback_exists_condition = """
-                            AND (sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"""
+                            AND NOT EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND sc2.data->>'feedback_type' IS NOT NULL
+                                  AND TRIM(sc2.data->>'feedback_type') <> ''
+                            )"""
                     elif f_lower in ("submit", "submitted"):
                         feedback_exists_condition = """
-                            AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit'"""
+                            AND EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
+                            )"""
                     elif f_lower in ("reject", "rejected"):
                         feedback_exists_condition = """
-                            AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%'"""
+                            AND EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
+                            )"""
                     elif f_lower in ("unreachable",):
                         feedback_exists_condition = """
-                            AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable'"""
+                            AND EXISTS (
+                                SELECT 1 FROM sourced_candidates sc2
+                                WHERE sc2.candidate_id = sc.candidate_id
+                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
+                            )"""
 
                 if source:
                     search_condition += " AND sc.source = %s"

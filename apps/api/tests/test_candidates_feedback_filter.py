@@ -33,16 +33,33 @@ def _build_feedback_exists_condition(feedback: str) -> str:
         f_lower = feedback.strip().lower()
         if f_lower in ("no feedback", "none", "no_feedback"):
             feedback_exists_condition = """
-                AND (sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"""
+                AND NOT EXISTS (
+                    SELECT 1 FROM sourced_candidates sc2
+                    WHERE sc2.candidate_id = sc.candidate_id
+                      AND sc2.data->>'feedback_type' IS NOT NULL
+                      AND TRIM(sc2.data->>'feedback_type') <> ''
+                )"""
         elif f_lower in ("submit", "submitted"):
             feedback_exists_condition = """
-                AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit'"""
+                AND EXISTS (
+                    SELECT 1 FROM sourced_candidates sc2
+                    WHERE sc2.candidate_id = sc.candidate_id
+                      AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
+                )"""
         elif f_lower in ("reject", "rejected"):
             feedback_exists_condition = """
-                AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%'"""
+                AND EXISTS (
+                    SELECT 1 FROM sourced_candidates sc2
+                    WHERE sc2.candidate_id = sc.candidate_id
+                      AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
+                )"""
         elif f_lower in ("unreachable",):
             feedback_exists_condition = """
-                AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable'"""
+                AND EXISTS (
+                    SELECT 1 FROM sourced_candidates sc2
+                    WHERE sc2.candidate_id = sc.candidate_id
+                      AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
+                )"""
     return feedback_exists_condition
 
 
@@ -86,27 +103,46 @@ class TestFeedbackExistsConditionGeneration:
 
     def test_no_feedback_checks_null_or_empty(self):
         cond = _build_feedback_exists_condition("No Feedback")
+        assert "NOT EXISTS" in cond
         assert "feedback_type" in cond
-        assert "IS NULL" in cond
+        assert "IS NOT NULL" in cond
+        assert "<> ''" in cond
 
     def test_no_feedback_case_insensitive(self):
         assert _build_feedback_exists_condition("no feedback") == _build_feedback_exists_condition("No Feedback")
 
     def test_submit_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Submit")
+        assert "EXISTS" in cond
+        assert "NOT EXISTS" not in cond
         assert "'submit'" in cond.lower()
 
     def test_reject_uses_like(self):
         cond = _build_feedback_exists_condition("Reject")
+        assert "EXISTS" in cond
+        assert "NOT EXISTS" not in cond
         assert "like 'reject%'" in cond.lower()
 
     def test_rejected_variant_uses_like(self):
         cond = _build_feedback_exists_condition("Rejected")
+        assert "EXISTS" in cond
+        assert "NOT EXISTS" not in cond
         assert "like 'reject%'" in cond.lower()
 
     def test_unreachable_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Unreachable")
+        assert "EXISTS" in cond
+        assert "NOT EXISTS" not in cond
         assert "'unreachable'" in cond.lower()
+
+    def test_all_exists_conditions_reference_sc2(self):
+        for value in ["Submit", "Reject", "Unreachable"]:
+            cond = _build_feedback_exists_condition(value)
+            assert "sc2.candidate_id = sc.candidate_id" in cond
+
+    def test_no_feedback_references_sc2(self):
+        cond = _build_feedback_exists_condition("No Feedback")
+        assert "sc2.candidate_id = sc.candidate_id" in cond
 
 
 # ---------------------------------------------------------------------------
