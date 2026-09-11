@@ -2,6 +2,13 @@
 // by the FastAPI backend (apps/api/models.py + routers/*). Hand-written, not
 // auto-generated — keep in sync when backend models change.
 
+// Labels starting with "JobDiva" are load-bearing: the backend treats a numeric
+// candidate_id under such a label as the person's real JobDiva profile id and
+// ATTACHES Launch PAIR applications to it (services/jobdiva.py
+// `jobdiva_profile_id`). Renaming one of these labels without updating that
+// helper would make JobDiva mint duplicate profiles again. The emitter-stamped
+// `jobdiva_candidate_id` field is the label-independent backstop -- keep passing
+// it through on /candidates/save.
 export type Source =
   | "JobDiva"
   | "JobDiva-JobAgent"

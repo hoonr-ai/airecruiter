@@ -7488,6 +7488,12 @@ function NewJobPageContent() {
           skills: skillList,
           experience_years: c.yearsExtracted || c.experience_years || 0,
           source: c.source || "JobDiva-Applicants",
+          // Label-independent JobDiva provenance. The JobDiva pool emitters stamp
+          // this with the row's OWN JobDiva id; the backend trusts it only when it
+          // equals candidate_id, so Launch PAIR keeps attaching to the existing
+          // profile even if a source label is ever renamed (a renamed label used
+          // to turn JobDiva people into "unknown" people that got re-created).
+          jobdiva_candidate_id: c.jobdiva_candidate_id ? String(c.jobdiva_candidate_id) : null,
           headline: c.title || c.headline || "",
           location: c.location || "",
           profile_url: c.profile_url || null,
