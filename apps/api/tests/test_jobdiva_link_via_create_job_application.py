@@ -246,6 +246,22 @@ def test_kill_switch_refuses_to_mint_even_when_nobody_matches():
     assert _calls_to(calls, "createJobApplication") == []
 
 
+def test_link_candidate_to_job_flags_a_non_boolean_2xx_body(caplog):
+    """JobDiva documents a boolean body. An empty/odd 2xx body still counts as
+    success (so a benign format change cannot stall provisioning) but must be
+    visible in the logs."""
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    calls = []
+    with patch("services.jobdiva.httpx.AsyncClient",
+               lambda *a, **k: _FakeAsyncClient(calls, _dispatch_with(link_status=200, link_body=""))):
+        ok = asyncio.run(_service().link_candidate_to_job(EXISTING_PROFILE, str(JOB_ID)))
+    assert ok is True
+    assert "non-boolean body" in caplog.text
+    assert EXISTING_PROFILE in caplog.text
+
+
 def test_link_candidate_to_job_refreshes_token_once_on_401():
     seen_tokens = []
     statuses = iter([401, 200])

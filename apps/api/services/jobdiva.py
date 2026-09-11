@@ -4883,6 +4883,15 @@ class JobDivaService:
                 f"{response.status_code} — {body[:200]}"
             )
             if response.status_code in (200, 201) and body.lower() != "false":
+                if body.lower() != "true":
+                    # JobDiva documents a boolean body. Anything else (empty, a
+                    # number, JSON) is ambiguous: keep treating a 2xx as success so
+                    # a benign format change cannot stall provisioning, but make
+                    # it visible so it can be checked against JobDiva.
+                    logger.warning(
+                        f"⚠️ createJobApplication candidateid={cid} jobid={resolved_job_id}: "
+                        f"2xx with non-boolean body {body[:100]!r} — treated as success; verify in JobDiva"
+                    )
                 return True
             logger.error(
                 f"❌ createJobApplication refused candidateid={cid} jobid={resolved_job_id}: "
