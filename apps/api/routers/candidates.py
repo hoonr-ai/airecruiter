@@ -3011,6 +3011,10 @@ async def get_launched_candidates(
                 # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
                 # and we only include candidates who match the feedback requirement on ANY row.
                 feedback_exists_condition = ""
+                # Shared SQL predicate: true when a sourced_candidates row has a
+                # non-empty feedback_type.  Used in the "No Feedback" EXISTS clause
+                # and conditionally in ORDER BY to prefer rows with feedback.
+                _HAS_FEEDBACK_PRED = "(sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '')"
                 if feedback:
                     f_lower = feedback.strip().lower()
                     
@@ -3132,7 +3136,12 @@ async def get_launched_candidates(
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
                           {feedback_exists_condition}
-                        ORDER BY sc.candidate_id, (sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '') DESC, sc.created_at DESC
+                        -- When a feedback filter is active, prefer the row that
+                        -- carries actual feedback data so the UI column matches
+                        -- the filter.  Without a filter, fall back to pure
+                        -- created_at DESC to use the existing index and avoid
+                        -- surfacing stale cross-job feedback rows.
+                        ORDER BY sc.candidate_id, {f'{_HAS_FEEDBACK_PRED} DESC,' if feedback_exists_condition else ''} sc.created_at DESC
                     )
                 """
 
