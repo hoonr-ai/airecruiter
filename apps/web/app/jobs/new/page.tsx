@@ -1119,9 +1119,16 @@ function NewJobPageContent() {
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
   // Source & Launch auto-selection guard rails. The launch is confirmation-
-  // free, so it is hard-capped (highest scores first) — an exclusion
-  // regression can never translate into unbounded outreach in one click.
-  const AUTO_LAUNCH_SAFETY_CAP = 250;
+  // free, so it takes the best `launchCount` candidates (highest scores
+  // first, all at/above the floor). The recruiter sets the number in the
+  // footer field; it defaults to AUTO_LAUNCH_DEFAULT_COUNT and is clamped to
+  // AUTO_LAUNCH_MAX_COUNT so a typo can never translate into unbounded
+  // outreach in one click.
+  const AUTO_LAUNCH_DEFAULT_COUNT = 250;
+  const AUTO_LAUNCH_MAX_COUNT = 1000;
+  const [launchCount, setLaunchCount] = useState<number>(AUTO_LAUNCH_DEFAULT_COUNT);
+  const [launchCountInput, setLaunchCountInput] = useState<string>(String(AUTO_LAUNCH_DEFAULT_COUNT));
+  const clampLaunchCount = (n: number) => Math.min(AUTO_LAUNCH_MAX_COUNT, Math.max(1, Math.floor(n)));
   // "No outreach for less than 60%": the Source & Launch floor. Mirrors the
   // backend's SCORING_OUTREACH_MIN_SCORE / lib/match-score OUTREACH_MIN_SCORE.
   const AUTO_LAUNCH_MIN_SCORE = OUTREACH_MIN_SCORE;
@@ -6687,12 +6694,12 @@ function NewJobPageContent() {
   // the table for review and are never auto-launched. DNC and
   // missing-contact handling stay inside the shared Launch PAIR flow.
   //
-  // Safety net: the confirmation-free launch is hard-capped at
-  // AUTO_LAUNCH_SAFETY_CAP (highest scores first), so an exclusion regression
-  // can never translate into unbounded outreach in one click — the overflow
-  // stays in the table and launches on the next Source & Launch.
+  // Count: the recruiter's footer number (`launchCount`, default 250, max
+  // 1000) — the best N by score among the eligible. The overflow stays in
+  // the table and launches on the next Source & Launch / Launch PAIR click.
   const computeAutoLaunchSelection = (
-    pool: any[]
+    pool: any[],
+    limit: number = launchCount,
   ): { ids: string[]; eligibleTotal: number; belowFloor: number; unscored: number } => {
     const idOf = (c: any) =>
       String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
@@ -6721,7 +6728,7 @@ function NewJobPageContent() {
     }
     const capped = [...eligible]
       .sort((a, b) => b.score - a.score)
-      .slice(0, AUTO_LAUNCH_SAFETY_CAP);
+      .slice(0, clampLaunchCount(limit));
     return {
       ids: capped.map((e) => e.id),
       eligibleTotal: eligible.length,
@@ -6755,6 +6762,7 @@ function NewJobPageContent() {
         mode: launchRemainingOnly ? "launch_remaining" : "full_search",
         candidates_on_screen: candidatesRef.current.length,
         min_score: AUTO_LAUNCH_MIN_SCORE,
+        launch_count: launchCount,
       });
       let results: any[] = [];
       if (!launchRemainingOnly) {
@@ -6766,7 +6774,7 @@ function NewJobPageContent() {
       }
       const pool =
         candidatesRef.current.length >= results.length ? candidatesRef.current : results;
-      const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(pool);
+      const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(pool, launchCount);
       trackEvent("job_wizard_step5_auto_launch_selection", {
         step: 5,
         mode: launchRemainingOnly ? "launch_remaining" : "full_search",
@@ -6776,6 +6784,7 @@ function NewJobPageContent() {
         below_floor: belowFloor,
         unscored,
         min_score: AUTO_LAUNCH_MIN_SCORE,
+        launch_count: launchCount,
       });
       const heldBack = [
         belowFloor > 0 ? `${belowFloor} below ${AUTO_LAUNCH_MIN_SCORE}%` : "",
@@ -6792,7 +6801,7 @@ function NewJobPageContent() {
       }
       showToast(
         eligibleTotal > ids.length
-          ? `${launchRemainingOnly ? "Launching" : "Search complete — launching"} PAIR for the top ${ids.length} of ${eligibleTotal} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+ (safety cap). Click Source & Launch again for the rest.`
+          ? `${launchRemainingOnly ? "Launching" : "Search complete — launching"} PAIR for the best ${ids.length} of ${eligibleTotal} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+ (your launch count). Raise the number or click Launch PAIR again for the rest.`
           : `${launchRemainingOnly ? "Launching" : "Search complete — launching"} PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} at ${AUTO_LAUNCH_MIN_SCORE}%+${heldBack ? ` (${heldBack} held back)` : ""}…`,
         "info",
       );
@@ -10247,18 +10256,19 @@ function NewJobPageContent() {
                 {(() => {
                   if (!hasSearched || isSearching) return "";
                   if (searchPhase === "sampled") {
-                    return `Best ${SAMPLE_MIN_PER_SOURCE}–${SAMPLE_PER_SOURCE} per source shown · Source & Launch runs the full search and launches PAIR to every candidate at ${AUTO_LAUNCH_MIN_SCORE}%+`;
+                    return `Best ${SAMPLE_MIN_PER_SOURCE}–${SAMPLE_PER_SOURCE} per source shown · Source & Launch runs the full search and launches PAIR to the best ${launchCount} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+`;
                   }
                   if (searchPhase === "complete") {
-                    const { eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(candidates);
+                    const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(candidates, launchCount);
                     const held = [
                       belowFloor > 0 ? `${belowFloor} below ${AUTO_LAUNCH_MIN_SCORE}%` : "",
                       unscored > 0 ? `${unscored} unscored` : "",
                     ].filter(Boolean).join(", ");
-                    return `${eligibleTotal} launchable candidate${eligibleTotal === 1 ? "" : "s"} at ${AUTO_LAUNCH_MIN_SCORE}%+ not yet launched${held ? ` · ${held} held back` : ""}`;
+                    const next = eligibleTotal > ids.length ? ` · next click launches the best ${ids.length}` : "";
+                    return `${eligibleTotal} launchable candidate${eligibleTotal === 1 ? "" : "s"} at ${AUTO_LAUNCH_MIN_SCORE}%+ not yet launched${next}${held ? ` · ${held} held back` : ""}`;
                   }
                   if (candidates.length > 0) {
-                    return `Source & Launch re-runs the full search and launches PAIR to every candidate at ${AUTO_LAUNCH_MIN_SCORE}%+`;
+                    return `Source & Launch re-runs the full search and launches PAIR to the best ${launchCount} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+`;
                   }
                   return "";
                 })()}
@@ -10297,11 +10307,50 @@ function NewJobPageContent() {
                     <ExternalLink className="w-4 h-4" />
                     New tab
                   </Button>
+                  {/* Launch count — how many of the best (≥ floor) candidates
+                      one click launches. Default 250, clamped to 1..1000. */}
+                  <label
+                    className="flex items-center gap-2 text-[13px] font-semibold text-slate-600 select-none"
+                    title={`Source & Launch picks the best N candidates by match score (all at ${AUTO_LAUNCH_MIN_SCORE}% or higher). Default ${AUTO_LAUNCH_DEFAULT_COUNT}, max ${AUTO_LAUNCH_MAX_COUNT}.`}
+                  >
+                    Launch up to
+                    <input
+                      type="number"
+                      min={1}
+                      max={AUTO_LAUNCH_MAX_COUNT}
+                      step={1}
+                      inputMode="numeric"
+                      value={launchCountInput}
+                      disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setLaunchCountInput(raw);
+                        const parsed = parseInt(raw, 10);
+                        if (!isNaN(parsed) && parsed > 0) {
+                          setLaunchCount(clampLaunchCount(parsed));
+                        }
+                      }}
+                      onBlur={() => {
+                        const parsed = parseInt(launchCountInput, 10);
+                        if (isNaN(parsed) || parsed <= 0) {
+                          setLaunchCount(AUTO_LAUNCH_DEFAULT_COUNT);
+                          setLaunchCountInput(String(AUTO_LAUNCH_DEFAULT_COUNT));
+                        } else {
+                          const clamped = clampLaunchCount(parsed);
+                          setLaunchCount(clamped);
+                          setLaunchCountInput(String(clamped));
+                        }
+                      }}
+                      aria-label="Number of best candidates to launch PAIR for"
+                      className="h-[42px] w-[84px] px-2.5 text-[14px] font-bold text-slate-800 border border-slate-300 rounded-xl bg-white shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40 focus:border-[#6366f1]/40 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
+                    />
+                  </label>
                   {/* Source & Launch PAIR — the single launch action on Step 5.
-                      sampled/restored → full search + auto-launch (≥ floor);
-                      complete → reads "Launch PAIR" and launches the
-                      not-yet-launched remainder without re-searching, so a
-                      recruiter coming back to this screen can launch more. */}
+                      sampled/restored → full search + auto-launch of the best
+                      `launchCount` (≥ floor); complete → reads "Launch PAIR"
+                      and launches the best `launchCount` of the not-yet-launched
+                      remainder without re-searching, so a recruiter coming
+                      back to this screen can launch more. */}
                   <Button
                     type="button"
                     className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
@@ -10313,8 +10362,8 @@ function NewJobPageContent() {
                         : !hasSearched
                           ? "Run Search first to preview the best candidates from each source"
                           : searchPhase === "complete"
-                            ? `Launch PAIR to every not-yet-launched candidate scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher (no new search)`
-                            : `Run the full search across every selected source, score everyone on the matrix, and launch PAIR to every candidate scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher (up to ${AUTO_LAUNCH_SAFETY_CAP} per click)`
+                            ? `Launch PAIR to the best ${launchCount} not-yet-launched candidate${launchCount === 1 ? "" : "s"} scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher (no new search)`
+                            : `Run the full search across every selected source, score everyone on the matrix, and launch PAIR to the best ${launchCount} candidate${launchCount === 1 ? "" : "s"} scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher`
                     }
                   >
                     {isEnrichingContacts || isSourceAndLaunchRunning ? (
