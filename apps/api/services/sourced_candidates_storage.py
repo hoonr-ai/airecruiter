@@ -5,6 +5,7 @@ import time
 import hashlib
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 import sqlalchemy
 from sqlalchemy import text
@@ -298,15 +299,69 @@ def _extract_resume_contact_details(resume_text: str) -> Dict[str, Any]:
     return extracted
 
 
+def _coerce_skill_years(value: Any) -> Optional[float]:
+    """`years_used` from the LLM: numeric, or a string like "3", "3.5", "3+".
+    None when absent / unparseable / non-positive — the scorer then falls
+    back to total YOE rather than treating a parse gap as zero years."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            years = float(value)
+        else:
+            match = re.search(r"\d+(?:\.\d+)?", str(value))
+            if not match:
+                return None
+            years = float(match.group(0))
+    except (TypeError, ValueError):
+        return None
+    if years <= 0 or years > 60:
+        return None
+    return round(years, 1)
+
+
+def _coerce_skill_year(value: Any) -> Optional[int]:
+    """`last_used_year` from the LLM: a 4-digit year, or "Present"/"Current"
+    (→ the current year). None when absent / unparseable."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in ("present", "current", "now", "ongoing", "till date", "to date"):
+        return datetime.now(timezone.utc).year
+    match = re.search(r"(19|20)\d{2}", text)
+    if not match:
+        return None
+    year = int(match.group(0))
+    if year > datetime.now(timezone.utc).year + 1:
+        return None
+    return year
+
+
 def _normalize_llm_skills(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Shape the LLM's skills[] into the stored `structured_skills` entries.
+
+    `years_used` / `last_used_year` are optional per-skill signals (see the
+    extraction prompt) that feed the "recent must-have skills" bucket of the
+    scoring matrix; they're carried only when the LLM supplied a usable value
+    so older cached payloads and the fallback path keep the legacy shape.
+    """
     formatted_skills: List[Dict[str, Any]] = []
     llm_skills = llm_result.get("skills", []) or llm_result.get("hard_skills", [])
     for skill in llm_skills:
         if isinstance(skill, dict) and skill.get("name"):
-            formatted_skills.append({
+            entry: Dict[str, Any] = {
                 "skill": str(skill["name"]).strip(),
                 "similar_skills": [],
-            })
+            }
+            years_used = _coerce_skill_years(skill.get("years_used"))
+            if years_used is not None:
+                entry["years_used"] = years_used
+            last_used_year = _coerce_skill_year(skill.get("last_used_year"))
+            if last_used_year is not None:
+                entry["last_used_year"] = last_used_year
+            formatted_skills.append(entry)
         elif isinstance(skill, str) and skill.strip():
             formatted_skills.append({
                 "skill": skill.strip(),
@@ -1234,7 +1289,9 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         '  "current_location": "City, State",\n'
         '  "skills": [\n'
         '    {\n'
-        '      "name": "Skill Name"\n'
+        '      "name": "Skill Name",\n'
+        '      "years_used": 3,\n'
+        '      "last_used_year": 2025\n'
         '    }\n'
         '  ],\n'
         '  "company_experience": [\n'
@@ -1278,7 +1335,10 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         "states only a work arrangement and no city, use an empty string \"\".\n"
         "2. job_title must be the candidate's current or most recent title from the latest experience entry.\n"
         "3. years_of_experience must be a numeric total based on the resume timeline or explicit summary.\n"
-        "4. Extract concrete professional skills into skills[].name. Include all meaningful technical and functional skills stated in the resume.\n"
+        "4. Extract concrete professional skills into skills[]. name is required; include all meaningful technical and functional skills stated in the resume.\n"
+        "4a. For each skill, when the resume timeline makes it evident, set years_used to the total number of years the skill was in use "
+        "(numeric, across all roles that used it) and last_used_year to the 4-digit year of the most recent role that used it "
+        "(a role marked Present/Current means the current year). When the resume does not make a value evident, omit that field or use null — never guess.\n"
         "5. Extract complete company_experience entries with company, title, start_date, end_date, end_client. List them in reverse chronological order.\n"
         "5a. company must be the EMPLOYER OF RECORD exactly as the resume names it. When an entry names both an "
         "employer/vendor and the client it served (e.g. 'Client: Walmart', 'TCS - deployed at Walmart', "
@@ -1307,7 +1367,10 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         ],
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
-        "max_tokens": 1800
+        # Per-skill years_used / last_used_year roughly double the skills[]
+        # payload; the old 1800 cap would truncate skill-dense résumés into
+        # invalid JSON (→ "raw" fallback, no structured skills at all).
+        "max_tokens": 2600
     }
     
     async with _llm_semaphore:
