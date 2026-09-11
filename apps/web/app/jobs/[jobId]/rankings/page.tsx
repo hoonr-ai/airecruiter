@@ -1805,11 +1805,13 @@ export default function CandidateRankingsPage() {
                 <div className="text-sm text-slate-500 font-medium">Candidate Rank List</div>
                 {!isInitialLoading && job?.screening_level && (
                   <span className={`inline-flex items-center px-2.5 py-0.5 rounded text-xs font-bold border uppercase tracking-wide ${
-                    job.screening_level.toLowerCase() === 'l0.5' ? 'bg-purple-50 text-purple-700 border-purple-200' :
-                    job.screening_level.toLowerCase() === 'l1' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                    job.screening_level.toLowerCase() === 'l1.5' ? 'bg-cyan-50 text-cyan-700 border-cyan-200' :
-                    job.screening_level.toLowerCase() === 'l2' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
-                    'bg-slate-100 text-slate-600 border-slate-300'
+                    ((level) => {
+                      if (level === 'l0.5') return 'bg-purple-50 text-purple-700 border-purple-200';
+                      if (level === 'l1') return 'bg-blue-50 text-blue-700 border-blue-200';
+                      if (level === 'l1.5') return 'bg-cyan-50 text-cyan-700 border-cyan-200';
+                      if (level === 'l2') return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+                      return 'bg-slate-100 text-slate-600 border-slate-300';
+                    })(job.screening_level.toLowerCase())
                   }`}>
                     {job.screening_level}
                   </span>
@@ -2169,7 +2171,7 @@ export default function CandidateRankingsPage() {
             <select
               value={feedbackFilter}
               onChange={(e) => setFeedbackFilter(e.target.value)}
-              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[110px]"
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[125px]"
             >
               <option value="">All</option>
               <option value="no feedback">No Feedback</option>

@@ -3079,8 +3079,8 @@ async def get_launched_candidates(
 
                 params.extend([limit, offset])
 
-                # CTE_BODY does NOT include the leading 'WITH' — it is added per-query below.
-                # This avoids the double-WITH bug that caused the feedback filter to silently fail.
+                # CTE_BODY defines the shared CTEs without a leading 'WITH'.
+                # This makes the downstream queries cleaner to construct.
                 CTE_BODY = f"""
                     latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
