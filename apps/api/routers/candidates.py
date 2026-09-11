@@ -3132,7 +3132,7 @@ async def get_launched_candidates(
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
                           {feedback_exists_condition}
-                        ORDER BY sc.candidate_id, sc.created_at DESC
+                        ORDER BY sc.candidate_id, (sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '') DESC, sc.created_at DESC
                     )
                 """
 

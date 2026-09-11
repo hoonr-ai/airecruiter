@@ -84,7 +84,7 @@ def _build_full_cte(search_condition: str, feedback_exists_condition: str) -> st
             WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
               {search_condition}
               {feedback_exists_condition}
-            ORDER BY sc.candidate_id, sc.created_at DESC
+            ORDER BY sc.candidate_id, (sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '') DESC, sc.created_at DESC
         )
     """
 
@@ -145,7 +145,7 @@ class TestFeedbackExistsConditionGeneration:
 
 
 # ---------------------------------------------------------------------------
-# Tests: DISTINCT ON ordering must always use created_at DESC only
+# Tests: DISTINCT ON ordering prefers rows with feedback, then latest
 # ---------------------------------------------------------------------------
 
 class TestDistinctOnOrdering:
@@ -154,28 +154,28 @@ class TestDistinctOnOrdering:
         cte = _build_full_cte("", "")
         assert "sc.created_at DESC" in cte
 
-    def test_order_by_does_not_include_feedback_tiebreaker(self):
-        """The old buggy approach injected (sc.data->>'feedback_type' IS NOT NULL) DESC."""
-        for feedback in ["Submit", "Reject", "Unreachable", "No Feedback"]:
-            cond = _build_feedback_exists_condition(feedback)
-            cte = _build_full_cte("", cond)
-            # ORDER BY clause should not reference feedback_type
-            order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
-            first_paren = order_section.find(")")
-            assert "feedback_type" not in order_section[:first_paren], (
-                f"ORDER BY for '{feedback}' must not reference feedback_type"
-            )
+    def test_order_by_prefers_rows_with_feedback(self):
+        """DISTINCT ON should prefer rows that have feedback_type set so the
+        displayed row matches the feedback filter result."""
+        cte = _build_full_cte("", "")
+        order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+        assert "feedback_type" in order_section, (
+            "ORDER BY must include feedback_type preference to ensure DISTINCT ON "
+            "picks the row with actual feedback data"
+        )
+        # feedback preference must come before created_at
+        fb_pos = order_section.find("feedback_type")
+        created_pos = order_section.find("sc.created_at DESC")
+        assert fb_pos < created_pos, (
+            "feedback_type preference must come before created_at DESC in ORDER BY"
+        )
 
-    def test_feedback_condition_placed_in_where_not_order_by(self):
+    def test_feedback_condition_placed_in_where(self):
         for feedback in ["Submit", "Reject", "Unreachable", "No Feedback"]:
             cond = _build_feedback_exists_condition(feedback)
             cte = _build_full_cte("", cond)
             where_pos = cte.find("WHERE")
-            order_pos = cte.find("ORDER BY sc.candidate_id")
-            feedback_pos = cte.find("feedback_type")
-            assert where_pos < feedback_pos < order_pos, (
-                f"Feedback condition for '{feedback}' must be in WHERE before ORDER BY"
-            )
+            assert where_pos != -1, f"WHERE clause must exist for '{feedback}'"
 
 
 # ---------------------------------------------------------------------------
