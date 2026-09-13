@@ -383,19 +383,36 @@ class JobRubricDB:
         """
         return
 
+    def _is_locked_default_question(self, text: str) -> bool:
+        if not text:
+            return False
+        lower_text = text.lower()
+        return (
+            "authorized to work indefinitely" in lower_text or
+            "require visa sponsorship to continue working" in lower_text or
+            "types of working arrangements are you open to and eligible for" in lower_text
+        )
+
     def _save_screen_questions_internal(self, cur, jobdiva_id: str, questions: List[Dict]):
         """Internal helper to save screen questions using an existing cursor."""
         self._ensure_hard_filter_column(cur)
         cur.execute("DELETE FROM job_screen_questions WHERE jobdiva_id = %s", (jobdiva_id,))
         for i, q in enumerate(questions):
+            question_text = q.get('question_text', '')
+            pass_criteria = q.get('pass_criteria', '')
+            
+            # Enforce lock: if it's one of the protected questions, force pass_criteria to empty
+            if self._is_locked_default_question(question_text):
+                pass_criteria = ''
+
             cur.execute("""
                 INSERT INTO job_screen_questions (
                     jobdiva_id, question_text, pass_criteria, is_default, category, order_index, is_hard_filter
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 jobdiva_id,
-                q.get('question_text', ''),
-                q.get('pass_criteria', ''),
+                question_text,
+                pass_criteria,
                 bool(q.get('is_default', False)),
                 q.get('category', 'other'),
                 q.get('order_index', i),

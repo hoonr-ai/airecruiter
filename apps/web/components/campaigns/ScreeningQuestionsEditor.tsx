@@ -173,7 +173,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
               value={q.pass_criteria ?? ""}
               onChange={(e) => {
                 if (q.is_locked) return;
-                update(index, { pass_criteria: e.target.value })
+                update(index, { pass_criteria: e.target.value });
               }}
               rows={2}
               disabled={q.is_locked}

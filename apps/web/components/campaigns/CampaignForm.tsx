@@ -28,6 +28,7 @@ import {
   isBooleanScreeningLevel,
   isValidRecruiterEmail,
   isRoleResponsibilitiesQuestion,
+  isLockedDefaultQuestion,
   TemplateQuestion,
   getDefaultCampaignScreeningQuestions,
 } from "@/lib/campaigns";
@@ -98,7 +99,10 @@ export function CampaignForm({
   const [outreach2Enabled, setOutreach2Enabled] = useState(initialOutreach2Enabled);
   const [questions, setQuestions] = useState<TemplateQuestion[]>(
     initial?.template_screen_questions && initial.template_screen_questions.length > 0
-      ? (initial.template_screen_questions as TemplateQuestion[])
+      ? (initial.template_screen_questions as TemplateQuestion[]).map(q => ({
+          ...q,
+          is_locked: isLockedDefaultQuestion(q.question_text),
+        }))
       : getDefaultCampaignScreeningQuestions(initial?.screening_level ?? "L1.5")
   );
   const [phase1ReminderHours, setPhase1ReminderHours] = useState<string>(
