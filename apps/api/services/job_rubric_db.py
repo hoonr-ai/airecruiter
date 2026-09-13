@@ -444,10 +444,8 @@ class JobRubricDB:
             pass_criteria = q.get('pass_criteria', '')
             is_locked = self._is_locked_default_question(question_text)
             
-            # Never accept criteria for a protected core question, including
-            # newly-created jobs that have no persisted lock yet.
-            if is_locked:
-                pass_criteria = ''
+            # Core question wording is locked; its pass criteria remains
+            # recruiter-configurable so it can be used as a hard filter.
 
             cur.execute("""
                 INSERT INTO job_screen_questions (
