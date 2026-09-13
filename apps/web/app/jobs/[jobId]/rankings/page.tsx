@@ -1466,6 +1466,20 @@ export default function CandidateRankingsPage() {
           ...src.data,
           ...(dst.data || {})
         };
+
+        const dstFeedbackType = String(dst.data?.feedback_type || "").trim();
+        const srcFeedbackType = String(src.data.feedback_type || "").trim();
+        const dstFeedbackAt = Date.parse(String(dst.data?.feedback_at || ""));
+        const srcFeedbackAt = Date.parse(String(src.data.feedback_at || ""));
+        const shouldUseSourceFeedback = srcFeedbackType && (
+          !dstFeedbackType ||
+          (Number.isFinite(srcFeedbackAt) && (!Number.isFinite(dstFeedbackAt) || srcFeedbackAt > dstFeedbackAt))
+        );
+        if (shouldUseSourceFeedback) {
+          dst.data.feedback_type = srcFeedbackType;
+          dst.data.feedback_reason = src.data.feedback_reason;
+          dst.data.feedback_at = src.data.feedback_at;
+        }
       }
       return dst;
     };
