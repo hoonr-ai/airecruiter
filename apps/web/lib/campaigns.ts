@@ -289,6 +289,15 @@ export interface TemplateQuestion {
   [k: string]: unknown;
 }
 
+export function isLockedDefaultQuestion(text: string): boolean {
+  if (!text) return false;
+  return (
+    text.includes("authorized to work indefinitely") ||
+    text.includes("require visa sponsorship to continue working") ||
+    text.includes("types of working arrangements are you open to and eligible for")
+  );
+}
+
 const AI_BASE = `${API_BASE}/api/v1/ai-generation`;
 
 // Campaign holds L0.5|L1|L1.5|L2; the screening-question generator wants
@@ -403,9 +412,7 @@ export async function generateScreeningQuestions(input: {
   );
 
   const defaults: TemplateQuestion[] = defaultQs.map((q, index) => {
-    const isLocked = q.text.includes("authorized to work indefinitely") ||
-                     q.text.includes("require visa sponsorship to continue working") ||
-                     q.text.includes("types of working arrangements are you open to and eligible for");
+
     return {
       id: index + 1,
       question_text: q.text,
@@ -414,7 +421,7 @@ export async function generateScreeningQuestions(input: {
       category: "default",
       order_index: index,
       is_hard_filter: !!q.is_hard_filter,
-      is_locked: isLocked,
+      is_locked: isLockedDefaultQuestion(q.text),
     };
   });
 
@@ -469,9 +476,7 @@ export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L
     : defaultQs;
 
   return normalizedDefaults.map((q, index) => {
-    const isLocked = q.text.includes("authorized to work indefinitely") ||
-                     q.text.includes("require visa sponsorship to continue working") ||
-                     q.text.includes("types of working arrangements are you open to and eligible for");
+
     return {
       id: index + 1,
       question_text: q.text,
@@ -480,7 +485,7 @@ export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L
       category: q.category,
       order_index: index,
       is_hard_filter: !!q.is_hard_filter,
-      is_locked: isLocked,
+      is_locked: isLockedDefaultQuestion(q.text),
     };
   });
 }
