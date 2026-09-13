@@ -54,6 +54,7 @@ import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
+import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -2109,6 +2110,17 @@ export default function CandidateRankingsPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Cross submissions: PAIR-screened candidates from other jobs (last
+          60 days) who match this one. Not on this job's list — the panel
+          hides itself when empty and each row can be added to the job. */}
+      {jobId && (
+        <CrossSubmissionsPanel
+          jobId={jobId as string}
+          notify={(type, message) => setToast({ type, message })}
+          onAdded={() => fetchCandidatesPage(0, true)}
+        />
       )}
 
       {/* Table Interface */}

@@ -282,8 +282,13 @@ def _ensure_monitored_jobs_schema() -> None:
                 missing_skills JSONB DEFAULT '[]'::jsonb,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 notified_at TIMESTAMPTZ NULL,
+                added_at TIMESTAMPTZ NULL,
                 UNIQUE (job_id, person_key)
             )""",
+            # added_at: stamped when a recruiter clicks "Add to job" on the
+            # rank-list panel. ALTER covers DBs that created the table before
+            # the column existed.
+            "ALTER TABLE cross_submissions ADD COLUMN IF NOT EXISTS added_at TIMESTAMPTZ NULL",
             "CREATE INDEX IF NOT EXISTS idx_cross_submissions_job ON cross_submissions (job_id)",
             "CREATE INDEX IF NOT EXISTS idx_cross_submissions_jobdiva ON cross_submissions (jobdiva_id)",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS cross_submissions_checked_at TIMESTAMP NULL",

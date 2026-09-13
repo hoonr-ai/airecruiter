@@ -373,7 +373,7 @@ def _router_routes():
 
 def test_every_cross_submissions_route_is_guarded():
     routes = _router_routes()
-    assert len(routes) == 2
+    assert len(routes) == 3
     for path, body in routes:
         assert "Depends(get_current_user)" in body, path
         assert "_verify_job_access_by_id(" in body, path
@@ -387,3 +387,85 @@ def test_cross_submissions_subpath_is_in_nginx_allowlist():
     for path, _ in _router_routes():
         sub = re.match(r"^/jobs/\{[^/]+\}/([^/]+)", path).group(1)
         assert sub in match.group(1).split("|"), path
+
+
+# ---------------------------------------------------------------------------
+# "Add to this job" (rank-list panel)
+# ---------------------------------------------------------------------------
+CS_ROW = {
+    "id": 7, "job_id": "2002", "jobdiva_id": "26-22222", "person_key": "email:a@x.com", "candidate_id": "c1",
+    "source": "JobDiva", "prior_job_id": "1001", "prior_jobdiva_id": "26-11111", "prior_job_title": "Sr DE",
+    "prior_customer_name": "Acme", "screen_result": "Pass", "screened_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+    "match_score": 81.5, "matched_skills": '["python"]', "missing_skills": "[]",
+}
+
+
+def test_build_added_blob_strips_outreach_state_but_keeps_jobdiva_profile_id():
+    prior = {
+        "engage_status": "passed", "engage_interview_id": "iv-1", "engage_score": 8, "engage_last_response": {"x": 1},
+        "engage_hard_filter_status": "passed", "phase": "phase2", "feedback_type": "Submit",
+        "jobdiva_candidate_id": "jd-999", "enhanced_info": {"key_skills": ["python"]}, "skills": ["python"],
+    }
+    blob = cs.build_added_blob(prior, CS_ROW)
+    for k in ("engage_status", "engage_interview_id", "engage_score", "engage_last_response", "engage_hard_filter_status", "phase", "feedback_type"):
+        assert k not in blob, k
+    assert blob["jobdiva_candidate_id"] == "jd-999"
+    assert blob["enhanced_info"] == {"key_skills": ["python"]}
+    assert blob["match_score"] == 81.5 and blob["resume_matching_status"] == "done"
+    assert blob["matched_skills"] == ["python"]
+    assert blob["cross_submission"]["from_jobdiva_id"] == "26-11111"
+    assert blob["cross_submission"]["screen_result"] == "Pass"
+    assert blob["cross_submission"]["screened_at"] == "2026-09-01T00:00:00+00:00"
+
+
+def _add_conn(job_row, cs_row, prior_row, inserted):
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.fetchone.side_effect = [job_row, cs_row, prior_row, inserted]
+    return conn, cur
+
+
+def test_add_to_job_copies_prior_row_without_engage_state():
+    prior = {
+        "candidate_id": "c1", "source": "JobDiva", "name": "Ada", "email": "a@x.com", "phone": "1", "headline": "DE",
+        "location": "Austin, TX", "profile_url": None, "image_url": None, "resume_id": "r1", "resume_text": "python",
+        "data": json.dumps({"engage_status": "passed", "engage_interview_id": "iv", "jobdiva_candidate_id": "jd-1"}),
+    }
+    conn, cur = _add_conn(JOB, CS_ROW, prior, {"id": 55})
+    with patch.object(cs, "get_db_connection", return_value=conn):
+        out = cs.add_to_job("26-22222", 7, added_by="rec@pyramidci.com")
+
+    assert out["status"] == "success" and out["already_present"] is False
+    assert out["job_key"] == "26-22222" and out["candidate_id"] == "c1" and out["match_score"] == 81.5
+    insert_call = next(c for c in cur.execute.call_args_list if "INSERT INTO sourced_candidates" in str(c.args[0]))
+    assert "ON CONFLICT (jobdiva_id, candidate_id, source) DO NOTHING" in insert_call.args[0]
+    params = insert_call.args[1]
+    assert params[0] == "26-22222" and params[1] == "c1" and params[11] == "python"
+    blob = json.loads(params[12])
+    assert "engage_status" not in blob and "engage_interview_id" not in blob
+    assert blob["jobdiva_candidate_id"] == "jd-1"
+    assert blob["cross_submission"]["added_by"] == "rec@pyramidci.com"
+    assert params[13] == 81.5
+    assert any("SET added_at = COALESCE(added_at, NOW())" in str(c.args[0]) for c in cur.execute.call_args_list)
+    conn.commit.assert_called_once()
+
+
+def test_add_to_job_is_idempotent_when_row_already_present():
+    prior = {"candidate_id": "c1", "source": "JobDiva", "name": "Ada", "data": "{}"}
+    conn, _ = _add_conn(JOB, CS_ROW, prior, None)  # ON CONFLICT → no RETURNING row
+    with patch.object(cs, "get_db_connection", return_value=conn):
+        out = cs.add_to_job("26-22222", 7)
+    assert out["already_present"] is True
+
+
+@pytest.mark.parametrize("job_row, cs_row, prior_row", [
+    (None, CS_ROW, {}),      # unknown job
+    (JOB, None, {}),         # id belongs to another job / doesn't exist
+    (JOB, CS_ROW, None),     # prior screened row deleted
+])
+def test_add_to_job_raises_lookup_error(job_row, cs_row, prior_row):
+    conn, _ = _add_conn(job_row, cs_row, prior_row, None)
+    with patch.object(cs, "get_db_connection", return_value=conn), pytest.raises(LookupError):
+        cs.add_to_job("26-22222", 7)
+    conn.rollback.assert_called()
