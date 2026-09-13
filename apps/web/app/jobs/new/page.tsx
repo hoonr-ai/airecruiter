@@ -7047,6 +7047,7 @@ function NewJobPageContent() {
       ...q,
       question_type: questionType,
       is_hard_filter: questionType === "hard_filter",
+      pass_criteria: questionType === "hard_filter" ? q.pass_criteria : "",
     } : q));
   };
 
@@ -7390,10 +7391,13 @@ function NewJobPageContent() {
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
                   rows={2}
+                  readOnly={isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"}
                   placeholder={q.question_type === "hard_filter" ? "Pass criteria for this hard filter" : "No hard filter"}
                   className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
                     q.pass_criteria
                       ? "text-[#4f46e5]"
+                      : isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"
+                      ? "text-slate-300 italic cursor-not-allowed"
                       : "text-slate-300 italic"
                   }`}
                 />

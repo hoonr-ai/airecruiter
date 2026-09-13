@@ -543,7 +543,12 @@ def _sanitize_pre_screen_questions_for_pair(
         # - Other front-matter questions → True iff recruiter provided pass_criteria
         # - Non-front-matter (role-specific) in boolean mode → honour the DB flag
         # - Non-front-matter in non-boolean mode → these are scored interview questions
-        if question_type == "hard_filter":
+        # These safety-critical front-matter questions are always gates; an
+        # explicit question type must never downgrade them to informational.
+        if is_new_opps or is_onsite_hybrid:
+            is_hard_filter = True
+            is_info_only = False
+        elif question_type == "hard_filter":
             is_hard_filter = True
             is_info_only = False
         elif question_type == "info_only":
@@ -551,9 +556,6 @@ def _sanitize_pre_screen_questions_for_pair(
             is_info_only = True
         elif question_type == "scored":
             is_hard_filter = False
-            is_info_only = False
-        elif is_new_opps or is_onsite_hybrid:
-            is_hard_filter = True
             is_info_only = False
         elif is_front_matter:
             is_hard_filter = has_pass_criteria

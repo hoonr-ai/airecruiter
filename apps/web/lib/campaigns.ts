@@ -285,6 +285,7 @@ export interface TemplateQuestion {
   order_index?: number;
   is_default?: boolean;
   is_hard_filter?: boolean;
+  question_type?: "hard_filter" | "info_only" | "scored";
   is_locked?: boolean;
   [k: string]: unknown;
 }

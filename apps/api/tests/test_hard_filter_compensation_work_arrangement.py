@@ -286,6 +286,23 @@ def test_recruiter_question_type_is_preserved(question_type, expected_hard_filte
     assert result[0]["question_type"] == question_type
 
 
+@pytest.mark.parametrize("question_type", ["info_only", "scored"])
+def test_always_on_question_cannot_be_downgraded(question_type):
+    result = _sanitize_pre_screen_questions_for_pair(
+        [{
+            "question_text": "Are you open to exploring new job opportunities?",
+            "category": "other",
+            "is_default": False,
+            "order_index": 14,
+            "question_type": question_type,
+        }],
+        boolean_mode=False,
+    )
+
+    assert result[0]["is_hard_filter"] is True
+    assert result[0]["is_info_only"] is False
+
+
 class TestSanitizeAutoPromotesCompWorkArrangement:
     """W2/comp questions with pass criteria must be promoted to is_hard_filter=True."""
 
