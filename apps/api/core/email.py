@@ -977,3 +977,153 @@ def notify_pair_inactive(
     )
 
     return _send(to_list, subject, _base_html(content), plain)
+
+
+def notify_cross_submissions(
+    *,
+    jobdiva_id: str,
+    job_id: str,
+    job_title: str,
+    customer_name: str,
+    recruiter_emails: List[str],
+    candidates: List[Dict[str, Any]],
+    lookback_days: int = 60,
+    app_base_url: Optional[str] = None,
+) -> bool:
+    """
+    Email #5 – Cross Submissions.
+
+    Triggered when a recruiter sources a new job and PAIR finds candidates it
+    already phone-screened (responded partially or fully) for OTHER jobs in
+    the last ``lookback_days`` who also match this job.
+    From : pair@pyramidci.com
+    To   : Pair-recruiting@pyramidci.com + the new job's recruiter emails
+    Subj : Cross Submissions – N previously screened candidates for [jobdiva_id]
+    """
+    if not candidates:
+        return False
+
+    base_url = resolve_app_base_url(app_base_url)
+    jobdiva_link = jobdiva_job_link(job_id, jobdiva_id)
+    jd_hyperlink = (
+        f'<a href="{jobdiva_link}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">{html.escape(jobdiva_id)}</a>'
+    )
+
+    def _result_badge(label: str) -> str:
+        palette = {
+            "Pass": ("#dcfce7", "#86efac", "#166534"),
+            "Fail": ("#fee2e2", "#fca5a5", "#991b1b"),
+            "In Progress": ("#fef9c3", "#fde047", "#854d0e"),
+        }
+        bg, border, fg = palette.get(label, ("#e2e8f0", "#cbd5e1", "#334155"))
+        return (
+            f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;'
+            f'font-weight:700;line-height:1.5;background:{bg};border:1px solid {border};color:{fg};">'
+            f'{html.escape(label)}</span>'
+        )
+
+    def _fmt_date(value: Any) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "strftime"):
+            return value.strftime("%b %d, %Y")
+        return html.escape(str(value)[:10])
+
+    rows_html: List[str] = []
+    plain_rows: List[str] = []
+    for c in candidates:
+        name = html.escape(str(c.get("name") or "Unnamed candidate"))
+        email_txt = str(c.get("email") or "").strip()
+        phone_txt = str(c.get("phone") or "").strip()
+        contact_bits = [html.escape(b) for b in (email_txt, phone_txt) if b]
+        contact_html = "<br>".join(contact_bits) or "—"
+        prior_ref = str(c.get("prior_jobdiva_id") or "")
+        prior_title = str(c.get("prior_job_title") or "")
+        prior_client = str(c.get("prior_customer_name") or "")
+        prior_bits = [html.escape(b) for b in (prior_ref, prior_title, prior_client) if b]
+        report_link = (
+            f"{base_url}/jobs/{prior_ref}/report?candidateId={c.get('candidate_id') or ''}"
+            if prior_ref else ""
+        )
+        prior_html = " · ".join(prior_bits) or "—"
+        if report_link:
+            prior_html += (
+                f'<br><a href="{report_link}" target="_blank" '
+                f'style="color:#4f46e5;font-size:12px;text-decoration:none;">View screen report</a>'
+            )
+        result_label = str(c.get("screen_result") or "Pending")
+        score_disp = str(c.get("screen_score_display") or "")
+        result_html = _result_badge(result_label) + (
+            f'<span style="font-size:12px;color:#64748b;margin-left:6px;">{html.escape(score_disp)}</span>' if score_disp else ""
+        )
+        try:
+            match_pct = f"{float(c.get('match_score') or 0):.0f}%"
+        except (TypeError, ValueError):
+            match_pct = "—"
+        screened = _fmt_date(c.get("screened_at"))
+
+        rows_html.append(
+            "<tr>"
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b;font-weight:600;vertical-align:top;">{name}'
+            f'<div style="font-size:12px;color:#64748b;font-weight:400;">{html.escape(str(c.get("headline") or ""))}</div></td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;vertical-align:top;">{contact_html}</td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;vertical-align:top;">{prior_html}</td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;vertical-align:top;white-space:nowrap;">{result_html}'
+            f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;">{screened}</div></td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b;font-weight:700;text-align:right;vertical-align:top;">{match_pct}</td>'
+            "</tr>"
+        )
+        plain_rows.append(
+            f"- {c.get('name') or 'Unnamed candidate'} | {' / '.join(b for b in (email_txt, phone_txt) if b) or 'no contact'} | "
+            f"prior: {' · '.join(b for b in (prior_ref, prior_title, prior_client) if b) or '-'} | "
+            f"screen: {result_label}{(' ' + score_disp) if score_disp else ''} on {screened or '-'} | match: {match_pct}"
+            + (f" | {report_link}" if report_link else "")
+        )
+
+    title_txt = html.escape(job_title or "this job")
+    client_txt = f" at {html.escape(customer_name)}" if customer_name else ""
+    n = len(candidates)
+    content = f"""
+    <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+      While sourcing <strong>{title_txt}</strong>{client_txt} ({jd_hyperlink}), PAIR found
+      <strong>{n}</strong> candidate{'s' if n != 1 else ''} it already phone-screened for other jobs in the
+      last {int(lookback_days)} days who also match this role. They responded to PAIR before, so a
+      recruiter follow-up is likely to land faster than fresh outreach.
+    </p>
+    <div style="overflow-x:auto;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #e2e8f0;border-radius:8px;">
+      <thead>
+        <tr style="background:#f8fafc;">
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Candidate</th>
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Contact</th>
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Screened for</th>
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Screen result</th>
+          <th align="right" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Match</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html)}
+      </tbody>
+    </table>
+    </div>
+    <p style="margin:16px 0 0;font-size:12px;color:#64748b;line-height:1.6;">
+      "Screen result" is the outcome of the PAIR phone screen for the <em>previous</em> job
+      (In Progress = partially completed). "Match" is the résumé match against <em>this</em> job's
+      Step&nbsp;5 criteria. These candidates are not on this job's candidate list yet — add them from
+      Step&nbsp;5 or reach out directly.
+    </p>
+    """
+
+    to_list = list(dict.fromkeys(
+        [PAIR_TEAM_EMAIL] + [e.strip() for e in recruiter_emails if e and e.strip()]
+    ))
+    subject = f"Cross Submissions – {n} previously screened candidate{'s' if n != 1 else ''} for {jobdiva_id}"
+    plain = (
+        f"While sourcing {job_title or 'this job'}{(' at ' + customer_name) if customer_name else ''} ({jobdiva_id}; {jobdiva_link}), "
+        f"PAIR found {n} candidate(s) it already phone-screened for other jobs in the last {int(lookback_days)} days "
+        f"who also match this role:\n\n" + "\n".join(plain_rows) + "\n\n"
+        "Screen result is the outcome of the PAIR phone screen for the previous job (In Progress = partially completed). "
+        "Match is the resume match against this job's Step 5 criteria.\n"
+    )
+    return _send(to_list, subject, _base_html(content), plain)
