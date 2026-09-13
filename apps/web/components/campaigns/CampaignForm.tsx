@@ -29,6 +29,7 @@ import {
   isValidRecruiterEmail,
   isRoleResponsibilitiesQuestion,
   isLockedDefaultQuestion,
+  resolveLockedFlag,
   TemplateQuestion,
   getDefaultCampaignScreeningQuestions,
 } from "@/lib/campaigns";
@@ -101,7 +102,7 @@ export function CampaignForm({
     initial?.template_screen_questions && initial.template_screen_questions.length > 0
       ? (initial.template_screen_questions as TemplateQuestion[]).map(q => ({
           ...q,
-          is_locked: q.is_locked || isLockedDefaultQuestion(q.question_text),
+          is_locked: resolveLockedFlag(q),
         }))
       : getDefaultCampaignScreeningQuestions(initial?.screening_level ?? "L1.5")
   );

@@ -289,6 +289,11 @@ export interface TemplateQuestion {
   [k: string]: unknown;
 }
 
+
+export function resolveLockedFlag(q: any): boolean {
+  return !!q.is_locked || isLockedDefaultQuestion(q.question_text);
+}
+
 export function isLockedDefaultQuestion(text: string): boolean {
   if (!text) return false;
   const lowerText = text.toLowerCase();
