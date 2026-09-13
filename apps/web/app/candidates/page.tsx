@@ -593,7 +593,14 @@ export default function GlobalCandidatesPage() {
         const pageFeedbackReasons: Record<string, string> = {};
         const pageFeedbackTimes: Record<string, string> = {};
         candData.candidates.forEach((c: Candidate) => {
-          if (c.data?.feedback_type) pageFeedbacks[c.id] = c.data.feedback_type;
+          if (c.data?.feedback_type) {
+            const raw = c.data.feedback_type.trim();
+            const lower = raw.toLowerCase();
+            if (lower.startsWith("reject")) pageFeedbacks[c.id] = "Reject";
+            else if (lower === "submit" || lower === "submitted") pageFeedbacks[c.id] = "Submit";
+            else if (lower === "unreachable") pageFeedbacks[c.id] = "Unreachable";
+            else pageFeedbacks[c.id] = raw;
+          }
           if (c.data?.feedback_reason) pageFeedbackReasons[c.id] = c.data.feedback_reason;
           if (c.data?.feedback_at) pageFeedbackTimes[c.id] = c.data.feedback_at;
         });
