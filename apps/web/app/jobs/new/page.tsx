@@ -4813,9 +4813,6 @@ function NewJobPageContent() {
     );
 
     defaultQs.forEach((q, index) => {
-      const isLocked = q.text.includes("authorized to work indefinitely") ||
-                       q.text.includes("require visa sponsorship to continue working") ||
-                       q.text.includes("types of working arrangements are you open to and eligible for");
       questions.push({
         id: idCounter++,
         question_text: q.text,
@@ -4824,7 +4821,7 @@ function NewJobPageContent() {
         category: "default",
         order_index: index,
         is_hard_filter: !!q.is_hard_filter,
-        is_locked: isLocked,
+        is_locked: isLockedDefaultQuestion(q.text),
       });
     });
 
