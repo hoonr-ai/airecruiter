@@ -5,21 +5,21 @@ Regression tests for the feedback filter in get_launched_candidates
 These tests guard the correctness of the feedback filter SQL logic without
 requiring a live DB connection.  They verify:
 
-1. The correct SQL EXISTS / NOT EXISTS clause is generated for each filter value.
+1. Action filters constrain the selected source row; No Feedback uses a
+   job-scoped NOT EXISTS clause.
 2. DISTINCT ON row selection: without a feedback filter, ORDER BY uses only
    created_at DESC (index-friendly); with a filter, a feedback-preference
    tiebreaker is injected so the displayed row matches the filter.
-3. The feedback EXISTS condition is placed in WHERE, not ORDER BY.
+3. The feedback condition is placed in WHERE, not ORDER BY.
 4. The shared FULL_CTE is used for both results and count (single source of truth).
 5. Cross-job data isolation: feedback tiebreaker only activates when a filter
    is active, preventing stale feedback from an unrelated job being surfaced.
 
 Background
 ----------
-The feedback filter uses EXISTS subqueries scoped by both candidate_id and
-jobdiva_id so that DISTINCT ON always picks the correct row.  When a feedback
-filter IS active, the ORDER BY additionally prefers rows carrying non-empty
-feedback_type so the UI column matches the filter result.
+Submit, Reject, and Unreachable constrain the selected source row directly,
+so DISTINCT ON cannot return an unfiltered duplicate. No Feedback uses a
+job-scoped NOT EXISTS check.
 """
 import re
 import pytest
@@ -32,14 +32,14 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _build_feedback_filter(feedback: str):
-    """Mirror feedback_exists_condition and matching_feedback_pred construction in get_launched_candidates."""
-    feedback_exists_condition = ""
+    """Mirror feedback_filter_condition and matching_feedback_pred construction."""
+    feedback_filter_condition = ""
     matching_feedback_pred = ""
     if feedback:
         f_lower = feedback.strip().lower()
         correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
         if f_lower in ("no feedback", "none", "no_feedback"):
-            feedback_exists_condition = f"""
+            feedback_filter_condition = f"""
                 AND NOT EXISTS (
                     {correlation_scaffold}
                       AND sc2.data->>'feedback_type' IS NOT NULL
@@ -47,27 +47,15 @@ def _build_feedback_filter(feedback: str):
                 )"""
             matching_feedback_pred = "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
         elif f_lower in ("submit", "submitted"):
-            feedback_exists_condition = f"""
-                AND EXISTS (
-                    {correlation_scaffold}
-                      AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
-                )"""
             matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')"
+            feedback_filter_condition = f"AND {matching_feedback_pred}"
         elif f_lower in ("reject", "rejected"):
-            feedback_exists_condition = f"""
-                AND EXISTS (
-                    {correlation_scaffold}
-                      AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
-                )"""
             matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')"
+            feedback_filter_condition = f"AND {matching_feedback_pred}"
         elif f_lower in ("unreachable",):
-            feedback_exists_condition = f"""
-                AND EXISTS (
-                    {correlation_scaffold}
-                      AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
-                )"""
             matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')"
-    return feedback_exists_condition, matching_feedback_pred
+            feedback_filter_condition = f"AND {matching_feedback_pred}"
+    return feedback_filter_condition, matching_feedback_pred
 
 
 def _build_feedback_exists_condition(feedback: str) -> str:
@@ -130,35 +118,31 @@ class TestFeedbackExistsConditionGeneration:
     def test_no_feedback_case_insensitive(self):
         assert _build_feedback_exists_condition("no feedback") == _build_feedback_exists_condition("No Feedback")
 
-    def test_submit_uses_exact_match(self):
+    def test_submit_constrains_current_source_row(self):
         cond = _build_feedback_exists_condition("Submit")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "'submit'" in cond.lower()
 
     def test_reject_uses_like(self):
         cond = _build_feedback_exists_condition("Reject")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "like 'reject%'" in cond.lower()
 
     def test_rejected_variant_uses_like(self):
         cond = _build_feedback_exists_condition("Rejected")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "like 'reject%'" in cond.lower()
 
     def test_unreachable_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Unreachable")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "'unreachable'" in cond.lower()
 
-    def test_all_exists_conditions_reference_sc2(self):
+    def test_action_filters_reference_current_row(self):
         for value in ["Submit", "Reject", "Unreachable"]:
             cond = _build_feedback_exists_condition(value)
-            assert "sc2.candidate_id = sc.candidate_id" in cond
-            assert "COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')" in cond
+            assert "sc.data" in cond
+            assert "sc2" not in cond
 
     def test_no_feedback_references_sc2(self):
         cond = _build_feedback_exists_condition("No Feedback")
@@ -205,7 +189,7 @@ class TestDistinctOnOrdering:
             )
 
     def test_feedback_condition_placed_in_where_before_order_by(self):
-        """The EXISTS/NOT EXISTS condition must be in WHERE, before ORDER BY."""
+        """The feedback condition must be in WHERE, before ORDER BY."""
         for feedback in ["Submit", "Reject", "Unreachable", "No Feedback"]:
             cond, matching_pred = _build_feedback_filter(feedback)
             cte = _build_full_cte("", cond, matching_pred)
@@ -215,10 +199,9 @@ class TestDistinctOnOrdering:
             assert where_pos < order_pos, (
                 f"WHERE must come before ORDER BY for '{feedback}'"
             )
-            # The EXISTS condition text must appear between WHERE and ORDER BY
-            exists_pos = cte.find("EXISTS")
-            assert where_pos < exists_pos < order_pos, (
-                f"EXISTS condition for '{feedback}' must be between WHERE and ORDER BY"
+            condition_pos = cte.find(cond.strip())
+            assert where_pos < condition_pos < order_pos, (
+                f"Feedback condition for '{feedback}' must be between WHERE and ORDER BY"
             )
 
 

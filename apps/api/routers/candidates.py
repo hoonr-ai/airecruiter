@@ -3010,10 +3010,10 @@ async def get_launched_candidates(
                         search_condition += " AND la.status = %s"
                         params.append(status)
 
-                # Feedback filter: use an EXISTS subquery checked against ALL rows for a
-                # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
-                # and we only include candidates who match the feedback requirement on ANY row.
-                feedback_exists_condition = ""
+                # Feedback action filters must constrain the source row itself.
+                # An EXISTS check can match one duplicate while DISTINCT ON
+                # returns another duplicate with no feedback.
+                feedback_filter_condition = ""
                 matching_feedback_pred = ""
                 if feedback:
                     f_lower = feedback.strip().lower()
@@ -3022,7 +3022,7 @@ async def get_launched_candidates(
                     correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
 
                     if f_lower in ("no feedback", "none", "no_feedback"):
-                        feedback_exists_condition = f"""
+                        feedback_filter_condition = f"""
                             AND NOT EXISTS (
                                 {correlation_scaffold}
                                   AND sc2.data->>'feedback_type' IS NOT NULL
@@ -3030,26 +3030,14 @@ async def get_launched_candidates(
                             )"""
                         matching_feedback_pred = "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
                     elif f_lower in ("submit", "submitted"):
-                        feedback_exists_condition = f"""
-                            AND EXISTS (
-                                {correlation_scaffold}
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
-                            )"""
                         matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')"
+                        feedback_filter_condition = f"AND {matching_feedback_pred}"
                     elif f_lower in ("reject", "rejected"):
-                        feedback_exists_condition = f"""
-                            AND EXISTS (
-                                {correlation_scaffold}
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
-                            )"""
                         matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')"
+                        feedback_filter_condition = f"AND {matching_feedback_pred}"
                     elif f_lower in ("unreachable",):
-                        feedback_exists_condition = f"""
-                            AND EXISTS (
-                                {correlation_scaffold}
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
-                            )"""
                         matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')"
+                        feedback_filter_condition = f"AND {matching_feedback_pred}"
 
                 # Preserve the common unfiltered ordering and its supporting
                 # index.  The feedback timestamp/type can break ties only
@@ -3150,7 +3138,7 @@ async def get_launched_candidates(
                         LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
-                          {feedback_exists_condition}
+                          {feedback_filter_condition}
                         -- When a feedback filter is active, prefer the row that
                         -- carries matching feedback data so the UI column matches
                         -- the filter. Without a filter, retain pure
