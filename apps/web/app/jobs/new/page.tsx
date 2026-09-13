@@ -7081,7 +7081,10 @@ function NewJobPageContent() {
     setScreenQuestions(prev => {
       if (from === to || from < 0 || to < 0) return prev;
       if (from >= prev.length || to >= prev.length) return prev;
-      if (prev[from]?.is_locked || prev[to]?.is_locked) return prev; // locked rows never move, and nothing displaces them
+      // A splice moves every row in the selected interval. Reject any move
+      // that would move a locked row indirectly, not just a locked endpoint.
+      const [lo, hi] = from < to ? [from, to] : [to, from];
+      if (prev.slice(lo, hi + 1).some(q => q.is_locked)) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
@@ -7358,9 +7361,10 @@ function NewJobPageContent() {
                       questionModeration.flushCheck(String(q.id), q.question_text);
                     }
                   }}
-                  disabled={q.is_locked}
+                  readOnly={q.is_locked}
+                  aria-readonly={q.is_locked}
                   className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
-                    q.is_locked ? "text-slate-500 cursor-not-allowed" : "text-slate-900"
+                    q.is_locked ? "text-slate-500 cursor-text" : "text-slate-900"
                   }`}
                   rows={3}
                 />
@@ -7374,11 +7378,12 @@ function NewJobPageContent() {
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
                   rows={2}
-                  disabled={q.is_locked}
+                  readOnly={q.is_locked}
+                  aria-readonly={q.is_locked}
                   placeholder={q.is_locked ? "Locked" : "No hard filter"}
                   className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
                     q.is_locked
-                      ? "text-slate-400 cursor-not-allowed italic"
+                      ? "text-slate-400 cursor-text italic"
                       : q.pass_criteria
                       ? "text-[#4f46e5]"
                       : "text-slate-300 italic"
