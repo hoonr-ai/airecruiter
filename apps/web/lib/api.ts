@@ -187,6 +187,41 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
   }
 }
 
+export type CrossSubmission = {
+  id: number;
+  job_id: string;
+  jobdiva_id: string | null;
+  person_key: string;
+  candidate_id: string | null;
+  source: string | null;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  headline: string | null;
+  location: string | null;
+  prior_job_id: string | null;
+  prior_jobdiva_id: string | null;
+  prior_job_title: string | null;
+  prior_customer_name: string | null;
+  engage_status: string | null;
+  screen_result: "Pass" | "Fail" | "In Progress" | "Pending" | string | null;
+  engage_score: number | null;
+  engage_total_score: number | null;
+  screened_at: string | null;
+  match_score: number | null;
+  matched_skills: string[] | null;
+  missing_skills: string[] | null;
+  created_at: string | null;
+  notified_at: string | null;
+  added_at: string | null;
+};
+
+export type CrossSubmissionsResponse = {
+  job_ref: string;
+  count: number;
+  candidates: CrossSubmission[];
+};
+
 export const api = {
   jobs: {
     fetch: (body: { job_id: string }) =>
@@ -211,6 +246,17 @@ export const api = {
     refreshResumeMatch: (jobId: string, candidateId: string, body: unknown) =>
       req<any>(`/jobs/${jobId}/candidates/${encodeURIComponent(candidateId)}/refresh-resume-match`, { method: "POST", body }),
     getCriteria: (jobId: string) => req<any>(`/api/jobs/${jobId}/criteria`),
+    // Cross submissions: candidates PAIR already screened for OTHER jobs in
+    // the last 60 days who match this one (routers/cross_submissions.py).
+    getCrossSubmissions: (jobId: string) =>
+      req<CrossSubmissionsResponse>(`/jobs/${jobId}/cross-submissions`),
+    runCrossSubmissions: (jobId: string, body: { send_email: boolean } = { send_email: false }) =>
+      req<any>(`/jobs/${jobId}/cross-submissions/run`, { method: "POST", body }),
+    addCrossSubmission: (jobId: string, csId: number) =>
+      req<{ status: string; already_present: boolean; candidate_id: string; source: string; name?: string }>(
+        `/jobs/${jobId}/cross-submissions/${csId}/add`,
+        { method: "POST" },
+      ),
   },
   candidates: {
     save: (body: unknown) =>

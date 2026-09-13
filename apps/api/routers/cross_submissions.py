@@ -85,3 +85,32 @@ async def run_cross_submissions(
     if criteria is None:
         summary["criteria_missing"] = True
     return summary
+
+
+@router.post("/jobs/{job_id_or_ref}/cross-submissions/{cs_id}/add")
+async def add_cross_submission_to_job(
+    job_id_or_ref: str,
+    cs_id: int,
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Copy the previously screened candidate into this job's candidate pool.
+
+    The new row has no outreach state (Pending on the rank list) and goes
+    through the normal Launch PAIR gate. Idempotent.
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    try:
+        result = await asyncio.to_thread(
+            cross_submissions.add_to_job, job_id_or_ref, cs_id, added_by=str(getattr(user, "email", "") or ""),
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error("cross_submissions add failed for %s/%s: %s", job_id_or_ref, cs_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to add candidate to this job")
+    try:
+        from routers.jobs import invalidate_monitored_jobs_cache
+        invalidate_monitored_jobs_cache()
+    except Exception:
+        pass
+    return result

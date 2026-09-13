@@ -503,7 +503,7 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
                 SELECT id, job_id, jobdiva_id, person_key, candidate_id, source, name, email, phone, headline, location,
                        prior_job_id, prior_jobdiva_id, prior_job_title, prior_customer_name,
                        engage_status, screen_result, engage_score, engage_total_score, screened_at,
-                       match_score, matched_skills, missing_skills, created_at, notified_at
+                       match_score, matched_skills, missing_skills, created_at, notified_at, added_at
                 FROM cross_submissions
                 WHERE job_id = ANY(%s) OR jobdiva_id = ANY(%s)
                 ORDER BY match_score DESC, screened_at DESC
@@ -514,7 +514,7 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
     finally:
         conn.close()
     for r in rows:
-        for k in ("screened_at", "created_at", "notified_at"):
+        for k in ("screened_at", "created_at", "notified_at", "added_at"):
             if isinstance(r.get(k), datetime):
                 r[k] = r[k].isoformat()
         for k in ("engage_score", "engage_total_score", "match_score"):
@@ -524,6 +524,140 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
                 except (TypeError, ValueError):
                     pass
     return rows
+
+
+# ---------------------------------------------------------------------------
+# "Add to this job" — copy the prior screened row into the new job's pool
+# ---------------------------------------------------------------------------
+# Screen bookkeeping belongs to the PRIOR job's outreach. Copying it would
+# make the new row look already-launched (rank list reads engage_interview_id)
+# and would skip the Launch PAIR gate. jobdiva_candidate_id is deliberately
+# kept: it is the person's JobDiva profile, and keeping it is what stops the
+# launch provisioner from minting a duplicate profile.
+ENGAGE_KEYS_NOT_COPIED: Tuple[str, ...] = (
+    "engage_status", "engage_interview_id", "engage_score", "engage_candidate_score", "engage_total_score",
+    "engage_updated_at", "engage_completed_at", "engage_last_response", "engage_hard_filter_status",
+    "engage_hard_filter_reason", "engage_hard_filter_pending_count", "engage_passed_email_sent",
+    "phase", "outreach_phase", "channel", "outreach_channel", "first_attempted_at", "first_completed_at",
+    "feedback_type", "feedback_reason", "feedback_at", "feedback_payload", "feedback_synced",
+    "_stage", "_drop_reason",
+)
+
+
+def build_added_blob(prior_blob: Dict[str, Any], cs_row: Dict[str, Any]) -> Dict[str, Any]:
+    """The new job's data blob: prior profile minus outreach state, plus provenance."""
+    blob = {k: v for k, v in (prior_blob or {}).items() if k not in ENGAGE_KEYS_NOT_COPIED}
+    score = cs_row.get("match_score")
+    try:
+        score_f = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score_f = None
+    if score_f is not None:
+        blob["match_score"] = score_f
+        blob["resume_matching_score"] = score_f
+        blob["resume_matching_status"] = "done"
+    if cs_row.get("matched_skills") is not None:
+        blob["matched_skills"] = json_load_safe(cs_row.get("matched_skills"), [])
+    if cs_row.get("missing_skills") is not None:
+        blob["missing_skills"] = json_load_safe(cs_row.get("missing_skills"), [])
+    screened_at = cs_row.get("screened_at")
+    blob["cross_submission"] = {
+        "id": cs_row.get("id"),
+        "from_job_id": cs_row.get("prior_job_id"),
+        "from_jobdiva_id": cs_row.get("prior_jobdiva_id"),
+        "from_job_title": cs_row.get("prior_job_title"),
+        "from_customer_name": cs_row.get("prior_customer_name"),
+        "screen_result": cs_row.get("screen_result"),
+        "screened_at": screened_at.isoformat() if isinstance(screened_at, datetime) else screened_at,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return blob
+
+
+def add_to_job(job_ref: str, cs_id: int, *, added_by: str = "") -> Dict[str, Any]:
+    """Copy a cross-submission's prior sourced_candidates row into ``job_ref``.
+
+    The new row is status='sourced' with no engage state, so it shows on the
+    rank list / Step 5 as Pending and goes through the normal Launch PAIR
+    gate. Idempotent: a second call reports ``already_present``.
+    Raises LookupError (unknown id / wrong job / prior row gone).
+    """
+    conn = get_db_connection()
+    try:
+        with _dict_cursor(conn) as cur:
+            job = load_job(cur, job_ref)
+            if not job:
+                raise LookupError("job not found")
+            keys = job_keys(job, job_ref)
+            cur.execute(
+                "SELECT * FROM cross_submissions WHERE id = %s AND (job_id = ANY(%s) OR jobdiva_id = ANY(%s))",
+                (int(cs_id), keys, keys),
+            )
+            cs_row = cur.fetchone()
+            if not cs_row:
+                raise LookupError("cross submission not found for this job")
+            cs_row = dict(cs_row)
+
+            prior_keys = [k for k in (cs_row.get("prior_jobdiva_id"), cs_row.get("prior_job_id")) if k]
+            cur.execute(
+                """
+                SELECT * FROM sourced_candidates
+                WHERE jobdiva_id = ANY(%s) AND candidate_id = %s AND source = %s
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                (prior_keys or [""], str(cs_row.get("candidate_id") or ""), str(cs_row.get("source") or "")),
+            )
+            prior = cur.fetchone()
+            if not prior:
+                raise LookupError("prior screened row no longer exists")
+            prior = dict(prior)
+            prior_blob = json_load_safe(prior.get("data"), {}) or {}
+            if not isinstance(prior_blob, dict):
+                prior_blob = {}
+
+            target_key = str(job.get("jobdiva_id") or job_ref)
+            blob = build_added_blob(prior_blob, cs_row)
+            if added_by:
+                blob["cross_submission"]["added_by"] = added_by
+            score = cs_row.get("match_score")
+            cur.execute(
+                """
+                INSERT INTO sourced_candidates (
+                    jobdiva_id, candidate_id, source, name, email, phone, headline, location,
+                    profile_url, image_url, resume_id, resume_text, data, status, resume_match_percentage,
+                    created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'sourced', %s, NOW(), NOW())
+                ON CONFLICT (jobdiva_id, candidate_id, source) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    target_key, prior.get("candidate_id"), prior.get("source"), prior.get("name"),
+                    prior.get("email"), prior.get("phone"), prior.get("headline"), prior.get("location"),
+                    prior.get("profile_url"), prior.get("image_url"), prior.get("resume_id"), prior.get("resume_text"),
+                    json.dumps(blob, default=str), float(score) if score is not None else None,
+                ),
+            )
+            inserted = cur.fetchone()
+            cur.execute("UPDATE cross_submissions SET added_at = COALESCE(added_at, NOW()) WHERE id = %s", (int(cs_id),))
+            conn.commit()
+            return {
+                "status": "success",
+                "already_present": inserted is None,
+                "job_key": target_key,
+                "candidate_id": str(prior.get("candidate_id") or ""),
+                "source": str(prior.get("source") or ""),
+                "name": prior.get("name"),
+                "match_score": float(score) if score is not None else None,
+            }
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
