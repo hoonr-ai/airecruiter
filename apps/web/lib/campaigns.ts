@@ -289,12 +289,18 @@ export interface TemplateQuestion {
   [k: string]: unknown;
 }
 
+
+export function resolveLockedFlag(q: any): boolean {
+  return !!q.is_locked || isLockedDefaultQuestion(q.question_text);
+}
+
 export function isLockedDefaultQuestion(text: string): boolean {
   if (!text) return false;
+  const lowerText = text.toLowerCase();
   return (
-    text.includes("authorized to work indefinitely") ||
-    text.includes("require visa sponsorship to continue working") ||
-    text.includes("types of working arrangements are you open to and eligible for")
+    lowerText.includes("authorized to work indefinitely") ||
+    lowerText.includes("require visa sponsorship to continue working") ||
+    lowerText.includes("types of working arrangements are you open to and eligible for")
   );
 }
 
