@@ -1463,10 +1463,41 @@ export default function CandidateRankingsPage() {
       }
       // Merge candidate data dictionary so nested fields like engage_status are preserved
       if (src.data && typeof src.data === "object" && !Array.isArray(src.data)) {
+        // Snapshot a complete feedback event before the generic data merge.
+        // Otherwise a missing field on dst can be backfilled from src, leaving
+        // a feedback type/reason/timestamp stitched from two different rows.
+        const dstFeedback = {
+          type: String(dst.data?.feedback_type || "").trim(),
+          reason: dst.data?.feedback_reason,
+          at: dst.data?.feedback_at,
+        };
+        const srcFeedback = {
+          type: String(src.data.feedback_type || "").trim(),
+          reason: src.data.feedback_reason,
+          at: src.data.feedback_at,
+        };
+        const dstFeedbackAt = Date.parse(String(dstFeedback.at || ""));
+        const srcFeedbackAt = Date.parse(String(srcFeedback.at || ""));
+        const shouldUseSourceFeedback = srcFeedback.type && (
+          !dstFeedback.type ||
+          (Number.isFinite(srcFeedbackAt) && (!Number.isFinite(dstFeedbackAt) || srcFeedbackAt > dstFeedbackAt))
+        );
+
         dst.data = {
           ...src.data,
           ...(dst.data || {})
         };
+
+        const selectedFeedback = shouldUseSourceFeedback ? srcFeedback : dstFeedback;
+        if (selectedFeedback.type) {
+          dst.data.feedback_type = selectedFeedback.type;
+          dst.data.feedback_reason = selectedFeedback.reason;
+          dst.data.feedback_at = selectedFeedback.at;
+        } else {
+          delete dst.data.feedback_type;
+          delete dst.data.feedback_reason;
+          delete dst.data.feedback_at;
+        }
       }
       return dst;
     };

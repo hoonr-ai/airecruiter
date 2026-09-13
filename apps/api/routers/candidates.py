@@ -1326,6 +1326,9 @@ async def get_job_candidates(
                                         = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
                               )
                           )
+                        -- Rankings has no feedback filter: retain the newest
+                        -- sourced row as canonical rather than allowing an
+                        -- older row with feedback to win the deduplication.
                         ORDER BY candidate_id, created_at DESC, id DESC
                     )
                     SELECT
@@ -3041,15 +3044,12 @@ async def get_launched_candidates(
                 # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
                 # and we only include candidates who match the feedback requirement on ANY row.
                 feedback_exists_condition = ""
-                # Shared SQL predicate: true when a sourced_candidates row has a
-                # non-empty feedback_type.  Used in the "No Feedback" EXISTS clause
-                # and conditionally in ORDER BY to prefer rows with feedback.
-                _HAS_FEEDBACK_PRED = "(sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '')"
+                matching_feedback_pred = ""
                 if feedback:
                     f_lower = feedback.strip().lower()
                     
                     # Shared correlation to scope feedback to the same candidate and job
-                    correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND sc2.jobdiva_id = sc.jobdiva_id"
+                    correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
 
                     if f_lower in ("no feedback", "none", "no_feedback"):
                         feedback_exists_condition = f"""
@@ -3058,24 +3058,39 @@ async def get_launched_candidates(
                                   AND sc2.data->>'feedback_type' IS NOT NULL
                                   AND TRIM(sc2.data->>'feedback_type') <> ''
                             )"""
+                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
                     elif f_lower in ("submit", "submitted"):
                         feedback_exists_condition = f"""
                             AND EXISTS (
                                 {correlation_scaffold}
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
                             )"""
+                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')"
                     elif f_lower in ("reject", "rejected"):
                         feedback_exists_condition = f"""
                             AND EXISTS (
                                 {correlation_scaffold}
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
                             )"""
+                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')"
                     elif f_lower in ("unreachable",):
                         feedback_exists_condition = f"""
                             AND EXISTS (
                                 {correlation_scaffold}
                                   AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
                             )"""
+                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')"
+
+                # Preserve the common unfiltered ordering and its supporting
+                # index.  The feedback timestamp/type can break ties only
+                # after a filter has selected the matching feedback row.
+                feedback_order_by = ""
+                if matching_feedback_pred:
+                    feedback_order_by = (
+                        f"{matching_feedback_pred} DESC, "
+                        "(sc.data->>'feedback_at') DESC NULLS LAST, "
+                        "(sc.data->>'feedback_type' IS NOT NULL) DESC, "
+                    )
 
                 if source:
                     search_condition += " AND sc.source = %s"
@@ -3167,11 +3182,10 @@ async def get_launched_candidates(
                           {search_condition}
                           {feedback_exists_condition}
                         -- When a feedback filter is active, prefer the row that
-                        -- carries actual feedback data so the UI column matches
-                        -- the filter.  Without a filter, fall back to pure
-                        -- created_at DESC to use the existing index and avoid
-                        -- surfacing stale cross-job feedback rows.
-                        ORDER BY sc.candidate_id, {f'{_HAS_FEEDBACK_PRED} DESC,' if feedback_exists_condition else ''} sc.created_at DESC
+                        -- carries matching feedback data so the UI column matches
+                        -- the filter. Without a filter, retain pure
+                        -- created_at DESC so the newest source row wins.
+                        ORDER BY sc.candidate_id, {feedback_order_by}sc.created_at DESC
                     )
                 """
 
