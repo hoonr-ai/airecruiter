@@ -23,43 +23,15 @@ job-scoped NOT EXISTS check.
 """
 import re
 import pytest
+from routers.candidates import _build_feedback_filter_condition
 
 
 # ---------------------------------------------------------------------------
-# Shared constants — must match candidates.py
+# Helpers — use the shipped filter-condition builder.
 # ---------------------------------------------------------------------------
-# Helpers — replicate the filter-building logic from candidates.py
-# ---------------------------------------------------------------------------
-
-def _build_feedback_filter(feedback: str):
-    """Mirror feedback_filter_condition and matching_feedback_pred construction."""
-    feedback_filter_condition = ""
-    matching_feedback_pred = ""
-    if feedback:
-        f_lower = feedback.strip().lower()
-        correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
-        if f_lower in ("no feedback", "none", "no_feedback"):
-            feedback_filter_condition = f"""
-                AND NOT EXISTS (
-                    {correlation_scaffold}
-                      AND sc2.data->>'feedback_type' IS NOT NULL
-                      AND TRIM(sc2.data->>'feedback_type') <> ''
-                )"""
-            matching_feedback_pred = "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
-        elif f_lower in ("submit", "submitted"):
-            matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')"
-            feedback_filter_condition = f"AND {matching_feedback_pred}"
-        elif f_lower in ("reject", "rejected"):
-            matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')"
-            feedback_filter_condition = f"AND {matching_feedback_pred}"
-        elif f_lower in ("unreachable",):
-            matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')"
-            feedback_filter_condition = f"AND {matching_feedback_pred}"
-    return feedback_filter_condition, matching_feedback_pred
-
 
 def _build_feedback_exists_condition(feedback: str) -> str:
-    cond, _ = _build_feedback_filter(feedback)
+    cond, _ = _build_feedback_filter_condition(feedback)
     return cond
 
 
@@ -175,7 +147,7 @@ class TestDistinctOnOrdering:
         """When a feedback filter IS active, ORDER BY should prefer rows with
         feedback so the displayed row matches the filter result."""
         for feedback in ["Submit", "Reject", "Unreachable"]:
-            cond, matching_pred = _build_feedback_filter(feedback)
+            cond, matching_pred = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte("", cond, matching_pred)
             order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
             assert "feedback_type" in order_section, (
@@ -191,7 +163,7 @@ class TestDistinctOnOrdering:
     def test_feedback_condition_placed_in_where_before_order_by(self):
         """The feedback condition must be in WHERE, before ORDER BY."""
         for feedback in ["Submit", "Reject", "Unreachable", "No Feedback"]:
-            cond, matching_pred = _build_feedback_filter(feedback)
+            cond, matching_pred = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte("", cond, matching_pred)
             where_pos = cte.find("WHERE")
             order_pos = cte.find("ORDER BY sc.candidate_id")
@@ -226,12 +198,9 @@ class TestCrossJobIsolation:
         )
 
     def test_filtered_order_scopes_tiebreaker(self):
-        """When a feedback filter is active, the tiebreaker must reference
-        sc.data (the current row's data), not a cross-table lookup, so it
-        only affects ordering within the rows already matched by the
-        jobdiva_id-scoped EXISTS subquery."""
+        """The tiebreaker must use the current row, never a cross-table lookup."""
         for feedback in ["Submit", "Reject"]:
-            cond, matching_pred = _build_feedback_filter(feedback)
+            cond, matching_pred = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte("", cond, matching_pred)
             order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
             # The tiebreaker must reference sc.data (same row), not sc2

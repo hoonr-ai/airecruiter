@@ -66,6 +66,40 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
+    """Return the WHERE condition and DISTINCT ON tiebreaker for a feedback filter.
+
+    Action filters constrain the selected ``sourced_candidates`` row directly;
+    No Feedback remains a job-scoped absence check across a candidate's rows.
+    """
+    if not feedback:
+        return "", ""
+
+    f_lower = feedback.strip().lower()
+    if f_lower in ("no feedback", "none", "no_feedback"):
+        correlation_scaffold = (
+            "SELECT 1 FROM sourced_candidates sc2 "
+            "WHERE sc2.candidate_id = sc.candidate_id "
+            "AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
+        )
+        return f"""
+            AND NOT EXISTS (
+                {correlation_scaffold}
+                  AND sc2.data->>'feedback_type' IS NOT NULL
+                  AND TRIM(sc2.data->>'feedback_type') <> ''
+            )""", "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
+
+    predicates = {
+        "submit": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "submitted": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "reject": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "rejected": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "unreachable": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')",
+    }
+    predicate = predicates.get(f_lower, "")
+    return (f"AND {predicate}", predicate) if predicate else ("", "")
+
+
 def _json_load_safe(value: Any, default: Any):
     if value is None:
         return default
@@ -3013,31 +3047,7 @@ async def get_launched_candidates(
                 # Feedback action filters must constrain the source row itself.
                 # An EXISTS check can match one duplicate while DISTINCT ON
                 # returns another duplicate with no feedback.
-                feedback_filter_condition = ""
-                matching_feedback_pred = ""
-                if feedback:
-                    f_lower = feedback.strip().lower()
-                    
-                    # Shared correlation to scope feedback to the same candidate and job
-                    correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
-
-                    if f_lower in ("no feedback", "none", "no_feedback"):
-                        feedback_filter_condition = f"""
-                            AND NOT EXISTS (
-                                {correlation_scaffold}
-                                  AND sc2.data->>'feedback_type' IS NOT NULL
-                                  AND TRIM(sc2.data->>'feedback_type') <> ''
-                            )"""
-                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
-                    elif f_lower in ("submit", "submitted"):
-                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')"
-                        feedback_filter_condition = f"AND {matching_feedback_pred}"
-                    elif f_lower in ("reject", "rejected"):
-                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')"
-                        feedback_filter_condition = f"AND {matching_feedback_pred}"
-                    elif f_lower in ("unreachable",):
-                        matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')"
-                        feedback_filter_condition = f"AND {matching_feedback_pred}"
+                feedback_filter_condition, matching_feedback_pred = _build_feedback_filter_condition(feedback)
 
                 # Preserve the common unfiltered ordering and its supporting
                 # index.  The feedback timestamp/type can break ties only
