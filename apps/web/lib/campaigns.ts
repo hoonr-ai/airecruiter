@@ -285,6 +285,7 @@ export interface TemplateQuestion {
   order_index?: number;
   is_default?: boolean;
   is_hard_filter?: boolean;
+  is_locked?: boolean;
   [k: string]: unknown;
 }
 
@@ -401,15 +402,21 @@ export async function generateScreeningQuestions(input: {
     }
   );
 
-  const defaults: TemplateQuestion[] = defaultQs.map((q, index) => ({
-    id: index + 1,
-    question_text: q.text,
-    pass_criteria: q.criteria,
-    is_default: true,
-    category: "default",
-    order_index: index,
-    is_hard_filter: !!q.is_hard_filter,
-  }));
+  const defaults: TemplateQuestion[] = defaultQs.map((q, index) => {
+    const isLocked = q.text.includes("authorized to work indefinitely") ||
+                     q.text.includes("require visa sponsorship to continue working") ||
+                     q.text.includes("types of working arrangements are you open to and eligible for");
+    return {
+      id: index + 1,
+      question_text: q.text,
+      pass_criteria: q.criteria,
+      is_default: true,
+      category: "default",
+      order_index: index,
+      is_hard_filter: !!q.is_hard_filter,
+      is_locked: isLocked,
+    };
+  });
 
   return defaults;
 }
@@ -461,13 +468,19 @@ export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L
     ? defaultQs.filter((q) => !isRoleResponsibilitiesQuestion(q.text))
     : defaultQs;
 
-  return normalizedDefaults.map((q, index) => ({
-    id: index + 1,
-    question_text: q.text,
-    pass_criteria: q.criteria,
-    is_default: true,
-    category: q.category,
-    order_index: index,
-    is_hard_filter: !!q.is_hard_filter,
-  }));
+  return normalizedDefaults.map((q, index) => {
+    const isLocked = q.text.includes("authorized to work indefinitely") ||
+                     q.text.includes("require visa sponsorship to continue working") ||
+                     q.text.includes("types of working arrangements are you open to and eligible for");
+    return {
+      id: index + 1,
+      question_text: q.text,
+      pass_criteria: q.criteria,
+      is_default: true,
+      category: q.category,
+      order_index: index,
+      is_hard_filter: !!q.is_hard_filter,
+      is_locked: isLocked,
+    };
+  });
 }
