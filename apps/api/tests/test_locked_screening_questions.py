@@ -73,3 +73,61 @@ def test_locked_question_pass_criteria_is_persisted(rubric_db):
         if "INSERT INTO job_screen_questions" in query
     )
     assert insert_params[2] == criteria
+
+
+@pytest.mark.parametrize(
+    ("question_type", "expected"),
+    [
+        ("hard_filter", "hard_filter"),
+        ("info_only", "info_only"),
+        ("scored", "scored"),
+        ("unexpected", None),
+    ],
+)
+def test_question_type_is_validated_before_persisting(rubric_db, question_type, expected):
+    class Cursor:
+        def __init__(self):
+            self.executions = []
+
+        def execute(self, query, params=None):
+            self.executions.append((query, params))
+
+        def fetchall(self):
+            return []
+
+    cursor = Cursor()
+    rubric_db._save_screen_questions_internal(
+        cursor,
+        "26-12345",
+        [{
+            "question_text": "Can you describe your reporting experience?",
+            "question_type": question_type,
+        }],
+    )
+
+    insert_params = next(
+        params for query, params in cursor.executions
+        if "INSERT INTO job_screen_questions" in query
+    )
+    assert insert_params[8] == expected
+
+
+def test_question_type_round_trips_from_storage(rubric_db):
+    class Cursor:
+        def execute(self, *_args, **_kwargs):
+            pass
+
+        def fetchall(self):
+            return [{
+                "question_text": "Can you describe your reporting experience?",
+                "pass_criteria": "",
+                "is_default": False,
+                "category": "other",
+                "order_index": 14,
+                "is_hard_filter": True,
+                "is_locked": False,
+                "question_type": "hard_filter",
+            }]
+
+    result = rubric_db._get_screen_questions_internal(Cursor(), "26-12345")
+    assert result[0]["question_type"] == "hard_filter"
