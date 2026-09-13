@@ -77,7 +77,13 @@ def _build_feedback_exists_condition(feedback: str) -> str:
 
 def _build_full_cte(search_condition: str, feedback_exists_condition: str, matching_feedback_pred: str = "") -> str:
     """Minimal replica of FULL_CTE construction used in production code."""
-    feedback_tiebreaker = f"{matching_feedback_pred} DESC," if matching_feedback_pred else ""
+    feedback_tiebreaker = (
+        f"{matching_feedback_pred} DESC, "
+        "(sc.data->>'feedback_at') DESC NULLS LAST, "
+        "(sc.data->>'feedback_type' IS NOT NULL) DESC, "
+        if matching_feedback_pred
+        else ""
+    )
     return f"""
         WITH latest_audit AS (
             SELECT DISTINCT ON (candidate_id) candidate_id, interview_id, status,

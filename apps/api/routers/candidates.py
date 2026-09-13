@@ -1298,7 +1298,10 @@ async def get_job_candidates(
                                         = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
                               )
                           )
-                        ORDER BY candidate_id, (data->>'feedback_at') DESC NULLS LAST, (data->>'feedback_type' IS NOT NULL) DESC, created_at DESC, id DESC
+                        -- Rankings has no feedback filter: retain the newest
+                        -- sourced row as canonical rather than allowing an
+                        -- older row with feedback to win the deduplication.
+                        ORDER BY candidate_id, created_at DESC, id DESC
                     )
                     SELECT
                         sc.id,
@@ -3048,6 +3051,17 @@ async def get_launched_candidates(
                             )"""
                         matching_feedback_pred = "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')"
 
+                # Preserve the common unfiltered ordering and its supporting
+                # index.  The feedback timestamp/type can break ties only
+                # after a filter has selected the matching feedback row.
+                feedback_order_by = ""
+                if matching_feedback_pred:
+                    feedback_order_by = (
+                        f"{matching_feedback_pred} DESC, "
+                        "(sc.data->>'feedback_at') DESC NULLS LAST, "
+                        "(sc.data->>'feedback_type' IS NOT NULL) DESC, "
+                    )
+
                 if source:
                     search_condition += " AND sc.source = %s"
                     params.append(source)
@@ -3139,10 +3153,9 @@ async def get_launched_candidates(
                           {feedback_exists_condition}
                         -- When a feedback filter is active, prefer the row that
                         -- carries matching feedback data so the UI column matches
-                        -- the filter.  Without a filter, fall back to the most
-                        -- recently added feedback (feedback_at) or the presence
-                        -- of any feedback, and finally pure created_at DESC.
-                        ORDER BY sc.candidate_id, {f'{matching_feedback_pred} DESC,' if matching_feedback_pred else ''} (sc.data->>'feedback_at') DESC NULLS LAST, (sc.data->>'feedback_type' IS NOT NULL) DESC, sc.created_at DESC
+                        -- the filter. Without a filter, retain pure
+                        -- created_at DESC so the newest source row wins.
+                        ORDER BY sc.candidate_id, {feedback_order_by}sc.created_at DESC
                     )
                 """
 
