@@ -7041,9 +7041,10 @@ function NewJobPageContent() {
   };
 
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
+    const target = screenQuestions.find(q => q.id === id);
+    if (target?.is_locked) return; // locked default questions are not editable
     userHasEditedQuestionsRef.current = true;
     if (field === 'question_text') {
-      const target = screenQuestions.find(q => q.id === id);
       if (target && isRecruiterAddedQuestion(target.category)) {
         questionModeration.scheduleCheck(String(id), String(value ?? ""));
       }
@@ -7063,6 +7064,8 @@ function NewJobPageContent() {
   };
 
   const deleteScreenQuestion = (id: number) => {
+    const target = screenQuestions.find(q => q.id === id);
+    if (target?.is_locked) return; // locked default questions are not removable
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
     trackEvent("job_wizard_step4_screen_question_removed", {
@@ -7078,6 +7081,10 @@ function NewJobPageContent() {
     setScreenQuestions(prev => {
       if (from === to || from < 0 || to < 0) return prev;
       if (from >= prev.length || to >= prev.length) return prev;
+      // A splice moves every row in the selected interval. Reject any move
+      // that would move a locked row indirectly, not just a locked endpoint.
+      const [lo, hi] = from < to ? [from, to] : [to, from];
+      if (prev.slice(lo, hi + 1).some(q => q.is_locked)) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
@@ -7329,11 +7336,14 @@ function NewJobPageContent() {
             >
               <button
                 type="button"
-                draggable
+                draggable={!q.is_locked}
                 onDragStart={questionsDrag.onDragStart(index)}
                 onDragEnd={questionsDrag.onDragEnd}
-                className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
-                title="Drag to reorder"
+                disabled={q.is_locked}
+                className={`w-5 flex-shrink-0 flex items-center justify-center mt-1.5 ${
+                  q.is_locked ? "text-slate-200 cursor-not-allowed" : "text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing"
+                }`}
+                title={q.is_locked ? "Locked" : "Drag to reorder"}
                 aria-label="Drag to reorder question"
               >
                 <GripVertical className="w-4 h-4" />
@@ -7351,7 +7361,11 @@ function NewJobPageContent() {
                       questionModeration.flushCheck(String(q.id), q.question_text);
                     }
                   }}
-                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
+                  readOnly={q.is_locked}
+                  aria-readonly={q.is_locked}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                    q.is_locked ? "text-slate-500 cursor-text" : "text-slate-900"
+                  }`}
                   rows={3}
                 />
                 {isRecruiterAddedQuestion(q.category) && (
@@ -7364,8 +7378,16 @@ function NewJobPageContent() {
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
                   rows={2}
-                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
-                  placeholder="No hard filter"
+                  readOnly={q.is_locked}
+                  aria-readonly={q.is_locked}
+                  placeholder={q.is_locked ? "Locked" : "No hard filter"}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                    q.is_locked
+                      ? "text-slate-400 cursor-text italic"
+                      : q.pass_criteria
+                      ? "text-[#4f46e5]"
+                      : "text-slate-300 italic"
+                  }`}
                 />
               </div>
 
@@ -7385,13 +7407,15 @@ function NewJobPageContent() {
                     Boolean(q.is_hard_filter)
                   )}
                 />
-                <button
-                  onClick={() => deleteScreenQuestion(q.id)}
-                  className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
-                  title="Remove"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                {!q.is_locked && (
+                  <button
+                    onClick={() => deleteScreenQuestion(q.id)}
+                    className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
+                    title="Remove"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
             );
