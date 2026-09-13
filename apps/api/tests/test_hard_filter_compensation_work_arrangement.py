@@ -259,6 +259,33 @@ def _make_role_specific_question(pass_criteria: str = "") -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    ("question_type", "expected_hard_filter", "expected_info_only"),
+    [
+        ("hard_filter", True, False),
+        ("info_only", False, True),
+        ("scored", False, False),
+    ],
+)
+def test_recruiter_question_type_is_preserved(question_type, expected_hard_filter, expected_info_only):
+    """Explicit recruiter selection must override legacy category/order defaults."""
+    result = _sanitize_pre_screen_questions_for_pair(
+        [{
+            "question_text": "Can you describe your experience with regulatory reporting?",
+            "pass_criteria": "Candidate has relevant reporting experience.",
+            "category": "other",
+            "is_default": False,
+            "order_index": 14,
+            "question_type": question_type,
+        }],
+        boolean_mode=False,
+    )
+
+    assert result[0]["is_hard_filter"] is expected_hard_filter
+    assert result[0]["is_info_only"] is expected_info_only
+    assert result[0]["question_type"] == question_type
+
+
 class TestSanitizeAutoPromotesCompWorkArrangement:
     """W2/comp questions with pass criteria must be promoted to is_hard_filter=True."""
 

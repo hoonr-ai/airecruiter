@@ -527,6 +527,7 @@ def _sanitize_pre_screen_questions_for_pair(
             category = category[:50].rstrip()
 
         is_hard_filter_in_db = bool(q.get("is_hard_filter", False))
+        question_type = str(q.get("question_type") or "").strip().lower()
         has_pass_criteria = bool(pass_criteria)
         is_front_matter = bool(q.get("is_default")) or category.lower() in ("default", "logistics", "work-arrangement")
 
@@ -542,15 +543,28 @@ def _sanitize_pre_screen_questions_for_pair(
         # - Other front-matter questions → True iff recruiter provided pass_criteria
         # - Non-front-matter (role-specific) in boolean mode → honour the DB flag
         # - Non-front-matter in non-boolean mode → these are scored interview questions
-        if is_new_opps or is_onsite_hybrid:
+        if question_type == "hard_filter":
             is_hard_filter = True
+            is_info_only = False
+        elif question_type == "info_only":
+            is_hard_filter = False
+            is_info_only = True
+        elif question_type == "scored":
+            is_hard_filter = False
+            is_info_only = False
+        elif is_new_opps or is_onsite_hybrid:
+            is_hard_filter = True
+            is_info_only = False
         elif is_front_matter:
             is_hard_filter = has_pass_criteria
+            is_info_only = not is_hard_filter
         elif boolean_mode:
             # Role-specific boolean questions keep their pre-calculated hard filter flag
             is_hard_filter = is_hard_filter_in_db
+            is_info_only = not is_hard_filter
         else:
             is_hard_filter = False
+            is_info_only = False
 
         sanitized.append({
             "question_text": text,
@@ -558,6 +572,8 @@ def _sanitize_pre_screen_questions_for_pair(
             "is_default": bool(q.get("is_default", True)),
             "category": category,
             "is_hard_filter": is_hard_filter,
+            "is_info_only": is_info_only,
+            "question_type": question_type or None,
         })
 
     return sanitized
@@ -925,7 +941,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             jobdiva_id_for_lookup = job_row.get("jobdiva_id") or ""
             job_id_for_lookup = job_row.get("job_id") or request.job_id
             cur.execute("""
-                SELECT question_text, pass_criteria, is_default, category, order_index, is_hard_filter
+                SELECT question_text, pass_criteria, is_default, category, order_index, is_hard_filter, question_type
                 FROM job_screen_questions
                 WHERE jobdiva_id = %s OR jobdiva_id = %s
                 ORDER BY order_index
@@ -939,7 +955,8 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "is_default": r["is_default"],
                     "category": r["category"],
                     "order_index": r["order_index"],
-                    "is_hard_filter": r.get("is_hard_filter", False)
+                    "is_hard_filter": r.get("is_hard_filter", False),
+                    "question_type": r.get("question_type"),
                 }
                 for r in rows
             ]
