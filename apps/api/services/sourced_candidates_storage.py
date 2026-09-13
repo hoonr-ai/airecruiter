@@ -175,6 +175,11 @@ def _ensure_sourced_candidates_schema() -> None:
                 # short-circuit to just the rows matching the status set.
                 "CREATE INDEX IF NOT EXISTS idx_sc_jobdiva_engage_status "
                 "ON sourced_candidates (jobdiva_id, ((data->>'engage_status')))",
+                # Cross submissions scans the WHOLE table by engage_status
+                # (not one jobdiva_id slice), so it needs the status key on
+                # its own — see services/cross_submissions.fetch_prior_rows.
+                "CREATE INDEX IF NOT EXISTS idx_sc_engage_status_global "
+                "ON sourced_candidates (((data->>'engage_status')))",
             ):
                 try:
                     conn.execute(text(stmt))

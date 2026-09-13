@@ -137,6 +137,22 @@ EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIME
 # Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
 EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
 
+# ---- Cross submissions (services/cross_submissions.py) ----
+# When a recruiter sources a new job at Step 5, candidates PAIR already
+# screened in the last LOOKBACK_DAYS (responded: in_progress/passed/failed)
+# are scored against the new job and the relevant ones are emailed to the
+# job's recruiters as a separate "cross submissions" list.
+CROSS_SUBMISSIONS_ENABLED = get_env_bool("CROSS_SUBMISSIONS_ENABLED", True)
+CROSS_SUBMISSIONS_LOOKBACK_DAYS = int(get_env_with_default("CROSS_SUBMISSIONS_LOOKBACK_DAYS", "60"))
+# Same floor as outreach (no PAIR outreach below 60% under scoring matrix v2).
+CROSS_SUBMISSIONS_MIN_SCORE = float(get_env_with_default("CROSS_SUBMISSIONS_MIN_SCORE", "60"))
+# Scoring is deterministic (no LLM) but bounded anyway: most-recent first.
+CROSS_SUBMISSIONS_MAX_SCORED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_SCORED", "500"))
+CROSS_SUBMISSIONS_MAX_LISTED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_LISTED", "25"))
+# Step-5 search fires on every run (sample + full); the scan runs at most
+# once per window per job. The endpoint's force flag bypasses this.
+CROSS_SUBMISSIONS_THROTTLE_MINUTES = int(get_env_with_default("CROSS_SUBMISSIONS_THROTTLE_MINUTES", "10"))
+
 # ---- Apify (LinkedIn Open-to-Work enrichment for Exa-sourced candidates) ----
 APIFY_API_TOKEN = get_env_with_default("APIFY_API_TOKEN", "")
 APIFY_LINKEDIN_OTW_ACTOR = get_env_with_default(

@@ -252,6 +252,46 @@ def _ensure_monitored_jobs_schema() -> None:
             )""",
             "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_job ON jobdiva_submittals (job_id)",
             "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_date ON jobdiva_submittals (submit_date)",
+            # Cross submissions (services/cross_submissions.py): one row per
+            # (new job, person) PAIR surfaced from its 60-day screened pool.
+            # UNIQUE(job_id, person_key) is the email-once claim. The
+            # monitored_jobs stamp throttles the Step-5-triggered scan.
+            """CREATE TABLE IF NOT EXISTS cross_submissions (
+                id SERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                jobdiva_id TEXT,
+                person_key TEXT NOT NULL,
+                candidate_id TEXT,
+                source TEXT,
+                name TEXT,
+                email TEXT,
+                phone TEXT,
+                headline TEXT,
+                location TEXT,
+                prior_job_id TEXT,
+                prior_jobdiva_id TEXT,
+                prior_job_title TEXT,
+                prior_customer_name TEXT,
+                engage_status TEXT,
+                screen_result TEXT,
+                engage_score NUMERIC,
+                engage_total_score NUMERIC,
+                screened_at TIMESTAMPTZ,
+                match_score NUMERIC,
+                matched_skills JSONB DEFAULT '[]'::jsonb,
+                missing_skills JSONB DEFAULT '[]'::jsonb,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                notified_at TIMESTAMPTZ NULL,
+                added_at TIMESTAMPTZ NULL,
+                UNIQUE (job_id, person_key)
+            )""",
+            # added_at: stamped when a recruiter clicks "Add to job" on the
+            # rank-list panel. ALTER covers DBs that created the table before
+            # the column existed.
+            "ALTER TABLE cross_submissions ADD COLUMN IF NOT EXISTS added_at TIMESTAMPTZ NULL",
+            "CREATE INDEX IF NOT EXISTS idx_cross_submissions_job ON cross_submissions (job_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cross_submissions_jobdiva ON cross_submissions (jobdiva_id)",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS cross_submissions_checked_at TIMESTAMP NULL",
         ):
             try:
                 cur.execute(stmt)
