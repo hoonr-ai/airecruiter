@@ -4,6 +4,7 @@ import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Susp
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode } from "@/lib/jobs/wizard-types";
+import { isLockedDefaultQuestion } from "@/lib/campaigns";
 import {
   DEFAULT_SEARCH_SOURCES,
   SEARCH_SOURCES_VERSION,
@@ -2158,7 +2159,7 @@ function NewJobPageContent() {
             // escape hatches (level change, explicit Regenerate, or rubric
             // change on Next) still work.
             if (rData.screen_questions?.length) {
-              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
+              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: isLockedDefaultQuestion(q.question_text) })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
               userHasEditedQuestionsRef.current = true;
               lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
@@ -4820,6 +4821,7 @@ function NewJobPageContent() {
         category: "default",
         order_index: index,
         is_hard_filter: !!q.is_hard_filter,
+        is_locked: isLockedDefaultQuestion(q.text),
       });
     });
 

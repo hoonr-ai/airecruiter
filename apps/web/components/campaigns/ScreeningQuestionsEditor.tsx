@@ -145,6 +145,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
             <textarea
               value={q.question_text ?? ""}
               onChange={(e) => {
+                if (q.is_locked) return;
                 update(index, { question_text: e.target.value });
                 if (isRecruiterAddedQuestion(q.category)) {
                   questionModeration.scheduleCheck(String(index), e.target.value);
@@ -156,7 +157,10 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 }
               }}
               rows={3}
-              className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
+              disabled={q.is_locked}
+              className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                q.is_locked ? "text-slate-500 cursor-not-allowed" : "text-slate-900"
+              }`}
             />
             {isRecruiterAddedQuestion(q.category) && (
               <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text ?? "")} />
@@ -167,11 +171,17 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
           <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
             <textarea
               value={q.pass_criteria ?? ""}
-              onChange={(e) => update(index, { pass_criteria: e.target.value })}
+              onChange={(e) => {
+                if (q.is_locked) return;
+                update(index, { pass_criteria: e.target.value });
+              }}
               rows={2}
-              placeholder="No hard filter"
+              disabled={q.is_locked}
+              placeholder={q.is_locked ? "Locked" : "No hard filter"}
               className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
-                q.pass_criteria
+                q.is_locked
+                  ? "text-slate-400 cursor-not-allowed italic"
+                  : q.pass_criteria
                   ? "text-[#4f46e5]"
                   : "text-slate-300 italic"
               }`}
@@ -195,14 +205,17 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 Boolean(q.is_hard_filter)
               )}
             />
-            <button
-              type="button"
-              onClick={() => remove(index)}
-              className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
-              title="Remove"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            {!q.is_locked && (
+              <button
+                type="button"
+                onClick={() => remove(index)}
+                className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
+                title="Remove"
+                aria-label="Remove question"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
       ))}

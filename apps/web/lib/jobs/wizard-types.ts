@@ -21,4 +21,5 @@ export type ScreenQuestion = {
   // when they say no. Persisted per-question so non-default recruiter-authored
   // questions can also be marked as hard filters.
   is_hard_filter?: boolean;
+  is_locked?: boolean;
 };
