@@ -587,7 +587,7 @@ export function CampaignForm({
             Cancel
           </Button>
         )}
-        <Button type="button" onClick={handleSubmit} disabled={submitting || hasQuestionWarning}>
+        <Button type="button" onClick={handleSubmit} disabled={submitting || hasQuestionWarning} title={hasQuestionWarning ? "Resolve flagged screening questions to save" : undefined}>
           {submitting ? "Saving…" : submitLabel}
         </Button>
       </div>

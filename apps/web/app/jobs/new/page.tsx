@@ -10645,11 +10645,7 @@ if (isHydratingJobSetup) {
   );
 }
 
-const hasScreeningWarning = screenQuestions.some(q => {
-  if (!isRecruiterAddedQuestion(q.category)) return false;
-  const verdict = questionModeration.verdictFor(q.question_text, q.pass_criteria || "");
-  return verdict === "checking" || (verdict && !verdict.ok);
-});
+const hasScreeningWarning = React.useMemo(() => questionModeration.hasBlockingWarning(screenQuestions), [questionModeration, screenQuestions]);
 
 return (
   <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -10884,6 +10880,7 @@ return (
               if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
             }}
             disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric || (currentStep === 4 && hasScreeningWarning)}
+            title={(currentStep === 4 && hasScreeningWarning) ? "Resolve flagged screening questions to proceed" : undefined}
           >
             {isGeneratingJD ? (
               <>

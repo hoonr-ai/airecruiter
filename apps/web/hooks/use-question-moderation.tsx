@@ -30,6 +30,12 @@ export interface QuestionPolicyVerdict {
     checked: boolean;
 }
 
+export interface ModeratableQuestion {
+    category?: string | null;
+    question_text: string;
+    pass_criteria?: string | null;
+}
+
 export type QuestionModerationState = QuestionPolicyVerdict | "checking";
 
 const MIN_CHECK_LENGTH = 12;
@@ -68,14 +74,18 @@ export function useQuestionModeration(jobTitle?: string) {
         if (existing && existing.checked) return;
         setEntry(norm, "checking");
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000);
             const res = await authFetch(`${API_BASE}/api/v1/ai-generation/screening-questions/moderate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
                 body: JSON.stringify({
                     questions: [{ key: norm, question_text: text.trim(), expected_answer: answer?.trim() || "" }],
                     job_title: jobTitleRef.current || "",
                 }),
             });
+            clearTimeout(timeoutId);
             const data = res.ok ? await res.json() : null;
             const v = data?.results?.[0];
             setEntry(
