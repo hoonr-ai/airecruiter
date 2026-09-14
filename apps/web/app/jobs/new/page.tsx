@@ -7059,7 +7059,11 @@ function NewJobPageContent() {
     userHasEditedQuestionsRef.current = true;
     if (field === 'question_text') {
       if (target && isRecruiterAddedQuestion(target.category)) {
-        questionModeration.scheduleCheck(String(id), String(value ?? ""));
+        questionModeration.scheduleCheck(String(id), String(value ?? ""), target.pass_criteria ?? "");
+      }
+    } else if (field === 'pass_criteria') {
+      if (target && isRecruiterAddedQuestion(target.category)) {
+        questionModeration.scheduleCheck(String(id), target.question_text ?? "", String(value ?? ""));
       }
     }
     setScreenQuestions(prev => prev.map(q => {
@@ -7371,7 +7375,7 @@ function NewJobPageContent() {
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
                   onBlur={() => {
                     if (isRecruiterAddedQuestion(q.category)) {
-                      questionModeration.flushCheck(String(q.id), q.question_text);
+                      questionModeration.flushCheck(String(q.id), q.question_text, q.pass_criteria ?? "");
                     }
                   }}
                   readOnly={q.is_locked}
@@ -7382,7 +7386,7 @@ function NewJobPageContent() {
                   rows={3}
                 />
                 {isRecruiterAddedQuestion(q.category) && (
-                  <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text)} />
+                  <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text, q.pass_criteria ?? "")} />
                 )}
               </div>
 
@@ -7390,6 +7394,11 @@ function NewJobPageContent() {
                 <textarea
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
+                  onBlur={() => {
+                    if (isRecruiterAddedQuestion(q.category)) {
+                      questionModeration.flushCheck(String(q.id), q.question_text, q.pass_criteria ?? "");
+                    }
+                  }}
                   rows={2}
                   readOnly={isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"}
                   placeholder={q.question_type === "hard_filter" ? "Pass criteria for this hard filter" : "No hard filter"}
