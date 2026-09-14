@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from core.auth import UserIdentity, get_current_user
 from routers._helpers import (
@@ -73,12 +73,23 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # same population — mixing pair's engage_status with pair-bot's status would
 # let a candidate land in two buckets and break the Percentage denominator.
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
-_PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started"}
-_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "active", "sent"}
+_PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started", "initiated"}
+_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent", "call_in_progress"}
 _COMPLETED_STATUSES = {"completed", "passed", "failed", "pass", "fail", "complete"}
 _PARTIAL_STATUSES = {
     "outreach_incomplete", "partial", "partial_complete", "incomplete",
-    "expired", "no_response", "unreachable", "abandoned",
+    "expired", "no_response", "unreachable", "abandoned", "outreach_failed",
+}
+
+_STATUS_HIERARCHY: Dict[str, int] = {
+    # Completed states rank highest
+    **{st: 4 for st in _COMPLETED_STATUSES},
+    # Partial states
+    **{st: 3 for st in _PARTIAL_STATUSES},
+    # In progress states
+    **{st: 2 for st in _IN_PROGRESS_STATUSES},
+    # Pending states
+    **{st: 1 for st in _PENDING_STATUSES},
 }
 
 _CHANNEL_COLUMNS = {"call": "call", "sms": "sms", "email": "web"}
@@ -90,24 +101,6 @@ _CHANNEL_ALIASES = {
     "whatsapp": "sms",
     "mail": "web",
     "web": "web",
-}
-_PHASE_ALIASES = {
-    "phase_1": "phase1",
-    "phase 1": "phase1",
-    "1": "phase1",
-    "stage1": "phase1",
-    "contact_check": "phase1",
-    "queued": "phase1",
-    "scheduled": "phase1",
-    "not_started": "phase1",
-    "phase_2": "phase2",
-    "phase 2": "phase2",
-    "2": "phase2",
-    "stage2": "phase2",
-    "phase_3": "phase3",
-    "phase 3": "phase3",
-    "3": "phase3",
-    "stage3": "phase3",
 }
 
 
@@ -232,27 +225,85 @@ def _bucket_status(raw: Optional[str]) -> str:
         return "partial_complete"
     # Deliberately visible: the status vocabulary lives in pair-bot and can
     # grow without pair knowing. Logging the unknown value is how the sets
-    # above get corrected.
-    logger.warning(f"LAUNCH-REPORT: unrecognised pair-bot outreach_status {status!r} — bucketed as partial_complete")
-    return "partial_complete"
+    # above get corrected. Defaults to pending so unknown states do not falsely inflate completion percentage.
+    logger.warning(f"LAUNCH-REPORT: unrecognised pair-bot outreach_status {status!r} — bucketed as pending")
+    return "pending"
 
 
-def _normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:
-    """Map phase variants onto phase1/phase2/phase3."""
-    return normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
+def _normalize_phase(
+    raw: Optional[str],
+    *,
+    allow_pending_aliases: bool = True,
+    shift_phases: bool = True,
+) -> Optional[str]:
+    """Map phase variants onto phase1/phase2/phase3/phase4/extra.
+
+    When shift_phases=True (Launch Report mode), PairBot retry phases are shifted
+    into Launch Report column indices:
+      contact_check / phase1 -> phase1
+      phase1_6hr             -> phase2
+      phase2                 -> phase3
+      phase3                 -> phase4
+      phase1_extra           -> extra1
+      phase1_6hr_extra       -> extra2
+      phase2_extra           -> extra3
+
+    When shift_phases=False (standard mode for routers.jobs::get_job_outreach_stats):
+      contact_check / phase1 -> phase1
+      phase1_6hr             -> phase1_6hr
+      phase2                 -> phase2
+      phase3                 -> phase3
+      phase1_extra           -> extra1
+      phase1_6hr_extra       -> extra2
+      phase2_extra           -> extra3
+    """
+    norm = normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
+    if not norm:
+        return None
+    if shift_phases:
+        if norm in ("contact_check", "phase1"):
+            return "phase1"
+        if norm == "phase1_6hr":
+            return "phase2"
+        if norm == "phase2":
+            return "phase3"
+        if norm == "phase3":
+            return "phase4"
+        if norm == "phase1_extra":
+            return "extra1"
+        if norm == "phase1_6hr_extra":
+            return "extra2"
+        if norm == "phase2_extra":
+            return "extra3"
+    else:
+        if norm in ("contact_check", "phase1"):
+            return "phase1"
+        if norm in ("phase1_6hr", "phase2", "phase3"):
+            return norm
+        if norm == "phase1_extra":
+            return "extra1"
+        if norm == "phase1_6hr_extra":
+            return "extra2"
+        if norm == "phase2_extra":
+            return "extra3"
+    return None
 
 
-def _extract_phase(outreach: Dict[str, Any]) -> Optional[str]:
+def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Optional[str]:
     """Pick phase from known keys, then fall back to status-shaped phase values."""
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
-    phase = _normalize_phase(raw)
+    phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
-    return _normalize_phase(outreach.get("outreach_status"), allow_pending_aliases=False)
+    return _normalize_phase(
+        outreach.get("outreach_status"),
+        allow_pending_aliases=False,
+        shift_phases=shift_phases,
+    )
 
 
 def _normalize_channel(raw: Optional[str]) -> Optional[str]:
@@ -289,8 +340,8 @@ def _fetch_jobs_launched_on(
     between `start_date` and `end_date` (inclusive) in Eastern time. A single
     day is just the range where start_date == end_date.
 
-    Keyed on first launch rather than "any launch that day" so a job appears
-    exactly once, on the day it went live, however long it keeps launching.
+    Keyed on true first launch rather than "any launch or audit activity that day" so a job appears
+    exactly once, on the day it went live, however long it keeps launching or receiving updates.
     """
     single_day_query = end_date is None
     if single_day_query:
@@ -303,8 +354,7 @@ def _fetch_jobs_launched_on(
         WITH launches AS (
             SELECT
                 mj.job_id                                     AS job_id,
-                MIN(a.created_at)                             AS first_launch_at,
-                COUNT(DISTINCT NULLIF(a.interview_id, ''))    AS total_launched
+                MIN(a.created_at)                             AS first_launch_at
             FROM monitored_jobs mj
             JOIN engage_interview_audit a
               -- monitor_job_locally writes `data.get("jobdiva_id") or ""`, so a
@@ -337,8 +387,7 @@ def _fetch_jobs_launched_on(
             -- parsed in Python because some rows carry an "… IST" suffix that a
             -- ::timestamp cast silently reads as if it were the DB's own zone.
             mj.created_at::text          AS job_created_at_text,
-            l.first_launch_at,
-            l.total_launched
+            l.first_launch_at
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
         WHERE {launch_date_filter}
@@ -398,10 +447,11 @@ def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any
     if not job_keys:
         return {}
     sql = """
-        SELECT jobdiva_id, interview_id, candidate_id, created_at, response
+        SELECT jobdiva_id, interview_id, candidate_id, created_at, status, response
         FROM engage_interview_audit
         WHERE jobdiva_id = ANY(%s)
           AND NULLIF(interview_id, '') IS NOT NULL
+        ORDER BY created_at DESC, id DESC
     """
     out: Dict[str, List[Dict[str, Any]]] = {}
     with conn.cursor() as cur:
@@ -475,25 +525,55 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     return fetched
 
 
-def merge_outreach_payloads(cand_fallback: Dict[str, Any], audit_fallback: Dict[str, Any], live_api: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _extract_audit_status(row: Dict[str, Any]) -> str:
+    """Extract outreach or audit status from row dict or its response payload."""
+    st = str(row.get("status") or "").strip()
+    if st:
+        return st
+    resp = row.get("response")
+    if isinstance(resp, dict):
+        return str(resp.get("outreach_status") or resp.get("status") or "").strip()
+    if isinstance(resp, str) and resp.strip():
+        try:
+            parsed = json.loads(resp)
+            if isinstance(parsed, dict):
+                return str(parsed.get("outreach_status") or parsed.get("status") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def merge_outreach_payloads(
+    cand_fallback: Dict[str, Any],
+    audit_fallback: Dict[str, Any],
+    live_api: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
     """
-    Merge outreach data from 3 layers with the *last layer winning*:
+    Merge outreach data from 3 layers:
       Candidate DB (lowest priority) → Audit DB → Live API (highest priority).
 
-    This means live_api fields override everything, which is intentional: the
-    live pair-bot response is the ground truth for a candidate's current outreach
-    state. Local DB fields serve as a best-effort fallback when the API is
-    unavailable or returns no data for an interview.
-
-    Callers that need first-available semantics should use the individual layers
-    directly before calling this helper.
+    State hierarchy protection: A lower progression status cannot overwrite a
+    higher one (e.g. if candidate has completed, an earlier or un-synced pending
+    status will not downgrade it).
     """
     merged_payload = {**cand_fallback}
     for source in (audit_fallback, live_api):
         if isinstance(source, dict):
             for k, v in source.items():
                 if v is not None:
-                    merged_payload[k] = v
+                    if k in ("outreach_status", "status"):
+                        existing_st = str(merged_payload.get(k) or "").strip().lower()
+                        new_st = str(v).strip().lower()
+                        # If both statuses are recognized in the hierarchy, enforce monotonic progression.
+                        # If either is unrecognised, allow the higher-priority layer to win so genuinely
+                        # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
+                        if existing_st in _STATUS_HIERARCHY and new_st in _STATUS_HIERARCHY:
+                            if _STATUS_HIERARCHY[new_st] >= _STATUS_HIERARCHY[existing_st]:
+                                merged_payload[k] = v
+                        else:
+                            merged_payload[k] = v
+                    else:
+                        merged_payload[k] = v
     return merged_payload
 
 
@@ -535,9 +615,14 @@ def build_merged_outreach_payload(
             audit_fallback = {}
             
     if audit_status:
-        if "outreach_status" not in audit_fallback:
+        st_hier = str(audit_status).strip().lower()
+        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
+        if st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
+            if _STATUS_HIERARCHY[st_hier] >= _STATUS_HIERARCHY[curr_st]:
+                audit_fallback["outreach_status"] = audit_status
+                audit_fallback["status"] = audit_status
+        else:
             audit_fallback["outreach_status"] = audit_status
-        if "status" not in audit_fallback:
             audit_fallback["status"] = audit_status
 
     # Layer 3: Live PairBot HTTP API Response
@@ -551,7 +636,7 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -559,11 +644,22 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     reading "SMS: 12" expects.
     """
     buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}
-    phases = {"phase1": 0, "phase2": 0, "phase3": 0}
+    phases = {
+        "phase1": 0,
+        "phase2": 0,
+        "phase3": 0,
+        "phase4": 0,
+        "extra": 0,
+        "extra1": 0,
+        "extra2": 0,
+        "extra3": 0,
+    }
     channels = {"call": 0, "sms": 0, "web": 0}
     first_response_minutes: List[float] = []
     response_timestamps: List[datetime.datetime] = []
     first_contact_timestamps: List[datetime.datetime] = []
+    first_attempted_timestamps: List[datetime.datetime] = []
+    first_completed_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
@@ -613,9 +709,11 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         elif normalized_status in ("failed", "fail"):
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged)
+        phase = _extract_phase(merged, shift_phases=shift_phases)
         if phase:
-            phases[phase] += 1
+            phases[phase] = phases.get(phase, 0) + 1
+            if phase in ("extra1", "extra2", "extra3"):
+                phases["extra"] = phases.get("extra", 0) + 1
 
         comms = payload.get("communications") or merged.get("communications") or []
         seen_channels = set()
@@ -655,6 +753,22 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if elapsed is not None:
                     first_response_minutes.append(elapsed)
 
+        # Pair-bot is the current source of truth for these lifecycle stamps.
+        # The local candidate record is retained as a fallback below because
+        # older pair-bot responses may omit them.
+        attempted = _parse_iso(
+            merged.get("first_attempted_at") or merged.get("attempted_at")
+        )
+        if attempted:
+            first_attempted_timestamps.append(attempted)
+        completed = _parse_iso(
+            merged.get("first_completed_at")
+            or merged.get("engage_completed_at")
+            or merged.get("completed_at")
+        )
+        if completed:
+            first_completed_timestamps.append(completed)
+
     return {
         "buckets": buckets,
         "phases": phases,
@@ -666,6 +780,8 @@ def _summarise_outreach(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         "earliest_response_at": min(response_timestamps) if response_timestamps else None,
         "responded_count": len(response_timestamps),
         "first_contact_at": min(first_contact_timestamps) if first_contact_timestamps else None,
+        "first_attempted_at": min(first_attempted_timestamps) if first_attempted_timestamps else None,
+        "first_completed_at": min(first_completed_timestamps) if first_completed_timestamps else None,
     }
 
 
@@ -736,17 +852,27 @@ def _build_row(
         for c in candidate_rows
         if c.get("engage_interview_id")
     }
+    cand_by_id = {
+        str(c["candidate_id"]): c
+        for c in candidate_rows
+        if c.get("candidate_id")
+    }
 
     payloads = []
+    num_resolved = 0
     for a in audit_rows:
         iid = str(a.get("interview_id") or "")
         if not iid:
             continue
 
-        cand_data = cand_by_interview.get(iid) or {}
+        cid = str(a.get("candidate_id") or "")
+        cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
         raw_resp = a.get("response")
         audit_status = a.get("status")
         live_api = outreach_by_interview.get(iid)
+
+        if live_api is not None or cand_data or raw_resp or audit_status:
+            num_resolved += 1
 
         merged_payload = build_merged_outreach_payload(
             cand_data,
@@ -755,10 +881,13 @@ def _build_row(
             live_api
         )
 
-        if merged_payload:
-            payloads.append(merged_payload)
+        # Enforce total fallback contract: an unresolved or empty payload must
+        # never be dropped. Default to pending so sum(buckets) == total_launched.
+        if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
+            merged_payload = {**merged_payload, "outreach_status": "pending"}
+        payloads.append(merged_payload)
 
-    outreach = _summarise_outreach(payloads)
+    outreach = _summarise_outreach(payloads, shift_phases=True)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -782,16 +911,9 @@ def _build_row(
     # Undefined rather than 0 when nothing launched, and undefined when the
     # outreach fan-out resolved nothing — a 0% that only means "pair-bot did
     # not answer" would read as a real result.
-    #
-    # Note the asymmetry when the fan-out only PARTIALLY resolves: the
-    # numerator counts just the interviews pair-bot answered for, while the
-    # denominator stays the full launched count, so the figure reads low. That
-    # is deliberate — inferring the unanswered ones would invent data — and the
-    # row carries outreach_detail_resolved/_expected so the UI can mark it.
-    resolved = sum(buckets.values())
     percentage = (
         round((buckets["completed"] + buckets["partial_complete"]) / total_launched * 100, 1)
-        if total_launched and resolved
+        if total_launched and num_resolved
         else None
     )
 
@@ -828,8 +950,10 @@ def _build_row(
         "completed": buckets["completed"],
         "partial_complete": buckets["partial_complete"],
 
-        "first_attempted_at": _edt(cand["first_attempted_at"]),
-        "first_completed_at": _edt(cand["first_completed_at"]),
+        # Prefer Pair-bot's live lifecycle timestamps.  `sourced_candidates`
+        # is only a fallback when the live response does not expose a stamp.
+        "first_attempted_at": _edt(outreach["first_attempted_at"] or cand["first_attempted_at"]),
+        "first_completed_at": _edt(outreach["first_completed_at"] or cand["first_completed_at"]),
 
         "time_to_first_response_minutes": outreach["time_to_first_response_minutes"],
         "launch_to_response_minutes": _minutes_between(launch_at, outreach["earliest_response_at"]),
@@ -855,11 +979,16 @@ def _build_row(
         "phase1": outreach["phases"]["phase1"],
         "phase2": outreach["phases"]["phase2"],
         "phase3": outreach["phases"]["phase3"],
+        "phase4": outreach["phases"]["phase4"],
+        "extra": outreach["phases"]["extra"],
+        "extra1": outreach["phases"]["extra1"],
+        "extra2": outreach["phases"]["extra2"],
+        "extra3": outreach["phases"]["extra3"],
         "percentage": percentage,
 
         # Lets the UI mark a row whose outreach columns are partial rather
         # than showing dashes that look like real zeros.
-        "outreach_detail_resolved": len(payloads),
+        "outreach_detail_resolved": num_resolved,
         "outreach_detail_expected": len(audit_rows),
     }
 
@@ -893,6 +1022,27 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
     return keys
 
 
+def _candidate_rows_as_of_first_launch(
+    candidate_rows: List[Dict[str, Any]], job: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Keep sourcing metrics historical to the job's initial launch.
+
+    The report has one row for that launch event. Including candidates sourced
+    days or weeks later makes the row grow every time a historical report is
+    regenerated. Rows without a usable source timestamp are excluded: there
+    is no defensible way to assign them to an as-of report.
+    """
+    first_launch_at = _parse_iso(job.get("first_launch_at"))
+    if first_launch_at is None:
+        return []
+    return [
+        row
+        for row in candidate_rows
+        if (created_at := _parse_iso(row.get("created_at"))) is not None
+        and created_at <= first_launch_at
+    ]
+
+
 @router.get("/launch-report")
 async def get_launch_report(
     date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; defaults to yesterday"),
@@ -900,6 +1050,7 @@ async def get_launch_report(
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with start_date"),
     team_id: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
+    response: Response = Response(),
 ):
     """PAIR launch report for jobs first launched on `date`, or between
     `start_date` and `end_date` inclusive (Eastern time). A single day is
@@ -910,6 +1061,11 @@ async def get_launch_report(
     - Team leads: always scoped to their own team (team_id is ignored).
     - Recruiters: 403.
     """
+    # A report contains live Pair-bot status. Never let a browser, CDN, or
+    # reverse proxy serve an earlier generation for an identical date range.
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
     if user.is_admin:
         scope_team_id = (team_id or "").strip() or None
     elif user.is_team_lead and user.team_id:
@@ -966,22 +1122,57 @@ async def get_launch_report(
     interview_ids: List[str] = []
     for job in jobs:
         rows = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
-        # A job matched under both keys yields the same interview twice.
+        # Deduplicate audit rows per interview_id.
+        # Two distinct concerns are decoupled:
+        # 1. Scope: An interview belongs to a report window based strictly on its
+        #    INITIAL launch timestamp (earliest created_at).
+        # 2. Status: Once in scope, it is bucketed using its latest known status
+        #    and monotonic state hierarchy (completed > partial > in_progress > pending).
         deduped: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             iid = str(row.get("interview_id") or "").strip()
-            if iid:
-                deduped[iid] = row
+            if not iid:
+                continue
+            if iid not in deduped:
+                deduped[iid] = dict(row)
+                deduped[iid]["first_launched_at"] = row.get("created_at")
+            else:
+                existing = deduped[iid]
+                # 1. Track earliest created_at for launch-window scoping
+                ex_dt = _parse_iso(existing.get("first_launched_at") or existing.get("created_at"))
+                row_dt = _parse_iso(row.get("created_at"))
+                if ex_dt and row_dt:
+                    if row_dt < ex_dt:
+                        existing["first_launched_at"] = row["created_at"]
+                        existing["created_at"] = row["created_at"]
+                elif row_dt and not ex_dt:
+                    existing["first_launched_at"] = row["created_at"]
+                    existing["created_at"] = row["created_at"]
 
-        # Scoped to the requested report range rather than only the job's
-        # first-launch day, so later-day launches show up on their own report
-        # instead of vanishing (the job's row is keyed on first-launch day,
-        # but its later launches still fall inside a range that includes them).
+                # 2. Monotonic status hierarchy: favor higher progression state
+                row_st = _extract_audit_status(row).lower()
+                ex_st = _extract_audit_status(existing).lower()
+                if row_st in _STATUS_HIERARCHY and ex_st in _STATUS_HIERARCHY:
+                    if _STATUS_HIERARCHY[row_st] > _STATUS_HIERARCHY[ex_st]:
+                        existing["status"] = row.get("status") or row_st
+                        if row.get("response"):
+                            existing["response"] = row.get("response")
+                    elif row.get("response") and not existing.get("response"):
+                        existing["response"] = row.get("response")
+                elif row_st and not ex_st:
+                    existing["status"] = row.get("status") or row_st
+                    if row.get("response"):
+                        existing["response"] = row.get("response")
+                elif row.get("response") and not existing.get("response"):
+                    existing["response"] = row.get("response")
+
+        # Report scoping: decides which interviews are in scope based strictly on
+        # initial launch date, never dropping candidates due to subsequent status updates.
         day_rows = [
             row
             for row in deduped.values()
-            if (created_date := _eastern_date(_parse_iso(row.get("created_at")))) is not None
-            and report_start_date <= created_date <= report_end_date
+            if (launch_date := _eastern_date(_parse_iso(row.get("first_launched_at") or row.get("created_at")))) is not None
+            and report_start_date <= launch_date <= report_end_date
         ]
 
         audit_by_job[str(job["job_id"])] = day_rows
@@ -999,7 +1190,7 @@ async def get_launch_report(
         rows.append(
             _build_row(
                 job,
-                list(candidate_rows.values()),
+                _candidate_rows_as_of_first_launch(list(candidate_rows.values()), job),
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
             )
