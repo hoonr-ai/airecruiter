@@ -35,7 +35,11 @@ export type QuestionModerationState = QuestionPolicyVerdict | "checking";
 const MIN_CHECK_LENGTH = 12;
 const DEBOUNCE_MS = 1200;
 
-const normalizeQuestionText = (t: string) => t.trim().replace(/\s+/g, " ").toLowerCase();
+const normalizeQuestionText = (t: string, a?: string) => {
+    const normT = t.trim().replace(/\s+/g, " ").toLowerCase();
+    const normA = a ? a.trim().replace(/\s+/g, " ").toLowerCase() : "";
+    return JSON.stringify([normT, normA]);
+};
 
 const FAIL_OPEN: QuestionPolicyVerdict = { ok: true, flags: [], reason: "", checked: false };
 
@@ -53,8 +57,8 @@ export function useQuestionModeration(jobTitle?: string) {
         setVerdicts(verdictsRef.current);
     }, []);
 
-    const runCheck = useCallback(async (text: string) => {
-        const norm = normalizeQuestionText(text);
+    const runCheck = useCallback(async (text: string, answer?: string) => {
+        const norm = normalizeQuestionText(text, answer);
         if (norm.length < MIN_CHECK_LENGTH) return;
         const existing = verdictsRef.current[norm];
         // Skip only when a check is in flight or a REAL verdict exists. A
@@ -68,7 +72,7 @@ export function useQuestionModeration(jobTitle?: string) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    questions: [{ key: norm, question_text: text.trim() }],
+                    questions: [{ key: norm, question_text: text.trim(), expected_answer: answer?.trim() || "" }],
                     job_title: jobTitleRef.current || "",
                 }),
             });
@@ -92,20 +96,20 @@ export function useQuestionModeration(jobTitle?: string) {
 
     // Debounced while typing — one timer per row so parallel edits don't
     // cancel each other.
-    const scheduleCheck = useCallback((rowKey: string, text: string) => {
+    const scheduleCheck = useCallback((rowKey: string, text: string, answer?: string) => {
         if (timers.current[rowKey]) clearTimeout(timers.current[rowKey]);
-        if (normalizeQuestionText(text).length < MIN_CHECK_LENGTH) return;
-        timers.current[rowKey] = setTimeout(() => void runCheck(text), DEBOUNCE_MS);
+        if (normalizeQuestionText(text, answer).length < MIN_CHECK_LENGTH) return;
+        timers.current[rowKey] = setTimeout(() => void runCheck(text, answer), DEBOUNCE_MS);
     }, [runCheck]);
 
     // Immediate — for blur.
-    const flushCheck = useCallback((rowKey: string, text: string) => {
+    const flushCheck = useCallback((rowKey: string, text: string, answer?: string) => {
         if (timers.current[rowKey]) clearTimeout(timers.current[rowKey]);
-        void runCheck(text);
+        void runCheck(text, answer);
     }, [runCheck]);
 
     const verdictFor = useCallback(
-        (text: string): QuestionModerationState | undefined => verdicts[normalizeQuestionText(text)],
+        (text: string, answer?: string): QuestionModerationState | undefined => verdicts[normalizeQuestionText(text, answer)],
         [verdicts],
     );
 
@@ -120,7 +124,7 @@ export function useQuestionModeration(jobTitle?: string) {
     return { verdictFor, scheduleCheck, flushCheck };
 }
 
-const SERIOUS_FLAGS = new Set(["nsfw", "rude", "discriminatory", "sensitive_personal_data"]);
+const SERIOUS_FLAGS = new Set(["nsfw", "rude", "discriminatory", "sensitive_personal_data", "unsafe"]);
 
 const FLAG_LABELS: Record<string, string> = {
     nsfw: "NSFW",
@@ -129,6 +133,8 @@ const FLAG_LABELS: Record<string, string> = {
     sensitive_personal_data: "sensitive personal data",
     nonsensical: "doesn't make sense",
     off_topic: "off-topic",
+    grammatical_error: "grammatical error",
+    unsafe: "unsafe",
 };
 
 // Warning banner rendered under a flagged question row. Renders nothing while

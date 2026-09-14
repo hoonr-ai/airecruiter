@@ -148,12 +148,12 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 if (q.is_locked) return;
                 update(index, { question_text: e.target.value });
                 if (isRecruiterAddedQuestion(q.category)) {
-                  questionModeration.scheduleCheck(String(index), e.target.value);
+                  questionModeration.scheduleCheck(String(index), e.target.value, q.pass_criteria ?? "");
                 }
               }}
               onBlur={() => {
                 if (isRecruiterAddedQuestion(q.category)) {
-                  questionModeration.flushCheck(String(index), q.question_text ?? "");
+                  questionModeration.flushCheck(String(index), q.question_text ?? "", q.pass_criteria ?? "");
                 }
               }}
               rows={3}
@@ -163,7 +163,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
               }`}
             />
             {isRecruiterAddedQuestion(q.category) && (
-              <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text ?? "")} />
+              <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text ?? "", q.pass_criteria ?? "")} />
             )}
           </div>
 
@@ -173,6 +173,14 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 value={q.pass_criteria ?? ""}
                 onChange={(e) => {
                   update(index, { pass_criteria: e.target.value });
+                  if (isRecruiterAddedQuestion(q.category)) {
+                    questionModeration.scheduleCheck(String(index), q.question_text ?? "", e.target.value);
+                  }
+                }}
+                onBlur={() => {
+                  if (isRecruiterAddedQuestion(q.category)) {
+                    questionModeration.flushCheck(String(index), q.question_text ?? "", q.pass_criteria ?? "");
+                  }
                 }}
                 rows={2}
                 readOnly={isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"}

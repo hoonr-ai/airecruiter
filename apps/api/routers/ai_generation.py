@@ -662,6 +662,7 @@ async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuest
 class ModerateQuestionItem(BaseModel):
     key: str = ""
     question_text: str = ""
+    expected_answer: str = ""
 
 
 class ModerateQuestionsRequest(BaseModel):
@@ -674,26 +675,28 @@ class QuestionPolicyVerdict(BaseModel):
     ok: bool
     flags: List[Literal[
         "nsfw", "rude", "discriminatory", "sensitive_personal_data",
-        "nonsensical", "off_topic",
+        "nonsensical", "off_topic", "grammatical_error", "unsafe"
     ]] = Field(default_factory=list)
     reason: str = Field(
         description="One short recruiter-facing sentence explaining the problem; empty when ok."
     )
 
 
-_QUESTION_MODERATION_PROMPT = """You review recruiter-written phone-screen questions for PAIR, a recruiting platform, against company policy. An automated interview bot will ask candidates these questions verbatim.
+_QUESTION_MODERATION_PROMPT = """You review recruiter-written phone-screen questions and their expected answers (if provided) for PAIR, a recruiting platform, against company policy. An automated interview bot will ask candidates these questions verbatim.
 
-Flag a question ONLY when it clearly violates policy:
+Flag a question or expected answer ONLY when it clearly violates policy:
 - nsfw: sexual, explicit, or otherwise inappropriate content.
 - rude: insulting, demeaning, hostile, or mocking toward the candidate.
 - discriminatory: probes protected characteristics (age, race, ethnicity, religion, gender, sexual orientation, marital/family status, pregnancy, disability, national origin, or citizenship beyond standard work-authorization) or otherwise invites illegal hiring bias.
 - sensitive_personal_data: asks for data a screening call must not collect (SSN/government ID numbers, bank or card details, passwords, medical history).
 - nonsensical: incoherent, self-contradictory, or not answerable as written — a candidate could not reasonably respond to it.
 - off_topic: no plausible relevance to screening a candidate for a job.
+- grammatical_error: contains significant spelling or grammatical errors that make it look unprofessional.
+- unsafe: asks a question that recruiters should not ask in an interview for legal, safety, or compliance reasons (e.g., asking about union affiliation, genetic information, or promoting illegal activities).
 
 Do NOT flag normal recruiting questions, even blunt ones: availability/notice period, compensation expectations, work authorization/visa status, willingness to relocate or work on-site/shifts/on-call, background-check or drug-test consent, references, years of experience, education, or tough technical/behavioral questions.
 
-Set ok=true with empty flags and empty reason when the question complies. When flagging, set ok=false and reason to ONE short recruiter-facing sentence (under 25 words) explaining the problem."""
+Set ok=true with empty flags and empty reason when the question and expected answer comply. When flagging, set ok=false and reason to ONE short recruiter-facing sentence (under 25 words) explaining the problem."""
 
 _QUESTION_MODERATION_MAX = 30
 _QUESTION_MODERATION_CACHE_TTL = 7 * 24 * 60 * 60
@@ -733,7 +736,8 @@ async def moderate_screening_questions(
         # job_title is part of the prompt (it decides off_topic/nonsensical),
         # so it must be part of the key — a verdict for one job's context must
         # not serve another job for 7 days.
-        cache_key = _llm_cache.make_key("q_moderation", 1, model, job_title, text)
+        expected_answer_text = (item.expected_answer or "").strip()[:1000]
+        cache_key = _llm_cache.make_key("q_moderation", 2, model, job_title, text, expected_answer_text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
@@ -746,11 +750,15 @@ async def moderate_screening_questions(
             started = time.monotonic()
             try:
                 job_context = f"Job title: {job_title}\n\n" if job_title else ""
+                content_to_check = f"{job_context}Screening question to review:\n{text}"
+                if expected_answer_text:
+                    content_to_check += f"\n\nExpected answer/Pass criteria:\n{expected_answer_text}"
+
                 completion = await oai.beta.chat.completions.parse(
                     model=model,
                     messages=[
                         {"role": "system", "content": _QUESTION_MODERATION_PROMPT},
-                        {"role": "user", "content": f"{job_context}Screening question to review:\n{text}"},
+                        {"role": "user", "content": content_to_check},
                     ],
                     response_format=QuestionPolicyVerdict,
                     temperature=0.0,
