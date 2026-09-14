@@ -10645,6 +10645,12 @@ if (isHydratingJobSetup) {
   );
 }
 
+const hasScreeningWarning = screenQuestions.some(q => {
+  if (!isRecruiterAddedQuestion(q.category)) return false;
+  const verdict = questionModeration.verdictFor(q.question_text, q.pass_criteria || "");
+  return verdict === "checking" || (verdict && !verdict.ok);
+});
+
 return (
   <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
     {/* Breadcrumb */}
@@ -10877,7 +10883,7 @@ return (
 
               if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
             }}
-            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric || (currentStep === 4 && hasScreeningWarning)}
           >
             {isGeneratingJD ? (
               <>
