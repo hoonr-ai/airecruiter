@@ -7,7 +7,8 @@ reported side by side, because they answer different questions:
     in PAIR (Submit or Reject) via the rank list or the evaluation report.
   PAIR SUBMITS — of those, the ones that were a Submit. PAIR mirrors each
     Submit into JobDiva as a candidate note with the action
-    "PAIR Submit - Externally Submitted", linked to the job.
+        "PAIR External Submission" for plain external submits or
+        "PAIR Internal Submission" for manager-review submits, linked to the job.
 
 They sit next to PAIR EXTERNAL SUBS, which is the JobDiva-verified count
 (a JobDiva submittal to the job's contact whose candidate carries the
