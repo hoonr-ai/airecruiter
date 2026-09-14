@@ -88,6 +88,29 @@ def test_missing_id_returns_none():
     assert _resolve_link_candidate_id(None, None, None) is None
 
 
+def test_jobdiva_row_own_id_beats_a_stored_duplicate_id():
+    """A JobDiva-sourced row whose stored jobdiva_candidate_id disagrees with its
+    own id is carrying the id of a duplicate profile: before the
+    createJobApplication fix, CreateJobApplicationWithResume ignored the linked
+    id, minted a new profile and the provisioner persisted that new id here.
+    The row's own id (JobDiva's, from the pool response) must win so the next
+    launch attaches to the real profile instead of the duplicate."""
+    for src in ("JobDiva-TalentSearch", "JobDiva-JobAgent", "JobDiva-Applicants", "JobDiva"):
+        assert (
+            _resolve_link_candidate_id(src, {"jobdiva_candidate_id": "999000111"}, "462058065251")
+            == "462058065251"
+        ), src
+
+
+def test_stored_id_is_used_when_the_row_is_not_jobdiva_sourced():
+    """For LinkedIn/Exa rows the stored id is the only JobDiva handle we have
+    (PAIR-created earlier, or learned from the applicant list)."""
+    assert _resolve_link_candidate_id("LinkedIn-Recruiter", {"jobdiva_candidate_id": "999"}, "exa_x") == "999"
+    assert _resolve_link_candidate_id("Exa", {"jobdiva_candidate_id": " 999 "}, "123") == "999"
+    # A non-numeric stored value is garbage, not a profile id.
+    assert _resolve_link_candidate_id("LinkedIn", {"jobdiva_candidate_id": "n/a"}, "123") is None
+
+
 # ---------------------------------------------------------------------------
 # _select_pass_email_resume
 # ---------------------------------------------------------------------------

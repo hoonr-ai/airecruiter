@@ -30,6 +30,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,11 @@ def resolve_app_base_url(override: Optional[str] = None) -> str:
     if candidate.startswith("http://") or candidate.startswith("https://"):
         return candidate
     return (APP_BASE_URL or "https://pair.pyramidci.com").rstrip("/")
+
+def candidate_report_link(base_url: str, job_id_or_ref: str, candidate_id: str) -> str:
+    safe_job_ref = quote(str(job_id_or_ref or ""), safe="")
+    safe_candidate_id = quote(str(candidate_id or ""), safe="")
+    return f"{base_url}/jobs/{safe_job_ref}/report?candidateId={safe_candidate_id}"
 
 def _smtp_configured() -> bool:
     """Return True only when enough SMTP settings are present to attempt a send."""
@@ -672,7 +678,8 @@ def notify_candidate_passed(
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
     rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings?source=email"
     # Deep link to the candidate evaluation report
-    report_link    = f"{base_url}/jobs/{jobdiva_id}/report?candidateId={candidate_id}"
+    report_link    = candidate_report_link(base_url, jobdiva_id, candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -879,7 +886,7 @@ def notify_candidate_passed(
     </table>
 
     <p style="margin:0 0 24px;text-align:center;">
-      {_btn(report_link, "View Full Candidate Report →")}
+          {_btn(safe_report_link, "View Full Candidate Report →")}
     </p>
 
     <div style="background:#fff7ed;border:1px solid #ffedd5;border-radius:8px;padding:12px;">
@@ -920,6 +927,101 @@ def notify_candidate_passed(
 
     return _send(to_list, subject, _base_html(content), plain, attachments=attachments)
 
+
+
+def notify_internal_submission_to_manager(
+    *,
+    manager_email: str,
+    recruiter_name: str,
+    recruiter_email: str,
+    candidate_name: str,
+    candidate_id: str,
+    job_id_or_ref: str,
+    job_title: str,
+    customer_name: str = "",
+    recruiter_notes: Optional[str] = None,
+    app_base_url: Optional[str] = None,
+) -> bool:
+    """
+    Email notification sent to Manager when Recruiter submits a candidate internally.
+    Provides candidate details, recruiter notes, and a deep-link to the Candidate Evaluation Report
+    where the manager can review and submit externally to JobDiva.
+    """
+    if not manager_email or not manager_email.strip():
+        logger.warning("⚠️ No manager email provided for internal submission notification.")
+        return False
+
+    base_url = resolve_app_base_url(app_base_url)
+    report_link = candidate_report_link(base_url, job_id_or_ref, candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
+
+    safe_candidate = html.escape(candidate_name or "Candidate")
+    safe_recruiter = html.escape(recruiter_name or recruiter_email or "Recruiter")
+    safe_recruiter_email = html.escape(recruiter_email or "")
+    safe_title = html.escape(job_title or "Job")
+    safe_job_ref = html.escape(str(job_id_or_ref or ""))
+    safe_client = html.escape(customer_name or "—")
+
+    notes_section = ""
+    if recruiter_notes and recruiter_notes.strip():
+        safe_notes = html.escape(recruiter_notes.strip()).replace("\n", "<br>")
+        notes_section = f"""
+        <div style="margin:20px 0;padding:16px;background:#f8fafc;border-left:4px solid #4f46e5;border-radius:4px;">
+          <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">
+            Recruiter Notes / Comments
+          </p>
+          <p style="margin:0;font-size:14px;color:#1e293b;line-height:1.5;">{safe_notes}</p>
+        </div>
+        """
+
+    content = f"""
+    <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+      <strong>{safe_recruiter}</strong> ({safe_recruiter_email}) has submitted <strong>{safe_candidate}</strong> for your internal review regarding <strong>{safe_title} ({safe_job_ref})</strong>.
+    </p>
+
+    <div style="margin:0 0 20px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+      <table style="width:100%;border-collapse:collapse;font-family:inherit;">
+        {_info_row("Candidate Name", safe_candidate)}
+        {_info_row("Job Position", f"{safe_title} ({safe_job_ref})")}
+        {_info_row("Client", safe_client)}
+        {_info_row("Submitted By", f"{safe_recruiter} &lt;{safe_recruiter_email}&gt;")}
+      </table>
+    </div>
+
+    {notes_section}
+
+    <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.6;">
+      Please click the button below to review the candidate's full evaluation report, score breakdown, and resume. You can complete the external submission directly from the report page.
+    </p>
+
+    <div style="text-align:center;margin:24px 0;">
+      {_btn(safe_report_link, "Review Candidate &amp; Submit Externally", color="#4f46e5")}
+    </div>
+
+    <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;line-height:1.5;">
+            Direct Report URL: <a href="{safe_report_link}" style="color:#4f46e5;">{safe_report_link}</a>
+    </p>
+    """
+
+    subject = f"Internal Candidate Submission: {candidate_name} for {job_title} ({job_id_or_ref})"
+
+    plain_notes = f"\nRecruiter Notes:\n{recruiter_notes.strip()}\n" if recruiter_notes and recruiter_notes.strip() else ""
+    plain = (
+        f"{safe_recruiter} ({safe_recruiter_email}) has submitted {candidate_name} for internal review.\n\n"
+        f"Job: {job_title} ({job_id_or_ref})\n"
+        f"Client: {customer_name or '—'}\n"
+        f"Candidate: {candidate_name}\n"
+        f"{plain_notes}\n"
+        f"View Report and Submit Externally: {report_link}\n"
+    )
+
+    to_list = [manager_email.strip()]
+    if recruiter_email and recruiter_email.strip():
+        # Optional: include recruiter in the recipients list
+        to_list.append(recruiter_email.strip())
+    to_list = list(dict.fromkeys(to_list))
+
+    return _send(to_list, subject, _base_html(content), plain)
 
 
 def notify_pair_inactive(
@@ -976,4 +1078,154 @@ def notify_pair_inactive(
         f"To relaunch PAIR, navigate to the Jobs List, and click Edit Job Configuration under Actions.\n"
     )
 
+    return _send(to_list, subject, _base_html(content), plain)
+
+
+def notify_cross_submissions(
+    *,
+    jobdiva_id: str,
+    job_id: str,
+    job_title: str,
+    customer_name: str,
+    recruiter_emails: List[str],
+    candidates: List[Dict[str, Any]],
+    lookback_days: int = 60,
+    app_base_url: Optional[str] = None,
+) -> bool:
+    """
+    Email #5 – Cross Submissions.
+
+    Triggered when a recruiter sources a new job and PAIR finds candidates it
+    already phone-screened (responded partially or fully) for OTHER jobs in
+    the last ``lookback_days`` who also match this job.
+    From : pair@pyramidci.com
+    To   : Pair-recruiting@pyramidci.com + the new job's recruiter emails
+    Subj : Cross Submissions – N previously screened candidates for [jobdiva_id]
+    """
+    if not candidates:
+        return False
+
+    base_url = resolve_app_base_url(app_base_url)
+    jobdiva_link = jobdiva_job_link(job_id, jobdiva_id)
+    jd_hyperlink = (
+        f'<a href="{jobdiva_link}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">{html.escape(jobdiva_id)}</a>'
+    )
+
+    def _result_badge(label: str) -> str:
+        palette = {
+            "Pass": ("#dcfce7", "#86efac", "#166534"),
+            "Fail": ("#fee2e2", "#fca5a5", "#991b1b"),
+            "In Progress": ("#fef9c3", "#fde047", "#854d0e"),
+        }
+        bg, border, fg = palette.get(label, ("#e2e8f0", "#cbd5e1", "#334155"))
+        return (
+            f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;'
+            f'font-weight:700;line-height:1.5;background:{bg};border:1px solid {border};color:{fg};">'
+            f'{html.escape(label)}</span>'
+        )
+
+    def _fmt_date(value: Any) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "strftime"):
+            return value.strftime("%b %d, %Y")
+        return html.escape(str(value)[:10])
+
+    rows_html: List[str] = []
+    plain_rows: List[str] = []
+    for c in candidates:
+        name = html.escape(str(c.get("name") or "Unnamed candidate"))
+        email_txt = str(c.get("email") or "").strip()
+        phone_txt = str(c.get("phone") or "").strip()
+        contact_bits = [html.escape(b) for b in (email_txt, phone_txt) if b]
+        contact_html = "<br>".join(contact_bits) or "—"
+        prior_ref = str(c.get("prior_jobdiva_id") or "")
+        prior_title = str(c.get("prior_job_title") or "")
+        prior_client = str(c.get("prior_customer_name") or "")
+        prior_bits = [html.escape(b) for b in (prior_ref, prior_title, prior_client) if b]
+        report_link = (
+            f"{base_url}/jobs/{prior_ref}/report?candidateId={c.get('candidate_id') or ''}"
+            if prior_ref else ""
+        )
+        prior_html = " · ".join(prior_bits) or "—"
+        if report_link:
+            prior_html += (
+                f'<br><a href="{report_link}" target="_blank" '
+                f'style="color:#4f46e5;font-size:12px;text-decoration:none;">View screen report</a>'
+            )
+        result_label = str(c.get("screen_result") or "Pending")
+        score_disp = str(c.get("screen_score_display") or "")
+        result_html = _result_badge(result_label) + (
+            f'<span style="font-size:12px;color:#64748b;margin-left:6px;">{html.escape(score_disp)}</span>' if score_disp else ""
+        )
+        try:
+            match_pct = f"{float(c.get('match_score') or 0):.0f}%"
+        except (TypeError, ValueError):
+            match_pct = "—"
+        screened = _fmt_date(c.get("screened_at"))
+
+        rows_html.append(
+            "<tr>"
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b;font-weight:600;vertical-align:top;">{name}'
+            f'<div style="font-size:12px;color:#64748b;font-weight:400;">{html.escape(str(c.get("headline") or ""))}</div></td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;vertical-align:top;">{contact_html}</td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;vertical-align:top;">{prior_html}</td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;vertical-align:top;white-space:nowrap;">{result_html}'
+            f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;">{screened}</div></td>'
+            f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b;font-weight:700;text-align:right;vertical-align:top;">{match_pct}</td>'
+            "</tr>"
+        )
+        plain_rows.append(
+            f"- {c.get('name') or 'Unnamed candidate'} | {' / '.join(b for b in (email_txt, phone_txt) if b) or 'no contact'} | "
+            f"prior: {' · '.join(b for b in (prior_ref, prior_title, prior_client) if b) or '-'} | "
+            f"screen: {result_label}{(' ' + score_disp) if score_disp else ''} on {screened or '-'} | match: {match_pct}"
+            + (f" | {report_link}" if report_link else "")
+        )
+
+    title_txt = html.escape(job_title or "this job")
+    client_txt = f" at {html.escape(customer_name)}" if customer_name else ""
+    n = len(candidates)
+    content = f"""
+    <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+      While sourcing <strong>{title_txt}</strong>{client_txt} ({jd_hyperlink}), PAIR found
+      <strong>{n}</strong> candidate{'s' if n != 1 else ''} it already phone-screened for other jobs in the
+      last {int(lookback_days)} days who also match this role. They responded to PAIR before, so a
+      recruiter follow-up is likely to land faster than fresh outreach.
+    </p>
+    <div style="overflow-x:auto;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #e2e8f0;border-radius:8px;">
+      <thead>
+        <tr style="background:#f8fafc;">
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Candidate</th>
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Contact</th>
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Screened for</th>
+          <th align="left" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Screen result</th>
+          <th align="right" style="padding:10px 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Match</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html)}
+      </tbody>
+    </table>
+    </div>
+    <p style="margin:16px 0 0;font-size:12px;color:#64748b;line-height:1.6;">
+      "Screen result" is the outcome of the PAIR phone screen for the <em>previous</em> job
+      (In Progress = partially completed). "Match" is the résumé match against <em>this</em> job's
+      Step&nbsp;5 criteria. These candidates are not on this job's candidate list yet — add them from
+      Step&nbsp;5 or reach out directly.
+    </p>
+    """
+
+    to_list = list(dict.fromkeys(
+        [PAIR_TEAM_EMAIL] + [e.strip() for e in recruiter_emails if e and e.strip()]
+    ))
+    subject = f"Cross Submissions – {n} previously screened candidate{'s' if n != 1 else ''} for {jobdiva_id}"
+    plain = (
+        f"While sourcing {job_title or 'this job'}{(' at ' + customer_name) if customer_name else ''} ({jobdiva_id}; {jobdiva_link}), "
+        f"PAIR found {n} candidate(s) it already phone-screened for other jobs in the last {int(lookback_days)} days "
+        f"who also match this role:\n\n" + "\n".join(plain_rows) + "\n\n"
+        "Screen result is the outcome of the PAIR phone screen for the previous job (In Progress = partially completed). "
+        "Match is the resume match against this job's Step 5 criteria.\n"
+    )
     return _send(to_list, subject, _base_html(content), plain)

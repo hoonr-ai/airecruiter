@@ -253,6 +253,28 @@ EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP = True
 # old hard-zero. Every other source keeps the location hard gate either way.
 JOBAGENT_LOCATION_HARD_VETO = False
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# Résumé is final for residence (2026-09-11, product)
+# ─────────────────────────────────────────────────────────────────────────
+# When True, the current location the LLM extracted from the résumé
+# (`enhanced_info.current_location`, explicit contact-header / address
+# statements only — the prompt forbids inferring it) REPLACES the
+# source-native location (JobDiva CRM city/state, LinkedIn area) for
+# display, scoring and the location / country gates. A JobDiva JobAgent
+# record that says "Dallas, TX" for a résumé headed "Hyderabad, India" is
+# rated and launched as India. The source value is kept on the row as
+# `profile_location` and the disagreement as `location_conflict` so the UI
+# and the score popup can show why. When the résumé is silent the source
+# value stands. A conflicting résumé also switches off the JobAgent
+# location-veto exemption above — JobDiva's own location filter is exactly
+# what the résumé just contradicted.
+# False restores the legacy fill-blank-only behaviour.
+RESUME_LOCATION_AUTHORITATIVE = (
+    _os.getenv("RESUME_LOCATION_AUTHORITATIVE", "true").strip().lower()
+    not in ("0", "false", "no", "off")
+)
+
 # High-level scoring for JobDiva-JobAgent results. The JobAgent criteria
 # are authored by recruiters inside JobDiva and its matcher pre-ranks the
 # results, so the expensive per-candidate LLM skills-match adds little —

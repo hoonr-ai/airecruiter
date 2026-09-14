@@ -203,14 +203,44 @@ def test_hard_gate_no_veto_for_remote_job(svc):
 
 # ---------------------------------------------- review-confirmed regressions
 
-def test_verdict_source_native_location_beats_llm_extraction(svc, monkeypatch):
-    """Policy 2026-07-30 (Job 26-22448): the source-native location is
-    authoritative. When `candidate.location` is present, the LLM-extracted
-    `enhanced_info.current_location` is NOT consulted — a resume-derived
-    string ("Hyderabad, India" on a candidate whose JobDiva record says
-    "Ajax, ON") must be able to neither rescue nor condemn the candidate."""
+def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
+    """Policy 2026-09-11: the résumé is final for residence. When the LLM
+    extracted an explicit `enhanced_info.current_location`, THAT is the
+    location the verdict judges — the source-native `candidate.location`
+    ("Tucson, AZ" here) is not consulted alongside it. (Superseded the
+    2026-07-30 source-native-wins policy by product request: JobDiva agent
+    records saying "US" for résumés headed "India" were being launched.)"""
     import services.unified_candidate_search as ucs
 
+    geocoded = []
+
+    def fake_within_radius(candidate_loc, target, miles):
+        geocoded.append(candidate_loc)
+        return True, "ok", 16.3
+
+    monkeypatch.setattr(ucs, "within_radius", fake_within_radius)
+    ok, reason, dist = svc._location_match_verdict(
+        {
+            "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
+            "location": "Tucson, AZ",
+        },
+        _criteria(),
+    )
+    # The résumé string is what gets geocoded; Tucson never enters the verdict.
+    assert ok
+    assert dist == 16.3
+    assert len(geocoded) == 1 and "phoenix" in geocoded[0].lower()
+
+
+def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, monkeypatch):
+    """RESUME_LOCATION_AUTHORITATIVE=False restores policy 2026-07-30 (Job
+    26-22448): the source-native location is authoritative and the
+    LLM-extracted string is NOT consulted while `candidate.location` is
+    present — it can neither rescue nor condemn the candidate."""
+    import services.unified_candidate_search as ucs
+    from core import sourcing_config
+
+    monkeypatch.setattr(sourcing_config, "RESUME_LOCATION_AUTHORITATIVE", False)
     geocoded = []
 
     def fake_within_radius(candidate_loc, target, miles):

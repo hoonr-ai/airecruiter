@@ -603,10 +603,29 @@ export function CandidateMatchTable({
                         {homeLocation && (
                           <span
                             className="inline-flex items-center gap-1 text-slate-600 truncate"
-                            title={`Location: ${homeLocation}`}
+                            title={
+                              candidate.location_source === "resume"
+                                ? `Location from résumé: ${homeLocation}${
+                                    candidate.location_conflict?.profile
+                                      ? ` (JobDiva/profile said ${candidate.location_conflict.profile})`
+                                      : ""
+                                  }`
+                                : `Location: ${homeLocation}`
+                            }
                           >
                             <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
                             <span className="truncate">{homeLocation}</span>
+                            {/* Résumé-is-final: the résumé's stated location
+                                overrode a different profile location — the
+                                score and the location gate used the résumé. */}
+                            {candidate.location_conflict?.profile && (
+                              <span
+                                className="shrink-0 px-1 py-px rounded bg-violet-50 text-violet-700 text-[9px] font-bold uppercase tracking-wider border border-violet-200"
+                                title={`Résumé says ${homeLocation}; JobDiva/profile said ${candidate.location_conflict.profile}. Scored on the résumé.`}
+                              >
+                                résumé
+                              </span>
+                            )}
                           </span>
                         )}
                         {workLocation && (

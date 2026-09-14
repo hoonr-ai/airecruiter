@@ -41,11 +41,11 @@ jobs:
 
       - name: Run API tests
         # Env stubs live in apps/api/tests/conftest.py (single source of truth).
-        # test_jobdiva_talent_payload.py has 9 pre-existing failures on develop
-        # (mock signature drift) — tracked separately from this PR.
+        # No --ignore: the whole suite runs, so a file cannot regress unnoticed
+        # behind an exclusion that outlives the failures it was added for.
         run: |
           cd apps/api
-          pytest -q --ignore=tests/test_jobdiva_talent_payload.py
+          pytest -q
 
   test-web:
     runs-on: ubuntu-latest

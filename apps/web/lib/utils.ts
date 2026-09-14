@@ -22,7 +22,8 @@ export function getQuestionFilterType(
   category: string,
   orderIndex: number,
   isBooleanMode: boolean,
-  isHardFilterInDb: boolean
+  isHardFilterInDb: boolean,
+  questionType?: string
 ): "HARD_FILTER" | "INFO_ONLY" | "SCORED" {
   const textLower = (questionText || "").toLowerCase();
   const hasPassCriteria = Boolean(passCriteria && passCriteria.trim());
@@ -34,6 +35,10 @@ export function getQuestionFilterType(
 
   const isNewOpps = textLower.includes(PHRASE_NEW_OPPS);
   const isOnsiteHybrid = PHRASES_ONSITE_HYBRID.some((p) => textLower.includes(p));
+
+  if (questionType === "hard_filter") return "HARD_FILTER";
+  if (questionType === "info_only") return "INFO_ONLY";
+  if (questionType === "scored") return "SCORED";
 
   // Mirrors _sanitize_pre_screen_questions_for_pair in engagement.py
   if (isNewOpps || isOnsiteHybrid) return "HARD_FILTER";

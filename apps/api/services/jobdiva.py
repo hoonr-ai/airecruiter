@@ -359,7 +359,31 @@ def _collect_field_values(data: Dict[str, Any], keys: List[str]) -> List[str]:
     return values
 
 
-def jobdiva_profile_id(source: Optional[str], candidate_id: Any) -> Optional[str]:
+# Grep-able marker for every log line / New Relic event raised when the
+# JobDiva profile-identity invariant is breached ("a person sourced from JobDiva
+# must never get a second profile"). Alert on it.
+JOBDIVA_PROFILE_INVARIANT = "JOBDIVA_PROFILE_INVARIANT"
+
+
+def jobdiva_profile_stamp(candidate_id: Any) -> Dict[str, str]:
+    """Fields a JobDiva pool emitter adds to each row it returns.
+
+    ``{"jobdiva_candidate_id": <own id>}`` when the id is numeric, else ``{}``.
+    The frontend passes it through on /candidates/save and ``jobdiva_profile_id``
+    trusts it when it equals ``candidate_id`` -- a proof of JobDiva provenance
+    that does not depend on the ``source`` label spelling, so renaming a label in
+    either app can no longer turn JobDiva people into "unknown" people that
+    Launch PAIR would re-create in JobDiva.
+    """
+    cid = str(candidate_id or "").strip()
+    return {"jobdiva_candidate_id": cid} if cid.isdigit() else {}
+
+
+def jobdiva_profile_id(
+    source: Optional[str],
+    candidate_id: Any,
+    declared_jobdiva_candidate_id: Any = None,
+) -> Optional[str]:
     """Return the real JobDiva profile id for a JobDiva-sourced row, else None.
 
     For every JobDiva pool (TalentSearch / JobAgent / Applicants) ``candidate_id``
@@ -371,16 +395,35 @@ def jobdiva_profile_id(source: Optional[str], candidate_id: Any) -> Optional[str
     against TalentSearch rows via ``jobagent_matched_ids``
     (services/unified_candidate_search.py).
 
-    Persisting this id is what lets Launch PAIR link the JobDiva application to the
-    person's existing profile instead of making JobDiva mint a duplicate
-    "Unknown Unknown" one -- see routers/engagement.py ``_resolve_link_candidate_id``.
+    A numeric ``candidate_id`` is accepted as the profile id on EITHER signal:
+
+    * ``source`` starts with "jobdiva" (the pool labels), or
+    * ``declared_jobdiva_candidate_id`` equals ``candidate_id`` -- the stamp the
+      pool emitters put on every row (``jobdiva_profile_stamp``), carried through
+      the frontend and the stored ``data`` blob. This keeps the trust decision
+      independent of label spelling.
+
+    A declared id that DIFFERS from the row's own id is deliberately not accepted
+    here: it may be a foreign id merged in from another row, or the duplicate
+    profile the pre-fix provisioner persisted; the provisioner handles stored ids
+    separately (routers/engagement.py ``_resolve_link_candidate_id``).
+
+    Persisting this id is what lets Launch PAIR attach the JobDiva application to
+    the person's existing profile (``link_candidate_to_job`` -> createJobApplication)
+    instead of making JobDiva mint a duplicate "Unknown Unknown" one via
+    CreateJobApplicationWithResume -- see routers/engagement.py
+    ``_resolve_link_candidate_id``.
 
     Non-JobDiva sources mint their own ids (``exa_<url>``, ``<source>_<md5>``, and
     LinkedIn rows that merely *look* numeric), so they must never be linked to a
     JobDiva profile.
     """
     cid = str(candidate_id or "").strip()
-    if cid.isdigit() and str(source or "").lower().startswith("jobdiva"):
+    if not cid.isdigit():
+        return None
+    if str(source or "").lower().startswith("jobdiva"):
+        return cid
+    if str(declared_jobdiva_candidate_id or "").strip() == cid:
         return cid
     return None
 
@@ -1073,6 +1116,7 @@ class JobDivaService:
                         jd_results.append({
                             "candidate_id": str(candidate_id),  # Add this field for consistency
                             "id": str(candidate_id),
+                            **jobdiva_profile_stamp(candidate_id),
                             "name": full_name,
                             "first_name": first_name,  # Use underscore format
                             "last_name": last_name,    # Use underscore format
@@ -1384,6 +1428,7 @@ class JobDivaService:
             record = {
                 "candidate_id": candidate_id,
                 "id": candidate_id,
+                **jobdiva_profile_stamp(candidate_id),
                 "name": full_name,
                 "first_name": first_name,
                 "last_name": last_name,
@@ -1729,6 +1774,7 @@ class JobDivaService:
                     profile_only_results.append({
                         "candidate_id": candidate_id,
                         "id": candidate_id,
+                        **jobdiva_profile_stamp(candidate_id),
                         "name": full_name,
                         "first_name": first_name,
                         "last_name": last_name,
@@ -1826,6 +1872,7 @@ class JobDivaService:
                 jd_results.append({
                     "candidate_id": candidate_id,
                     "id": candidate_id,
+                    **jobdiva_profile_stamp(candidate_id),
                     "name": full_name,
                     "first_name": first_name,
                     "last_name": last_name,
@@ -3644,6 +3691,7 @@ class JobDivaService:
         return {
             "jobdiva_id": applicant.get("JOBID") or candidate_detail.get("JOBID") or "",
             "candidate_id": candidate_id,
+            **jobdiva_profile_stamp(candidate_id),
             "source": "JobDiva-Applicants" if candidate_type == "job_applicant" else "JobDiva-TalentSearch",
             "name": full_name,
             "firstName": first_name,
@@ -4767,6 +4815,92 @@ class JobDivaService:
             logger.error(f"❌ createCandidate exception: {e}")
         return None
 
+    async def _resolve_jobdiva_job_id_or_digits(self, job_id: Any) -> int:
+        """Resolve ``job_id`` (numeric, reference like 26-06182, or versioned
+        26-06182-v2) to the root numeric JobDiva job id. Falls back to digit
+        extraction only when resolution fails; returns 0 when nothing usable."""
+        resolved_job_id = await self._resolve_jobdiva_job_id(job_id)
+        if resolved_job_id:
+            return int(resolved_job_id)
+        try:
+            return int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
+        except (TypeError, ValueError):
+            return 0
+
+    async def link_candidate_to_job(self, candidate_id: Any, job_id: Any) -> bool:
+        """Attach an EXISTING JobDiva profile to a job (apiv2/jobdiva/createJobApplication).
+
+        This is the one JobDiva call that records "candidate applied to job" for
+        a profile we already know. Its body schema (``CreateJobApplicationDef``)
+        is ``{candidateid, jobid}`` plus optional dateapplied/globalid/
+        resumesource, and it is structurally incapable of creating a profile --
+        exactly the property the provisioner needs for people sourced from
+        JobDiva, who must never get a second profile.
+
+        Returns True when JobDiva acknowledged the application. JobDiva documents
+        the response as a boolean, so a 2xx whose body is literally ``false`` is
+        a refusal and is logged with the id pair.
+        """
+        try:
+            cid = int(str(candidate_id).strip())
+        except (TypeError, ValueError):
+            logger.error(f"❌ createJobApplication: non-numeric candidateid {candidate_id!r}")
+            return False
+
+        token = await self.authenticate()
+        if not token:
+            return False
+
+        resolved_job_id = await self._resolve_jobdiva_job_id_or_digits(job_id)
+        if not resolved_job_id:
+            logger.error(f"❌ createJobApplication: cannot resolve job id {job_id!r}")
+            return False
+
+        url = f"{self.api_url}/apiv2/jobdiva/createJobApplication"
+        payload = {"candidateid": cid, "jobid": int(resolved_job_id)}
+        try:
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json",
+                        },
+                    )
+                if response.status_code == 401 and attempt == 0:
+                    logger.warning("⚠️ createJobApplication got 401. Refreshing token...")
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False
+                    continue
+                break
+
+            body = (response.text or "").strip()
+            logger.info(
+                f"🔎 createJobApplication candidateid={cid} jobid={resolved_job_id}: "
+                f"{response.status_code} — {body[:200]}"
+            )
+            if response.status_code in (200, 201) and body.lower() != "false":
+                if body.lower() != "true":
+                    # JobDiva documents a boolean body. Anything else (empty, a
+                    # number, JSON) is ambiguous: keep treating a 2xx as success so
+                    # a benign format change cannot stall provisioning, but make
+                    # it visible so it can be checked against JobDiva.
+                    logger.warning(
+                        f"⚠️ createJobApplication candidateid={cid} jobid={resolved_job_id}: "
+                        f"2xx with non-boolean body {body[:100]!r} — treated as success; verify in JobDiva"
+                    )
+                return True
+            logger.error(
+                f"❌ createJobApplication refused candidateid={cid} jobid={resolved_job_id}: "
+                f"{response.status_code} - {body[:300]}"
+            )
+        except Exception as e:
+            logger.error(f"❌ createJobApplication exception for candidateid={cid} jobid={resolved_job_id}: {e}")
+        return False
+
     async def create_job_application_with_resume(
         self,
         candidate_id: Any,
@@ -4776,45 +4910,107 @@ class JobDivaService:
         first_name: str = "",
         last_name: str = "",
         email: str = "",
-        phone: str = ""
+        phone: str = "",
+        allow_profile_creation: bool = True,
     ) -> tuple:
-        """
-        Creates a job application via JSON (application/json).
-        After creation, updates the candidate's name, email, and phone since
-        the JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
-        email. We fix name + real contact info immediately via updateCandidateProfile.
-        Returns (success: bool, new_candidateId: int|None).
+        """Record a job application for a candidate, creating a JobDiva profile
+        ONLY when nobody in JobDiva matches.
+
+        Two different JobDiva endpoints hide behind this entry point:
+
+        * Known profile (``candidate_id`` given, or found via searchCandidateProfile)
+          -> ``createJobApplication`` {candidateid, jobid}. Attaches the job to the
+          existing profile; cannot create one. See ``link_candidate_to_job``.
+        * Nobody known -> ``CreateJobApplicationWithResume``. JobDiva parses the
+          resume text, mints a NEW profile ("Unknown Unknown" with an Auto_
+          placeholder email until ``_update_candidate_name`` fixes it) and returns
+          the new profile's id as the response body.
+
+        ``CreateJobApplicationWithResume`` has NO ``candidateid`` field. Its body
+        schema in JobDiva's Swagger v2 (``UploadResumeAndApplyJob``) is exactly
+        filecontent, filename, jobid, recruiterid, resumeDate, resumesource,
+        textfile. A ``candidateid`` sent alongside is silently ignored -- which is
+        why the previous "link by passing candidateid" minted a duplicate profile
+        on every Launch PAIR of a JobDiva-sourced person and then persisted the
+        duplicate's id over the real one.
+
+        A known profile id is never downgraded to a fresh profile. If linking
+        fails we retry once through an email/phone lookup ONLY when it yields a
+        *different* id (a stale id after a JobDiva-side merge); otherwise we
+        report failure and leave the retry to /engage/re-provision.
+
+        ``allow_profile_creation=False`` is the caller's declaration that this
+        person already has a JobDiva profile (routers/engagement.py passes it for
+        every row it could resolve a link id for). With it, the create path is
+        refused outright and logged under ``JOBDIVA_PROFILE_INVARIANT`` -- a second
+        wall behind the link-first logic above, so a future refactor of either
+        side cannot reopen the duplicate-minting path silently.
+
+        Returns ``(success, jobdiva_candidate_id)``: on the link path the linked id
+        (str); on the create path the int JobDiva returned (None if it sent no id).
         """
         token = await self.authenticate()
         if not token:
             return False, None
 
-        # Remember whether the caller explicitly linked a profile id. If the create
-        # later fails, the linked id may be stale (profile merged/deleted, or captured
-        # before an earlier duplicate-creation bug), so we retry via an email-based
-        # lookup rather than trusting the linked id unconditionally.
-        linked_id_provided = bool(candidate_id)
+        linked_id = str(candidate_id).strip() if candidate_id is not None else ""
+        if linked_id and not linked_id.isdigit():
+            # Callers only pass ids they trust to be JobDiva profile ids
+            # (routers/engagement.py `_resolve_link_candidate_id`). Anything else
+            # is a programming error, not a reason to mint a profile.
+            logger.error(
+                f"❌ create_job_application_with_resume: refusing non-numeric candidate_id {candidate_id!r}"
+            )
+            return False, None
 
-        # Check if candidate already exists to avoid duplicate/Unknown-Unknown profile
-        if (email or phone) and not candidate_id:
-            candidate_id = await self.search_candidate_profile(email, first_name, last_name, phone)
+        # Check if the person already exists to avoid a duplicate/Unknown-Unknown profile.
+        found_via_search = False
+        if not linked_id and (email or phone):
+            found = await self.search_candidate_profile(email, first_name, last_name, phone)
+            if found:
+                linked_id = str(found).strip()
+                found_via_search = True
 
-        from datetime import datetime
+        if linked_id:
+            if await self.link_candidate_to_job(linked_id, job_id):
+                logger.info(f"✅ JobDiva application linked → candidateId={linked_id}, job={job_id}")
+                return True, linked_id
+
+            # Linking failed. Only a *different* profile (stale id after a JobDiva
+            # merge) justifies another attempt -- never a brand-new profile.
+            if not found_via_search and (email or phone):
+                alt = await self.search_candidate_profile(email, first_name, last_name, phone)
+                alt_id = str(alt).strip() if alt else ""
+                if alt_id and alt_id != linked_id:
+                    logger.warning(
+                        f"⚠️ Linked candidateId={linked_id} refused — retrying with email/phone-matched id={alt_id}"
+                    )
+                    if await self.link_candidate_to_job(alt_id, job_id):
+                        return True, alt_id
+            logger.error(
+                f"❌ Could not attach job {job_id} to existing JobDiva profile {linked_id}; "
+                f"NOT creating a new profile (it would duplicate the person). "
+                f"Retry later via /engage/re-provision."
+            )
+            return False, None
+
+        # ── Nobody known in JobDiva: create a profile from the resume text.
+        # This is the ONLY path that mints a JobDiva profile.
+        if not allow_profile_creation:
+            logger.error(
+                f"❌ {JOBDIVA_PROFILE_INVARIANT}: refusing to create a JobDiva profile for a person "
+                f"the caller marked as already in JobDiva (job={job_id}, email={email or '-'}, "
+                f"phone={phone or '-'}): no link id was resolved and the lookup found nobody. "
+                f"Fix the row's jobdiva_candidate_id / source instead of minting a duplicate."
+            )
+            return False, None
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
-
         url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
-        # Resolve to the real numeric JobDiva job id. This correctly handles a
-        # numeric id, a reference string (26-06182) AND a versioned ref
-        # (26-06182-v2 -> root job), instead of digit-mashing the ref into a
-        # bogus number. Fall back to digit extraction only if resolution fails.
-        resolved_job_id = await self._resolve_jobdiva_job_id(job_id)
-        if not resolved_job_id:
-            try:
-                resolved_job_id = int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
-            except (TypeError, ValueError):
-                resolved_job_id = 0
+        # Resolve to the real numeric JobDiva job id (numeric, reference 26-06182,
+        # or versioned 26-06182-v2 -> root job) instead of digit-mashing the ref.
+        resolved_job_id = await self._resolve_jobdiva_job_id_or_digits(job_id)
 
-        # Build an explicit text header to guarantee JobDiva's parser correctly 
+        # Build an explicit text header to guarantee JobDiva's parser correctly
         # extracts the confirmed candidate name and contact info.
         header_lines = []
         if first_name or last_name:
@@ -4823,103 +5019,80 @@ class JobDivaService:
             header_lines.append(f"Email: {email}")
         if phone:
             header_lines.append(f"Phone: {phone}")
-        
+
         if header_lines:
             header_text = "\n".join(header_lines)
             resume_text = f"{header_text}\n\n================================\n\n{resume_text}"
 
-        async def _attempt(cid: Any) -> tuple:
-            """Post one CreateJobApplicationWithResume call for the given candidate id."""
-            nonlocal token
-            json_payload = {
-                "filename": filename,
-                "textfile": resume_text,
-                "filecontent": "",
-                "jobid": int(resolved_job_id or 0),
-                "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
-                "resumeDate": resume_date,
-                "resumesource": 0
-            }
-            try:
-                if cid:
-                    json_payload["candidateid"] = int(cid)
-                status, res_body = None, ""
-                for attempt in range(2):
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        response = await client.post(
-                            url,
-                            json=json_payload,
-                            headers={
-                                "Authorization": f"Bearer {token}",
-                                "Accept": "application/json",
-                            }
-                        )
-                    status, res_body = response.status_code, response.text
+        # Exactly the UploadResumeAndApplyJob schema -- no candidateid (see docstring).
+        json_payload = {
+            "filename": filename,
+            "textfile": resume_text,
+            "filecontent": "",
+            "jobid": int(resolved_job_id or 0),
+            "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
+            "resumeDate": resume_date,
+            "resumesource": 0
+        }
+        try:
+            status, res_body = None, ""
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        url,
+                        json=json_payload,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json",
+                        }
+                    )
+                status, res_body = response.status_code, response.text
 
-                    if status == 401 and attempt == 0:
-                        logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
-                        token = await self.authenticate(force_refresh=True)
-                        if not token:
-                            return False, None
-                        continue
+                if status == 401 and attempt == 0:
+                    logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False, None
+                    continue
 
-                    logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
-                    break
+                logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+                break
 
-                if status in [200, 201]:
+            if status in [200, 201]:
+                try:
+                    new_cid = int(res_body.strip())
+                except (ValueError, TypeError):
+                    # JobDiva may return JSON instead of a bare integer
                     try:
-                        new_cid = int(res_body.strip())
-                    except (ValueError, TypeError):
-                        # JobDiva may return JSON instead of a bare integer
-                        try:
-                            import json as _json
-                            parsed = _json.loads(res_body)
-                            if isinstance(parsed, dict):
-                                new_cid = parsed.get("candidateId") or parsed.get("id") or parsed.get("CANDIDATEID")
-                            else:
-                                new_cid = None
-                        except Exception:
+                        import json as _json
+                        parsed = _json.loads(res_body)
+                        if isinstance(parsed, dict):
+                            new_cid = parsed.get("candidateId") or parsed.get("id") or parsed.get("CANDIDATEID")
+                        else:
                             new_cid = None
+                    except Exception:
+                        new_cid = None
 
-                    # When linking an existing candidate, JobDiva often returns 0 or empty
-                    # body (no new profile created). Fall back to the pre-found candidate_id
-                    # so the ID is correctly persisted and updateCandidateProfile still runs.
-                    if not new_cid and cid:
-                        new_cid = cid
-                        logger.info(f"ℹ️ JobDiva returned no ID — using pre-found candidateId={new_cid}")
+                if not new_cid:
+                    logger.warning(
+                        f"⚠️ CreateJobApplicationWithResume returned no candidate id for job={job_id} "
+                        f"(body={res_body[:100]!r}); a profile may exist that we cannot link to."
+                    )
+                logger.info(f"✅ JobDiva profile created → candidateId={new_cid}, job={job_id}")
 
-                    logger.info(f"✅ JobDiva application linked/created → candidateId={new_cid}, job={job_id}")
+                # We injected the name into the resume header, so JobDiva's parser should
+                # extract it perfectly. We still call _update_candidate_name instantly
+                # just to guarantee the exact spelling and apply any missing fields.
+                # Only here: we edit the profiles we create, never a linked one.
+                if new_cid and (first_name or last_name or email or phone):
+                    await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
-                    # We injected the name into the resume header, so JobDiva's parser should 
-                    # extract it perfectly. We still call _update_candidate_name instantly 
-                    # just to guarantee the exact spelling and apply any missing fields.
-                    if new_cid and (first_name or last_name or email or phone):
-                        await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
-
-                    return True, new_cid
-                else:
-                    logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
-            except Exception as e:
-                logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
-            return False, None
-
-        success, new_cid = await _attempt(candidate_id)
-
-        # On linked-id failure, retry once via email/phone lookup before creating a new profile.
-        if not success and linked_id_provided and (email or phone):
-            fallback_id = await self.search_candidate_profile(email, first_name, last_name, phone)
-            if fallback_id and str(fallback_id) != str(candidate_id):
-                logger.warning(
-                    f"⚠️ Linked candidateId={candidate_id} failed — retrying with email/phone-matched id={fallback_id}"
-                )
-                success, new_cid = await _attempt(fallback_id)
-            elif not fallback_id:
-                logger.warning(
-                    f"⚠️ Linked candidateId={candidate_id} failed and no email match — retrying as new profile"
-                )
-                success, new_cid = await _attempt(None)
-
-        return success, new_cid
+                return True, new_cid
+            else:
+                logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
+        except Exception as e:
+            logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
+        return False, None
 
     async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "", phone: str = "") -> bool:
         """
