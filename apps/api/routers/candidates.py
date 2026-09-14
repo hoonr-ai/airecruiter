@@ -120,6 +120,41 @@ def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float],
     return s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and (is_boolean_job or engage_score is not None)
 
 
+def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
+    """Return the WHERE condition and DISTINCT ON tiebreaker for a feedback filter.
+
+    Action filters constrain the selected ``sourced_candidates`` row directly;
+    No Feedback remains a job-scoped absence check across a candidate's rows.
+    """
+    if not feedback:
+        return "", ""
+
+    f_lower = feedback.strip().lower()
+    if f_lower in ("no feedback", "none", "no_feedback"):
+        correlation_scaffold = (
+            "SELECT 1 FROM sourced_candidates sc2 "
+            "WHERE sc2.candidate_id = sc.candidate_id "
+            "AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
+        )
+        return f"""
+            AND NOT EXISTS (
+                {correlation_scaffold}
+                  AND sc2.data->>'feedback_type' IS NOT NULL
+                  AND TRIM(sc2.data->>'feedback_type') <> ''
+            )""", "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
+
+    predicates = {
+        "submit": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "submitted": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "reject": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "rejected": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "unreachable": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')",
+    }
+    predicate = predicates.get(f_lower, "")
+    return (f"AND {predicate}", predicate) if predicate else ("", "")
+
+
+
 def _extract_rankings_hard_filter_details(
     data_blob: Dict[str, Any],
     audit_response: Any,
