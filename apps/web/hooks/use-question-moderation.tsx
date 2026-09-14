@@ -36,9 +36,9 @@ const MIN_CHECK_LENGTH = 12;
 const DEBOUNCE_MS = 1200;
 
 const normalizeQuestionText = (t: string, a?: string) => {
-    let combined = t.trim();
-    if (a) combined += "|" + a.trim();
-    return combined.replace(/\s+/g, " ").toLowerCase();
+    const normT = t.trim().replace(/\s+/g, " ").toLowerCase();
+    const normA = a ? a.trim().replace(/\s+/g, " ").toLowerCase() : "";
+    return JSON.stringify([normT, normA]);
 };
 
 const FAIL_OPEN: QuestionPolicyVerdict = { ok: true, flags: [], reason: "", checked: false };

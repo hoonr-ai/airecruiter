@@ -736,7 +736,8 @@ async def moderate_screening_questions(
         # job_title is part of the prompt (it decides off_topic/nonsensical),
         # so it must be part of the key — a verdict for one job's context must
         # not serve another job for 7 days.
-        cache_key = _llm_cache.make_key("q_moderation", 1, model, job_title, text)
+        expected_answer_text = (item.expected_answer or "").strip()[:1000]
+        cache_key = _llm_cache.make_key("q_moderation", 2, model, job_title, text, expected_answer_text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
@@ -750,8 +751,8 @@ async def moderate_screening_questions(
             try:
                 job_context = f"Job title: {job_title}\n\n" if job_title else ""
                 content_to_check = f"{job_context}Screening question to review:\n{text}"
-                if item.expected_answer:
-                    content_to_check += f"\n\nExpected answer/Pass criteria:\n{item.expected_answer[:1000]}"
+                if expected_answer_text:
+                    content_to_check += f"\n\nExpected answer/Pass criteria:\n{expected_answer_text}"
 
                 completion = await oai.beta.chat.completions.parse(
                     model=model,
