@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Literal
 
 class Skill(BaseModel):
     value: str
@@ -448,6 +448,6 @@ class ManualCandidateRequest(BaseModel):
 class CandidateFeedbackRequest(BaseModel):
     feedback_type: str  # 'Submit', 'Reject', 'Unreachable'
     reason: Optional[str] = None
-    submission_type: Optional[str] = "external"  # 'internal' or 'external' (when feedback_type == 'Submit')
+    submission_type: Optional[Literal["internal", "external"]] = "external"  # 'internal' or 'external' (when feedback_type == 'Submit')
     manager_email: Optional[str] = None          # Required when submission_type == 'internal'
     recruiter_notes: Optional[str] = None        # Optional notes from recruiter to manager

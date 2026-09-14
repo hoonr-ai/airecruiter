@@ -1017,7 +1017,7 @@ def notify_internal_submission_to_manager(
 
     to_list = [manager_email.strip()]
     if recruiter_email and recruiter_email.strip():
-        # Optional: cc or include recruiter
+        # Optional: include recruiter in the recipients list
         to_list.append(recruiter_email.strip())
     to_list = list(dict.fromkeys(to_list))
 

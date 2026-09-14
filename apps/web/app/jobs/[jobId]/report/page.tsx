@@ -18,14 +18,11 @@ import {
   Headphones,
   AlertTriangle,
   CircleCheck,
-  Briefcase,
   MapPin,
   Hash,
   DollarSign,
   Circle,
   Info,
-  ExternalLink,
-  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SubmissionModal } from "@/components/SubmissionModal";

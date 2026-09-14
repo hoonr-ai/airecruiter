@@ -8,7 +8,6 @@ export interface SubmissionModalProps {
   isOpen: boolean;
   onClose: () => void;
   candidateName?: string;
-  candidateId?: string | number;
   jobTitle?: string;
   jobRef?: string;
   clientName?: string;

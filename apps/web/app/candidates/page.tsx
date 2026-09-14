@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
+import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
