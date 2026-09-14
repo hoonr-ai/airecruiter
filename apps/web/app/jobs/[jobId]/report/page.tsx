@@ -18,18 +18,21 @@ import {
   Headphones,
   AlertTriangle,
   CircleCheck,
+  Briefcase,
   MapPin,
   Hash,
   DollarSign,
   Circle,
   Info,
+  ExternalLink,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SubmissionModal } from "@/components/SubmissionModal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { API_BASE, authFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
+import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 
 interface TranscriptionItem {
   question: string;
@@ -64,6 +67,10 @@ interface EvaluationReport {
     feedback_type?: string;
     feedback_reason?: string;
     feedback_at?: string;
+    submission_type?: "internal" | "external" | string;
+    manager_email?: string;
+    recruiter_notes?: string;
+    submitted_by?: string;
   };
   scores: {
     resume_match_score: number;
@@ -169,11 +176,7 @@ export default function CandidateEvaluationReportPage() {
   const [rejectReason, setRejectReason] = useState("");
   const [syncingCandidateId, setSyncingCandidateId] = useState<string | null>(null);
 
-  const handleConfirmSubmit = async (submissionData: {
-    submission_type: 'internal' | 'external';
-    manager_email?: string;
-    recruiter_notes?: string;
-  }) => {
+  const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (candidateId) {
       setSyncingCandidateId(candidateId);
       try {
@@ -198,6 +201,8 @@ export default function CandidateEvaluationReportPage() {
                 ...prev.candidate,
                 feedback_type: 'Submit',
                 submission_type: submissionData.submission_type,
+                manager_email: submissionData.manager_email,
+                recruiter_notes: submissionData.recruiter_notes,
                 feedback_at: new Date().toISOString()
               }
             };
@@ -310,6 +315,11 @@ export default function CandidateEvaluationReportPage() {
   }
 
   const { candidate, scores, job, pair } = data;
+  const feedbackType = String(candidate.feedback_type || '').trim().toLowerCase();
+  const submissionType = String(candidate.submission_type || '').trim().toLowerCase();
+  const isInternalSubmission = feedbackType === 'submit' && submissionType === 'internal';
+  const isExternalSubmission = feedbackType === 'submit' && submissionType !== 'internal';
+  const isRejected = feedbackType.startsWith('reject');
   const showEngageScore = hasFinalEngageOutcome(scores.hard_filter_status, scores.engage_status, scores.engage_score);
   const displayedTotalFitScore = showEngageScore
     ? (scores.total_fit_score || 0)
@@ -398,14 +408,14 @@ export default function CandidateEvaluationReportPage() {
             </p>
           </div>
           <div className="flex gap-3 no-print">
-            {candidate.feedback_type ? (
+            {isExternalSubmission || isRejected ? (
               <div className={cn(
                 "flex items-center gap-2 px-6 py-2 rounded-xl text-[14px] font-bold shadow-sm border",
-                candidate.feedback_type === 'Submit' 
+                isExternalSubmission
                   ? "bg-emerald-50 border-emerald-200 text-emerald-700" 
                   : "bg-rose-50 border-rose-200 text-rose-700"
               )}>
-                {candidate.feedback_type === 'Submit' ? (
+                {isExternalSubmission ? (
                   <><CircleCheck className="w-4 h-4" /> Submitted</>
                 ) : (
                   <><Ban className="w-4 h-4" /> Rejected</>
@@ -413,6 +423,11 @@ export default function CandidateEvaluationReportPage() {
               </div>
             ) : (
               <>
+                {isInternalSubmission && (
+                  <div className="flex items-center gap-2 px-4 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-sm font-semibold text-indigo-700 shadow-sm">
+                    <CircleCheck className="w-4 h-4" /> Internally Submitted
+                  </div>
+                )}
                 <button 
                   onClick={() => window.print()}
                   className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
@@ -814,25 +829,26 @@ export default function CandidateEvaluationReportPage() {
       <SubmissionModal
         isOpen={integrationModalOpen === 'submit'}
         onClose={() => setIntegrationModalOpen(null)}
-        candidateName={candidate?.name || "Candidate"}
-        jobTitle={job?.title || "Job"}
-        jobRef={job?.jobdiva_id || job?.job_id || (Array.isArray(jobId) ? jobId[0] : jobId)}
-        clientName={job?.customer_name || "—"}
+        candidateName={candidate?.name || 'Candidate'}
+        jobTitle={job?.title || 'Job'}
+        jobRef={job?.jobdiva_id || job?.job_id || (Array.isArray(jobId) ? jobId[0] : String(jobId || ''))}
+        clientName={job?.customer_name || '-'}
         onConfirmSubmit={handleConfirmSubmit}
         isSubmitting={!!syncingCandidateId}
+        defaultMode={isInternalSubmission ? 'external' : 'choose'}
       />
 
       {integrationModalOpen === 'reject' && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 no-print">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
-                Reject Candidate
-              </h3>
-              <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
-            </div>
-            <div className="p-6 space-y-4">
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                    Reject Candidate
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidate?.name || "Winci Zu"}</strong>.
                   </p>

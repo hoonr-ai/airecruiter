@@ -19,6 +19,9 @@ import {
   MessageSquare,
   Send,
   ExternalLink,
+  User,
+  Briefcase,
+  Building2,
   Zap,
   Check,
   X,
@@ -45,19 +48,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SubmissionModal } from "@/components/SubmissionModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
-import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
+import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -539,11 +541,7 @@ export default function CandidateRankingsPage() {
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
 
-  const handleConfirmSubmit = async (submissionData: {
-    submission_type: 'internal' | 'external';
-    manager_email?: string;
-    recruiter_notes?: string;
-  }) => {
+  const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
@@ -1470,41 +1468,10 @@ export default function CandidateRankingsPage() {
       }
       // Merge candidate data dictionary so nested fields like engage_status are preserved
       if (src.data && typeof src.data === "object" && !Array.isArray(src.data)) {
-        // Snapshot a complete feedback event before the generic data merge.
-        // Otherwise a missing field on dst can be backfilled from src, leaving
-        // a feedback type/reason/timestamp stitched from two different rows.
-        const dstFeedback = {
-          type: String(dst.data?.feedback_type || "").trim(),
-          reason: dst.data?.feedback_reason,
-          at: dst.data?.feedback_at,
-        };
-        const srcFeedback = {
-          type: String(src.data.feedback_type || "").trim(),
-          reason: src.data.feedback_reason,
-          at: src.data.feedback_at,
-        };
-        const dstFeedbackAt = Date.parse(String(dstFeedback.at || ""));
-        const srcFeedbackAt = Date.parse(String(srcFeedback.at || ""));
-        const shouldUseSourceFeedback = srcFeedback.type && (
-          !dstFeedback.type ||
-          (Number.isFinite(srcFeedbackAt) && (!Number.isFinite(dstFeedbackAt) || srcFeedbackAt > dstFeedbackAt))
-        );
-
         dst.data = {
           ...src.data,
           ...(dst.data || {})
         };
-
-        const selectedFeedback = shouldUseSourceFeedback ? srcFeedback : dstFeedback;
-        if (selectedFeedback.type) {
-          dst.data.feedback_type = selectedFeedback.type;
-          dst.data.feedback_reason = selectedFeedback.reason;
-          dst.data.feedback_at = selectedFeedback.at;
-        } else {
-          delete dst.data.feedback_type;
-          delete dst.data.feedback_reason;
-          delete dst.data.feedback_at;
-        }
       }
       return dst;
     };
@@ -2148,17 +2115,6 @@ export default function CandidateRankingsPage() {
             </div>
           )}
         </div>
-      )}
-
-      {/* Cross submissions: PAIR-screened candidates from other jobs (last
-          60 days) who match this one. Not on this job's list — the panel
-          hides itself when empty and each row can be added to the job. */}
-      {jobId && (
-        <CrossSubmissionsPanel
-          jobId={jobId as string}
-          notify={(type, message) => setToast({ type, message })}
-          onAdded={() => fetchCandidatesPage(0, true)}
-        />
       )}
 
       {/* Table Interface */}
@@ -2974,7 +2930,7 @@ export default function CandidateRankingsPage() {
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={job?.title || "Job"}
         jobRef={job?.jobdiva_id || job?.job_id || String(jobId || "")}
-        clientName={job?.customer_name || "—"}
+        clientName={job?.customer_name || "-"}
         onConfirmSubmit={handleConfirmSubmit}
         isSubmitting={syncingCandidateId === actionCandidateId}
       />
@@ -2982,14 +2938,14 @@ export default function CandidateRankingsPage() {
       {integrationModalOpen === 'reject' && actionCandidateId && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
-                Reject Candidate
-              </h3>
-              <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
-            </div>
-            <div className="p-6 space-y-4">
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                    Reject Candidate
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
