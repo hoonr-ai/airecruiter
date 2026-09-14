@@ -1332,7 +1332,6 @@ export default function GlobalCandidatesPage() {
           setActionCandidateId(null);
         }}
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
-        candidateId={actionCandidateId || undefined}
         jobTitle={candidates.find(c => c.id === actionCandidateId)?.job_title || "Job"}
         jobRef={candidates.find(c => c.id === actionCandidateId)?.jobdiva_id || ""}
         clientName={String(candidates.find(c => c.id === actionCandidateId)?.company || "—")}

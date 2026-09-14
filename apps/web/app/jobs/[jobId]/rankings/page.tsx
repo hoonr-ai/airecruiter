@@ -2972,7 +2972,6 @@ export default function CandidateRankingsPage() {
           setActionCandidateId(null);
         }}
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
-        candidateId={actionCandidateId || undefined}
         jobTitle={job?.title || "Job"}
         jobRef={job?.jobdiva_id || job?.job_id || String(jobId || "")}
         clientName={job?.customer_name || "—"}
