@@ -65,6 +65,36 @@ export function AssessModal({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [stopOutreachOpen, setStopOutreachOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  // The transcript endpoint is authenticated. window.open cannot send the
+  // bearer token, so fetch the PDF with authFetch and hand the blob to the
+  // browser as a download.
+  const downloadTranscript = async () => {
+    setDownloading(true);
+    try {
+      const res = await authFetch(
+        `${API_BASE}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`
+      );
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") || "";
+      const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+      const filename = match?.[1] ? decodeURIComponent(match[1]) : `transcript-${interviewId}.pdf`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Transcript download failed:", e);
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   useEffect(() => {
     if (open && interviewId) {
@@ -507,12 +537,11 @@ export function AssessModal({
                     variant="outline"
                     size="sm"
                     className="h-7 text-[11px] gap-1.5 border-slate-200 text-slate-600 hover:bg-slate-50"
-                    onClick={() => {
-                      window.open(`${API_BASE}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`, "_blank");
-                    }}
+                    onClick={downloadTranscript}
+                    disabled={downloading}
                   >
                     <Download className="w-3.5 h-3.5" />
-                    Download PDF
+                    {downloading ? "Downloading…" : "Download PDF"}
                   </Button>
                 )}
               </div>
