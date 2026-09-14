@@ -415,6 +415,7 @@ def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any
         FROM engage_interview_audit
         WHERE jobdiva_id = ANY(%s)
           AND NULLIF(interview_id, '') IS NOT NULL
+        ORDER BY created_at DESC, id DESC
     """
     out: Dict[str, List[Dict[str, Any]]] = {}
     with conn.cursor() as cur:
@@ -1062,8 +1063,12 @@ async def get_launch_report(
     interview_ids: List[str] = []
     for job in jobs:
         rows = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
-        # A job matched under both keys yields the same interview twice.
-        # Preserve earliest launch timestamp and prioritize higher status progression.
+        # Deduplicate audit rows per interview_id.
+        # Two distinct concerns are decoupled:
+        # 1. Scope: An interview belongs to a report window based strictly on its
+        #    INITIAL launch timestamp (earliest created_at).
+        # 2. Status: Once in scope, it is bucketed using its latest known status
+        #    and monotonic state hierarchy (completed > partial > in_progress > pending).
         deduped: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             iid = str(row.get("interview_id") or "").strip()
@@ -1071,18 +1076,21 @@ async def get_launch_report(
                 continue
             if iid not in deduped:
                 deduped[iid] = dict(row)
+                deduped[iid]["first_launched_at"] = row.get("created_at")
             else:
                 existing = deduped[iid]
-                # Preserve earliest created_at for true launch timestamp
-                ex_dt = _parse_iso(existing.get("created_at"))
+                # 1. Track earliest created_at for launch-window scoping
+                ex_dt = _parse_iso(existing.get("first_launched_at") or existing.get("created_at"))
                 row_dt = _parse_iso(row.get("created_at"))
                 if ex_dt and row_dt:
                     if row_dt < ex_dt:
+                        existing["first_launched_at"] = row["created_at"]
                         existing["created_at"] = row["created_at"]
                 elif row_dt and not ex_dt:
+                    existing["first_launched_at"] = row["created_at"]
                     existing["created_at"] = row["created_at"]
 
-                # Prioritize higher status rank
+                # 2. Monotonic status hierarchy: favor higher progression state
                 row_st = _extract_audit_status(row).lower()
                 ex_st = _extract_audit_status(existing).lower()
                 if _STATUS_HIERARCHY.get(row_st, 0) > _STATUS_HIERARCHY.get(ex_st, 0):
@@ -1092,15 +1100,13 @@ async def get_launch_report(
                 elif row.get("response") and not existing.get("response"):
                     existing["response"] = row.get("response")
 
-        # Scoped to the requested report range rather than only the job's
-        # first-launch day, so later-day launches show up on their own report
-        # instead of vanishing (the job's row is keyed on first-launch day,
-        # but its later launches still fall inside a range that includes them).
+        # Report scoping: decides which interviews are in scope based strictly on
+        # initial launch date, never dropping candidates due to subsequent status updates.
         day_rows = [
             row
             for row in deduped.values()
-            if (created_date := _eastern_date(_parse_iso(row.get("created_at")))) is not None
-            and report_start_date <= created_date <= report_end_date
+            if (launch_date := _eastern_date(_parse_iso(row.get("first_launched_at") or row.get("created_at")))) is not None
+            and report_start_date <= launch_date <= report_end_date
         ]
 
         audit_by_job[str(job["job_id"])] = day_rows
