@@ -30,6 +30,12 @@ export interface QuestionPolicyVerdict {
     checked: boolean;
 }
 
+export interface ModeratableQuestion {
+    category?: string | null;
+    question_text: string;
+    pass_criteria?: string | null;
+}
+
 export type QuestionModerationState = QuestionPolicyVerdict | "checking";
 
 const MIN_CHECK_LENGTH = 12;
@@ -67,10 +73,14 @@ export function useQuestionModeration(jobTitle?: string) {
         if (existing === "checking") return;
         if (existing && existing.checked) return;
         setEntry(norm, "checking");
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
+            const controller = new AbortController();
+            timeoutId = setTimeout(() => controller.abort(), 8000);
             const res = await authFetch(`${API_BASE}/api/v1/ai-generation/screening-questions/moderate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
                 body: JSON.stringify({
                     questions: [{ key: norm, question_text: text.trim(), expected_answer: answer?.trim() || "" }],
                     job_title: jobTitleRef.current || "",
@@ -91,6 +101,8 @@ export function useQuestionModeration(jobTitle?: string) {
             );
         } catch {
             setEntry(norm, FAIL_OPEN);
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
         }
     }, [setEntry]);
 
@@ -113,6 +125,15 @@ export function useQuestionModeration(jobTitle?: string) {
         [verdicts],
     );
 
+    const hasBlockingWarning = useCallback(
+        (questions: ModeratableQuestion[]) => questions.some(question => {
+            if (!isRecruiterAddedQuestion(question.category)) return false;
+            const verdict = verdicts[normalizeQuestionText(question.question_text, question.pass_criteria || "")];
+            return verdict === "checking" || (verdict !== undefined && !verdict.ok);
+        }),
+        [verdicts],
+    );
+
     // Pending debounce timers must not fire after the editor unmounts.
     useEffect(() => {
         const pending = timers.current;
@@ -121,7 +142,7 @@ export function useQuestionModeration(jobTitle?: string) {
         };
     }, []);
 
-    return { verdictFor, scheduleCheck, flushCheck };
+    return { verdictFor, hasBlockingWarning, scheduleCheck, flushCheck };
 }
 
 const SERIOUS_FLAGS = new Set(["nsfw", "rude", "discriminatory", "sensitive_personal_data", "unsafe"]);
