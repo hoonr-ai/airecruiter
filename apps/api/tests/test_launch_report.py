@@ -64,7 +64,7 @@ def test_bucket_status_unknown_value_falls_back_and_warns(caplog):
     bucket sets need updating, so it has to be both counted and logged.
     """
     with caplog.at_level("WARNING"):
-        assert lr._bucket_status("some_brand_new_state") == "partial_complete"
+        assert lr._bucket_status("some_brand_new_state") == "pending"
     assert "some_brand_new_state" in caplog.text
 
 
@@ -897,3 +897,216 @@ def test_fetch_outreach_status_handles_legacy_unwrapped_payload():
         result = await lr._fetch_outreach_status(client, semaphore, deadline, "123")
         assert result == {"outreach_status": "pass", "outreach_phase": "phase2"}
     asyncio.run(_test())
+
+
+# ---------------------------------------------------------------------------
+# Status bucketing and fallback invariant tests (fix/launch-report-metrics)
+# ---------------------------------------------------------------------------
+def test_bucket_status_extended_mappings():
+    assert lr._bucket_status("initiated") == "pending"
+    assert lr._bucket_status("not_started") == "pending"
+    assert lr._bucket_status("call_in_progress") == "in_progress"
+    assert lr._bucket_status("phase4") == "in_progress"
+    assert lr._bucket_status("outreach_failed") == "partial_complete"
+
+
+def test_status_buckets_sum_to_total_launched_under_all_conditions():
+    """Invariant: Pending + In Progress + Completed + Partial Complete == Total Launched."""
+    job = _job(4)
+    audit = [{"interview_id": str(i), "candidate_id": f"c_{i}"} for i in range(1, 5)]
+    # Interview 1: Completed from live API
+    # Interview 2: Call in progress from live API
+    # Interview 3: Unresolved from live API, has DB fallback 'initiated'
+    # Interview 4: Completely unresolved (live API None, DB None) -> defaults to 'pending'
+    cand_rows = [
+        {"engage_interview_id": "3", "candidate_id": "c_3", "engage_status": "initiated"}
+    ]
+    live_outreach = {
+        "1": {"outreach_status": "completed"},
+        "2": {"outreach_status": "call_in_progress"},
+    }
+    row = lr._build_row(job, cand_rows, audit, live_outreach)
+    assert row["total_candidates_launched"] == 4
+    assert row["completed"] == 1
+    assert row["in_progress"] == 1
+    assert row["pending"] == 2  # c_3 (initiated) and c_4 (unresolved fallback)
+    assert row["partial_complete"] == 0
+    assert row["pending"] + row["in_progress"] + row["completed"] + row["partial_complete"] == 4
+    assert row["percentage"] == 25.0  # 1 of 4 completed
+    assert row["outreach_detail_resolved"] == 3  # 1, 2 (live) and 3 (DB) resolved
+
+
+def test_deduplication_preserves_earliest_created_at_and_highest_status(monkeypatch):
+    """When an interview has multiple audit events across days, keep earliest launch date and highest status."""
+    jobs = [{**_job(999), "job_id": "55", "jobdiva_id": "26-01234", "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}]
+    audit_by_key = {
+        "26-01234": [
+            # Later event on Aug 29 with 'completed'
+            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 29, 14, 0), "status": "completed", "response": '{"status": "completed"}'},
+            # Earlier launch event on Aug 27 with 'initiated'
+            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "status": "Initiated", "response": None},
+        ]
+    }
+
+    def _load_inputs(_start, _end, _scope):
+        return jobs, {}, audit_by_key
+
+    async def _fake_outreach(_iids):
+        return {}
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _fake_outreach)
+
+    # Query for Aug 27 in Eastern (Aug 28 02:10 UTC)
+    response = asyncio.run(
+        lr.get_launch_report(
+            date=None,
+            start_date="2026-08-27",
+            end_date="2026-08-27",
+            team_id=None,
+            user=_admin_user(),
+        )
+    )
+    row = response["data"]["jobs"][0]
+    # Candidate should still belong to Aug 27 report because earliest created_at was preserved
+    assert row["total_candidates_launched"] == 1
+    # Status progression retained 'completed' rather than being clobbered by 'Initiated'
+    assert row["completed"] == 1
+
+
+def test_merge_outreach_payloads_monotonic_state_progression():
+    """Higher progression status (e.g. completed) cannot be downgraded by lower status (e.g. initiated or pending)."""
+    cand = {"outreach_status": "completed"}
+    audit = {"outreach_status": "initiated", "status": "initiated"}
+    live = {"outreach_status": "pending"}
+
+    merged = lr.merge_outreach_payloads(cand, audit, live)
+    assert merged["outreach_status"] == "completed"
+
+    # Conversely, live completed status upgrades pending candidate
+    cand2 = {"outreach_status": "pending"}
+    live2 = {"outreach_status": "completed"}
+    merged2 = lr.merge_outreach_payloads(cand2, {}, live2)
+    assert merged2["outreach_status"] == "completed"
+
+
+def test_eastern_date_expr_sql():
+    """Explicit timezone conversion in SQL query matches project defaults."""
+    expr = lr._eastern_date_expr("a.created_at")
+    assert expr == "((a.created_at AT TIME ZONE %s) AT TIME ZONE %s)::date"
+
+
+def test_candidate_rows_stop_at_the_first_launch_timestamp():
+    """Sourcing metrics are capped to the initial launch timestamp to prevent inflation."""
+    job = {**_job(0), "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}
+    rows = [
+        {"candidate_id": "before", "created_at": datetime.datetime(2026, 8, 28, 2, 1)},
+        {"candidate_id": "after", "created_at": datetime.datetime(2026, 8, 28, 2, 3)},
+        {"candidate_id": "unknown", "created_at": None},
+    ]
+    assert [r["candidate_id"] for r in lr._candidate_rows_as_of_first_launch(rows, job)] == ["before"]
+
+
+def test_live_outreach_timestamps_are_exposed_for_the_report_row():
+    """Live outreach timestamps from PairBot are exposed and parsed."""
+    payload = {
+        "outreach": {
+            "outreach_status": "completed",
+            "first_attempted_at": "2026-08-27T14:00:00Z",
+            "first_completed_at": "2026-08-27T14:30:00Z",
+        },
+        "communications": [],
+    }
+    summary = lr._summarise_outreach([payload])
+    assert summary["first_attempted_at"] == datetime.datetime(2026, 8, 27, 14, 0, tzinfo=datetime.timezone.utc)
+    assert summary["first_completed_at"] == datetime.datetime(2026, 8, 27, 14, 30, tzinfo=datetime.timezone.utc)
+
+
+def test_status_taxonomy_and_hierarchy_sync():
+    """All status taxonomy sets must stay 100% synchronized with _STATUS_HIERARCHY."""
+    all_known = lr._PENDING_STATUSES | lr._IN_PROGRESS_STATUSES | lr._COMPLETED_STATUSES | lr._PARTIAL_STATUSES
+    assert set(lr._STATUS_HIERARCHY.keys()) == all_known
+    for s in lr._COMPLETED_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 4
+    for s in lr._PARTIAL_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 3
+    for s in lr._IN_PROGRESS_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 2
+    for s in lr._PENDING_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 1
+
+
+def test_merge_outreach_payloads_unrecognised_status_not_swallowed():
+    """An unrecognised status from a higher-priority layer must not be dropped in favor of a recognised one."""
+    cand = {"outreach_status": "pending"}
+    audit = {"outreach_status": "new_unmapped_audit_state"}
+    # Layer 2 (audit) unmapped state overrides Layer 1 (cand) pending
+    merged = lr.merge_outreach_payloads(cand, audit, None)
+    assert merged["outreach_status"] == "new_unmapped_audit_state"
+
+    # Layer 3 (live API) unmapped state overrides Layer 1 (cand) pending
+    live = {"outreach_status": "brand_new_pairbot_state"}
+    merged_live = lr.merge_outreach_payloads(cand, {}, live)
+    assert merged_live["outreach_status"] == "brand_new_pairbot_state"
+
+    # But recognised monotonic hierarchy still protects completed from being overwritten by pending
+    cand_completed = {"outreach_status": "completed"}
+    live_pending = {"outreach_status": "pending"}
+    merged_hier = lr.merge_outreach_payloads(cand_completed, {}, live_pending)
+    assert merged_hier["outreach_status"] == "completed"
+
+
+def test_build_merged_outreach_payload_unrecognised_audit_status():
+    """build_merged_outreach_payload retains unrecognised audit_status without dropping it."""
+    cand_data = {"engage_status": "pending"}
+    payload = lr.build_merged_outreach_payload(cand_data, None, "brand_new_state", None)
+    assert payload["outreach_status"] == "brand_new_state"
+
+
+def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
+    """_fetch_jobs_launched_on filters on l.first_launch_at in the outer query, not a.created_at in the CTE."""
+    class FakeCursor:
+        def __init__(self):
+            self.description = [("job_id",), ("jobdiva_id",), ("first_launch_at",)]
+            self.last_sql = ""
+            self.last_params = []
+
+        def execute(self, sql, params):
+            self.last_sql = sql
+            self.last_params = params
+
+        def fetchall(self):
+            return []
+
+    class FakeConn:
+        def __init__(self):
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            class Ctx:
+                def __init__(self, c):
+                    self.c = c
+                def __enter__(self):
+                    return self.c
+                def __exit__(self, *args):
+                    pass
+            return Ctx(self.cursor_obj)
+
+    fake_conn = FakeConn()
+    start = datetime.date(2026, 9, 8)
+    end = datetime.date(2026, 9, 9)
+    lr._fetch_jobs_launched_on(fake_conn, start, None, end)
+
+    sql = fake_conn.cursor_obj.last_sql
+    # CTE must NOT filter a.created_at
+    assert "AND {audit_date_filter}" not in sql
+    assert "WHERE mj_cond" not in sql  # was replaced by actual mj_cond
+    # CTE computes MIN(a.created_at) without date restrictions
+    assert "MIN(a.created_at)                             AS first_launch_at" in sql
+    # Unused total_launched removed from CTE and outer query
+    assert "total_launched" not in sql
+    # Outer query filters on l.first_launch_at
+    assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
+
+
+
