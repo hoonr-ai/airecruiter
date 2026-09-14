@@ -9,7 +9,7 @@
 //   – role-specific / default category labels
 //   – Add Question + Regenerate (difficulty selector) toolbar
 
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { GripVertical, Plus, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TemplateQuestion } from "@/lib/campaigns";
@@ -47,17 +47,31 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
     questions: TemplateQuestion[];
     onChange: (q: TemplateQuestion[]) => void;
     isBooleanMode?: boolean;
+    onWarningChange?: (hasWarning: boolean) => void;
   }
 
   export function ScreeningQuestionsEditor({
     questions,
     onChange,
     isBooleanMode = false,
+    onWarningChange,
   }: ScreeningQuestionsEditorProps) {
 
   // AI policy check (NSFW / rude / discriminatory / nonsensical) on
   // recruiter-added questions — warning only, never blocks.
   const questionModeration = useQuestionModeration();
+
+  const hasWarning = questions.some(q => {
+    if (!isRecruiterAddedQuestion(q.category || "")) return false;
+    const verdict = questionModeration.verdictFor(q.question_text, q.pass_criteria || "");
+    return verdict === "checking" || (verdict && !verdict.ok);
+  });
+
+  useEffect(() => {
+    if (onWarningChange) {
+      onWarningChange(hasWarning);
+    }
+  }, [hasWarning, onWarningChange]);
 
   // ── Drag reorder ────────────────────────────────────────────────────────────
   const move = (from: number, to: number) => {

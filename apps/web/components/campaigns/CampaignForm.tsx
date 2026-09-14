@@ -86,6 +86,7 @@ export function CampaignForm({
   const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
   const [botIntro, setBotIntro] = useState(initial?.bot_introduction?.trim() ? initial.bot_introduction : defaultBotIntro);
   const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
+  const [hasQuestionWarning, setHasQuestionWarning] = useState(false);
 
   // Outreach 1 — always active, no checkbox
   const [outreachDelayMins, setOutreachDelayMins] = useState<string>(
@@ -575,6 +576,7 @@ export function CampaignForm({
             questions={questions}
             onChange={setQuestions}
             isBooleanMode={screeningLevel === "L0.5"}
+            onWarningChange={setHasQuestionWarning}
           />
         </div>
       </div>
@@ -585,7 +587,7 @@ export function CampaignForm({
             Cancel
           </Button>
         )}
-        <Button type="button" onClick={handleSubmit} disabled={submitting}>
+        <Button type="button" onClick={handleSubmit} disabled={submitting || hasQuestionWarning}>
           {submitting ? "Saving…" : submitLabel}
         </Button>
       </div>
