@@ -683,9 +683,11 @@ def notify_candidate_passed(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings?source=email"
+    rankings_link  = f"{base_url}/jobs/{urllib.parse.quote(str(jobdiva_id or '').strip(), safe='')}/rankings?source=email"
     # Deep link to the candidate evaluation report
-    report_link    = f"{base_url}/jobs/{jobdiva_id}/report?candidateId={candidate_id}"
+    report_link    = candidate_report_link(base_url, jobdiva_id, candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
+
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -892,8 +894,9 @@ def notify_candidate_passed(
     </table>
 
     <p style="margin:0 0 24px;text-align:center;">
-      {_btn(report_link, "View Full Candidate Report →")}
+      {_btn(safe_report_link, "View Full Candidate Report →")}
     </p>
+
 
     <div style="background:#fff7ed;border:1px solid #ffedd5;border-radius:8px;padding:12px;">
       <p style="margin:0;font-size:12px;color:#9a3412;line-height:1.5;">
@@ -935,92 +938,91 @@ def notify_candidate_passed(
 
 
 def notify_internal_submission_to_manager(
-        *,
-        manager_email: str,
-        recruiter_name: str,
-        recruiter_email: str,
-        candidate_name: str,
-        candidate_id: str,
-        job_id_or_ref: str,
-        job_title: str,
-        customer_name: str = "",
-        recruiter_notes: Optional[str] = None,
-        app_base_url: Optional[str] = None,
+    *,
+    manager_email: str,
+    recruiter_name: Optional[str] = None,
+    recruiter_email: str = "",
+    candidate_name: str = "",
+    candidate_id: str = "",
+    job_id_or_ref: str,
+    job_title: str,
+    customer_name: str = "",
+    recruiter_notes: Optional[str] = None,
+    app_base_url: Optional[str] = None,
 ) -> bool:
-        """Send a passive manager-review email for an internal submission."""
-        manager_email = (manager_email or "").strip()
-        if not manager_email:
-                logger.warning("No manager email provided for internal submission notification")
-                return False
+    """Send a passive manager-review email for an internal submission."""
+    manager_email = (manager_email or "").strip()
+    if not manager_email:
+        logger.warning("No manager email provided for internal submission notification")
+        return False
 
-        base_url = resolve_app_base_url(app_base_url)
-        report_link = candidate_report_link(base_url, job_id_or_ref, candidate_id)
-        safe_report_link = html.escape(report_link, quote=True)
+    base_url = resolve_app_base_url(app_base_url)
+    report_link = candidate_report_link(base_url, job_id_or_ref, candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
-        safe_candidate = html.escape(candidate_name or "Candidate")
-        safe_recruiter = html.escape(recruiter_name or recruiter_email or "Recruiter")
-        safe_recruiter_email = html.escape(recruiter_email or "")
-        safe_title = html.escape(job_title or "Job")
-        safe_job_ref = html.escape(str(job_id_or_ref or ""))
-        safe_client = html.escape(customer_name or "-")
+    safe_candidate = html.escape(candidate_name or "Candidate")
+    safe_recruiter = html.escape(recruiter_name or recruiter_email or "Recruiter")
+    safe_recruiter_email = html.escape(recruiter_email or "")
+    safe_title = html.escape(job_title or "Job")
+    safe_job_ref = html.escape(str(job_id_or_ref or ""))
+    safe_client = html.escape(customer_name or "-")
 
-        notes_section = ""
-        plain_notes = ""
-        if recruiter_notes and recruiter_notes.strip():
-                safe_notes = html.escape(recruiter_notes.strip()).replace("\n", "<br>")
-                notes_section = f"""
-                <div style="margin:20px 0;padding:16px;background:#f8fafc;border-left:4px solid #4f46e5;border-radius:4px;">
-                    <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">
-                        Recruiter Notes / Comments
-                    </p>
-                    <p style="margin:0;font-size:14px;color:#1e293b;line-height:1.5;">{safe_notes}</p>
-                </div>
-                """
-                plain_notes = f"\nRecruiter Notes:\n{recruiter_notes.strip()}\n"
-
-        content = f"""
-        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-            <strong>{safe_recruiter}</strong> ({safe_recruiter_email}) has submitted <strong>{safe_candidate}</strong> for your internal review.
-        </p>
-
-        <div style="margin:0 0 20px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
-            <table style="width:100%;border-collapse:collapse;font-family:inherit;">
-                {_info_row("Candidate Name", safe_candidate)}
-                {_info_row("Job Position", f"{safe_title} ({safe_job_ref})")}
-                {_info_row("Client", safe_client)}
-                {_info_row("Submitted By", f"{safe_recruiter} &lt;{safe_recruiter_email}&gt;")}
-            </table>
+    notes_section = ""
+    plain_notes = ""
+    if recruiter_notes and recruiter_notes.strip():
+        safe_notes = html.escape(recruiter_notes.strip()).replace("\n", "<br>")
+        notes_section = f"""
+        <div style="margin:20px 0;padding:16px;background:#f8fafc;border-left:4px solid #4f46e5;border-radius:4px;">
+            <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">
+                Recruiter Notes / Comments
+            </p>
+            <p style="margin:0;font-size:14px;color:#1e293b;line-height:1.5;">{safe_notes}</p>
         </div>
-
-        {notes_section}
-
-        <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.6;">
-            Please review the candidate report. Opening this link will not submit the candidate externally; external submission happens only after you choose Submit on the report page.
-        </p>
-
-        <div style="text-align:center;margin:24px 0;">
-            {_btn(safe_report_link, "Review Candidate", color="#4f46e5")}
-        </div>
-
-        <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;line-height:1.5;">
-            Direct Report URL: <a href="{safe_report_link}" style="color:#4f46e5;">{safe_report_link}</a>
-        </p>
         """
+        plain_notes = f"\nRecruiter Notes:\n{recruiter_notes.strip()}\n"
 
+    content = f"""
+    <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{safe_recruiter}</strong> ({safe_recruiter_email}) has submitted <strong>{safe_candidate}</strong> for your internal review.
+    </p>
 
-        subject = f"Internal Candidate Submission: {candidate_name} for {job_title} ({job_id_or_ref})"
-        plain = (
-                f"{recruiter_name or recruiter_email} ({recruiter_email}) submitted {candidate_name} for internal review.\n\n"
-                f"Job: {job_title} ({job_id_or_ref})\n"
-                f"Client: {customer_name or '-'}\n"
-                f"Candidate: {candidate_name}\n"
-                f"{plain_notes}\n"
-                f"Review Candidate: {report_link}\n"
-                "Opening the link will not submit externally; submit externally only from the report page.\n"
-        )
+    <div style="margin:0 0 20px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+        <table style="width:100%;border-collapse:collapse;font-family:inherit;">
+            {_info_row("Candidate Name", safe_candidate)}
+            {_info_row("Job Position", f"{safe_title} ({safe_job_ref})")}
+            {_info_row("Client", safe_client)}
+            {_info_row("Submitted By", f"{safe_recruiter} &lt;{safe_recruiter_email}&gt;")}
+        </table>
+    </div>
 
-        to_list = list(dict.fromkeys([manager_email] + ([recruiter_email.strip()] if recruiter_email and recruiter_email.strip() else [])))
-        return _send(to_list, subject, _base_html(content), plain)
+    {notes_section}
+
+    <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.6;">
+        Please review the candidate report. Opening this link will not submit the candidate externally; external submission happens only after you choose Submit on the report page.
+    </p>
+
+    <div style="text-align:center;margin:24px 0;">
+        {_btn(safe_report_link, "Review Candidate", color="#4f46e5")}
+    </div>
+
+    <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;line-height:1.5;">
+        Direct Report URL: <a href="{safe_report_link}" style="color:#4f46e5;">{safe_report_link}</a>
+    </p>
+    """
+
+    subject = f"Internal Candidate Submission: {candidate_name} for {job_title} ({job_id_or_ref})"
+    plain = (
+        f"{recruiter_name or recruiter_email} ({recruiter_email}) submitted {candidate_name} for internal review.\n\n"
+        f"Job: {job_title} ({job_id_or_ref})\n"
+        f"Client: {customer_name or '-'}\n"
+        f"Candidate: {candidate_name}\n"
+        f"{plain_notes}\n"
+        f"Review Candidate: {report_link}\n"
+        "Opening the link will not submit externally; submit externally only from the report page.\n"
+    )
+
+    to_list = list(dict.fromkeys([manager_email] + ([recruiter_email.strip()] if recruiter_email and recruiter_email.strip() else [])))
+    return _send(to_list, subject, _base_html(content), plain)
 
 
 

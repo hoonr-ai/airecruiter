@@ -471,7 +471,30 @@ def _extract_candidate_gender_fields(cand: Dict[str, Any]) -> Dict[str, Any]:
     return to_gender_fields(normalized)
 
 
+# Strong references so fire-and-forget cross-submission tasks are not
+# garbage-collected mid-flight (same pattern as the gender_tasks set below).
+_cross_submission_tasks: set = set()
+
+
+def _schedule_cross_submissions(job_ref: str, criteria: "SearchCriteria") -> None:
+    """Kick off services.cross_submissions for this job without blocking the search."""
+    try:
+        from core.config import CROSS_SUBMISSIONS_ENABLED
+        if not CROSS_SUBMISSIONS_ENABLED or not job_ref:
+            return
+        from services import cross_submissions
+
+        task = asyncio.create_task(
+            cross_submissions.run_for_job_async(job_ref, criteria, _compute_resume_matching)
+        )
+        _cross_submission_tasks.add(task)
+        task.add_done_callback(_cross_submission_tasks.discard)
+    except Exception as e:  # noqa: BLE001 — must never break the search
+        logger.warning("cross_submissions: could not schedule for job %s: %s", job_ref, e)
+
+
 async def _extract_candidate_gender_fields_with_ai(cand: Dict[str, Any]) -> Dict[str, Any]:
+
     fields = _extract_candidate_gender_fields(cand)
     if fields.get("gender_label") in {"male", "female"}:
         return fields
@@ -676,7 +699,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             assess_all_sources=bool(request.assess_all_sources),
         )
 
+        # Cross submissions: in the background, look back over candidates PAIR
+        # already screened for OTHER jobs (last 60 days, responded) and email
+        # the recruiter the ones that match this job's criteria. Fail-open,
+        # throttled per job inside the service; never touches the stream.
+        _schedule_cross_submissions(str(request.job_id), criteria)
+
         # Execute unified search as a stream. Persist each candidate to
+
         # `sourced_candidates` as it's yielded — fire-and-forget via
         # asyncio.to_thread so the sync SQLAlchemy call doesn't block the
         # event loop. We keep a reference list so pending tasks aren't

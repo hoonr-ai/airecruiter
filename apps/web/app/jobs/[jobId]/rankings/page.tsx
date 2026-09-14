@@ -54,7 +54,9 @@ import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
+import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { API_BASE, authFetch, api } from "@/lib/api";
+
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
@@ -1468,13 +1470,45 @@ export default function CandidateRankingsPage() {
       }
       // Merge candidate data dictionary so nested fields like engage_status are preserved
       if (src.data && typeof src.data === "object" && !Array.isArray(src.data)) {
+        // Snapshot a complete feedback event before the generic data merge.
+        // Otherwise a missing field on dst can be backfilled from src, leaving
+        // a feedback type/reason/timestamp stitched from two different rows.
+        const dstFeedback = {
+          type: String(dst.data?.feedback_type || "").trim(),
+          reason: dst.data?.feedback_reason,
+          at: dst.data?.feedback_at,
+        };
+        const srcFeedback = {
+          type: String(src.data.feedback_type || "").trim(),
+          reason: src.data.feedback_reason,
+          at: src.data.feedback_at,
+        };
+        const dstFeedbackAt = Date.parse(String(dstFeedback.at || ""));
+        const srcFeedbackAt = Date.parse(String(srcFeedback.at || ""));
+        const shouldUseSourceFeedback = srcFeedback.type && (
+          !dstFeedback.type ||
+          (Number.isFinite(srcFeedbackAt) && (!Number.isFinite(dstFeedbackAt) || srcFeedbackAt > dstFeedbackAt))
+        );
+
         dst.data = {
           ...src.data,
           ...(dst.data || {})
         };
+
+        const selectedFeedback = shouldUseSourceFeedback ? srcFeedback : dstFeedback;
+        if (selectedFeedback.type) {
+          dst.data.feedback_type = selectedFeedback.type;
+          dst.data.feedback_reason = selectedFeedback.reason;
+          dst.data.feedback_at = selectedFeedback.at;
+        } else {
+          delete dst.data.feedback_type;
+          delete dst.data.feedback_reason;
+          delete dst.data.feedback_at;
+        }
       }
       return dst;
     };
+
 
     const dedupedByIdentity = new Map<string, any>();
     rows.forEach((candidate: any) => {
@@ -2117,8 +2151,20 @@ export default function CandidateRankingsPage() {
         </div>
       )}
 
+      {/* Cross submissions: PAIR-screened candidates from other jobs (last
+          60 days) who match this one. Not on this job's list — the panel
+          hides itself when empty and each row can be added to the job. */}
+      {jobId && (
+        <CrossSubmissionsPanel
+          jobId={jobId as string}
+          notify={(type, message) => setToast({ type, message })}
+          onAdded={() => fetchCandidatesPage(0, true)}
+        />
+      )}
+
       {/* Table Interface */}
       <div className="space-y-4">
+
         {/* Filter bar: search + activity + candidate count in Row 1; filters in Row 2 */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm mb-3 flex flex-col gap-4 p-4">
           {/* Row 1: Search bar, Activity History, Showing text */}
