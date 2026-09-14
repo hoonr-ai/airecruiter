@@ -10634,6 +10634,11 @@ const renderStepContent = () => {
   return content;
 };
 
+const hasScreeningWarning = useMemo(
+  () => questionModeration.hasBlockingWarning(screenQuestions),
+  [questionModeration, screenQuestions],
+);
+
 if (isHydratingJobSetup) {
   return (
     <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
@@ -10644,8 +10649,6 @@ if (isHydratingJobSetup) {
     </div>
   );
 }
-
-const hasScreeningWarning = useMemo(() => questionModeration.hasBlockingWarning(screenQuestions), [questionModeration, screenQuestions]);
 
 return (
   <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
