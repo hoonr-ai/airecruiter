@@ -1,111 +1,97 @@
-import pytest
+"""Regression coverage for screening-question moderation of pass criteria."""
+
 import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
-from apps.api.routers.ai_generation import moderate_screening_questions, ModerateQuestionsRequest, ModerateQuestionItem
-from apps.api.core.auth import UserIdentity
+from unittest.mock import AsyncMock, MagicMock
 
-@pytest.mark.asyncio
-async def test_expected_answer_moderation():
-    with patch("apps.api.routers.ai_generation.get_openai_client") as mock_get_client, \
-         patch("apps.api.routers.ai_generation._llm_cache") as mock_cache:
-        
-        # Mock the cache to always miss
-        mock_cache.get_json = AsyncMock(return_value=None)
-        mock_cache.make_key = MagicMock(return_value="mock_key")
-        mock_cache.set_json = AsyncMock()
+from core import llm_cache
+from core.auth import UserIdentity
+from routers import ai_generation
 
-        # Mock the OpenAI client
-        mock_oai = MagicMock()
-        mock_parse = AsyncMock()
-        mock_oai.beta.chat.completions.parse = mock_parse
-        mock_get_client.return_value = mock_oai
-        
-        mock_verdict = MagicMock()
-        mock_verdict.model_dump.return_value = {
-            "ok": False,
-            "flags": ["unsafe", "grammatical_error"],
-            "reason": "This is unsafe."
-        }
-        mock_message = MagicMock()
-        mock_message.parsed = mock_verdict
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_parse.return_value = MagicMock(choices=[mock_choice])
 
-        req = ModerateQuestionsRequest(
-            questions=[
-                ModerateQuestionItem(
-                    key="test_key",
-                    question_text="What is your favorite color?",
-                    expected_answer="Union affiliation"
-                )
-            ],
-            job_title="Software Engineer"
-        )
-        
-        user = UserIdentity(email="test@example.com", id="1")
-        
-        res = await moderate_screening_questions(req, user)
-        
-        assert res["status"] == "success"
-        assert len(res["results"]) == 1
-        result = res["results"][0]
-        
-        assert result["ok"] is False
-        assert "unsafe" in result["flags"]
-        assert "grammatical_error" in result["flags"]
-        
-        # Ensure that make_key was called with the expected answer
-        mock_cache.make_key.assert_called_with(
-            "q_moderation", 2, "gpt-4o-mini", "Software Engineer", 
-            "What is your favorite color?", "Union affiliation"
-        )
-        
-        # Verify that expected_answer was included in the LLM prompt
-        call_args = mock_parse.call_args
-        messages = call_args.kwargs["messages"]
-        user_message = messages[1]["content"]
-        assert "Expected answer/Pass criteria:" in user_message
-        assert "Union affiliation" in user_message
+def _run(coro):
+    """Run async endpoint tests without requiring pytest-asyncio in CI."""
+    return asyncio.run(coro)
 
-@pytest.mark.asyncio
-async def test_moderation_cache_hit():
-    with patch("apps.api.routers.ai_generation.get_openai_client") as mock_get_client, \
-         patch("apps.api.routers.ai_generation._llm_cache") as mock_cache:
-        
-        # Mock the cache to hit
-        mock_cache.get_json = AsyncMock(return_value={
-            "ok": False,
-            "flags": ["nsfw"],
-            "reason": "Bad word."
-        })
-        mock_cache.make_key = MagicMock(return_value="mock_key")
 
-        # Mock the OpenAI client (should not be called)
-        mock_oai = MagicMock()
-        mock_parse = AsyncMock()
-        mock_oai.beta.chat.completions.parse = mock_parse
-        mock_get_client.return_value = mock_oai
-        
-        req = ModerateQuestionsRequest(
-            questions=[
-                ModerateQuestionItem(
-                    key="test_key",
-                    question_text="Bad question",
-                    expected_answer=""
-                )
-            ],
-            job_title="Test"
-        )
-        
-        user = UserIdentity(email="test@example.com", id="1")
-        
-        res = await moderate_screening_questions(req, user)
-        
-        assert res["status"] == "success"
-        result = res["results"][0]
-        assert result["ok"] is False
-        assert result["flags"] == ["nsfw"]
-        
-        # Ensure LLM was not called
-        mock_parse.assert_not_called()
+def _request(expected_answer="Union affiliation"):
+    return ai_generation.ModerateQuestionsRequest(
+        questions=[
+            ai_generation.ModerateQuestionItem(
+                key="test_key",
+                question_text="What is your favorite color?",
+                expected_answer=expected_answer,
+            )
+        ],
+        job_title="Software Engineer",
+    )
+
+
+def _user():
+    return UserIdentity(email="test@example.com", role="recruiter")
+
+
+def test_expected_answer_is_moderated_and_part_of_the_cache_key(monkeypatch):
+    mock_oai = MagicMock()
+    mock_parse = AsyncMock()
+    mock_oai.beta.chat.completions.parse = mock_parse
+    monkeypatch.setattr(ai_generation, "get_openai_client", lambda: mock_oai)
+
+    make_key = MagicMock(return_value="mock_key")
+    monkeypatch.setattr(llm_cache, "make_key", make_key)
+    monkeypatch.setattr(llm_cache, "get_json", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_cache, "set_json", AsyncMock())
+
+    verdict = MagicMock()
+    verdict.model_dump.return_value = {
+        "ok": False,
+        "flags": ["unsafe", "grammatical_error"],
+        "reason": "This is unsafe.",
+    }
+    mock_parse.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(parsed=verdict))]
+    )
+
+    result = _run(ai_generation.moderate_screening_questions(_request(), _user()))
+
+    assert result["status"] == "success"
+    assert result["results"][0]["ok"] is False
+    assert result["results"][0]["flags"] == ["unsafe", "grammatical_error"]
+    make_key.assert_called_once_with(
+        "q_moderation",
+        2,
+        "gpt-4o-mini",
+        "Software Engineer",
+        "What is your favorite color?",
+        "Union affiliation",
+    )
+    user_message = mock_parse.call_args.kwargs["messages"][1]["content"]
+    assert "Expected answer/Pass criteria:\nUnion affiliation" in user_message
+
+
+def test_cache_hit_uses_expected_answer_key_and_skips_the_llm(monkeypatch):
+    mock_oai = MagicMock()
+    mock_parse = AsyncMock()
+    mock_oai.beta.chat.completions.parse = mock_parse
+    monkeypatch.setattr(ai_generation, "get_openai_client", lambda: mock_oai)
+
+    make_key = MagicMock(return_value="mock_key")
+    monkeypatch.setattr(llm_cache, "make_key", make_key)
+    monkeypatch.setattr(
+        llm_cache,
+        "get_json",
+        AsyncMock(return_value={"ok": False, "flags": ["nsfw"], "reason": "Bad word."}),
+    )
+
+    result = _run(ai_generation.moderate_screening_questions(_request("  criteria  "), _user()))
+
+    assert result["status"] == "success"
+    assert result["results"][0]["flags"] == ["nsfw"]
+    make_key.assert_called_once_with(
+        "q_moderation",
+        2,
+        "gpt-4o-mini",
+        "Software Engineer",
+        "What is your favorite color?",
+        "criteria",
+    )
+    mock_parse.assert_not_called()
