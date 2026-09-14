@@ -10645,7 +10645,7 @@ if (isHydratingJobSetup) {
   );
 }
 
-const hasScreeningWarning = React.useMemo(() => questionModeration.hasBlockingWarning(screenQuestions), [questionModeration, screenQuestions]);
+const hasScreeningWarning = useMemo(() => questionModeration.hasBlockingWarning(screenQuestions), [questionModeration, screenQuestions]);
 
 return (
   <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
