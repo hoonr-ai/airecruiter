@@ -81,17 +81,15 @@ _PARTIAL_STATUSES = {
     "expired", "no_response", "unreachable", "abandoned", "outreach_failed",
 }
 
-_STATUS_HIERARCHY = {
+_STATUS_HIERARCHY: Dict[str, int] = {
     # Completed states rank highest
-    "completed": 4, "passed": 4, "failed": 4, "pass": 4, "fail": 4, "complete": 4,
+    **{st: 4 for st in _COMPLETED_STATUSES},
     # Partial states
-    "partial_complete": 3, "outreach_incomplete": 3, "partial": 3, "incomplete": 3,
-    "expired": 3, "no_response": 3, "unreachable": 3, "abandoned": 3, "outreach_failed": 3,
+    **{st: 3 for st in _PARTIAL_STATUSES},
     # In progress states
-    "in_progress": 2, "phase1": 2, "phase2": 2, "phase3": 2, "phase4": 2,
-    "active": 2, "sent": 2, "call_in_progress": 2,
+    **{st: 2 for st in _IN_PROGRESS_STATUSES},
     # Pending states
-    "pending": 1, "scheduled": 1, "queued": 1, "contact_check": 1, "not_started": 1, "initiated": 1,
+    **{st: 1 for st in _PENDING_STATUSES},
 }
 
 _CHANNEL_COLUMNS = {"call": "call", "sms": "sms", "email": "web"}
@@ -342,22 +340,21 @@ def _fetch_jobs_launched_on(
     between `start_date` and `end_date` (inclusive) in Eastern time. A single
     day is just the range where start_date == end_date.
 
-    Keyed on first launch rather than "any launch that day" so a job appears
-    exactly once, on the day it went live, however long it keeps launching.
+    Keyed on true first launch rather than "any launch or audit activity that day" so a job appears
+    exactly once, on the day it went live, however long it keeps launching or receiving updates.
     """
     single_day_query = end_date is None
     if single_day_query:
         end_date = start_date
 
     mj_cond, mj_params = _mj_filter(scope, "mj")
-    audit_date_expr = _eastern_date_expr('a.created_at')
-    audit_date_filter = f"{audit_date_expr} = %s" if single_day_query else f"{audit_date_expr} BETWEEN %s AND %s"
+    launch_date_expr = _eastern_date_expr('l.first_launch_at')
+    launch_date_filter = f"{launch_date_expr} = %s" if single_day_query else f"{launch_date_expr} BETWEEN %s AND %s"
     sql = f"""
         WITH launches AS (
             SELECT
                 mj.job_id                                     AS job_id,
-                MIN(a.created_at)                             AS first_launch_at,
-                COUNT(DISTINCT NULLIF(a.interview_id, ''))    AS total_launched
+                MIN(a.created_at)                             AS first_launch_at
             FROM monitored_jobs mj
             JOIN engage_interview_audit a
               -- monitor_job_locally writes `data.get("jobdiva_id") or ""`, so a
@@ -367,7 +364,6 @@ def _fetch_jobs_launched_on(
               ON NULLIF(a.jobdiva_id, '') IS NOT NULL
              AND (a.jobdiva_id = NULLIF(mj.jobdiva_id, '') OR a.jobdiva_id = mj.job_id::text)
             WHERE {mj_cond}
-              AND {audit_date_filter}
             GROUP BY mj.job_id
         )
         SELECT
@@ -391,10 +387,10 @@ def _fetch_jobs_launched_on(
             -- parsed in Python because some rows carry an "… IST" suffix that a
             -- ::timestamp cast silently reads as if it were the DB's own zone.
             mj.created_at::text          AS job_created_at_text,
-            l.first_launch_at,
-            l.total_launched
+            l.first_launch_at
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
+        WHERE {launch_date_filter}
         ORDER BY l.first_launch_at ASC
     """
     params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date]
@@ -568,7 +564,13 @@ def merge_outreach_payloads(
                     if k in ("outreach_status", "status"):
                         existing_st = str(merged_payload.get(k) or "").strip().lower()
                         new_st = str(v).strip().lower()
-                        if _STATUS_HIERARCHY.get(new_st, 0) >= _STATUS_HIERARCHY.get(existing_st, 0):
+                        # If both statuses are recognized in the hierarchy, enforce monotonic progression.
+                        # If either is unrecognised, allow the higher-priority layer to win so genuinely
+                        # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
+                        if existing_st in _STATUS_HIERARCHY and new_st in _STATUS_HIERARCHY:
+                            if _STATUS_HIERARCHY[new_st] >= _STATUS_HIERARCHY[existing_st]:
+                                merged_payload[k] = v
+                        else:
                             merged_payload[k] = v
                     else:
                         merged_payload[k] = v
@@ -613,14 +615,15 @@ def build_merged_outreach_payload(
             audit_fallback = {}
             
     if audit_status:
-        st_hier = _STATUS_HIERARCHY.get(str(audit_status).strip().lower(), 0)
-        curr_st = audit_fallback.get("outreach_status") or audit_fallback.get("status")
-        curr_hier = _STATUS_HIERARCHY.get(str(curr_st or "").strip().lower(), 0)
-        if st_hier >= curr_hier:
+        st_hier = str(audit_status).strip().lower()
+        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
+        if st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
+            if _STATUS_HIERARCHY[st_hier] >= _STATUS_HIERARCHY[curr_st]:
+                audit_fallback["outreach_status"] = audit_status
+                audit_fallback["status"] = audit_status
+        else:
             audit_fallback["outreach_status"] = audit_status
             audit_fallback["status"] = audit_status
-        elif "outreach_status" not in audit_fallback:
-            audit_fallback["outreach_status"] = audit_status
 
     # Layer 3: Live PairBot HTTP API Response
     # Unwrap nested `outreach` key from live API payload if present
@@ -1047,7 +1050,7 @@ async def get_launch_report(
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with start_date"),
     team_id: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
-    response: Response = None,
+    response: Response = Response(),
 ):
     """PAIR launch report for jobs first launched on `date`, or between
     `start_date` and `end_date` inclusive (Eastern time). A single day is
@@ -1149,7 +1152,14 @@ async def get_launch_report(
                 # 2. Monotonic status hierarchy: favor higher progression state
                 row_st = _extract_audit_status(row).lower()
                 ex_st = _extract_audit_status(existing).lower()
-                if _STATUS_HIERARCHY.get(row_st, 0) > _STATUS_HIERARCHY.get(ex_st, 0):
+                if row_st in _STATUS_HIERARCHY and ex_st in _STATUS_HIERARCHY:
+                    if _STATUS_HIERARCHY[row_st] > _STATUS_HIERARCHY[ex_st]:
+                        existing["status"] = row.get("status") or row_st
+                        if row.get("response"):
+                            existing["response"] = row.get("response")
+                    elif row.get("response") and not existing.get("response"):
+                        existing["response"] = row.get("response")
+                elif row_st and not ex_st:
                     existing["status"] = row.get("status") or row_st
                     if row.get("response"):
                         existing["response"] = row.get("response")

@@ -1022,3 +1022,91 @@ def test_live_outreach_timestamps_are_exposed_for_the_report_row():
     assert summary["first_completed_at"] == datetime.datetime(2026, 8, 27, 14, 30, tzinfo=datetime.timezone.utc)
 
 
+def test_status_taxonomy_and_hierarchy_sync():
+    """All status taxonomy sets must stay 100% synchronized with _STATUS_HIERARCHY."""
+    all_known = lr._PENDING_STATUSES | lr._IN_PROGRESS_STATUSES | lr._COMPLETED_STATUSES | lr._PARTIAL_STATUSES
+    assert set(lr._STATUS_HIERARCHY.keys()) == all_known
+    for s in lr._COMPLETED_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 4
+    for s in lr._PARTIAL_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 3
+    for s in lr._IN_PROGRESS_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 2
+    for s in lr._PENDING_STATUSES:
+        assert lr._STATUS_HIERARCHY[s] == 1
+
+
+def test_merge_outreach_payloads_unrecognised_status_not_swallowed():
+    """An unrecognised status from a higher-priority layer must not be dropped in favor of a recognised one."""
+    cand = {"outreach_status": "pending"}
+    audit = {"outreach_status": "new_unmapped_audit_state"}
+    # Layer 2 (audit) unmapped state overrides Layer 1 (cand) pending
+    merged = lr.merge_outreach_payloads(cand, audit, None)
+    assert merged["outreach_status"] == "new_unmapped_audit_state"
+
+    # Layer 3 (live API) unmapped state overrides Layer 1 (cand) pending
+    live = {"outreach_status": "brand_new_pairbot_state"}
+    merged_live = lr.merge_outreach_payloads(cand, {}, live)
+    assert merged_live["outreach_status"] == "brand_new_pairbot_state"
+
+    # But recognised monotonic hierarchy still protects completed from being overwritten by pending
+    cand_completed = {"outreach_status": "completed"}
+    live_pending = {"outreach_status": "pending"}
+    merged_hier = lr.merge_outreach_payloads(cand_completed, {}, live_pending)
+    assert merged_hier["outreach_status"] == "completed"
+
+
+def test_build_merged_outreach_payload_unrecognised_audit_status():
+    """build_merged_outreach_payload retains unrecognised audit_status without dropping it."""
+    cand_data = {"engage_status": "pending"}
+    payload = lr.build_merged_outreach_payload(cand_data, None, "brand_new_state", None)
+    assert payload["outreach_status"] == "brand_new_state"
+
+
+def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
+    """_fetch_jobs_launched_on filters on l.first_launch_at in the outer query, not a.created_at in the CTE."""
+    class FakeCursor:
+        def __init__(self):
+            self.description = [("job_id",), ("jobdiva_id",), ("first_launch_at",)]
+            self.last_sql = ""
+            self.last_params = []
+
+        def execute(self, sql, params):
+            self.last_sql = sql
+            self.last_params = params
+
+        def fetchall(self):
+            return []
+
+    class FakeConn:
+        def __init__(self):
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            class Ctx:
+                def __init__(self, c):
+                    self.c = c
+                def __enter__(self):
+                    return self.c
+                def __exit__(self, *args):
+                    pass
+            return Ctx(self.cursor_obj)
+
+    fake_conn = FakeConn()
+    start = datetime.date(2026, 9, 8)
+    end = datetime.date(2026, 9, 9)
+    lr._fetch_jobs_launched_on(fake_conn, start, None, end)
+
+    sql = fake_conn.cursor_obj.last_sql
+    # CTE must NOT filter a.created_at
+    assert "AND {audit_date_filter}" not in sql
+    assert "WHERE mj_cond" not in sql  # was replaced by actual mj_cond
+    # CTE computes MIN(a.created_at) without date restrictions
+    assert "MIN(a.created_at)                             AS first_launch_at" in sql
+    # Unused total_launched removed from CTE and outer query
+    assert "total_launched" not in sql
+    # Outer query filters on l.first_launch_at
+    assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
+
+
+
