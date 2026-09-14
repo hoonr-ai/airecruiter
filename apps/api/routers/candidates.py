@@ -33,12 +33,17 @@ from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 def _manager_email_allowed(email: str) -> bool:
-    allowed = [part.strip().lower() for part in os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "").split(",") if part.strip()]
+    raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
+    allowed = [part.strip().lower() for part in raw.split(",") if part.strip()]
     if not allowed:
-        return True
+        allowed = ["pyramidci.com"]
     normalized = email.strip().lower()
     domain = normalized.rsplit("@", 1)[-1]
-    return any(normalized == entry or domain == entry.lstrip("@") for entry in allowed)
+    return any(
+        normalized == entry or domain == entry.lstrip("@") or domain.endswith("." + entry.lstrip("@"))
+        for entry in allowed
+    )
+
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
@@ -4307,9 +4312,10 @@ async def save_candidate_feedback(
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
-    from core.email import notify_internal_submission_to_manager, resolve_app_base_url
+    from core.email import candidate_report_link, notify_internal_submission_to_manager, resolve_app_base_url
     
-    report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     if request.feedback_type == "Unreachable":
         logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
@@ -4319,9 +4325,10 @@ async def save_candidate_feedback(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
+
 
         if jobdiva_result.get("status") == "error":
             logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")

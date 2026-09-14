@@ -25,11 +25,13 @@ import logging
 import smtplib
 import ssl
 import html
+import urllib.parse
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +94,11 @@ def resolve_app_base_url(override: Optional[str] = None) -> str:
 def candidate_report_link(base_url: str, jobdiva_ref: str, candidate_id: str) -> str:
     """Build deep link to candidate report page."""
     base = resolve_app_base_url(base_url)
-    ref = str(jobdiva_ref or "").strip()
-    cid = str(candidate_id or "").strip()
+    ref = urllib.parse.quote(str(jobdiva_ref or "").strip(), safe="")
+    cid = urllib.parse.quote(str(candidate_id or "").strip(), safe="")
     return f"{base}/jobs/{ref}/report?candidateId={cid}"
+
+
 
 
 def _smtp_configured() -> bool:
@@ -950,7 +954,8 @@ def notify_internal_submission_to_manager(
                 return False
 
         base_url = resolve_app_base_url(app_base_url)
-        report_link = f"{base_url}/jobs/{job_id_or_ref}/report?candidateId={candidate_id}"
+        report_link = candidate_report_link(base_url, job_id_or_ref, candidate_id)
+        safe_report_link = html.escape(report_link, quote=True)
 
         safe_candidate = html.escape(candidate_name or "Candidate")
         safe_recruiter = html.escape(recruiter_name or recruiter_email or "Recruiter")
@@ -994,13 +999,14 @@ def notify_internal_submission_to_manager(
         </p>
 
         <div style="text-align:center;margin:24px 0;">
-            {_btn(report_link, "Review Candidate", color="#4f46e5")}
+            {_btn(safe_report_link, "Review Candidate", color="#4f46e5")}
         </div>
 
         <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;line-height:1.5;">
-            Direct Report URL: <a href="{report_link}" style="color:#4f46e5;">{report_link}</a>
+            Direct Report URL: <a href="{safe_report_link}" style="color:#4f46e5;">{safe_report_link}</a>
         </p>
         """
+
 
         subject = f"Internal Candidate Submission: {candidate_name} for {job_title} ({job_id_or_ref})"
         plain = (
