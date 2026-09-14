@@ -206,6 +206,11 @@ class CandidateSaveRecord(BaseModel):
     company_experience: Optional[Any] = None
     urls: Optional[Any] = None
     enhanced_info: Optional[Any] = None
+    # Stamped by the JobDiva pool emitters (services/jobdiva.py
+    # `jobdiva_profile_stamp`) and passed through by the frontend. Trusted at
+    # save only when it equals candidate_id -- a label-independent proof that
+    # this row's id is a JobDiva profile id (see `jobdiva_profile_id`).
+    jobdiva_candidate_id: Optional[str] = None
 
 class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str

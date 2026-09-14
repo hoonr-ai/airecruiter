@@ -3,7 +3,8 @@
 import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode } from "@/lib/jobs/wizard-types";
+import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
+import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import {
   DEFAULT_SEARCH_SOURCES,
   SEARCH_SOURCES_VERSION,
@@ -1120,12 +1121,25 @@ function NewJobPageContent() {
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
   // Source & Launch auto-selection guard rails. The launch is confirmation-
-  // free, so it is hard-capped (highest scores first) — an exclusion
-  // regression can never translate into unbounded outreach in one click.
-  const AUTO_LAUNCH_SAFETY_CAP = 250;
+  // free, so it takes the best `launchCount` candidates (highest scores
+  // first, all at/above the floor). The recruiter sets the number in the
+  // footer field; it defaults to AUTO_LAUNCH_DEFAULT_COUNT and is clamped to
+  // AUTO_LAUNCH_MAX_COUNT so a typo can never translate into unbounded
+  // outreach in one click.
+  const AUTO_LAUNCH_DEFAULT_COUNT = 250;
+  const AUTO_LAUNCH_MAX_COUNT = 1000;
+  const [launchCount, setLaunchCount] = useState<number>(AUTO_LAUNCH_DEFAULT_COUNT);
+  const [launchCountInput, setLaunchCountInput] = useState<string>(String(AUTO_LAUNCH_DEFAULT_COUNT));
+  const clampLaunchCount = (n: number) => Math.min(AUTO_LAUNCH_MAX_COUNT, Math.max(1, Math.floor(n)));
   // "No outreach for less than 60%": the Source & Launch floor. Mirrors the
   // backend's SCORING_OUTREACH_MIN_SCORE / lib/match-score OUTREACH_MIN_SCORE.
   const AUTO_LAUNCH_MIN_SCORE = OUTREACH_MIN_SCORE;
+  // QA-only bypass: launch PAIR for the best 1 or 2 rows currently on screen
+  // (sample or full run), skipping the full search AND the 60% floor, so QA
+  // can exercise the launch pipeline end-to-end without sourcing hundreds of
+  // people. Hard exclusions (client employee / no-contact / already
+  // launched) still apply. Rendered and honoured only when IS_QA_ENV.
+  const [qaQuickLaunchCount, setQaQuickLaunchCount] = useState<1 | 2>(1);
   // Armed by handleSourceAndLaunch: the launch must fire AFTER the
   // auto-selection lands in selectedCandidates state (the launch flow reads
   // that state), so a selection-effect performs the actual launch call.
@@ -2146,7 +2160,7 @@ function NewJobPageContent() {
             // escape hatches (level change, explicit Regenerate, or rubric
             // change on Next) still work.
             if (rData.screen_questions?.length) {
-              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
+              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: resolveLockedFlag(q) })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
               userHasEditedQuestionsRef.current = true;
               lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
@@ -4808,6 +4822,7 @@ function NewJobPageContent() {
         category: "default",
         order_index: index,
         is_hard_filter: !!q.is_hard_filter,
+        is_locked: isLockedDefaultQuestion(q.text),
       });
     });
 
@@ -6688,12 +6703,12 @@ function NewJobPageContent() {
   // the table for review and are never auto-launched. DNC and
   // missing-contact handling stay inside the shared Launch PAIR flow.
   //
-  // Safety net: the confirmation-free launch is hard-capped at
-  // AUTO_LAUNCH_SAFETY_CAP (highest scores first), so an exclusion regression
-  // can never translate into unbounded outreach in one click — the overflow
-  // stays in the table and launches on the next Source & Launch.
+  // Count: the recruiter's footer number (`launchCount`, default 250, max
+  // 1000) — the best N by score among the eligible. The overflow stays in
+  // the table and launches on the next Source & Launch / Launch PAIR click.
   const computeAutoLaunchSelection = (
-    pool: any[]
+    pool: any[],
+    limit: number = launchCount,
   ): { ids: string[]; eligibleTotal: number; belowFloor: number; unscored: number } => {
     const idOf = (c: any) =>
       String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
@@ -6722,13 +6737,56 @@ function NewJobPageContent() {
     }
     const capped = [...eligible]
       .sort((a, b) => b.score - a.score)
-      .slice(0, AUTO_LAUNCH_SAFETY_CAP);
+      .slice(0, clampLaunchCount(limit));
     return {
       ids: capped.map((e) => e.id),
       eligibleTotal: eligible.length,
       belowFloor,
       unscored,
     };
+  };
+
+  // QA bypass (see qaQuickLaunchCount): best N of the rows on screen, by
+  // score (unscored last), no search, no floor. Same arm-and-launch path as
+  // Source & Launch so enrichment / DNC / missing-contact handling is real.
+  const handleQaQuickLaunch = () => {
+    if (!IS_QA_ENV) return;
+    if (isSearching || isEnrichingContacts || launchProgress.open || isViewOnly) return;
+    const idOf = (c: Record<string, unknown>) =>
+      String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+    const seen = new Set<string>();
+    const eligible: { id: string; score: number }[] = [];
+    for (const c of candidatesRef.current) {
+      const id = idOf(c);
+      if (!id || seen.has(id)) continue;
+      if (getCandidateExclusionReason(c)) continue;
+      if (c?.no_contact === true) continue;
+      const launchedKey = `${c?.source ?? ""}:${id}`;
+      if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
+      seen.add(id);
+      eligible.push({ id, score: typeof c?.match_score === "number" ? c.match_score : -1 });
+    }
+    const ids = eligible
+      .sort((a, b) => b.score - a.score)
+      .slice(0, qaQuickLaunchCount)
+      .map((e) => e.id);
+    if (ids.length === 0) {
+      showToast("QA quick launch: no launchable rows on screen. Run Search first.", "info");
+      return;
+    }
+    trackEvent("job_wizard_step5_qa_quick_launch", {
+      step: 5,
+      requested: qaQuickLaunchCount,
+      selected_count: ids.length,
+      pool_size: candidatesRef.current.length,
+      search_phase: searchPhase,
+    });
+    showToast(
+      `QA bypass — launching PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} from the current rows (no full search, no ${AUTO_LAUNCH_MIN_SCORE}% floor)…`,
+      "info",
+    );
+    searchAndLaunchArmedRef.current = true;
+    setSelectedCandidates(new Set(ids));
   };
 
   // Source & Launch PAIR (footer button). Two entry states:
@@ -6756,6 +6814,7 @@ function NewJobPageContent() {
         mode: launchRemainingOnly ? "launch_remaining" : "full_search",
         candidates_on_screen: candidatesRef.current.length,
         min_score: AUTO_LAUNCH_MIN_SCORE,
+        launch_count: launchCount,
       });
       let results: any[] = [];
       if (!launchRemainingOnly) {
@@ -6767,7 +6826,7 @@ function NewJobPageContent() {
       }
       const pool =
         candidatesRef.current.length >= results.length ? candidatesRef.current : results;
-      const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(pool);
+      const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(pool, launchCount);
       trackEvent("job_wizard_step5_auto_launch_selection", {
         step: 5,
         mode: launchRemainingOnly ? "launch_remaining" : "full_search",
@@ -6777,6 +6836,7 @@ function NewJobPageContent() {
         below_floor: belowFloor,
         unscored,
         min_score: AUTO_LAUNCH_MIN_SCORE,
+        launch_count: launchCount,
       });
       const heldBack = [
         belowFloor > 0 ? `${belowFloor} below ${AUTO_LAUNCH_MIN_SCORE}%` : "",
@@ -6793,7 +6853,7 @@ function NewJobPageContent() {
       }
       showToast(
         eligibleTotal > ids.length
-          ? `${launchRemainingOnly ? "Launching" : "Search complete — launching"} PAIR for the top ${ids.length} of ${eligibleTotal} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+ (safety cap). Click Source & Launch again for the rest.`
+          ? `${launchRemainingOnly ? "Launching" : "Search complete — launching"} PAIR for the best ${ids.length} of ${eligibleTotal} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+ (your launch count). Raise the number or click Launch PAIR again for the rest.`
           : `${launchRemainingOnly ? "Launching" : "Search complete — launching"} PAIR for ${ids.length} candidate${ids.length === 1 ? "" : "s"} at ${AUTO_LAUNCH_MIN_SCORE}%+${heldBack ? ` (${heldBack} held back)` : ""}…`,
         "info",
       );
@@ -6970,6 +7030,7 @@ function NewJobPageContent() {
       category: "other",
       order_index: screenQuestions.length,
       is_hard_filter: false,
+      question_type: "scored",
     };
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions([...screenQuestions, newQuestion]);
@@ -6981,10 +7042,23 @@ function NewJobPageContent() {
     });
   };
 
+  const setRecruiterQuestionType = (id: number, questionType: RecruiterQuestionType) => {
+    userHasEditedQuestionsRef.current = true;
+    setScreenQuestions(prev => prev.map(q => q.id === id ? {
+      ...q,
+      question_type: questionType,
+      is_hard_filter: questionType === "hard_filter",
+      pass_criteria: questionType === "hard_filter" ? q.pass_criteria : "",
+    } : q));
+  };
+
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
+    const target = screenQuestions.find(q => q.id === id);
+    // Core-question wording is immutable, but recruiters may configure its
+    // pass criteria as a hard filter.
+    if (target?.is_locked && field !== 'pass_criteria') return;
     userHasEditedQuestionsRef.current = true;
     if (field === 'question_text') {
-      const target = screenQuestions.find(q => q.id === id);
       if (target && isRecruiterAddedQuestion(target.category)) {
         questionModeration.scheduleCheck(String(id), String(value ?? ""));
       }
@@ -7004,6 +7078,8 @@ function NewJobPageContent() {
   };
 
   const deleteScreenQuestion = (id: number) => {
+    const target = screenQuestions.find(q => q.id === id);
+    if (target?.is_locked) return; // locked default questions are not removable
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
     trackEvent("job_wizard_step4_screen_question_removed", {
@@ -7019,6 +7095,10 @@ function NewJobPageContent() {
     setScreenQuestions(prev => {
       if (from === to || from < 0 || to < 0) return prev;
       if (from >= prev.length || to >= prev.length) return prev;
+      // A splice moves every row in the selected interval. Reject any move
+      // that would move a locked row indirectly, not just a locked endpoint.
+      const [lo, hi] = from < to ? [from, to] : [to, from];
+      if (prev.slice(lo, hi + 1).some(q => q.is_locked)) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
@@ -7270,11 +7350,14 @@ function NewJobPageContent() {
             >
               <button
                 type="button"
-                draggable
+                draggable={!q.is_locked}
                 onDragStart={questionsDrag.onDragStart(index)}
                 onDragEnd={questionsDrag.onDragEnd}
-                className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
-                title="Drag to reorder"
+                disabled={q.is_locked}
+                className={`w-5 flex-shrink-0 flex items-center justify-center mt-1.5 ${
+                  q.is_locked ? "text-slate-200 cursor-not-allowed" : "text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing"
+                }`}
+                title={q.is_locked ? "Locked" : "Drag to reorder"}
                 aria-label="Drag to reorder question"
               >
                 <GripVertical className="w-4 h-4" />
@@ -7292,7 +7375,11 @@ function NewJobPageContent() {
                       questionModeration.flushCheck(String(q.id), q.question_text);
                     }
                   }}
-                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
+                  readOnly={q.is_locked}
+                  aria-readonly={q.is_locked}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                    q.is_locked ? "text-slate-500 cursor-text" : "text-slate-900"
+                  }`}
                   rows={3}
                 />
                 {isRecruiterAddedQuestion(q.category) && (
@@ -7305,10 +7392,33 @@ function NewJobPageContent() {
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
                   rows={2}
-                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
-                  placeholder="No hard filter"
+                  readOnly={isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"}
+                  placeholder={q.question_type === "hard_filter" ? "Pass criteria for this hard filter" : "No hard filter"}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                    q.pass_criteria
+                      ? "text-[#4f46e5]"
+                      : isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"
+                      ? "text-slate-300 italic cursor-not-allowed"
+                      : "text-slate-300 italic"
+                  }`}
                 />
               </div>
+
+              {isRecruiterAddedQuestion(q.category) && (
+                <div className="w-[130px] flex-shrink-0 border-l border-slate-100 pl-3">
+                  <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Question type</label>
+                  <select
+                    value={q.question_type || "scored"}
+                    onChange={(e) => setRecruiterQuestionType(q.id, e.target.value as RecruiterQuestionType)}
+                    className="w-full h-8 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-700"
+                    aria-label="Question type"
+                  >
+                    <option value="hard_filter">Hard filter</option>
+                    <option value="info_only">Info only</option>
+                    <option value="scored">Scored</option>
+                  </select>
+                </div>
+              )}
 
               <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
                 {q.category === 'role-specific' && (
@@ -7323,16 +7433,19 @@ function NewJobPageContent() {
                     q.category ?? "",
                     q.order_index ?? index + 1,
                     screeningLevel === "L0.5",
-                    Boolean(q.is_hard_filter)
+                    Boolean(q.is_hard_filter),
+                    q.question_type
                   )}
                 />
-                <button
-                  onClick={() => deleteScreenQuestion(q.id)}
-                  className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
-                  title="Remove"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                {!q.is_locked && (
+                  <button
+                    onClick={() => deleteScreenQuestion(q.id)}
+                    className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
+                    title="Remove"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
             );
@@ -7489,6 +7602,12 @@ function NewJobPageContent() {
           skills: skillList,
           experience_years: c.yearsExtracted || c.experience_years || 0,
           source: c.source || "JobDiva-Applicants",
+          // Label-independent JobDiva provenance. The JobDiva pool emitters stamp
+          // this with the row's OWN JobDiva id; the backend trusts it only when it
+          // equals candidate_id, so Launch PAIR keeps attaching to the existing
+          // profile even if a source label is ever renamed (a renamed label used
+          // to turn JobDiva people into "unknown" people that got re-created).
+          jobdiva_candidate_id: c.jobdiva_candidate_id ? String(c.jobdiva_candidate_id) : null,
           headline: c.title || c.headline || "",
           location: c.location || "",
           profile_url: c.profile_url || null,
@@ -10242,30 +10361,106 @@ function NewJobPageContent() {
                 Step 5 to keep sourcing focused on the boolean-string workflow. */}
             </div>
 
+  {/* Legend — how the score and the launch decisions are made. Mirrors
+      core/config.py SCORING_MATRIX_* / score_band and lib/match-score.ts so
+      the recruiter can read the "why" without opening a score popup. */}
+  <div className="mt-8 rounded-xl border border-slate-200 bg-slate-50/70 px-5 py-4">
+    <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400 mb-3">
+      How scoring &amp; launch work
+    </p>
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-5 text-[12px] leading-relaxed text-slate-600">
+      <div>
+        <p className="font-bold text-slate-800 mb-1">Match score · out of 100</p>
+        <ul className="space-y-1">
+          <li className="flex gap-2">
+            <span className="w-6 shrink-0 font-extrabold text-slate-900">75</span>
+            <span>Recent must-have skills — the rubric&apos;s must-haves and their JobDiva-mapped similar skills, required years, and how recently they were used</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="w-6 shrink-0 font-extrabold text-slate-900">15</span>
+            <span>Recent title / role relevancy</span>
+          </li>
+          <li className="flex gap-2">
+            <span className="w-6 shrink-0 font-extrabold text-slate-900">10</span>
+            <span>Preferred — preferred skills, domain / industry, education</span>
+          </li>
+        </ul>
+        <p className="mt-1.5 text-slate-500">
+          Skills and location are judged from the résumé; the JobDiva profile
+          fills in only when the résumé is silent. A bucket the rubric
+          doesn&apos;t define, or the profile has no data for, is left out and
+          the rest is normalized to 100%.
+        </p>
+      </div>
+      <div>
+        <p className="font-bold text-slate-800 mb-1">Hard filters · pass / fail → 0%</p>
+        <ul className="space-y-1 list-disc pl-4">
+          <li>Currently employed by the client</li>
+          <li>None of the must-have skills evidenced</li>
+          <li>Required certification missing</li>
+          <li>Confirmed outside the mandatory location</li>
+          <li>Below the minimum years of experience</li>
+          <li>Work authorization — asked by PAIR on the call</li>
+        </ul>
+        <p className="mt-1.5 text-slate-500">
+          0% rows stay visible for transparency and are never launched.
+        </p>
+      </div>
+      <div>
+        <p className="font-bold text-slate-800 mb-1">Ranking &amp; launch</p>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
+            {SCORE_BAND_EXCELLENT}–100 Excellent · Priority
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-bold">
+            {SCORE_BAND_STRONG}–{SCORE_BAND_EXCELLENT - 1} Strong · Recommended
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-bold">
+            {SCORE_BAND_GOOD}–{SCORE_BAND_STRONG - 1} Good · Recruiter review
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 font-bold">
+            &lt;{SCORE_BAND_GOOD} Low priority · No outreach
+          </span>
+        </div>
+        <p>
+          <span className="font-semibold text-slate-700">Run Search</span> previews the
+          best {SAMPLE_MIN_PER_SOURCE}–{SAMPLE_PER_SOURCE} candidates per source.{" "}
+          <span className="font-semibold text-slate-700">Source &amp; Launch PAIR</span> runs
+          the full search and launches the best {launchCount} (the &quot;Launch up to&quot;
+          number) at {AUTO_LAUNCH_MIN_SCORE}% or higher; afterwards{" "}
+          <span className="font-semibold text-slate-700">Launch PAIR</span> launches the
+          remaining ones. Unscored (N/A) rows are never auto-launched.
+        </p>
+      </div>
+    </div>
+  </div>
+
   {/* Launch Footer */ }
   < div className = "border-t border-slate-200 pt-6 mt-2 flex items-center justify-between" >
               <span className="text-[13px] font-medium text-slate-400 max-w-[46%]">
                 {(() => {
                   if (!hasSearched || isSearching) return "";
                   if (searchPhase === "sampled") {
-                    return `Best ${SAMPLE_MIN_PER_SOURCE}–${SAMPLE_PER_SOURCE} per source shown · Source & Launch runs the full search and launches PAIR to every candidate at ${AUTO_LAUNCH_MIN_SCORE}%+`;
+                    return `Best ${SAMPLE_MIN_PER_SOURCE}–${SAMPLE_PER_SOURCE} per source shown · Source & Launch runs the full search and launches PAIR to the best ${launchCount} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+`;
                   }
                   if (searchPhase === "complete") {
-                    const { eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(candidates);
+                    const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(candidates, launchCount);
                     const held = [
                       belowFloor > 0 ? `${belowFloor} below ${AUTO_LAUNCH_MIN_SCORE}%` : "",
                       unscored > 0 ? `${unscored} unscored` : "",
                     ].filter(Boolean).join(", ");
-                    return `${eligibleTotal} launchable candidate${eligibleTotal === 1 ? "" : "s"} at ${AUTO_LAUNCH_MIN_SCORE}%+ not yet launched${held ? ` · ${held} held back` : ""}`;
+                    const next = eligibleTotal > ids.length ? ` · next click launches the best ${ids.length}` : "";
+                    return `${eligibleTotal} launchable candidate${eligibleTotal === 1 ? "" : "s"} at ${AUTO_LAUNCH_MIN_SCORE}%+ not yet launched${next}${held ? ` · ${held} held back` : ""}`;
                   }
                   if (candidates.length > 0) {
-                    return `Source & Launch re-runs the full search and launches PAIR to every candidate at ${AUTO_LAUNCH_MIN_SCORE}%+`;
+                    return `Source & Launch re-runs the full search and launches PAIR to the best ${launchCount} candidates at ${AUTO_LAUNCH_MIN_SCORE}%+`;
                   }
                   return "";
                 })()}
               </span>
               <div className="flex flex-col items-end gap-2">
                 {IS_QA_ENV && (
+                  <div className="flex items-center gap-4">
                   <button
                     type="button"
                     onClick={() => setQaOverrideEnabled(v => !v)}
@@ -10286,6 +10481,33 @@ function NewJobPageContent() {
                       {qaOverrideEnabled ? "ON" : "OFF"}
                     </span>
                   </button>
+                  {/* QA-only bypass: launch the best 1–2 rows on screen with
+                      no full search and no 60% floor. */}
+                  <label
+                    className="flex items-center gap-1.5 text-[12px] font-semibold text-slate-600 select-none"
+                    title="QA bypass: launch PAIR for the best 1 or 2 rows currently on screen — no full search, no 60% floor. Hard exclusions still apply."
+                  >
+                    QA launch
+                    <select
+                      value={qaQuickLaunchCount}
+                      onChange={(e) => setQaQuickLaunchCount(Number(e.target.value) === 2 ? 2 : 1)}
+                      disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
+                      aria-label="QA quick launch count"
+                      className="h-7 px-1.5 text-[12px] font-bold text-slate-800 border border-slate-200 rounded-md bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:bg-slate-50 disabled:text-slate-400"
+                    >
+                      <option value={1}>1</option>
+                      <option value={2}>2</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleQaQuickLaunch}
+                      disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open || !hasSearched || candidates.length === 0}
+                      className="h-7 px-2.5 rounded-md text-[12px] font-bold border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Quick launch (bypass)
+                    </button>
+                  </label>
+                  </div>
                 )}
                 <button
                   type="button"
@@ -10318,10 +10540,50 @@ function NewJobPageContent() {
                     <ExternalLink className="w-4 h-4" />
                     New tab
                   </Button>
+                  {/* Launch count — how many of the best (≥ floor) candidates
+                      one click launches. Default 250, clamped to 1..1000. */}
+                  <label
+                    className="flex items-center gap-2 text-[13px] font-semibold text-slate-600 select-none"
+                    title={`Source & Launch picks the best N candidates by match score (all at ${AUTO_LAUNCH_MIN_SCORE}% or higher). Default ${AUTO_LAUNCH_DEFAULT_COUNT}, max ${AUTO_LAUNCH_MAX_COUNT}.`}
+                  >
+                    Launch up to
+                    <input
+                      type="number"
+                      min={1}
+                      max={AUTO_LAUNCH_MAX_COUNT}
+                      step={1}
+                      inputMode="numeric"
+                      value={launchCountInput}
+                      disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setLaunchCountInput(raw);
+                        const parsed = parseInt(raw, 10);
+                        if (!isNaN(parsed) && parsed > 0) {
+                          setLaunchCount(clampLaunchCount(parsed));
+                        }
+                      }}
+                      onBlur={() => {
+                        const parsed = parseInt(launchCountInput, 10);
+                        if (isNaN(parsed) || parsed <= 0) {
+                          setLaunchCount(AUTO_LAUNCH_DEFAULT_COUNT);
+                          setLaunchCountInput(String(AUTO_LAUNCH_DEFAULT_COUNT));
+                        } else {
+                          const clamped = clampLaunchCount(parsed);
+                          setLaunchCount(clamped);
+                          setLaunchCountInput(String(clamped));
+                        }
+                      }}
+                      aria-label="Number of best candidates to launch PAIR for"
+                      className="h-[42px] w-[84px] px-2.5 text-[14px] font-bold text-slate-800 border border-slate-300 rounded-xl bg-white shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40 focus:border-[#6366f1]/40 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
+                    />
+                  </label>
                   {/* Source & Launch PAIR — the single launch action on Step 5.
-                      sampled/restored → full search + auto-launch (≥ floor);
-                      complete → launch the not-yet-launched remainder, so a
-                      recruiter coming back to this screen can launch more. */}
+                      sampled/restored → full search + auto-launch of the best
+                      `launchCount` (≥ floor); complete → reads "Launch PAIR"
+                      and launches the best `launchCount` of the not-yet-launched
+                      remainder without re-searching, so a recruiter coming
+                      back to this screen can launch more. */}
                   <Button
                     type="button"
                     className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
@@ -10333,8 +10595,8 @@ function NewJobPageContent() {
                         : !hasSearched
                           ? "Run Search first to preview the best candidates from each source"
                           : searchPhase === "complete"
-                            ? `Launch PAIR to every not-yet-launched candidate scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher (no new search)`
-                            : `Run the full search across every selected source, score everyone on the matrix, and launch PAIR to every candidate scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher (up to ${AUTO_LAUNCH_SAFETY_CAP} per click)`
+                            ? `Launch PAIR to the best ${launchCount} not-yet-launched candidate${launchCount === 1 ? "" : "s"} scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher (no new search)`
+                            : `Run the full search across every selected source, score everyone on the matrix, and launch PAIR to the best ${launchCount} candidate${launchCount === 1 ? "" : "s"} scoring ${AUTO_LAUNCH_MIN_SCORE}% or higher`
                     }
                   >
                     {isEnrichingContacts || isSourceAndLaunchRunning ? (
@@ -10347,7 +10609,7 @@ function NewJobPageContent() {
                       : isSourceAndLaunchRunning
                         ? "Sourcing & Launching…"
                         : searchPhase === "complete"
-                          ? "Launch More PAIR"
+                          ? "Launch PAIR"
                           : "Source & Launch PAIR"}
                   </Button>
                 </div>

@@ -152,7 +152,25 @@ def test_country_field_unknown_is_not_evidence(svc):
 
 # ------------------------------------------------- location precedence
 
-def test_structured_locations_source_native_wins(svc):
+def test_structured_locations_resume_wins_when_present(svc):
+    """Policy 2026-09-11: the résumé is final for residence. The explicitly
+    stated résumé location is the ONLY value judged when present — the
+    source's city/state must not ride alongside it, or a Canadian CRM record
+    would pass the country gate for an India résumé."""
+    locs = svc._candidate_structured_locations({
+        "city": "Ajax",
+        "state": "ON",
+        "location": "Ajax, ON",
+        "enhanced_info": {"current_location": "Hyderabad, India"},
+    })
+    assert locs == ["Hyderabad, India"]
+
+
+def test_structured_locations_source_native_wins_when_flag_off(svc, monkeypatch):
+    """RESUME_LOCATION_AUTHORITATIVE=False restores the 2026-07-30 policy:
+    source-native wins and the LLM string is not consulted alongside it."""
+    from core import sourcing_config
+    monkeypatch.setattr(sourcing_config, "RESUME_LOCATION_AUTHORITATIVE", False)
     locs = svc._candidate_structured_locations({
         "city": "Ajax",
         "state": "ON",
@@ -161,8 +179,6 @@ def test_structured_locations_source_native_wins(svc):
     })
     joined = " | ".join(locs).lower()
     assert "ajax" in joined
-    # The LLM string must NOT ride alongside authoritative source data —
-    # it would otherwise re-trigger the outside-country gate.
     assert "hyderabad" not in joined
 
 

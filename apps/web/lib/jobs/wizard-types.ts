@@ -9,6 +9,7 @@ export type ScreeningLevel = "L0.5" | "L1" | "L1.5" | "L2";
 export type RegenerateDifficulty = "easy" | "medium" | "hard";
 export type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
 export type WizardMode = "edit" | "source" | "view";
+export type RecruiterQuestionType = "hard_filter" | "info_only" | "scored";
 
 export type ScreenQuestion = {
   id: number;
@@ -21,4 +22,6 @@ export type ScreenQuestion = {
   // when they say no. Persisted per-question so non-default recruiter-authored
   // questions can also be marked as hard filters.
   is_hard_filter?: boolean;
+  question_type?: RecruiterQuestionType;
+  is_locked?: boolean;
 };

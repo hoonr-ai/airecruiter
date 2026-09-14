@@ -105,6 +105,40 @@ def _candidate_report_link(base_url: str, job_id_or_ref: str, candidate_id: str)
     return f"{base_url}/jobs/{safe_job_ref}/report?candidateId={safe_candidate_id}"
 
 
+def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
+    """Return the WHERE condition and DISTINCT ON tiebreaker for a feedback filter.
+
+    Action filters constrain the selected ``sourced_candidates`` row directly;
+    No Feedback remains a job-scoped absence check across a candidate's rows.
+    """
+    if not feedback:
+        return "", ""
+
+    f_lower = feedback.strip().lower()
+    if f_lower in ("no feedback", "none", "no_feedback"):
+        correlation_scaffold = (
+            "SELECT 1 FROM sourced_candidates sc2 "
+            "WHERE sc2.candidate_id = sc.candidate_id "
+            "AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
+        )
+        return f"""
+            AND NOT EXISTS (
+                {correlation_scaffold}
+                  AND sc2.data->>'feedback_type' IS NOT NULL
+                  AND TRIM(sc2.data->>'feedback_type') <> ''
+            )""", "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
+
+    predicates = {
+        "submit": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "submitted": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "reject": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "rejected": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "unreachable": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')",
+    }
+    predicate = predicates.get(f_lower, "")
+    return (f"AND {predicate}", predicate) if predicate else ("", "")
+
+
 def _json_load_safe(value: Any, default: Any):
     if value is None:
         return default
@@ -512,6 +546,28 @@ async def get_open_to_work_diag(user: UserIdentity = Depends(get_current_user)):
     return diagnostics()
 
 
+# Strong references so fire-and-forget cross-submission tasks are not
+# garbage-collected mid-flight (same pattern as the gender_tasks set below).
+_cross_submission_tasks: set = set()
+
+
+def _schedule_cross_submissions(job_ref: str, criteria: "SearchCriteria") -> None:
+    """Kick off services.cross_submissions for this job without blocking the search."""
+    try:
+        from core.config import CROSS_SUBMISSIONS_ENABLED
+        if not CROSS_SUBMISSIONS_ENABLED or not job_ref:
+            return
+        from services import cross_submissions
+
+        task = asyncio.create_task(
+            cross_submissions.run_for_job_async(job_ref, criteria, _compute_resume_matching)
+        )
+        _cross_submission_tasks.add(task)
+        task.add_done_callback(_cross_submission_tasks.discard)
+    except Exception as e:  # noqa: BLE001 — must never break the search
+        logger.warning("cross_submissions: could not schedule for job %s: %s", job_ref, e)
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
@@ -663,6 +719,12 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
             assess_all_sources=bool(request.assess_all_sources),
         )
+
+        # Cross submissions: in the background, look back over candidates PAIR
+        # already screened for OTHER jobs (last 60 days, responded) and email
+        # the recruiter the ones that match this job's criteria. Fail-open,
+        # throttled per job inside the service; never touches the stream.
+        _schedule_cross_submissions(str(request.job_id), criteria)
 
         # Execute unified search as a stream. Persist each candidate to
         # `sourced_candidates` as it's yielded — fire-and-forget via
@@ -1337,6 +1399,9 @@ async def get_job_candidates(
                                         = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
                               )
                           )
+                        -- Rankings has no feedback filter: retain the newest
+                        -- sourced row as canonical rather than allowing an
+                        -- older row with feedback to win the deduplication.
                         ORDER BY candidate_id, created_at DESC, id DESC
                     )
                     SELECT
@@ -2046,7 +2111,9 @@ async def save_candidates(
                         # (routers/engagement.py `_resolve_link_candidate_id`).
                         # Recomputed on every save, so it self-heals rows whose
                         # blob predates this and survives the upsert either way.
-                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+                        jd_profile_id = jobdiva_profile_id(
+                            c.source, c.candidate_id, getattr(c, "jobdiva_candidate_id", None)
+                        )
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
@@ -3046,41 +3113,21 @@ async def get_launched_candidates(
                         search_condition += " AND la.status = %s"
                         params.append(status)
 
-                # Feedback filter: use an EXISTS subquery checked against ALL rows for a
-                # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
-                # and we only include candidates who match the feedback requirement on ANY row.
-                feedback_exists_condition = ""
-                if feedback:
-                    f_lower = feedback.strip().lower()
-                    if f_lower in ("no feedback", "none", "no_feedback"):
-                        feedback_exists_condition = """
-                            AND NOT EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND sc2.data->>'feedback_type' IS NOT NULL
-                                  AND TRIM(sc2.data->>'feedback_type') <> ''
-                            )"""
-                    elif f_lower in ("submit", "submitted"):
-                        feedback_exists_condition = """
-                            AND EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
-                            )"""
-                    elif f_lower in ("reject", "rejected"):
-                        feedback_exists_condition = """
-                            AND EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
-                            )"""
-                    elif f_lower in ("unreachable",):
-                        feedback_exists_condition = """
-                            AND EXISTS (
-                                SELECT 1 FROM sourced_candidates sc2
-                                WHERE sc2.candidate_id = sc.candidate_id
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
-                            )"""
+                # Feedback action filters must constrain the source row itself.
+                # An EXISTS check can match one duplicate while DISTINCT ON
+                # returns another duplicate with no feedback.
+                feedback_filter_condition, matching_feedback_pred = _build_feedback_filter_condition(feedback)
+
+                # Preserve the common unfiltered ordering and its supporting
+                # index.  The feedback timestamp/type can break ties only
+                # after a filter has selected the matching feedback row.
+                feedback_order_by = ""
+                if matching_feedback_pred:
+                    feedback_order_by = (
+                        f"{matching_feedback_pred} DESC, "
+                        "(sc.data->>'feedback_at') DESC NULLS LAST, "
+                        "(sc.data->>'feedback_type' IS NOT NULL) DESC, "
+                    )
 
                 if source:
                     search_condition += " AND sc.source = %s"
@@ -3170,8 +3217,12 @@ async def get_launched_candidates(
                         LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
-                          {feedback_exists_condition}
-                        ORDER BY sc.candidate_id, sc.created_at DESC
+                          {feedback_filter_condition}
+                        -- When a feedback filter is active, prefer the row that
+                        -- carries matching feedback data so the UI column matches
+                        -- the filter. Without a filter, retain pure
+                        -- created_at DESC so the newest source row wins.
+                        ORDER BY sc.candidate_id, {feedback_order_by}sc.created_at DESC
                     )
                 """
 

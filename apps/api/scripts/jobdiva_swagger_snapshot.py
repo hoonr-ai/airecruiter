@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Snapshot JobDiva's Swagger v2 schemas for every endpoint PAIR calls.
+
+WHY THIS EXISTS
+    JobDiva silently ignores request fields its schema does not define -- no
+    400, no warning, the call "succeeds". Two production bugs came from exactly
+    that:
+      * `candidateid` sent to CreateJobApplicationWithResume (whose body schema
+        has no such field) was dropped, so every Launch PAIR of a JobDiva-sourced
+        person minted a DUPLICATE profile for months (2026-06 .. 2026-09).
+      * the wrapped TalentSearch payload was answered with an unfiltered dump
+        (scripts/jobdiva_payload_variants_probe.py, 2026-07).
+    The checked-in snapshot (tests/fixtures/jobdiva_swagger_v2_endpoints.json)
+    lets tests/test_jobdiva_payload_contract.py fail the build when a payload we
+    build uses a field JobDiva does not define, and lets a reviewer read the
+    contract without network access.
+
+USAGE (from apps/api)
+    python scripts/jobdiva_swagger_snapshot.py                # refresh the fixture from the live Swagger
+    python scripts/jobdiva_swagger_snapshot.py --check        # exit 1 if the live Swagger differs from the fixture
+    python scripts/jobdiva_swagger_snapshot.py --from-file f  # build the fixture from a saved Swagger JSON
+
+    The live document is public (no JobDiva credentials needed):
+    https://api.jobdiva.com/swagger?group=Version%202  (index: /swagger-resources)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.request
+from datetime import date
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+SWAGGER_URL = "https://api.jobdiva.com/swagger?group=Version%202"
+FIXTURE_PATH = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "jobdiva_swagger_v2_endpoints.json"
+
+# Every JobDiva endpoint services/jobdiva.py calls (grep `apiv2/jobdiva/`),
+# plus the two the provisioner relies on. Add here when a new call is added.
+ENDPOINTS: List[str] = [
+    "/apiv2/jobdiva/CreateJobApplicationWithResume",
+    "/apiv2/jobdiva/createJobApplication",
+    "/apiv2/jobdiva/uploadResume",
+    "/apiv2/jobdiva/searchCandidateProfile",
+    "/apiv2/jobdiva/getCandidateById",
+    "/apiv2/jobdiva/createCandidate",
+    "/apiv2/jobdiva/updateCandidateProfile",
+    "/apiv2/jobdiva/createCandidateNote",
+    "/apiv2/jobdiva/createCandidateStickyNote",
+    "/apiv2/jobdiva/pinUnPinCandidateNotes",
+    "/apiv2/jobdiva/updateCandidateQualifications",
+    "/apiv2/jobdiva/updateJob",
+    "/apiv2/jobdiva/TalentSearch",
+    "/apiv2/jobdiva/JobAgentSearch",
+    "/apiv2/jobdiva/SearchJob",
+]
+
+
+def fetch_live() -> Dict[str, Any]:
+    req = urllib.request.Request(SWAGGER_URL, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 - fixed public URL
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _schema(defs: Dict[str, Any], name: str, depth: int = 0) -> Dict[str, Any]:
+    s = defs.get(name) or {}
+    props: Dict[str, Any] = {}
+    for key, val in (s.get("properties") or {}).items():
+        entry: Dict[str, Any] = {"type": val.get("type") or ("object" if "$ref" in val else None)}
+        ref = val.get("$ref") or (val.get("items") or {}).get("$ref")
+        if ref and depth < 2:
+            entry["items" if "items" in val else "schema"] = _schema(defs, ref.split("/")[-1], depth + 1)
+        props[key] = entry
+    return {"name": name, "required": sorted(s.get("required") or []), "properties": props}
+
+
+def extract(swagger: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce a Swagger 2.0 document to {path: {method: {body, query, response_200}}}."""
+    defs = swagger.get("definitions") or {}
+    paths = swagger.get("paths") or {}
+    out: Dict[str, Any] = {}
+    for path in ENDPOINTS:
+        ops = paths.get(path)
+        if not ops:
+            out[path] = None  # endpoint gone -> --check and the contract test both notice
+            continue
+        out[path] = {}
+        for method, op in sorted(ops.items()):
+            body: Optional[Dict[str, Any]] = None
+            query: List[Dict[str, Any]] = []
+            for p in op.get("parameters") or []:
+                if p.get("in") == "body" and "$ref" in (p.get("schema") or {}):
+                    body = _schema(defs, p["schema"]["$ref"].split("/")[-1])
+                elif p.get("in") == "query":
+                    query.append({"name": p.get("name"), "type": p.get("type"), "required": bool(p.get("required"))})
+            response = ((op.get("responses") or {}).get("200") or {}).get("schema")
+            out[path][method] = {
+                "body": body,
+                "query": sorted(query, key=lambda q: str(q["name"])),
+                "response_200": response,
+            }
+    return out
+
+
+def build_fixture(swagger: Dict[str, Any], source: str) -> Dict[str, Any]:
+    return {
+        "_comment": (
+            "Generated by scripts/jobdiva_swagger_snapshot.py -- do not hand-edit. "
+            "JobDiva silently ignores undefined request fields; tests/test_jobdiva_payload_contract.py "
+            "checks our payloads against this."
+        ),
+        "source": source,
+        "fetched_at": date.today().isoformat(),
+        "endpoints": extract(swagger),
+    }
+
+
+def diff_endpoints(expected: Dict[str, Any], actual: Dict[str, Any]) -> List[str]:
+    changed = []
+    for path in sorted(set(expected) | set(actual)):
+        if expected.get(path) != actual.get(path):
+            changed.append(path)
+    return changed
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--check", action="store_true", help="compare the live Swagger to the fixture; exit 1 on drift")
+    ap.add_argument("--from-file", metavar="PATH", help="read the Swagger JSON from a file instead of the network")
+    args = ap.parse_args(argv)
+
+    if args.from_file:
+        swagger = json.loads(Path(args.from_file).read_text(encoding="utf-8"))
+        source = SWAGGER_URL  # what the file was saved from
+    else:
+        swagger = fetch_live()
+        source = SWAGGER_URL
+
+    if args.check:
+        fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        changed = diff_endpoints(fixture.get("endpoints") or {}, extract(swagger))
+        if changed:
+            print("JobDiva Swagger drift for endpoints PAIR calls:")
+            for p in changed:
+                print(f"  {p}")
+            print("Refresh with: python scripts/jobdiva_swagger_snapshot.py  (then re-run the contract tests)")
+            return 1
+        print(f"No drift across {len(ENDPOINTS)} endpoints (fixture fetched {fixture.get('fetched_at')}).")
+        return 0
+
+    FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FIXTURE_PATH.write_text(json.dumps(build_fixture(swagger, source), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Wrote {FIXTURE_PATH.relative_to(Path.cwd()) if FIXTURE_PATH.is_relative_to(Path.cwd()) else FIXTURE_PATH}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
