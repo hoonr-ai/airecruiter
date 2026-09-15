@@ -1,4 +1,45 @@
-from routers.candidates import _extract_rankings_hard_filter_details
+from routers.candidates import _extract_rankings_hard_filter_details, _extract_needs_review_flags
+
+def test_extract_needs_review_flags_tolerates_non_dict():
+    # Helper should safely tolerate missing, malformed, or non-dict payloads
+    for bad in (None, [], "string", 123):
+        needs_review, questions = _extract_needs_review_flags(bad)
+        assert needs_review is False
+        assert questions == []
+
+    # Should also tolerate payload["data"] being non-dict
+    for bad_data in (None, [], "string", 123):
+        needs_review, questions = _extract_needs_review_flags({"data": bad_data})
+        assert needs_review is False
+        assert questions == []
+
+def test_extract_needs_review_flags_finds_nested_data():
+    # Base level payload
+    payload1 = {
+        "hard_filter_needs_review": True,
+        "needs_review_questions": ["q1"]
+    }
+    needs_review, questions = _extract_needs_review_flags(payload1)
+    assert needs_review is True
+    assert questions == ["q1"]
+
+    # Nested under "data"
+    payload2 = {
+        "data": {
+            "hard_filter_needs_review": True,
+            "needs_review_questions": ["q2"]
+        }
+    }
+    needs_review, questions = _extract_needs_review_flags(payload2)
+    assert needs_review is True
+    assert questions == ["q2"]
+
+    # Missing flags completely
+    payload3 = {"data": {"some_other_key": True}}
+    needs_review, questions = _extract_needs_review_flags(payload3)
+    assert needs_review is False
+    assert questions == []
+
 
 def test_extract_rankings_hard_filter_details_from_webhook():
     # Test Priority 1: `hard_filter_results` in `engage_last_response`
