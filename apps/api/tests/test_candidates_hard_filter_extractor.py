@@ -61,7 +61,37 @@ def test_extract_needs_review_flags_string_payload():
     assert needs_review is False
     assert questions == []
 
+def test_apply_needs_review_flags_cascades_multiple_payloads():
+    from routers.candidates import _apply_needs_review_flags
+    cand = {}
+    
+    # Needs Review is deep in the 3rd payload
+    payloads = [
+        {}, 
+        {"other": True}, 
+        {"hard_filter_needs_review": True, "needs_review_questions": ["q4"]}
+    ]
+    _apply_needs_review_flags(cand, payloads)
+    assert cand.get("engage_hard_filter_needs_review") is True
+    assert cand.get("engage_needs_review_questions") == ["q4"]
 
+    # Stop checking once found
+    cand2 = {}
+    payloads2 = [
+        {"hard_filter_needs_review": True, "needs_review_questions": ["q5"]},
+        {"hard_filter_needs_review": False, "needs_review_questions": []}
+    ]
+    _apply_needs_review_flags(cand2, payloads2)
+    assert cand2.get("engage_hard_filter_needs_review") is True
+    # Split across payloads (Medium priority reviewer note)
+    cand3 = {}
+    payloads3 = [
+        {"hard_filter_needs_review": True},
+        {"needs_review_questions": ["q6"]}
+    ]
+    _apply_needs_review_flags(cand3, payloads3)
+    assert cand3.get("engage_hard_filter_needs_review") is True
+    assert cand3.get("engage_needs_review_questions") == ["q6"]
 
 def test_extract_rankings_hard_filter_details_from_webhook():
     # Test Priority 1: `hard_filter_results` in `engage_last_response`
