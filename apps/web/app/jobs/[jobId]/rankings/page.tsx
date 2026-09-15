@@ -2732,8 +2732,8 @@ export default function CandidateRankingsPage() {
                               );
                             }
                             const { label, color } = normalizeInterviewStatus(candidate);
-                            const needsReview = candidate.engage_hard_filter_needs_review ||
-                              (candidate.data?.engage_hard_filter_needs_review);
+                            const needsReview = Boolean(candidate.engage_hard_filter_needs_review ||
+                              candidate.data?.engage_hard_filter_needs_review);
                             const needsReviewQs = candidate.engage_needs_review_questions ||
                               candidate.data?.engage_needs_review_questions || [];
                             return (

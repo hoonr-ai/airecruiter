@@ -1210,7 +1210,7 @@ export default function GlobalCandidatesPage() {
                           >
                             {statusInfo.label}
                           </span>
-                          {(c.engage_hard_filter_needs_review || c.data?.engage_hard_filter_needs_review) && statusInfo.label === "Pass" && (
+                          {Boolean(c.engage_hard_filter_needs_review || c.data?.engage_hard_filter_needs_review) && statusInfo.label === "Pass" && (
                             <div
                               className="relative group/nr"
                               onMouseEnter={() => setHoveredNeedsReviewKey(c.candidate_id)}
