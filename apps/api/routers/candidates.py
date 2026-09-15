@@ -317,6 +317,34 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         locations = sourcing_filters.get("locations") or []
         primary_location = locations[0].get("value", "") if locations else ""
 
+        # Two of the matrix's pass/fail hard filters read straight off the
+        # criteria — the minimum-years floor and the location radius — and both
+        # were being left at their defaults here (None → filter n/a, 25 → the
+        # wrong radius). Step 5 sends them from the same saved Step-5 state
+        # (`sourcing_filters.minExperienceYears` / `.sourceLocationMiles`, see
+        # apps/web/app/jobs/new/page.tsx), so read them back from there or the
+        # re-score paths silently grade on a different rubric than the screen.
+        min_experience_years = None
+        raw_min_years = sourcing_filters.get("minExperienceYears")
+        try:
+            if raw_min_years is not None and int(raw_min_years) > 0:
+                min_experience_years = int(raw_min_years)
+        except (TypeError, ValueError):
+            min_experience_years = None
+
+        within_miles = 25
+        raw_miles = sourcing_filters.get("sourceLocationMiles")
+        if raw_miles is None and locations:
+            # Older drafts stored the radius per-location as "within 50 mi".
+            raw_miles = "".join(
+                ch for ch in str(locations[0].get("radius") or "") if ch.isdigit()
+            )
+        try:
+            if raw_miles not in (None, "") and int(raw_miles) > 0:
+                within_miles = int(raw_miles)
+        except (TypeError, ValueError):
+            within_miles = 25
+
         return SearchCriteria(
             job_id=str(resolved_job_ref),
             title_criteria=title_criteria,
@@ -326,6 +354,8 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             resume_match_filters=resume_match_filters,
             location=primary_location,
             location_type=location_type or "Unspecified",
+            within_miles=within_miles,
+            min_experience_years=min_experience_years,
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
@@ -336,23 +366,79 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         return None
 
 
+# Fields the Step-5 scoring policy reads off a candidate but that are not
+# skill/title inputs: the source name (JobAgent location exemption + the
+# JobAgent N/A stamp), the location-provenance pair (résumé-is-final), the
+# out-of-radius badge, the detail-failure and high-level flags, and the
+# signals the legacy (SCORING_MATRIX_V2=false) floors and bonuses stack on.
+# Missing any of them makes an off-search score diverge from the number the
+# recruiter saw on Step 5 — which is the whole point of routing both through
+# `apply_scoring_policy`.
+_SCORING_POLICY_PASSTHROUGH = (
+    "source",
+    "city",
+    "state",
+    "current_company",
+    "location_source",
+    "location_conflict",
+    "location_out_of_radius",
+    "location_match_reason",
+    "distance_miles",
+    "detail_failed",
+    "scoring_mode",
+    "api_rank",
+    "open_to_work",
+    "deep_text",
+    "no_contact",
+    "no_contact_reason",
+)
+
+
 def _build_candidate_for_resume_matching(payload: Dict[str, Any]) -> Dict[str, Any]:
     data_blob = _json_load_safe(payload.get("data"), {})
     enhanced = payload.get("enhanced_info") or data_blob.get("enhanced_info") or {}
-    return {
+    if not isinstance(enhanced, dict):
+        enhanced = {}
+    # Title drives the 15% "recent title relevance" bucket — and when NO title
+    # reaches the scorer that bucket drops out of the denominator entirely, so
+    # the candidate is scored on skills alone (a Java QA engineer then reads
+    # like a Java developer). Walk the same fallback chain the search emits
+    # through rather than trusting one column.
+    title = (
+        payload.get("headline")
+        or payload.get("title")
+        or data_blob.get("headline")
+        or data_blob.get("title")
+        or enhanced.get("job_title")
+        or enhanced.get("current_title")
+        or enhanced.get("most_recent_title")
+        or ""
+    )
+    candidate = {
         "candidate_id": str(payload.get("candidate_id") or ""),
         "name": payload.get("name") or "",
-        "title": payload.get("headline") or "",
-        "headline": payload.get("headline") or "",
-        "location": payload.get("location") or "",
-        "resume_text": payload.get("resume_text") or "",
+        "title": title,
+        "headline": title,
+        "location": payload.get("location") or data_blob.get("location") or "",
+        "resume_text": payload.get("resume_text") or data_blob.get("resume_text") or "",
         "skills": data_blob.get("skills") or payload.get("skills") or [],
         "experience_years": data_blob.get("experience_years") or payload.get("experience_years") or 0,
-        "company_experience": data_blob.get("company_experience") or [],
-        "education": data_blob.get("education") or [],
-        "certifications": data_blob.get("certifications") or [],
-        "enhanced_info": enhanced if isinstance(enhanced, dict) else {},
+        "company_experience": (
+            data_blob.get("company_experience")
+            or payload.get("company_experience")
+            or []
+        ),
+        "education": data_blob.get("education") or payload.get("education") or [],
+        "certifications": data_blob.get("certifications") or payload.get("certifications") or [],
+        "enhanced_info": enhanced,
     }
+    for key in _SCORING_POLICY_PASSTHROUGH:
+        value = payload.get(key)
+        if value is None:
+            value = data_blob.get(key)
+        if value is not None:
+            candidate[key] = value
+    return candidate
 
 
 def _compute_resume_matching(payload: Dict[str, Any], criteria: Optional[SearchCriteria]) -> Dict[str, Any]:
@@ -376,15 +462,26 @@ def _compute_resume_matching(payload: Dict[str, Any], criteria: Optional[SearchC
 
     candidate = _build_candidate_for_resume_matching(payload)
     try:
-        scored = unified_search_service._score_candidate(candidate, criteria)
+        # The FULL Step-5 pipeline, not just the scorer: location hygiene,
+        # the no-contact and hiring-client gates, the scoring matrix, and the
+        # N/A policies (detail_failed, JobDiva-JobAgent) — in the same order,
+        # from the same code. `score` is None when a policy withholds the
+        # percentage, which is a real verdict ("N/A"), not a zero.
+        scored = unified_search_service.score_candidate_off_search(candidate, criteria)
+        raw_score = scored.get("match_score")
+        details = scored.get("match_score_details") or {}
         return {
-            "score": float(scored.get("score") or 0),
+            "score": None if raw_score is None else float(raw_score),
             "status": "done",
             "missing_skills": scored.get("missing_skills") or [],
             "matched_skills": scored.get("matched_skills") or [],
             "explainability": scored.get("explainability") or [],
-            "score_details": scored.get("score_details") or {},
+            "score_details": details,
             "scored_at": now_iso,
+            "no_contact": bool(scored.get("no_contact")),
+            "no_contact_reason": scored.get("no_contact_reason") or "",
+            "client_conflict": bool(scored.get("client_conflict")),
+            "client_conflict_reason": scored.get("client_conflict_reason") or "",
         }
     except Exception as e:
         logger.warning(f"resume matching score failed for {payload.get('candidate_id')}: {e}")
@@ -397,6 +494,23 @@ def _compute_resume_matching(payload: Dict[str, Any], criteria: Optional[SearchC
             "score_details": {},
             "scored_at": now_iso,
         }
+
+
+async def _warm_resume_matching(
+    payloads: List[Dict[str, Any]], criteria: Optional[SearchCriteria]
+) -> None:
+    """Warm the scorer's caches for a batch about to go through
+    `_compute_resume_matching`.
+
+    A live Step-5 search warms query-side embeddings once and each candidate's
+    side as it emits; an off-search batch has to do both up front or the
+    embedding skill matcher (cache-only, and ON for every non-IT family) scores
+    every term 0 and the batch comes out below what Step 5 showed.
+    """
+    if not criteria or not payloads:
+        return
+    candidates = [_build_candidate_for_resume_matching(p) for p in payloads]
+    await unified_search_service.warm_scoring_embeddings(criteria, candidates)
 
 
 def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, Any]:
@@ -494,7 +608,9 @@ def _schedule_cross_submissions(job_ref: str, criteria: "SearchCriteria") -> Non
         from services import cross_submissions
 
         task = asyncio.create_task(
-            cross_submissions.run_for_job_async(job_ref, criteria, _compute_resume_matching)
+            cross_submissions.run_for_job_async(
+                job_ref, criteria, _compute_resume_matching, warmer=_warm_resume_matching,
+            )
         )
         _cross_submission_tasks.add(task)
         task.add_done_callback(_cross_submission_tasks.discard)

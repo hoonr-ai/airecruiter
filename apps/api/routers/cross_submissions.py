@@ -67,7 +67,11 @@ async def run_cross_submissions(
     body = body or RunCrossSubmissionsRequest()
     # Late import: routers.candidates is a heavy module and imports routers.jobs;
     # importing it here (not at module load) keeps router boot order simple.
-    from routers.candidates import _build_resume_matching_criteria, _compute_resume_matching
+    from routers.candidates import (
+        _build_resume_matching_criteria,
+        _compute_resume_matching,
+        _warm_resume_matching,
+    )
 
     try:
         criteria = await asyncio.to_thread(_build_resume_matching_criteria, job_id_or_ref)
@@ -75,6 +79,7 @@ async def run_cross_submissions(
             job_id_or_ref,
             criteria,
             _compute_resume_matching,
+            warmer=_warm_resume_matching,
             force=True,
             send_email=bool(body.send_email),
             app_base_url=_frontend_origin(request),
