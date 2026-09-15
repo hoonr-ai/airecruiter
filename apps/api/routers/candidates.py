@@ -1591,6 +1591,12 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
+            needs_review, review_qs = _extract_needs_review_flags(cand.get("audit_payload"))
+            if needs_review:
+                cand["engage_hard_filter_needs_review"] = needs_review
+            if review_qs:
+                cand["engage_needs_review_questions"] = review_qs
+
             try:
                 scores_to_avg = [float(r_score)]
                 if is_engage_done and cand.get("engage_score") is not None:
