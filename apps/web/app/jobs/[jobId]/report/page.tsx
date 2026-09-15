@@ -47,6 +47,7 @@ interface TranscriptionItem {
   text?: string;
   content?: string;
   timestamp?: string;
+  needs_review?: boolean;
 }
 
 interface EvaluationReport {
@@ -80,6 +81,7 @@ interface EvaluationReport {
     total_fit_score: number;
     is_boolean_interview?: boolean;
     engage_hard_filter_details?: any[];
+    hard_filter_needs_review?: boolean;
   };
   job: {
     job_id: string;
@@ -604,7 +606,8 @@ export default function CandidateEvaluationReportPage() {
                       answer: q.answer_text || q.answer,
                       candidate_score: q.score,
                       hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
-                      reason: q.evaluation_reason || q.reason
+                      reason: q.evaluation_reason || q.reason,
+                      needs_review: q.needs_review
                     }));
                   }
 
@@ -642,6 +645,12 @@ export default function CandidateEvaluationReportPage() {
                                 status={hf_label} 
                                 type={hf_label === 'Pass' ? 'success' : hf_label === 'Fail' ? 'danger' : 'neutral'} 
                               />
+                              {item.needs_review && hf_label === 'Pass' && (
+                                <StatusPill
+                                  status="Needs Review"
+                                  type="warning"
+                                />
+                              )}
                             </div>
                           </div>
 
@@ -907,12 +916,13 @@ export default function CandidateEvaluationReportPage() {
   );
 }
 
-function StatusPill({ status, type }: { status: string; type: "success" | "danger" | "neutral" | "info" }) {
+function StatusPill({ status, type }: { status: string; type: "success" | "danger" | "neutral" | "info" | "warning" }) {
   const themes = {
     success: "bg-[#e8fbf0] text-[#107d4f] border-[#b2f0d1]",
     danger: "bg-[#fff1f2] text-[#be123c] border-[#fecdd3]",
     neutral: "bg-[#fffbeb] text-[#b45309] border-[#fde68a]",
     info: "bg-[#eef2ff] text-[#4338ca] border-[#c7d2fe]",
+    warning: "bg-status-warning-bg text-status-warning border-status-warning-border",
   };
   
   return (
@@ -925,5 +935,4 @@ function StatusPill({ status, type }: { status: string; type: "success" | "dange
     </span>
   );
 }
-
 

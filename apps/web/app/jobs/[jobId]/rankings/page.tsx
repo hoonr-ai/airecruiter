@@ -28,7 +28,7 @@ import {
   Activity,
   Ban,
   AlertTriangle,
-  PhoneOff
+  PhoneOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -55,6 +55,7 @@ import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
 import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
+import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import { API_BASE, authFetch, api } from "@/lib/api";
 
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
@@ -304,13 +305,17 @@ interface Candidate {
   engage_total_score?: number;
   engage_status?: string;
   engage_hard_filter_status?: string;
+  engage_hard_filter_needs_review?: boolean;
   engage_hard_filter_details?: {
     question: string;
+    answer?: string;
     status: "Pass" | "Fail" | "Pending";
     score?: number | null;
     total_score?: number | null;
     reason?: string;
+    needs_review?: boolean;
   }[];
+  engage_needs_review_questions?: { question: string; answer?: string; reason?: string }[];
   engage_completed_at?: string;
   engage_created_at?: string;
   availability?: string;
@@ -2682,14 +2687,21 @@ export default function CandidateRankingsPage() {
                               );
                             }
                             const { label, color } = normalizeInterviewStatus(candidate);
+                            const needsReview = Boolean(candidate.engage_hard_filter_needs_review ||
+                              candidate.data?.engage_hard_filter_needs_review);
+                            const needsReviewQs = candidate.engage_needs_review_questions ||
+                              candidate.data?.engage_needs_review_questions || [];
                             return (
-                              <div className="flex justify-center items-center w-full">
+                              <div className="flex flex-col justify-center items-center gap-1 w-full relative">
                                 <span
                                   className="px-3 py-1 rounded-full text-[11px] font-bold border"
                                   style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
                                 >
                                   {label}
                                 </span>
+                                {needsReview && label === "Pass" && (
+                                  <NeedsReviewBadge questions={needsReviewQs} />
+                                )}
                               </div>
                             );
                           })()}

@@ -19,6 +19,7 @@ import { api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
+import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
   SelectContent,
@@ -163,6 +164,12 @@ interface CandidateData {
   feedback_reason?: string;
   feedback_at?: string;
   jobdiva_candidate_id?: string;
+  engage_hard_filter_needs_review?: boolean;
+  engage_needs_review_questions?: Array<{
+    question: string;
+    answer?: string;
+    reason?: string;
+  }>;
   [key: string]: unknown;
 }
 
@@ -188,6 +195,8 @@ interface Candidate {
   engage_score: number;
   total_fit_score?: number | null;
   audit_payload?: { hard_filter_details?: HardFilterDetail[] };
+  engage_hard_filter_needs_review?: boolean;
+  engage_needs_review_questions?: { question: string; answer?: string; reason?: string }[];
   job_title: string;
   recruiter_emails?: string | string[];
   screening_level: string;
@@ -1151,14 +1160,19 @@ export default function GlobalCandidatesPage() {
                         )}
                       </TableCell>
 
-                      <TableCell className="border-b border-slate-200 text-center py-3 border-l border-slate-200">
-                        <div className="flex justify-center items-center w-full">
+                      <TableCell className="border-b border-slate-200 text-center py-3 border-l border-slate-200 overflow-visible relative">
+                        <div className="flex flex-col justify-center items-center gap-1 w-full relative">
                           <span
                             className="px-3 py-1 rounded-full text-[11px] font-bold border"
                             style={{ backgroundColor: `${statusInfo.color}08`, color: statusInfo.color, borderColor: `${statusInfo.color}30` }}
                           >
                             {statusInfo.label}
                           </span>
+                          {Boolean(c.engage_hard_filter_needs_review || c.data?.engage_hard_filter_needs_review) && statusInfo.label === "Pass" && (
+                            <NeedsReviewBadge
+                              questions={c.engage_needs_review_questions || c.data?.engage_needs_review_questions || []}
+                            />
+                          )}
                         </div>
                       </TableCell>
 
