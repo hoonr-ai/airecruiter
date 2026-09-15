@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff , AlertCircle } from "lucide-react";
+import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import { api } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
+import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
   SelectContent,
@@ -162,6 +163,7 @@ interface CandidateData {
   feedback_reason?: string;
   feedback_at?: string;
   jobdiva_candidate_id?: string;
+  engage_hard_filter_needs_review?: boolean;
   engage_needs_review_questions?: Array<{
     question: string;
     answer?: string;
@@ -205,60 +207,6 @@ interface Candidate {
   image_url?: string;
   headline?: string;
   [key: string]: unknown;
-}
-
-function NeedsReviewHoverCard({
-  questions,
-  open,
-}: {
-  questions?: { question: string; answer?: string; reason?: string }[];
-  open: boolean;
-}) {
-  if (!questions || questions.length === 0) return null;
-
-  return (
-    <div
-      className={`absolute left-1/2 top-full z-50 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-amber-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${open
-        ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
-        : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
-        }`}
-    >
-      <div className="mb-3 flex items-center justify-between border-b border-amber-100 pb-2.5">
-        <span className="text-[12px] font-bold uppercase tracking-widest text-amber-800 flex items-center gap-2">
-          <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
-          Needs Recruiter Review
-        </span>
-        <span className="text-[10px] font-medium text-amber-500">
-          {questions.length} Question{questions.length !== 1 ? "s" : ""}
-        </span>
-      </div>
-      <p className="text-[11px] text-amber-700 mb-3 leading-relaxed">
-        These questions were <strong>passed</strong> but the candidate gave an ambiguous or uncertain answer. Please review before proceeding.
-      </p>
-      <div className="space-y-2.5 max-h-[320px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-amber-200">
-        {questions.map((item, index) => (
-          <div
-            key={`${item.question}-${index}`}
-            className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 hover:border-amber-300 hover:bg-white transition-all duration-200"
-          >
-            <div className="text-[13px] font-semibold leading-relaxed text-slate-800 mb-1.5 break-words whitespace-normal">
-              {item.question}
-            </div>
-            {item.answer && (
-              <div className="text-[12px] italic text-slate-600 mb-1.5 bg-white/70 px-2.5 py-1.5 rounded-lg border border-amber-100">
-                "{item.answer}"
-              </div>
-            )}
-            {item.reason && (
-              <div className="text-[11px] text-amber-700 leading-relaxed">
-                <span className="font-semibold not-italic">AI Note: </span>{item.reason}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 function ResumeScreeningHoverCard({
@@ -521,7 +469,6 @@ export default function GlobalCandidatesPage() {
   // Hover states
   const [hoveredScoreCandidateId, setHoveredScoreCandidateId] = useState<string | null>(null);
   const [hoveredEngageCandidateId, setHoveredEngageCandidateId] = useState<string | null>(null);
-  const [hoveredNeedsReviewKey, setHoveredNeedsReviewKey] = useState<string | null>(null);
 
   const resetPagination = () => {
     setOffset(0);
@@ -1216,19 +1163,9 @@ export default function GlobalCandidatesPage() {
                             {statusInfo.label}
                           </span>
                           {Boolean(c.engage_hard_filter_needs_review || c.data?.engage_hard_filter_needs_review) && statusInfo.label === "Pass" && (
-                            <div
-                              className="relative group/nr"
-                              onMouseEnter={() => setHoveredNeedsReviewKey(c.candidate_id)}
-                              onMouseLeave={() => setHoveredNeedsReviewKey(prev => prev === c.candidate_id ? null : prev)}
-                            >
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-300 cursor-pointer select-none">
-                                <AlertCircle className="w-3 h-3" /> Needs Review
-                              </span>
-                              <NeedsReviewHoverCard
-                                questions={c.engage_needs_review_questions || c.data?.engage_needs_review_questions || []}
-                                open={hoveredNeedsReviewKey === c.candidate_id}
-                              />
-                            </div>
+                            <NeedsReviewBadge
+                              questions={c.engage_needs_review_questions || c.data?.engage_needs_review_questions || []}
+                            />
                           )}
                         </div>
                       </TableCell>

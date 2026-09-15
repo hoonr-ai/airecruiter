@@ -625,7 +625,7 @@ export default function CandidateEvaluationReportPage() {
                               {item.needs_review && hf_label === 'Pass' && (
                                 <StatusPill
                                   status="Needs Review"
-                                  type="neutral"
+                                  type="warning"
                                 />
                               )}
                             </div>
@@ -933,12 +933,13 @@ export default function CandidateEvaluationReportPage() {
   );
 }
 
-function StatusPill({ status, type }: { status: string; type: "success" | "danger" | "neutral" | "info" }) {
+function StatusPill({ status, type }: { status: string; type: "success" | "danger" | "neutral" | "info" | "warning" }) {
   const themes = {
     success: "bg-[#e8fbf0] text-[#107d4f] border-[#b2f0d1]",
     danger: "bg-[#fff1f2] text-[#be123c] border-[#fecdd3]",
     neutral: "bg-[#fffbeb] text-[#b45309] border-[#fde68a]",
     info: "bg-[#eef2ff] text-[#4338ca] border-[#c7d2fe]",
+    warning: "bg-status-warning-bg text-status-warning border-status-warning-border",
   };
   
   return (
@@ -951,5 +952,4 @@ function StatusPill({ status, type }: { status: string; type: "success" | "dange
     </span>
   );
 }
-
 
