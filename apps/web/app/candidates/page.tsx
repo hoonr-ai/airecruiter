@@ -605,7 +605,7 @@ export default function GlobalCandidatesPage() {
             if (lower.startsWith("reject")) pageFeedbacks[c.id] = "Reject";
             else if (lower === "submit" || lower === "submitted") pageFeedbacks[c.id] = "Submit";
             else if (lower === "unreachable") pageFeedbacks[c.id] = "Unreachable";
-            else pageFeedbacks[c.id] = raw;
+            else pageFeedbacks[c.id] = "";
           }
           if (c.data?.feedback_reason) pageFeedbackReasons[c.id] = c.data.feedback_reason;
           if (c.data?.feedback_at) pageFeedbackTimes[c.id] = c.data.feedback_at;
@@ -1051,7 +1051,7 @@ export default function GlobalCandidatesPage() {
                   const parsedRecruiterEmails = getRecruiterEmailsArray(c.recruiter_emails); // Cache parsed emails once per row
 
                   return (
-                    <TableRow key={c.candidate_id} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
+                    <TableRow key={candidateRowKey(c)} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
                       <TableCell className="border-b border-slate-200 text-center text-[13px] font-medium text-slate-400 sticky left-0 z-10 bg-white group-hover:bg-slate-50 transition-colors">
                         {i + 1}
                       </TableCell>
