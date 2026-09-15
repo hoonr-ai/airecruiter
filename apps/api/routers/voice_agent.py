@@ -130,6 +130,7 @@ class HardFilterResultItem(BaseModel):
     answer: Optional[str] = None
     pass_fail: Optional[str] = None
     hard_filter_status: Optional[str] = None
+    needs_review: Optional[bool] = None
     reason: Optional[str] = None
     question_order: Optional[int] = None
 
@@ -140,6 +141,8 @@ class VoiceAgentInterviewWebhook(BaseModel):
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
     hard_filter_status: Optional[str] = None  # "passed" or "failed"
+    hard_filter_needs_review: Optional[bool] = None
+    needs_review_questions: Optional[List[str]] = None
     total_score: Optional[float] = None
     candidate_score: Optional[float] = None
     completed_at: Optional[str] = None
@@ -199,6 +202,8 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
+            "hard_filter_needs_review": payload.hard_filter_needs_review,
+            "needs_review_questions": payload.needs_review_questions,
             "transcriptions": [t.model_dump(mode="json") for t in payload.transcriptions] if payload.transcriptions else [],
             "hard_filter_results": [h.model_dump(mode="json") for h in payload.hard_filter_results] if payload.hard_filter_results else []
         }
