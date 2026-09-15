@@ -140,11 +140,11 @@ def _extract_needs_review_flags(payload: Any) -> tuple:
 def _apply_needs_review_flags(cand: dict, payloads: List[Any]) -> None:
     for payload in payloads:
         needs_review, review_qs = _extract_needs_review_flags(payload)
-        if needs_review:
+        if needs_review and "engage_hard_filter_needs_review" not in cand:
             cand["engage_hard_filter_needs_review"] = needs_review
-        if review_qs:
+        if review_qs and "engage_needs_review_questions" not in cand:
             cand["engage_needs_review_questions"] = review_qs
-        if cand.get("engage_hard_filter_needs_review"):
+        if cand.get("engage_hard_filter_needs_review") and cand.get("engage_needs_review_questions"):
             break
 
 def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
@@ -218,7 +218,7 @@ def _extract_rankings_hard_filter_details(
                 "score": None,
                 "total_score": None,
                 "reason": item.get("reason") or "",
-                "needs_review": item.get("needs_review")
+                "needs_review": item.get("needs_review"),
             })
         if details:
             return details
@@ -4156,7 +4156,17 @@ async def get_candidate_evaluation_report(
             if scores_to_average_corrected:
                 total_fit_score = sum(scores_to_average_corrected) / len(scores_to_average_corrected)
 
-        needs_review, review_qs = _extract_needs_review_flags(pair_data.get("audit_payload"))
+        temp_cand = {}
+        _apply_needs_review_flags(
+            temp_cand,
+            [
+                pair_data.get("audit_payload"),
+                pair_data.get("audit_response"),
+                data_blob.get("engage_last_response") if isinstance(data_blob, dict) else None
+            ]
+        )
+        needs_review = temp_cand.get("engage_hard_filter_needs_review", False)
+        review_qs = temp_cand.get("engage_needs_review_questions", [])
 
         scores = {
             "resume_match_score":    resume_match_score,
