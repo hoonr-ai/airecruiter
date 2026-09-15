@@ -40,6 +40,28 @@ def test_extract_needs_review_flags_finds_nested_data():
     assert needs_review is False
     assert questions == []
 
+def test_extract_needs_review_flags_string_payload():
+    import json
+    # Valid JSON string
+    payload_str = json.dumps({
+        "hard_filter_needs_review": True,
+        "needs_review_questions": ["q3"]
+    })
+    needs_review, questions = _extract_needs_review_flags(payload_str)
+    assert needs_review is True
+    assert questions == ["q3"]
+
+    # Invalid JSON string
+    needs_review, questions = _extract_needs_review_flags("invalid json")
+    assert needs_review is False
+    assert questions == []
+
+    # None payload
+    needs_review, questions = _extract_needs_review_flags(None)
+    assert needs_review is False
+    assert questions == []
+
+
 
 def test_extract_rankings_hard_filter_details_from_webhook():
     # Test Priority 1: `hard_filter_results` in `engage_last_response`
