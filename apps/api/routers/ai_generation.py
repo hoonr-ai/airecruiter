@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import re
 import time
 import logging
 from typing import Any, Dict, List, Literal, Optional
@@ -680,6 +681,13 @@ class QuestionPolicyVerdict(BaseModel):
     reason: str = Field(
         description="One short recruiter-facing sentence explaining the problem; empty when ok."
     )
+    corrected_question: str = Field(
+        default="",
+        description=(
+            "Full question rewritten with correct spelling/grammar when flags includes "
+            "'grammatical_error'. Same meaning and tone, minimal changes. Empty otherwise."
+        ),
+    )
 
 
 _QUESTION_MODERATION_PROMPT = """You review recruiter-written phone-screen questions and their expected answers (if provided) for PAIR, a recruiting platform, against company policy. An automated interview bot will ask candidates these questions verbatim.
@@ -691,15 +699,101 @@ Flag a question or expected answer ONLY when it clearly violates policy:
 - sensitive_personal_data: asks for data a screening call must not collect (SSN/government ID numbers, bank or card details, passwords, medical history).
 - nonsensical: incoherent, self-contradictory, or not answerable as written — a candidate could not reasonably respond to it.
 - off_topic: no plausible relevance to screening a candidate for a job.
-- grammatical_error: contains significant spelling or grammatical errors that make it look unprofessional.
+- grammatical_error: contains a spelling, grammar, verb-tense, subject-verb agreement, or word-order error that a careful editor would correct before publishing. Review every question for this independently of the other flags — do not skip it just because nothing else is wrong. Catch ALL such errors, not only common templates like "how many years experience" or "is you".
 - unsafe: asks a question that recruiters should not ask in an interview for legal, safety, or compliance reasons (e.g., asking about union affiliation, genetic information, or promoting illegal activities).
 
 Do NOT flag normal recruiting questions, even blunt ones: availability/notice period, compensation expectations, work authorization/visa status, willingness to relocate or work on-site/shifts/on-call, background-check or drug-test consent, references, years of experience, education, or tough technical/behavioral questions.
 
-Set ok=true with empty flags and empty reason when the question and expected answer comply. When flagging, set ok=false and reason to ONE short recruiter-facing sentence (under 25 words) explaining the problem."""
+Set ok=true with empty flags, empty reason, and empty corrected_question when the question and expected answer comply. When flagging, set ok=false and reason to ONE short recruiter-facing sentence (under 25 words) explaining the problem. When flags includes grammatical_error, also set corrected_question to the full question rewritten with correct spelling and grammar (same meaning and tone, smallest edit that fixes it) so the recruiter can copy it directly; otherwise leave corrected_question empty."""
 
 _QUESTION_MODERATION_MAX = 30
 _QUESTION_MODERATION_CACHE_TTL = 7 * 24 * 60 * 60
+
+
+def _match_case(original: str, replacement: str) -> str:
+    """Keep the replacement's leading capitalization aligned with the original."""
+    if original[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
+
+
+# (detect/fix pattern, fixed phrase or backreference template, recruiter-facing reason).
+# Each rule rewrites only the offending fragment so the rest of the recruiter's
+# wording is preserved in `corrected_question`. This is a fast, dependency-free
+# net for the handful of errors we've seen recur; the model call above is what
+# generalizes to the long tail of grammar mistakes it can't enumerate here.
+_DETERMINISTIC_GRAMMAR_RULES: List[tuple] = [
+    (
+        re.compile(r"how\s+many\s+years\s+experience\s+you\s+have", re.IGNORECASE),
+        lambda m: _match_case(m.group(0), "how many years of experience do you have"),
+        "Use ‘How many years of experience do you have?’ instead.",
+    ),
+    (
+        re.compile(r"how\s+much\s+years", re.IGNORECASE),
+        lambda m: _match_case(m.group(0), "how many years"),
+        "Use ‘How many years’ rather than ‘How much years.’",
+    ),
+    (
+        re.compile(r"(current\s+(?:job\s+)?designation)\s+currently", re.IGNORECASE),
+        r"\1",
+        "Remove the repeated ‘current/currently’ wording.",
+    ),
+
+    (
+        re.compile(r"\b(is)(\s+you\b)", re.IGNORECASE),
+        lambda m: ("Are" if m.group(1)[0].isupper() else "are") + m.group(2),
+        "Use ‘Are you …?’ — ‘Is you’ is not correct English.",
+    ),
+]
+
+
+def _deterministic_grammar_fix(text: str) -> Optional[tuple]:
+    """Catch high-confidence grammar errors the moderation model may overlook.
+
+    Returns (reason, corrected_question) when a rule matches, else None. All
+    matching rules are applied so a question with more than one of these
+    errors still gets a single, fully corrected sentence back. This
+    deliberately covers only unambiguous, recurring wording errors — broader,
+    open-ended grammar interpretation is the model's job (see
+    _QUESTION_MODERATION_PROMPT) since a fixed regex list can never enumerate
+    every possible mistake a recruiter might type.
+    """
+    reasons: List[str] = []
+    corrected = text
+    for _ in range(5):  # Run to fixed point
+        prev = corrected
+        for pattern, repl, reason in _DETERMINISTIC_GRAMMAR_RULES:
+            corrected, count = pattern.subn(repl, corrected)
+            if count:
+                reasons.append(reason)
+        if prev == corrected:
+            break
+            
+    if not reasons:
+        return None
+        
+    combined_reason = " ".join(dict.fromkeys(reasons))
+    if len(combined_reason) > 200:
+        combined_reason = combined_reason[:197] + "..."
+        
+    return combined_reason, corrected
+
+
+def _merge_deterministic_grammar_verdict(data: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """Add a deterministic grammar warning without hiding an AI policy flag."""
+    fix = _deterministic_grammar_fix(text)
+    if fix is None:
+        return data
+    grammar_reason, corrected_question = fix
+
+    flags = list(dict.fromkeys([*(data.get("flags") or []), "grammatical_error"]))
+    return {
+        **data,
+        "ok": False,
+        "flags": flags,
+        "reason": data.get("reason") or grammar_reason,
+        "corrected_question": data.get("corrected_question") or corrected_question,
+    }
 
 
 @router.post("/screening-questions/moderate")
@@ -729,20 +823,37 @@ async def moderate_screening_questions(
     async def _check(item: ModerateQuestionItem) -> Dict[str, Any]:
         text = item.question_text.strip()[:1000]
         base = {"key": item.key, "question_text": text}
-        unchecked = {**base, "ok": True, "flags": [], "reason": "", "checked": False}
+        unchecked = {**base, "ok": True, "flags": [], "reason": "", "corrected_question": "", "checked": False}
+        deterministic_fix = _deterministic_grammar_fix(text)
         if oai is None:
+            if deterministic_fix:
+                grammar_reason, corrected_question = deterministic_fix
+                return {
+                    **base,
+                    "ok": False,
+                    "flags": ["grammatical_error"],
+                    "reason": grammar_reason,
+                    "corrected_question": corrected_question,
+                    "checked": True,
+                }
             return unchecked
 
         # job_title is part of the prompt (it decides off_topic/nonsensical),
         # so it must be part of the key — a verdict for one job's context must
         # not serve another job for 7 days.
         expected_answer_text = (item.expected_answer or "").strip()[:1000]
-        cache_key = _llm_cache.make_key("q_moderation", 2, model, job_title, text, expected_answer_text)
+        # v3 adds corrected_question — bumped so pre-existing cache entries
+        # (which lack that field) don't mask the correction for 7 days.
+        cache_key = _llm_cache.make_key("q_moderation", 3, model, job_title, text, expected_answer_text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
                 verdict = QuestionPolicyVerdict.model_validate(cached)
-                return {**base, **verdict.model_dump(), "checked": True}
+                return {
+                    **base,
+                    **_merge_deterministic_grammar_verdict(verdict.model_dump(), text),
+                    "checked": True,
+                }
             except Exception:
                 pass  # schema drift — re-run
 
@@ -777,6 +888,8 @@ async def moderate_screening_questions(
         data["ok"] = bool(data.get("ok")) and not data.get("flags")
         if data["ok"]:
             data["reason"] = ""
+            data["corrected_question"] = ""
+        data = _merge_deterministic_grammar_verdict(data, text)
         try:
             await _llm_cache.set_json(cache_key, data, ttl_seconds=_QUESTION_MODERATION_CACHE_TTL)
         except Exception:

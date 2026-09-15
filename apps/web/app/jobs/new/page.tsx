@@ -7386,7 +7386,13 @@ function NewJobPageContent() {
                   rows={3}
                 />
                 {isRecruiterAddedQuestion(q.category) && (
-                  <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text, q.pass_criteria ?? "")} />
+                  <QuestionPolicyWarning
+                    verdict={questionModeration.verdictFor(q.question_text, q.pass_criteria ?? "")}
+                    onApplyCorrection={(corrected) => {
+                      updateScreenQuestion(q.id, 'question_text', corrected);
+                      questionModeration.flushCheck(String(q.id), corrected, q.pass_criteria ?? "");
+                    }}
+                  />
                 )}
               </div>
 
