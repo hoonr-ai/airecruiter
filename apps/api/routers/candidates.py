@@ -126,6 +126,8 @@ def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float],
 
 
 def _extract_needs_review_flags(payload: Any) -> tuple:
+    if isinstance(payload, str):
+        payload = _json_load_safe(payload, {})
     if not isinstance(payload, dict):
         return False, []
     nested = payload.get("data")
@@ -3278,7 +3280,7 @@ async def get_launched_candidates(
 
         for cand in candidates:
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
-            original_payload = cand.get("audit_payload") if isinstance(cand.get("audit_payload"), dict) else {}
+            original_payload = cand.get("audit_payload")
             
             # Promote persisted values from data_blob
             if isinstance(data_blob, dict):
