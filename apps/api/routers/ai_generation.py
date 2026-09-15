@@ -738,11 +738,7 @@ _DETERMINISTIC_GRAMMAR_RULES: List[tuple] = [
         r"\1",
         "Remove the repeated ‘current/currently’ wording.",
     ),
-    (
-        re.compile(r"\b(did)(\s+you\s+have\s+experience\b)", re.IGNORECASE),
-        lambda m: ("Do" if m.group(1)[0].isupper() else "do") + m.group(2),
-        "Use ‘Do you have experience …?’ for a current qualification question.",
-    ),
+
     (
         re.compile(r"\b(is)(\s+you\b)", re.IGNORECASE),
         lambda m: ("Are" if m.group(1)[0].isupper() else "are") + m.group(2),
@@ -764,13 +760,23 @@ def _deterministic_grammar_fix(text: str) -> Optional[tuple]:
     """
     reasons: List[str] = []
     corrected = text
-    for pattern, repl, reason in _DETERMINISTIC_GRAMMAR_RULES:
-        corrected, count = pattern.subn(repl, corrected)
-        if count:
-            reasons.append(reason)
+    for _ in range(5):  # Run to fixed point
+        prev = corrected
+        for pattern, repl, reason in _DETERMINISTIC_GRAMMAR_RULES:
+            corrected, count = pattern.subn(repl, corrected)
+            if count:
+                reasons.append(reason)
+        if prev == corrected:
+            break
+            
     if not reasons:
         return None
-    return " ".join(dict.fromkeys(reasons)), corrected
+        
+    combined_reason = " ".join(dict.fromkeys(reasons))
+    if len(combined_reason) > 200:
+        combined_reason = combined_reason[:197] + "..."
+        
+    return combined_reason, corrected
 
 
 def _merge_deterministic_grammar_verdict(data: Dict[str, Any], text: str) -> Dict[str, Any]:
@@ -836,9 +842,9 @@ async def moderate_screening_questions(
         # so it must be part of the key — a verdict for one job's context must
         # not serve another job for 7 days.
         expected_answer_text = (item.expected_answer or "").strip()[:1000]
-        # v4 adds corrected_question — bumped so pre-existing cache entries
+        # v3 adds corrected_question — bumped so pre-existing cache entries
         # (which lack that field) don't mask the correction for 7 days.
-        cache_key = _llm_cache.make_key("q_moderation", 4, model, job_title, text, expected_answer_text)
+        cache_key = _llm_cache.make_key("q_moderation", 3, model, job_title, text, expected_answer_text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
