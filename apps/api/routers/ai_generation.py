@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import re
 import time
 import logging
 from typing import Any, Dict, List, Literal, Optional
@@ -702,6 +703,53 @@ _QUESTION_MODERATION_MAX = 30
 _QUESTION_MODERATION_CACHE_TTL = 7 * 24 * 60 * 60
 
 
+def _deterministic_grammar_reason(text: str) -> str:
+    """Catch high-confidence grammar errors the moderation model may overlook.
+
+    This deliberately covers only unambiguous, recruiter-facing wording errors.
+    Broader grammar interpretation remains with the model to avoid rejecting
+    valid technical terms, regional phrasing, and job-specific language.
+    """
+    normalized = " ".join(text.lower().split())
+    checks = (
+        (
+            r"\bhow\s+many\s+years\s+experience\b",
+            "Use ‘How many years of experience do you have?’ instead.",
+        ),
+        (
+            r"\bhow\s+much\s+years\b",
+            "Use ‘How many years’ rather than ‘How much years.’",
+        ),
+        (
+            r"\bcurrent\s+(?:job\s+)?designation\s+currently\b",
+            "Remove the repeated ‘current/currently’ wording.",
+        ),
+        (
+            r"\bdid\s+you\s+have\s+experience\b",
+            "Use ‘Do you have experience …?’ for a current qualification question.",
+        ),
+    )
+    for pattern, reason in checks:
+        if re.search(pattern, normalized):
+            return reason
+    return ""
+
+
+def _merge_deterministic_grammar_verdict(data: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """Add a deterministic grammar warning without hiding an AI policy flag."""
+    grammar_reason = _deterministic_grammar_reason(text)
+    if not grammar_reason:
+        return data
+
+    flags = list(dict.fromkeys([*(data.get("flags") or []), "grammatical_error"]))
+    return {
+        **data,
+        "ok": False,
+        "flags": flags,
+        "reason": data.get("reason") or grammar_reason,
+    }
+
+
 @router.post("/screening-questions/moderate")
 async def moderate_screening_questions(
     req: ModerateQuestionsRequest,
@@ -730,19 +778,32 @@ async def moderate_screening_questions(
         text = item.question_text.strip()[:1000]
         base = {"key": item.key, "question_text": text}
         unchecked = {**base, "ok": True, "flags": [], "reason": "", "checked": False}
+        deterministic_reason = _deterministic_grammar_reason(text)
         if oai is None:
+            if deterministic_reason:
+                return {
+                    **base,
+                    "ok": False,
+                    "flags": ["grammatical_error"],
+                    "reason": deterministic_reason,
+                    "checked": True,
+                }
             return unchecked
 
         # job_title is part of the prompt (it decides off_topic/nonsensical),
         # so it must be part of the key — a verdict for one job's context must
         # not serve another job for 7 days.
         expected_answer_text = (item.expected_answer or "").strip()[:1000]
-        cache_key = _llm_cache.make_key("q_moderation", 2, model, job_title, text, expected_answer_text)
+        cache_key = _llm_cache.make_key("q_moderation", 3, model, job_title, text, expected_answer_text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
                 verdict = QuestionPolicyVerdict.model_validate(cached)
-                return {**base, **verdict.model_dump(), "checked": True}
+                return {
+                    **base,
+                    **_merge_deterministic_grammar_verdict(verdict.model_dump(), text),
+                    "checked": True,
+                }
             except Exception:
                 pass  # schema drift — re-run
 
@@ -777,6 +838,7 @@ async def moderate_screening_questions(
         data["ok"] = bool(data.get("ok")) and not data.get("flags")
         if data["ok"]:
             data["reason"] = ""
+        data = _merge_deterministic_grammar_verdict(data, text)
         try:
             await _llm_cache.set_json(cache_key, data, ttl_seconds=_QUESTION_MODERATION_CACHE_TTL)
         except Exception:
