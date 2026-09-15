@@ -249,6 +249,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     )
 
                 # 1. Update engage_interview_audit (matching interview_id)
+                # NOTE: The needs-review flags are saved into the `response` column here.
+                # The frontend readers (candidates.py) check both `payload` (initial outbound) 
+                # and `response` (webhook inbound) to reliably extract needs-review status.
                 cur.execute(
                     """
                     UPDATE engage_interview_audit
