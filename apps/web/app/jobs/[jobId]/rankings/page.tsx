@@ -19,6 +19,9 @@ import {
   MessageSquare,
   Send,
   ExternalLink,
+  User,
+  Briefcase,
+  Building2,
   Zap,
   Check,
   X,
@@ -45,7 +48,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SubmissionModal } from "@/components/SubmissionModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
@@ -54,10 +56,12 @@ import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/mis
 import { StopOutreachModal, type StopOutreachCandidate } from "@/components/StopOutreachModal";
 import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { API_BASE, authFetch, api } from "@/lib/api";
+
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
+import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -539,11 +543,7 @@ export default function CandidateRankingsPage() {
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
 
-  const handleConfirmSubmit = async (submissionData: {
-    submission_type: 'internal' | 'external';
-    manager_email?: string;
-    recruiter_notes?: string;
-  }) => {
+  const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
@@ -1509,6 +1509,7 @@ export default function CandidateRankingsPage() {
       return dst;
     };
 
+
     const dedupedByIdentity = new Map<string, any>();
     rows.forEach((candidate: any) => {
       const dedupKey = getCanonicalCandidateKey(candidate);
@@ -2163,6 +2164,7 @@ export default function CandidateRankingsPage() {
 
       {/* Table Interface */}
       <div className="space-y-4">
+
         {/* Filter bar: search + activity + candidate count in Row 1; filters in Row 2 */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm mb-3 flex flex-col gap-4 p-4">
           {/* Row 1: Search bar, Activity History, Showing text */}
@@ -2974,7 +2976,7 @@ export default function CandidateRankingsPage() {
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={job?.title || "Job"}
         jobRef={job?.jobdiva_id || job?.job_id || String(jobId || "")}
-        clientName={job?.customer_name || "—"}
+        clientName={job?.customer_name || "-"}
         onConfirmSubmit={handleConfirmSubmit}
         isSubmitting={syncingCandidateId === actionCandidateId}
       />
@@ -2982,14 +2984,14 @@ export default function CandidateRankingsPage() {
       {integrationModalOpen === 'reject' && actionCandidateId && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
-                Reject Candidate
-              </h3>
-              <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
-            </div>
-            <div className="p-6 space-y-4">
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                    Reject Candidate
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>

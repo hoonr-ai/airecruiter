@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
+import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SubmissionModal } from "@/components/SubmissionModal";
+import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 
 const formatDate = (dateStr: string) => {
   if (!dateStr) return "—";
@@ -467,11 +467,7 @@ export default function GlobalCandidatesPage() {
     setIsLoading(true);
   };
 
-  const handleConfirmSubmit = async (submissionData: {
-    submission_type: 'internal' | 'external';
-    manager_email?: string;
-    recruiter_notes?: string;
-  }) => {
+  const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
@@ -1334,7 +1330,7 @@ export default function GlobalCandidatesPage() {
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={candidates.find(c => c.id === actionCandidateId)?.job_title || "Job"}
         jobRef={candidates.find(c => c.id === actionCandidateId)?.jobdiva_id || ""}
-        clientName={String(candidates.find(c => c.id === actionCandidateId)?.company || "—")}
+        clientName={String(candidates.find(c => c.id === actionCandidateId)?.company || "-")}
         onConfirmSubmit={handleConfirmSubmit}
         isSubmitting={syncingCandidateId === actionCandidateId}
       />
@@ -1342,14 +1338,14 @@ export default function GlobalCandidatesPage() {
       {integrationModalOpen === 'reject' && actionCandidateId && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
-                Reject Candidate
-              </h3>
-              <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
-            </div>
-            <div className="p-6 space-y-4">
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                    Reject Candidate
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
+                </div>
+                <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>

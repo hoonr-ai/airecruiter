@@ -212,6 +212,7 @@ class CandidateSaveRecord(BaseModel):
     # this row's id is a JobDiva profile id (see `jobdiva_profile_id`).
     jobdiva_candidate_id: Optional[str] = None
 
+
 class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str
     candidates: List[CandidateSaveRecord]
@@ -446,8 +447,9 @@ class ManualCandidateRequest(BaseModel):
     resume_text: str
 
 class CandidateFeedbackRequest(BaseModel):
-    feedback_type: str  # 'Submit', 'Reject', 'Unreachable'
+    feedback_type: str # 'Submit', 'Reject', or 'Unreachable'
     reason: Optional[str] = None
-    submission_type: Optional[Literal["internal", "external"]] = "external"  # 'internal' or 'external' (when feedback_type == 'Submit')
-    manager_email: Optional[str] = None          # Required when submission_type == 'internal'
-    recruiter_notes: Optional[str] = None        # Optional notes from recruiter to manager
+    submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
+    manager_email: Optional[str] = None
+    recruiter_notes: Optional[str] = None
+
