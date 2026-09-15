@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime, timezone
@@ -33,10 +34,10 @@ from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 def _manager_email_allowed(email: str) -> bool:
-    raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
-    allowed = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com, celsiortech.com, genspark.net")
+    allowed = [part.strip("\"' ").lower() for part in raw.split(",") if part.strip("\"' ")]
     if not allowed:
-        allowed = ["pyramidci.com"]
+        allowed = ["pyramidci.com", "celsiortech.com", "genspark.net"]
     normalized = email.strip().lower()
     domain = normalized.rsplit("@", 1)[-1]
     return any(
@@ -4444,7 +4445,11 @@ async def save_candidate_feedback(
             _conn2.commit()
         _conn2.close()
     except Exception as e:
-        logger.error(f"❌ Failed to persist feedback locally: {e}")
+        logger.error(f"❌ Failed to persist feedback locally: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to persist candidate feedback in database: {e}"
+        )
 
     manager_email_sent = None
     if request.feedback_type == "Submit" and submission_type == "internal":
@@ -4474,21 +4479,25 @@ async def save_candidate_feedback(
     #    (closed/filled status, or a processing_status the cron doesn't
     #    select). Recomputing here makes the recruiter's own action land on
     #    the next dashboard load.
-    feedback_metrics = await asyncio.to_thread(
-        refresh_feedback_metrics_sync, str(app_job_ref or job_id_or_ref)
-    )
-    if feedback_metrics is not None:
-        # Drop this worker's cached /jobs/monitored payload so the fresh
-        # counts aren't hidden behind the 30s cache TTL.
-        try:
-            invalidate_monitored_jobs_cache()
-        except Exception:  # noqa: BLE001
-            pass
-        logger.info(
-            f"📊 Job {app_job_ref}: feedback_completed="
-            f"{feedback_metrics['feedback_completed']} "
-            f"pair_submits={feedback_metrics['pair_submits']}"
+    feedback_metrics = None
+    try:
+        feedback_metrics = await asyncio.to_thread(
+            refresh_feedback_metrics_sync, str(app_job_ref or job_id_or_ref)
         )
+        if feedback_metrics is not None:
+            # Drop this worker's cached /jobs/monitored payload so the fresh
+            # counts aren't hidden behind the 30s cache TTL.
+            try:
+                invalidate_monitored_jobs_cache()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.info(
+                f"📊 Job {app_job_ref}: feedback_completed="
+                f"{feedback_metrics['feedback_completed']} "
+                f"pair_submits={feedback_metrics['pair_submits']}"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to refresh feedback metrics for {app_job_ref}: {e}")
 
     return {
         "status": "success",
