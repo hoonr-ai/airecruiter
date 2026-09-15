@@ -71,6 +71,7 @@ from core.config import (
     CROSS_SUBMISSIONS_MAX_SCORED,
     CROSS_SUBMISSIONS_MIN_SCORE,
     CROSS_SUBMISSIONS_THROTTLE_MINUTES,
+    CROSS_SUBMISSIONS_WARM_TIMEOUT_SECONDS,
 )
 from core.db import get_db_connection
 
@@ -98,6 +99,14 @@ Scorer = Callable[[Dict[str, Any], Any], Dict[str, Any]]
 # (payload, criteria) -> (passed, reason). Runs before the scorer; a False
 # drops the row without scoring it. See module docstring, step 1.
 Prescreen = Callable[[Dict[str, Any], Any], Tuple[bool, str]]
+
+# Called once with every scoring payload just before the scoring loop, so the
+# scorer's caches are as warm as they are during a live Step-5 search. The
+# embedding skill matcher is cache-only — an unwarmed term scores 0 — and it is
+# ON for every non-IT role family, so skipping this makes non-IT candidates
+# score BELOW the number Step 5 showed. Injected (like `scorer`) to keep this
+# module free of the heavy unified-search import.
+Warmer = Callable[[List[Dict[str, Any]]], None]
 
 
 # ---------------------------------------------------------------------------
@@ -240,11 +249,21 @@ def format_screen_score(score: Any, total: Any) -> str:
 
 
 def build_scoring_payload(row: Dict[str, Any], blob: Dict[str, Any]) -> Dict[str, Any]:
-    """Same shape ``routers.candidates._compute_resume_matching`` consumes."""
+    """Same shape ``routers.candidates._compute_resume_matching`` consumes.
+
+    That function runs the *whole* Step-5 pipeline
+    (``unified_candidate_search.apply_scoring_policy``), so this payload has to
+    carry everything that pipeline reads — not just the skill inputs. `source`
+    especially: it decides the JobAgent location exemption and the JobAgent
+    "no percentage" stamp. The rest is pulled from the stored `data` blob via
+    ``_build_candidate_for_resume_matching``, which walks its own fallbacks;
+    passing the blob as `data` is what makes that work.
+    """
     return {
         "candidate_id": row.get("candidate_id"),
         "name": row.get("name"),
-        "headline": row.get("headline"),
+        "source": row.get("source") or blob.get("source") or "",
+        "headline": row.get("headline") or blob.get("headline") or blob.get("title") or "",
         "location": row.get("location"),
         "resume_text": row.get("resume_text") or blob.get("resume_text") or "",
         "skills": blob.get("skills") or [],
@@ -255,6 +274,34 @@ def build_scoring_payload(row: Dict[str, Any], blob: Dict[str, Any]) -> Dict[str
     }
 
 
+def comparable_scoring_criteria(criteria: Any) -> Any:
+    """The new job's criteria, asking for a comparable % on every source.
+
+    Step 5 withholds the percentage for JobDiva-JobAgent rows: on that screen
+    they carry JobDiva's own ranking for *that* job, so a rubric % misleads.
+    Here the person is being re-scored against a DIFFERENT job's rubric, where
+    JobDiva's endorsement says nothing — and this list is gated and ranked on
+    the number, so every row needs one or an entire source silently drops out
+    of cross submissions. `assess_all_sources` is exactly that request (the
+    auto-launch flow sets it for the same reason). The matrix itself is
+    untouched; only the source-based display suppression is lifted.
+
+    Copies rather than mutates: the auto-scan is handed the live Step-5
+    search's own criteria object, which that search is still using.
+    """
+    if criteria is None:
+        return None
+    if not getattr(criteria, "assess_all_sources", False):
+        for copier in ("model_copy", "copy"):
+            fn = getattr(criteria, copier, None)
+            if callable(fn):
+                try:
+                    return fn(update={"assess_all_sources": True})
+                except Exception:  # noqa: BLE001 — not a pydantic model; score as-is
+                    continue
+    return criteria
+
+
 def select_candidates(
     prior_rows: Iterable[Dict[str, Any]],
     *,
@@ -263,6 +310,7 @@ def select_candidates(
     cutoff: datetime,
     scorer: Optional[Scorer],
     criteria: Any,
+    warmer: Optional[Warmer] = None,
     min_score: float = CROSS_SUBMISSIONS_MIN_SCORE,
     max_scored: int = CROSS_SUBMISSIONS_MAX_SCORED,
     max_listed: int = CROSS_SUBMISSIONS_MAX_LISTED,
@@ -354,27 +402,49 @@ def select_candidates(
         stats["gated_reasons"] = gated_reasons
         stats["scored"] = len(pool)
 
+    payloads = [build_scoring_payload(c["_row"], c["_blob"]) for c in pool]
+    if warmer is not None and criteria is not None and payloads:
+        try:
+            warmer(payloads)
+        except Exception as e:  # noqa: BLE001 — a cold cache scores low, not wrong-shaped
+            logger.warning("cross_submissions: scorer warm-up failed: %s", e)
+
     selected: List[Dict[str, Any]] = []
-    for cand in pool:
-        score = 0.0
+    for cand, payload in zip(pool, payloads):
+        score: Optional[float] = 0.0
         matched: List[str] = []
         missing: List[str] = []
+        blocked = ""
         if scorer is not None and criteria is not None:
             try:
-                result = scorer(build_scoring_payload(cand["_row"], cand["_blob"]), criteria) or {}
-                score = float(result.get("score") or 0)
+                result = scorer(payload, criteria) or {}
+                raw = result.get("score")
+                # None is the Step-5 "N/A" verdict (no-contact company,
+                # unscorable profile, JobDiva-JobAgent row), NOT a zero. This
+                # list is score-gated and ends in an email, so an unscorable
+                # person is left off rather than surfaced on a made-up number.
+                score = None if raw is None else float(raw)
                 matched = list(result.get("matched_skills") or [])
                 missing = list(result.get("missing_skills") or [])
+                if result.get("no_contact"):
+                    blocked = result.get("no_contact_reason") or "No-contact company"
+                elif result.get("client_conflict"):
+                    blocked = result.get("client_conflict_reason") or "Employed by the hiring client"
             except Exception as e:  # noqa: BLE001 — one bad row must not sink the list
                 logger.warning("cross_submissions: scoring failed for %s: %s", cand.get("candidate_id"), e)
                 score = 0.0
-        cand["match_score"] = round(score, 1)
+        cand["match_score"] = None if score is None else round(score, 1)
         cand["matched_skills"] = matched
         cand["missing_skills"] = missing
-        if score >= float(min_score):
+        if blocked:
+            logger.info(
+                "cross_submissions: skipping %s — %s", cand.get("candidate_id"), blocked
+            )
+            continue
+        if score is not None and score >= float(min_score):
             selected.append(cand)
 
-    selected.sort(key=lambda c: (c["match_score"], c["screened_at"]), reverse=True)
+    selected.sort(key=lambda c: (c["match_score"] or 0.0, c["screened_at"]), reverse=True)
     for cand in selected:
         cand.pop("_row", None)
         cand.pop("_blob", None)
@@ -730,6 +800,7 @@ def run_for_job(
     scorer: Optional[Scorer],
     *,
     prescreen: Optional[Prescreen] = None,
+    warmer: Optional[Warmer] = None,
     force: bool = False,
     send_email: bool = True,
     app_base_url: str = "",
@@ -767,6 +838,8 @@ def run_for_job(
             conn.commit()  # persist the claim before the (slow) scan
             cur.execute("SET LOCAL statement_timeout = '60000ms'")  # commit reset the LOCAL above
 
+            scoring_criteria = comparable_scoring_criteria(criteria)
+
             keys = job_keys(job, job_ref)
             existing = fetch_existing_person_keys(cur, keys)
             prior = fetch_prior_rows(cur, lookback_days=CROSS_SUBMISSIONS_LOOKBACK_DAYS, exclude_keys=keys)
@@ -779,9 +852,10 @@ def run_for_job(
                 existing_person_keys=existing,
                 cutoff=cutoff,
                 scorer=scorer,
-                criteria=criteria,
+                criteria=scoring_criteria,
                 prescreen=prescreen,
                 stats=gate_stats,
+                warmer=warmer,
             )
             summary["gated_out"] = int(gate_stats.get("gated_out") or 0)
             summary["gated_reasons"] = dict(gate_stats.get("gated_reasons") or {})
@@ -836,5 +910,32 @@ def run_for_job(
                 pass
 
 
-async def run_for_job_async(job_ref: str, criteria: Any, scorer: Optional[Scorer], **kwargs: Any) -> Dict[str, Any]:
-    return await asyncio.to_thread(run_for_job, job_ref, criteria, scorer, **kwargs)
+async def run_for_job_async(
+    job_ref: str,
+    criteria: Any,
+    scorer: Optional[Scorer],
+    *,
+    warmer: Optional[Callable[[List[Dict[str, Any]], Any], Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """`run_for_job` off the event loop.
+
+    `warmer` is an async callable ``(payloads, criteria) -> None``; the scan
+    itself is synchronous in a worker thread, so it is bridged back onto this
+    loop with ``run_coroutine_threadsafe`` (what that API is for) and waited on
+    with a bounded timeout. A warm failure only costs score fidelity, so it is
+    logged, never raised.
+    """
+    sync_warmer: Optional[Warmer] = None
+    if warmer is not None:
+        loop = asyncio.get_running_loop()
+
+        def sync_warmer(payloads: List[Dict[str, Any]]) -> None:  # noqa: F811
+            future = asyncio.run_coroutine_threadsafe(
+                warmer(payloads, comparable_scoring_criteria(criteria)), loop
+            )
+            future.result(timeout=CROSS_SUBMISSIONS_WARM_TIMEOUT_SECONDS)
+
+    return await asyncio.to_thread(
+        run_for_job, job_ref, criteria, scorer, warmer=sync_warmer, **kwargs
+    )
