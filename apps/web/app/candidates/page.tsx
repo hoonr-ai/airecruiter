@@ -162,6 +162,11 @@ interface CandidateData {
   feedback_reason?: string;
   feedback_at?: string;
   jobdiva_candidate_id?: string;
+  engage_needs_review_questions?: Array<{
+    question: string;
+    answer?: string;
+    reason?: string;
+  }>;
   [key: string]: unknown;
 }
 
