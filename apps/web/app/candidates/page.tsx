@@ -210,6 +210,12 @@ interface Candidate {
   [key: string]: unknown;
 }
 
+// A candidate may be launched for more than one job. Feedback is specific to
+// that job's sourced-candidate row, so pagination must not collapse rows that
+// share a candidate ID but belong to different JobDiva jobs.
+const candidateRowKey = (candidate: Candidate) =>
+  `${candidate.jobdiva_id ?? ""}:${candidate.candidate_id}`;
+
 function ResumeScreeningHoverCard({
   candidate,
   open,
@@ -612,8 +618,8 @@ export default function GlobalCandidatesPage() {
           setCandidates(candData.candidates);
         } else {
           setCandidates(prev => {
-            const newDict = new Map(prev.map(c => [c.candidate_id, c]));
-            candData.candidates.forEach((c: Candidate) => newDict.set(c.candidate_id, c));
+            const newDict = new Map(prev.map(c => [candidateRowKey(c), c]));
+            candData.candidates.forEach((c: Candidate) => newDict.set(candidateRowKey(c), c));
             return Array.from(newDict.values());
           });
         }

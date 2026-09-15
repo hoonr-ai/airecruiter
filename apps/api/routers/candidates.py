@@ -3189,7 +3189,11 @@ async def get_launched_candidates(
                         ORDER BY lookup_id
                     ),
                     launched_candidates AS (
-                        SELECT DISTINCT ON (sc.candidate_id)
+                        -- Feedback is recorded per sourced-candidate row and job.
+                        -- Keeping only one row per candidate across every job can
+                        -- surface feedback from a different job (or hide the row
+                        -- that actually matched the filter).
+                        SELECT DISTINCT ON (sc.jobdiva_id, sc.candidate_id)
                             sc.id,
                             sc.jobdiva_id,
                             sc.candidate_id,
@@ -3213,7 +3217,11 @@ async def get_launched_candidates(
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
                           {feedback_exists_condition}
-                        ORDER BY sc.candidate_id, sc.created_at DESC
+                        -- When a feedback filter is active, prefer the row that
+                        -- carries matching feedback data so the UI column matches
+                        -- the filter. Without a filter, retain pure
+                        -- created_at DESC so the newest source row wins.
+                        ORDER BY sc.jobdiva_id, sc.candidate_id, {feedback_order_by}sc.created_at DESC
                     )
                 """
 
