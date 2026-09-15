@@ -173,7 +173,13 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
               }`}
             />
             {isRecruiterAddedQuestion(q.category) && (
-              <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text ?? "", q.pass_criteria ?? "")} />
+              <QuestionPolicyWarning
+                verdict={questionModeration.verdictFor(q.question_text ?? "", q.pass_criteria ?? "")}
+                onApplyCorrection={(corrected) => {
+                  update(index, { question_text: corrected });
+                  questionModeration.flushCheck(String(index), corrected, q.pass_criteria ?? "");
+                }}
+              />
             )}
           </div>
 

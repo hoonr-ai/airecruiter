@@ -27,6 +27,7 @@ export interface QuestionPolicyVerdict {
     ok: boolean;
     flags: string[];
     reason: string;
+    corrected_question: string;
     checked: boolean;
 }
 
@@ -47,7 +48,7 @@ const normalizeQuestionText = (t: string, a?: string) => {
     return JSON.stringify([normT, normA]);
 };
 
-const FAIL_OPEN: QuestionPolicyVerdict = { ok: true, flags: [], reason: "", checked: false };
+const FAIL_OPEN: QuestionPolicyVerdict = { ok: true, flags: [], reason: "", corrected_question: "", checked: false };
 
 export function useQuestionModeration(jobTitle?: string) {
     const [verdicts, setVerdicts] = useState<Record<string, QuestionModerationState>>({});
@@ -95,6 +96,7 @@ export function useQuestionModeration(jobTitle?: string) {
                         ok: v.ok !== false,
                         flags: Array.isArray(v.flags) ? v.flags : [],
                         reason: typeof v.reason === "string" ? v.reason : "",
+                        corrected_question: typeof v.corrected_question === "string" ? v.corrected_question : "",
                         checked: v.checked !== false,
                     }
                     : FAIL_OPEN,
@@ -159,11 +161,34 @@ const FLAG_LABELS: Record<string, string> = {
 };
 
 // Warning banner rendered under a flagged question row. Renders nothing while
-// the check is pending or when the question passes.
-export function QuestionPolicyWarning({ verdict }: { verdict: QuestionModerationState | undefined }) {
+// the check is pending or when the question passes. When the verdict includes
+// a grammatical_error correction, shows the full corrected sentence so the
+// recruiter can copy it or apply it in place (Google Docs-style suggestion),
+// instead of only naming the mistake.
+export function QuestionPolicyWarning({
+    verdict,
+    onApplyCorrection,
+}: {
+    verdict: QuestionModerationState | undefined;
+    onApplyCorrection?: (correctedQuestion: string) => void;
+}) {
+    const [copied, setCopied] = useState(false);
     if (!verdict || verdict === "checking" || verdict.ok || verdict.flags.length === 0) return null;
     const serious = verdict.flags.some(f => SERIOUS_FLAGS.has(f));
     const flagLabel = verdict.flags.map(f => FLAG_LABELS[f] || f).join(", ");
+    const correction = verdict.corrected_question?.trim();
+
+    const copyCorrection = async () => {
+        if (!correction) return;
+        try {
+            await navigator.clipboard.writeText(correction);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch {
+            // Clipboard API unavailable — the text is still selectable/copyable below.
+        }
+    };
+
     return (
         <div
             className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2.5 py-1.5 text-[11.5px] leading-snug ${
@@ -173,12 +198,36 @@ export function QuestionPolicyWarning({ verdict }: { verdict: QuestionModeration
             }`}
         >
             <AlertTriangle className="w-3.5 h-3.5 mt-[1px] shrink-0" />
-            <span>
-                <span className="font-semibold">
-                    This question doesn&apos;t follow company policy norms{flagLabel ? ` (${flagLabel})` : ""}.
-                </span>{" "}
-                {verdict.reason}
-            </span>
+            <div className="min-w-0 flex-1">
+                <span>
+                    <span className="font-semibold">
+                        This question doesn&apos;t follow company policy norms{flagLabel ? ` (${flagLabel})` : ""}.
+                    </span>{" "}
+                    {verdict.reason}
+                </span>
+                {correction && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span className="italic">Corrected: &ldquo;{correction}&rdquo;</span>
+                        <button
+                            type="button"
+                            onClick={copyCorrection}
+                            className="rounded border border-current px-1.5 py-0.5 text-[11px] font-medium not-italic hover:bg-white/60"
+                        >
+                            {copied ? "Copied" : "Copy"}
+                        </button>
+                        {onApplyCorrection && (
+                            <button
+                                type="button"
+                                onClick={() => onApplyCorrection(correction)}
+                                className="rounded border border-current px-1.5 py-0.5 text-[11px] font-medium not-italic hover:bg-white/60"
+                            >
+                                Use this
+                            </button>
+                        )}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
+

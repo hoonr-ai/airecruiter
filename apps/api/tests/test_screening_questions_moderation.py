@@ -58,7 +58,7 @@ def test_expected_answer_is_moderated_and_part_of_the_cache_key(monkeypatch):
     assert result["results"][0]["flags"] == ["unsafe", "grammatical_error"]
     make_key.assert_called_once_with(
         "q_moderation",
-        3,
+        4,
         "gpt-4o-mini",
         "Software Engineer",
         "What is your favorite color?",
@@ -88,7 +88,7 @@ def test_cache_hit_uses_expected_answer_key_and_skips_the_llm(monkeypatch):
     assert result["results"][0]["flags"] == ["nsfw"]
     make_key.assert_called_once_with(
         "q_moderation",
-        3,
+        4,
         "gpt-4o-mini",
         "Software Engineer",
         "What is your favorite color?",
@@ -99,15 +99,34 @@ def test_cache_hit_uses_expected_answer_key_and_skips_the_llm(monkeypatch):
 
 def test_deterministic_grammar_checks_cover_common_recruiter_question_errors():
     cases = {
-        "How many years experience you have?": "How many years of experience",
-        "How much years of experience do you have?": "How many years",
-        "What is your current designation currently?": "repeated",
-        "Did you have experience managing teams?": "Do you have experience",
+        "How many years experience you have?": (
+            "How many years of experience",
+            "How many years of experience do you have?",
+        ),
+        "How much years of experience do you have?": (
+            "How many years",
+            "How many years of experience do you have?",
+        ),
+        "What is your current designation currently?": (
+            "repeated",
+            "What is your current designation?",
+        ),
+        "Did you have experience managing teams?": (
+            "Do you have experience",
+            "Do you have experience managing teams?",
+        ),
+        "Is you open to work overtime?": (
+            "Are you",
+            "Are you open to work overtime?",
+        ),
     }
 
-    for question, expected_reason in cases.items():
-        reason = ai_generation._deterministic_grammar_reason(question)
+    for question, (expected_reason, expected_corrected) in cases.items():
+        fix = ai_generation._deterministic_grammar_fix(question)
+        assert fix is not None, question
+        reason, corrected = fix
         assert expected_reason in reason
+        assert corrected == expected_corrected
 
 
 def test_deterministic_grammar_flag_overrides_an_llm_ok_verdict(monkeypatch):
@@ -138,5 +157,6 @@ def test_deterministic_grammar_flag_overrides_an_llm_ok_verdict(monkeypatch):
         "ok": False,
         "flags": ["grammatical_error"],
         "reason": "Use ‘How many years’ rather than ‘How much years.’",
+        "corrected_question": "How many years of experience do you have?",
         "checked": True,
     }
