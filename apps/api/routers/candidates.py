@@ -34,6 +34,14 @@ from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 def _manager_email_allowed(email: str) -> bool:
+    """Validate that the manager's email domain belongs to an approved organization.
+
+    Default trusted domains include Pyramid Consulting Group sister entities:
+      - pyramidci.com   : Pyramid Consulting (parent company)
+      - celsiortech.com : Celsior Technologies (IT & digital consulting division)
+      - genspark.net    : GenSpark (custom talent & training division)
+    To customize per environment, set PAIR_MANAGER_EMAIL_DOMAINS in .env or app settings.
+    """
     raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com, celsiortech.com, genspark.net")
     allowed = [part.strip("\"' ").lower() for part in raw.split(",") if part.strip("\"' ")]
     if not allowed:
@@ -4379,41 +4387,17 @@ async def save_candidate_feedback(
 
     logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, app_job_ref={app_job_ref}, sc_row_id={sc_row_id}")
 
-    # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
-    #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
-    from core import JOBDIVA_PAIR_RECRUITER_ID
-    from core.email import candidate_report_link, notify_internal_submission_to_manager, resolve_app_base_url
-    
-    report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
-    safe_report_link = html.escape(report_link, quote=True)
-
-    if request.feedback_type == "Unreachable":
-        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
-        jobdiva_result = {"status": "success"}
-    else:
-        jobdiva_result = await jobdiva_service.create_candidate_note(
-            candidate_id=jd_candidate_id,
-            job_id=jd_job_ref,
-            action=action_string,
-            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
-            recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
-        )
-
-
-        if jobdiva_result.get("status") == "error":
-            logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
-        else:
-            logger.info(f"✅ JobDiva note created — action='{action_string}', "
-                        f"candidate={jd_candidate_id}, job={jd_job_ref}")
-
-    # 4. Persist feedback locally in sourced_candidates.data (JSONB merge)
+    # 3. Persist feedback locally in sourced_candidates.data (JSONB merge) first.
+    #    Persisting locally before triggering external side-effects ensures that if
+    #    the DB write fails, execution aborts immediately with HTTP 500 without leaving
+    #    orphaned JobDiva notes or duplicate manager emails.
     try:
         _conn2 = get_db_connection()
         with _conn2.cursor() as _cur2:
             feedback_data = {
                 "feedback_type": request.feedback_type,
                 "feedback_reason": request.reason,
-                "feedback_synced": jobdiva_result.get("status") == "success",
+                "feedback_synced": False,
                 "feedback_at": datetime.now(timezone.utc).isoformat(),
                 "submitted_by": user.email,
             }
@@ -4448,8 +4432,59 @@ async def save_candidate_feedback(
         logger.error(f"❌ Failed to persist feedback locally: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to persist candidate feedback in database: {e}"
+            detail="Failed to persist candidate feedback in database. Please try again."
         )
+
+    # 4. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
+    #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
+    from core import JOBDIVA_PAIR_RECRUITER_ID
+    from core.email import candidate_report_link, notify_internal_submission_to_manager, resolve_app_base_url
+    
+    report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
+
+    if request.feedback_type == "Unreachable":
+        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
+        jobdiva_result = {"status": "success"}
+    else:
+        jobdiva_result = await jobdiva_service.create_candidate_note(
+            candidate_id=jd_candidate_id,
+            job_id=jd_job_ref,
+            action=action_string,
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+        )
+
+        if jobdiva_result.get("status") == "error":
+            logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+        else:
+            logger.info(f"✅ JobDiva note created — action='{action_string}', "
+                        f"candidate={jd_candidate_id}, job={jd_job_ref}")
+            # Mark feedback_synced = True in local DB
+            try:
+                _conn_sync = get_db_connection()
+                with _conn_sync.cursor() as _cur_sync:
+                    sync_payload = json.dumps({"feedback_synced": True})
+                    if sc_row_id is not None:
+                        _cur_sync.execute(
+                            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                            (sync_payload, sc_row_id)
+                        )
+                    else:
+                        _cur_sync.execute(
+                            """UPDATE sourced_candidates
+                                  SET data = data || %s::jsonb
+                                WHERE candidate_id = %s
+                                  AND (jobdiva_id = %s
+                                       OR jobdiva_id IN (
+                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                                       ))""",
+                            (sync_payload, jd_candidate_id, job_id_or_ref, job_id_or_ref)
+                        )
+                    _conn_sync.commit()
+                _conn_sync.close()
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to update feedback_synced flag: {e}")
 
     manager_email_sent = None
     if request.feedback_type == "Submit" and submission_type == "internal":

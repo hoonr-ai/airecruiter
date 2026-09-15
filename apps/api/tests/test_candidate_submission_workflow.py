@@ -1,4 +1,10 @@
+import pytest
+from fastapi import HTTPException
+
+from core.auth import UserIdentity
+from core.email import notify_internal_submission_to_manager
 from models import CandidateFeedbackRequest
+from routers.candidates import _manager_email_allowed
 
 
 def test_feedback_request_defaults_submit_to_external_mode():
@@ -24,8 +30,6 @@ def test_feedback_request_allows_internal_submission_metadata():
 
 
 def test_manager_email_domain_allowlist_accepts_domain_and_exact_email(monkeypatch):
-    from routers.candidates import _manager_email_allowed
-
     monkeypatch.setenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com, reviewer@celsiortech.com")
 
     assert _manager_email_allowed("lead@pyramidci.com")
@@ -33,9 +37,16 @@ def test_manager_email_domain_allowlist_accepts_domain_and_exact_email(monkeypat
     assert not _manager_email_allowed("reviewer@example.com")
 
 
-def test_internal_submission_email_is_passive_review_link(monkeypatch):
-    from core.email import notify_internal_submission_to_manager
+def test_manager_email_domain_allowlist_strips_quotes_and_padding(monkeypatch):
+    monkeypatch.setenv("PAIR_MANAGER_EMAIL_DOMAINS", ' "pyramidci.com" , \'celsiortech.com\' ,  genspark.net  ')
 
+    assert _manager_email_allowed("manager@pyramidci.com")
+    assert _manager_email_allowed("lead@celsiortech.com")
+    assert _manager_email_allowed("admin@genspark.net")
+    assert not _manager_email_allowed("other@external.com")
+
+
+def test_internal_submission_email_is_passive_review_link(monkeypatch):
     sent = {}
 
     def fake_send(to_list, subject, html_body, plain_body, **_kwargs):
@@ -104,11 +115,6 @@ class _FakeConnection:
 
     def close(self):
         self.closed = True
-
-
-import pytest
-from core.auth import UserIdentity
-from fastapi import HTTPException
 
 
 @pytest.mark.anyio
@@ -288,7 +294,9 @@ async def test_save_candidate_feedback_db_error_raises_500(monkeypatch):
     fake_conn = _FakeConnection(select_row=fake_cand_row, fail_on_update=True)
     monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
 
+    jobdiva_calls = []
     async def fake_create_note(**kwargs):
+        jobdiva_calls.append(kwargs)
         return {"status": "success"}
 
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
@@ -312,6 +320,6 @@ async def test_save_candidate_feedback_db_error_raises_500(monkeypatch):
         )
 
     assert exc_info.value.status_code == 500
-    assert "Failed to persist candidate feedback in database" in exc_info.value.detail
-
-
+    assert exc_info.value.detail == "Failed to persist candidate feedback in database. Please try again."
+    # Verify that because DB failed first, no JobDiva note was created
+    assert len(jobdiva_calls) == 0
