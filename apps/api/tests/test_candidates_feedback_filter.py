@@ -58,7 +58,7 @@ def _build_full_cte(search_condition: str, feedback_exists_condition: str, match
             ORDER BY lookup_id
         ),
         launched_candidates AS (
-            SELECT DISTINCT ON (sc.candidate_id)
+            SELECT DISTINCT ON (sc.jobdiva_id, sc.candidate_id)
                 sc.id, sc.candidate_id, sc.data, sc.created_at as engage_created_at
             FROM sourced_candidates sc
             JOIN latest_audit la ON la.candidate_id = sc.candidate_id
@@ -66,7 +66,7 @@ def _build_full_cte(search_condition: str, feedback_exists_condition: str, match
             WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
               {search_condition}
               {feedback_exists_condition}
-            ORDER BY sc.candidate_id, {feedback_tiebreaker} sc.created_at DESC
+            ORDER BY sc.jobdiva_id, sc.candidate_id, {feedback_tiebreaker}sc.created_at DESC
         )
     """
 
@@ -136,7 +136,7 @@ class TestDistinctOnOrdering:
         """Without a feedback filter, ORDER BY should be pure created_at DESC
         to use the existing index and avoid cross-job data mismatch."""
         cte = _build_full_cte("", "")
-        order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+        order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
         # The only thing between candidate_id and created_at should be a comma
         between = order_section.split("sc.candidate_id,")[1].split("sc.created_at")[0]
         assert "feedback_type" not in between, (
@@ -149,7 +149,7 @@ class TestDistinctOnOrdering:
         for feedback in ["Submit", "Reject", "Unreachable"]:
             cond, matching_pred = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte("", cond, matching_pred)
-            order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+            order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
             assert "feedback_type" in order_section, (
                 f"ORDER BY must include feedback_type tiebreaker when '{feedback}' filter is active"
             )
@@ -166,7 +166,7 @@ class TestDistinctOnOrdering:
             cond, matching_pred = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte("", cond, matching_pred)
             where_pos = cte.find("WHERE")
-            order_pos = cte.find("ORDER BY sc.candidate_id")
+            order_pos = cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id")
             assert where_pos != -1, f"WHERE clause must exist for '{feedback}'"
             assert where_pos < order_pos, (
                 f"WHERE must come before ORDER BY for '{feedback}'"
@@ -183,18 +183,22 @@ class TestDistinctOnOrdering:
 
 class TestCrossJobIsolation:
 
+    def test_distinct_rows_are_scoped_to_job_and_candidate(self):
+        """The same candidate can be launched for multiple jobs with different feedback."""
+        cte = _build_full_cte("", "")
+        assert "DISTINCT ON (sc.jobdiva_id, sc.candidate_id)" in cte
+        assert "ORDER BY sc.jobdiva_id, sc.candidate_id, sc.created_at DESC" in cte
+
     def test_no_filter_uses_index_friendly_order(self):
-        """Without a filter, the ORDER BY must match the existing
-        idx_sourced_candidates_candidate_created_at index:
-        (candidate_id, created_at DESC)."""
+        """Without a filter, the ORDER BY matches the composite row identity."""
         cte = _build_full_cte("", "")
         order_match = re.search(
-            r"ORDER BY sc\.candidate_id,\s*sc\.created_at DESC",
+            r"ORDER BY sc\.jobdiva_id,\s*sc\.candidate_id,\s*sc\.created_at DESC",
             cte,
         )
         assert order_match is not None, (
-            "Without a filter, ORDER BY must be 'sc.candidate_id, sc.created_at DESC' "
-            "to use the existing index"
+            "Without a filter, ORDER BY must be 'sc.jobdiva_id, sc.candidate_id, sc.created_at DESC' "
+            "to use the composite source-row index"
         )
 
     def test_filtered_order_scopes_tiebreaker(self):
@@ -202,7 +206,7 @@ class TestCrossJobIsolation:
         for feedback in ["Submit", "Reject"]:
             cond, matching_pred = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte("", cond, matching_pred)
-            order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+            order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
             # The tiebreaker must reference sc.data (same row), not sc2
             assert "sc.data" in order_section, (
                 f"Tiebreaker for '{feedback}' must reference sc.data, not a cross-table join"

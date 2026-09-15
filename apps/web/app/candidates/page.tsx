@@ -210,6 +210,12 @@ interface Candidate {
   [key: string]: unknown;
 }
 
+// A candidate may be launched for more than one job. Feedback is specific to
+// that job's sourced-candidate row, so pagination must not collapse rows that
+// share a candidate ID but belong to different JobDiva jobs.
+const candidateRowKey = (candidate: Candidate) =>
+  `${candidate.jobdiva_id ?? ""}:${candidate.candidate_id}`;
+
 function ResumeScreeningHoverCard({
   candidate,
   open,
@@ -593,7 +599,14 @@ export default function GlobalCandidatesPage() {
         const pageFeedbackReasons: Record<string, string> = {};
         const pageFeedbackTimes: Record<string, string> = {};
         candData.candidates.forEach((c: Candidate) => {
-          if (c.data?.feedback_type) pageFeedbacks[c.id] = c.data.feedback_type;
+          if (c.data?.feedback_type) {
+            const raw = c.data.feedback_type.trim();
+            const lower = raw.toLowerCase();
+            if (lower.startsWith("reject")) pageFeedbacks[c.id] = "Reject";
+            else if (lower === "submit" || lower === "submitted") pageFeedbacks[c.id] = "Submit";
+            else if (lower === "unreachable") pageFeedbacks[c.id] = "Unreachable";
+            else pageFeedbacks[c.id] = "";
+          }
           if (c.data?.feedback_reason) pageFeedbackReasons[c.id] = c.data.feedback_reason;
           if (c.data?.feedback_at) pageFeedbackTimes[c.id] = c.data.feedback_at;
         });
@@ -605,8 +618,8 @@ export default function GlobalCandidatesPage() {
           setCandidates(candData.candidates);
         } else {
           setCandidates(prev => {
-            const newDict = new Map(prev.map(c => [c.candidate_id, c]));
-            candData.candidates.forEach((c: Candidate) => newDict.set(c.candidate_id, c));
+            const newDict = new Map(prev.map(c => [candidateRowKey(c), c]));
+            candData.candidates.forEach((c: Candidate) => newDict.set(candidateRowKey(c), c));
             return Array.from(newDict.values());
           });
         }
@@ -1038,7 +1051,7 @@ export default function GlobalCandidatesPage() {
                   const parsedRecruiterEmails = getRecruiterEmailsArray(c.recruiter_emails); // Cache parsed emails once per row
 
                   return (
-                    <TableRow key={c.candidate_id} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
+                    <TableRow key={candidateRowKey(c)} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
                       <TableCell className="border-b border-slate-200 text-center text-[13px] font-medium text-slate-400 sticky left-0 z-10 bg-white group-hover:bg-slate-50 transition-colors">
                         {i + 1}
                       </TableCell>
