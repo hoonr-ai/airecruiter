@@ -46,6 +46,7 @@ interface TranscriptionItem {
   text?: string;
   content?: string;
   timestamp?: string;
+  needs_review?: boolean;
 }
 
 interface EvaluationReport {
@@ -75,6 +76,7 @@ interface EvaluationReport {
     total_fit_score: number;
     is_boolean_interview?: boolean;
     engage_hard_filter_details?: any[];
+    hard_filter_needs_review?: boolean;
   };
   job: {
     job_id: string;
@@ -581,7 +583,8 @@ export default function CandidateEvaluationReportPage() {
                       answer: q.answer_text || q.answer,
                       candidate_score: q.score,
                       hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
-                      reason: q.evaluation_reason || q.reason
+                      reason: q.evaluation_reason || q.reason,
+                      needs_review: q.needs_review
                     }));
                   }
 
@@ -619,6 +622,12 @@ export default function CandidateEvaluationReportPage() {
                                 status={hf_label} 
                                 type={hf_label === 'Pass' ? 'success' : hf_label === 'Fail' ? 'danger' : 'neutral'} 
                               />
+                              {item.needs_review && hf_label === 'Pass' && (
+                                <StatusPill
+                                  status="Needs Review"
+                                  type="neutral"
+                                />
+                              )}
                             </div>
                           </div>
 
