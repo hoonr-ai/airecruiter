@@ -3266,6 +3266,15 @@ async def get_launched_candidates(
                 if data_blob.get("engage_hard_filter_status"):
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
 
+            # Extract Needs Review flags from the webhook payload
+            if isinstance(original_payload, dict):
+                payload_data = original_payload.get("data", original_payload)
+                if isinstance(payload_data, dict):
+                    if payload_data.get("hard_filter_needs_review") is not None:
+                        cand["engage_hard_filter_needs_review"] = payload_data.get("hard_filter_needs_review")
+                    if payload_data.get("needs_review_questions"):
+                        cand["engage_needs_review_questions"] = payload_data.get("needs_review_questions")
+
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
             
@@ -4109,6 +4118,12 @@ async def get_candidate_evaluation_report(
             "engage_completed_at":   _to_iso_z(engage_completed_at),
             "engage_created_at":     _to_iso_z(engage_created_at),
             "is_boolean_interview":  is_l05,
+            
+            "engage_hard_filter_needs_review": bool((pair_data.get("audit_payload") or {}).get("hard_filter_needs_review", False)) or 
+                                               bool((pair_data.get("audit_payload") or {}).get("data", {}).get("hard_filter_needs_review", False)),
+            "engage_needs_review_questions": (pair_data.get("audit_payload") or {}).get("needs_review_questions") or 
+                                             (pair_data.get("audit_payload") or {}).get("data", {}).get("needs_review_questions") or [],
+            
             # Same data source as the hover card — avoids a separate live-fetch failure
             "engage_hard_filter_details": _extract_rankings_hard_filter_details(
                 data_blob if isinstance(data_blob, dict) else {},
