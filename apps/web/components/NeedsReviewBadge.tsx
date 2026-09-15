@@ -57,6 +57,8 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
     };
   }, [open]);
 
+  if (questions.length === 0) return null;
+
   const panel = open ? (
     <div
       id={panelId}
@@ -81,34 +83,28 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
       <p className="mb-3 text-[11px] leading-relaxed text-amber-700">
         These questions were <strong>passed</strong> but the candidate gave an ambiguous or uncertain answer. Please review before proceeding.
       </p>
-      {questions.length > 0 ? (
-        <div className="max-h-[min(320px,calc(100vh-9rem))] space-y-2.5 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-amber-200">
-          {questions.map((item, index) => (
-            <div
-              key={`${item.question}-${index}`}
-              className="rounded-xl border border-amber-200 bg-amber-50/50 p-3"
-            >
-              <div className="mb-1.5 break-words whitespace-normal text-[13px] font-semibold leading-relaxed text-slate-800">
-                {item.question}
-              </div>
-              {item.answer && (
-                <div className="mb-1.5 rounded-lg border border-amber-100 bg-white/70 px-2.5 py-1.5 text-[12px] italic text-slate-600">
-                  &ldquo;{item.answer}&rdquo;
-                </div>
-              )}
-              {item.reason && (
-                <div className="text-[11px] leading-relaxed text-amber-700">
-                  <span className="font-semibold not-italic">AI Note: </span>{item.reason}
-                </div>
-              )}
+      <div className="max-h-[min(320px,calc(100vh-9rem))] space-y-2.5 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-amber-200">
+        {questions.map((item, index) => (
+          <div
+            key={`${item.question}-${index}`}
+            className="rounded-xl border border-amber-200 bg-amber-50/50 p-3"
+          >
+            <div className="mb-1.5 break-words whitespace-normal text-[13px] font-semibold leading-relaxed text-slate-800">
+              {item.question}
             </div>
-          ))}
-        </div>
-      ) : (
-        <p className="text-[11px] leading-relaxed text-amber-700">
-          Review details are unavailable, but this candidate gave an ambiguous or uncertain answer.
-        </p>
-      )}
+            {item.answer && (
+              <div className="mb-1.5 rounded-lg border border-amber-100 bg-white/70 px-2.5 py-1.5 text-[12px] italic text-slate-600">
+                &ldquo;{item.answer}&rdquo;
+              </div>
+            )}
+            {item.reason && (
+              <div className="text-[11px] leading-relaxed text-amber-700">
+                <span className="font-semibold not-italic">AI Note: </span>{item.reason}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   ) : null;
 
