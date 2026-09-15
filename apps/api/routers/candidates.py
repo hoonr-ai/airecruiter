@@ -125,6 +125,15 @@ def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float],
     return s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and (is_boolean_job or engage_score is not None)
 
 
+def _extract_needs_review_flags(payload: Any) -> tuple:
+    if not isinstance(payload, dict):
+        return False, []
+    nested = payload.get("data")
+    nested = nested if isinstance(nested, dict) else {}
+    needs_review = bool(payload.get("hard_filter_needs_review", False)) or bool(nested.get("hard_filter_needs_review", False))
+    questions = payload.get("needs_review_questions") or nested.get("needs_review_questions") or []
+    return needs_review, questions
+
 def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
     """Return the WHERE condition and DISTINCT ON tiebreaker for a feedback filter.
 
@@ -3278,6 +3287,13 @@ async def get_launched_candidates(
                 if data_blob.get("engage_hard_filter_status"):
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
 
+            # Extract Needs Review flags from the webhook payload
+            needs_review, review_qs = _extract_needs_review_flags(original_payload)
+            if needs_review:
+                cand["engage_hard_filter_needs_review"] = needs_review
+            if review_qs:
+                cand["engage_needs_review_questions"] = review_qs
+
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
             
@@ -4113,6 +4129,8 @@ async def get_candidate_evaluation_report(
             if scores_to_average_corrected:
                 total_fit_score = sum(scores_to_average_corrected) / len(scores_to_average_corrected)
 
+        needs_review, review_qs = _extract_needs_review_flags(pair_data.get("audit_payload"))
+
         scores = {
             "resume_match_score":    resume_match_score,
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
@@ -4125,6 +4143,8 @@ async def get_candidate_evaluation_report(
             "engage_completed_at":   _to_iso_z(engage_completed_at),
             "engage_created_at":     _to_iso_z(engage_created_at),
             "is_boolean_interview":  is_l05,
+            "engage_hard_filter_needs_review": needs_review,
+            "engage_needs_review_questions": review_qs,
             # Same data source as the hover card — avoids a separate live-fetch failure
             "engage_hard_filter_details": _extract_rankings_hard_filter_details(
                 data_blob if isinstance(data_blob, dict) else {},
