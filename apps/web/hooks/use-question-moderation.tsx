@@ -27,7 +27,14 @@ export interface QuestionPolicyVerdict {
     ok: boolean;
     flags: string[];
     reason: string;
+    corrected_question: string;
     checked: boolean;
+}
+
+export interface ModeratableQuestion {
+    category?: string | null;
+    question_text: string;
+    pass_criteria?: string | null;
 }
 
 export type QuestionModerationState = QuestionPolicyVerdict | "checking";
@@ -35,9 +42,13 @@ export type QuestionModerationState = QuestionPolicyVerdict | "checking";
 const MIN_CHECK_LENGTH = 12;
 const DEBOUNCE_MS = 1200;
 
-const normalizeQuestionText = (t: string) => t.trim().replace(/\s+/g, " ").toLowerCase();
+const normalizeQuestionText = (t: string, a?: string) => {
+    const normT = t.trim().replace(/\s+/g, " ").toLowerCase();
+    const normA = a ? a.trim().replace(/\s+/g, " ").toLowerCase() : "";
+    return JSON.stringify([normT, normA]);
+};
 
-const FAIL_OPEN: QuestionPolicyVerdict = { ok: true, flags: [], reason: "", checked: false };
+const FAIL_OPEN: QuestionPolicyVerdict = { ok: true, flags: [], reason: "", corrected_question: "", checked: false };
 
 export function useQuestionModeration(jobTitle?: string) {
     const [verdicts, setVerdicts] = useState<Record<string, QuestionModerationState>>({});
@@ -53,8 +64,8 @@ export function useQuestionModeration(jobTitle?: string) {
         setVerdicts(verdictsRef.current);
     }, []);
 
-    const runCheck = useCallback(async (text: string) => {
-        const norm = normalizeQuestionText(text);
+    const runCheck = useCallback(async (text: string, answer?: string) => {
+        const norm = normalizeQuestionText(text, answer);
         if (norm.length < MIN_CHECK_LENGTH) return;
         const existing = verdictsRef.current[norm];
         // Skip only when a check is in flight or a REAL verdict exists. A
@@ -63,12 +74,16 @@ export function useQuestionModeration(jobTitle?: string) {
         if (existing === "checking") return;
         if (existing && existing.checked) return;
         setEntry(norm, "checking");
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
+            const controller = new AbortController();
+            timeoutId = setTimeout(() => controller.abort(), 8000);
             const res = await authFetch(`${API_BASE}/api/v1/ai-generation/screening-questions/moderate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
                 body: JSON.stringify({
-                    questions: [{ key: norm, question_text: text.trim() }],
+                    questions: [{ key: norm, question_text: text.trim(), expected_answer: answer?.trim() || "" }],
                     job_title: jobTitleRef.current || "",
                 }),
             });
@@ -81,31 +96,43 @@ export function useQuestionModeration(jobTitle?: string) {
                         ok: v.ok !== false,
                         flags: Array.isArray(v.flags) ? v.flags : [],
                         reason: typeof v.reason === "string" ? v.reason : "",
+                        corrected_question: typeof v.corrected_question === "string" ? v.corrected_question : "",
                         checked: v.checked !== false,
                     }
                     : FAIL_OPEN,
             );
         } catch {
             setEntry(norm, FAIL_OPEN);
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
         }
     }, [setEntry]);
 
     // Debounced while typing — one timer per row so parallel edits don't
     // cancel each other.
-    const scheduleCheck = useCallback((rowKey: string, text: string) => {
+    const scheduleCheck = useCallback((rowKey: string, text: string, answer?: string) => {
         if (timers.current[rowKey]) clearTimeout(timers.current[rowKey]);
-        if (normalizeQuestionText(text).length < MIN_CHECK_LENGTH) return;
-        timers.current[rowKey] = setTimeout(() => void runCheck(text), DEBOUNCE_MS);
+        if (normalizeQuestionText(text, answer).length < MIN_CHECK_LENGTH) return;
+        timers.current[rowKey] = setTimeout(() => void runCheck(text, answer), DEBOUNCE_MS);
     }, [runCheck]);
 
     // Immediate — for blur.
-    const flushCheck = useCallback((rowKey: string, text: string) => {
+    const flushCheck = useCallback((rowKey: string, text: string, answer?: string) => {
         if (timers.current[rowKey]) clearTimeout(timers.current[rowKey]);
-        void runCheck(text);
+        void runCheck(text, answer);
     }, [runCheck]);
 
     const verdictFor = useCallback(
-        (text: string): QuestionModerationState | undefined => verdicts[normalizeQuestionText(text)],
+        (text: string, answer?: string): QuestionModerationState | undefined => verdicts[normalizeQuestionText(text, answer)],
+        [verdicts],
+    );
+
+    const hasBlockingWarning = useCallback(
+        (questions: ModeratableQuestion[]) => questions.some(question => {
+            if (!isRecruiterAddedQuestion(question.category)) return false;
+            const verdict = verdicts[normalizeQuestionText(question.question_text, question.pass_criteria || "")];
+            return verdict === "checking" || (verdict !== undefined && !verdict.ok);
+        }),
         [verdicts],
     );
 
@@ -117,10 +144,10 @@ export function useQuestionModeration(jobTitle?: string) {
         };
     }, []);
 
-    return { verdictFor, scheduleCheck, flushCheck };
+    return { verdictFor, hasBlockingWarning, scheduleCheck, flushCheck };
 }
 
-const SERIOUS_FLAGS = new Set(["nsfw", "rude", "discriminatory", "sensitive_personal_data"]);
+const SERIOUS_FLAGS = new Set(["nsfw", "rude", "discriminatory", "sensitive_personal_data", "unsafe"]);
 
 const FLAG_LABELS: Record<string, string> = {
     nsfw: "NSFW",
@@ -129,14 +156,39 @@ const FLAG_LABELS: Record<string, string> = {
     sensitive_personal_data: "sensitive personal data",
     nonsensical: "doesn't make sense",
     off_topic: "off-topic",
+    grammatical_error: "grammatical error",
+    unsafe: "unsafe",
 };
 
 // Warning banner rendered under a flagged question row. Renders nothing while
-// the check is pending or when the question passes.
-export function QuestionPolicyWarning({ verdict }: { verdict: QuestionModerationState | undefined }) {
+// the check is pending or when the question passes. When the verdict includes
+// a grammatical_error correction, shows the full corrected sentence so the
+// recruiter can copy it or apply it in place (Google Docs-style suggestion),
+// instead of only naming the mistake.
+export function QuestionPolicyWarning({
+    verdict,
+    onApplyCorrection,
+}: {
+    verdict: QuestionModerationState | undefined;
+    onApplyCorrection?: (correctedQuestion: string) => void;
+}) {
+    const [copied, setCopied] = useState(false);
     if (!verdict || verdict === "checking" || verdict.ok || verdict.flags.length === 0) return null;
     const serious = verdict.flags.some(f => SERIOUS_FLAGS.has(f));
     const flagLabel = verdict.flags.map(f => FLAG_LABELS[f] || f).join(", ");
+    const correction = verdict.corrected_question?.trim();
+
+    const copyCorrection = async () => {
+        if (!correction) return;
+        try {
+            await navigator.clipboard.writeText(correction);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch {
+            // Clipboard API unavailable — the text is still selectable/copyable below.
+        }
+    };
+
     return (
         <div
             className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2.5 py-1.5 text-[11.5px] leading-snug ${
@@ -146,12 +198,36 @@ export function QuestionPolicyWarning({ verdict }: { verdict: QuestionModeration
             }`}
         >
             <AlertTriangle className="w-3.5 h-3.5 mt-[1px] shrink-0" />
-            <span>
-                <span className="font-semibold">
-                    This question doesn&apos;t follow company policy norms{flagLabel ? ` (${flagLabel})` : ""}.
-                </span>{" "}
-                {verdict.reason}
-            </span>
+            <div className="min-w-0 flex-1">
+                <span>
+                    <span className="font-semibold">
+                        This question doesn&apos;t follow company policy norms{flagLabel ? ` (${flagLabel})` : ""}.
+                    </span>{" "}
+                    {verdict.reason}
+                </span>
+                {correction && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span className="italic">Corrected: &ldquo;{correction}&rdquo;</span>
+                        <button
+                            type="button"
+                            onClick={copyCorrection}
+                            className="rounded border border-current px-1.5 py-0.5 text-[11px] font-medium not-italic hover:bg-white/60"
+                        >
+                            {copied ? "Copied" : "Copy"}
+                        </button>
+                        {onApplyCorrection && (
+                            <button
+                                type="button"
+                                onClick={() => onApplyCorrection(correction)}
+                                className="rounded border border-current px-1.5 py-0.5 text-[11px] font-medium not-italic hover:bg-white/60"
+                            >
+                                Use this
+                            </button>
+                        )}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
+

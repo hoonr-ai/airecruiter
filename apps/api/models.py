@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Literal
 
 class Skill(BaseModel):
     value: str
@@ -211,6 +211,7 @@ class CandidateSaveRecord(BaseModel):
     # save only when it equals candidate_id -- a label-independent proof that
     # this row's id is a JobDiva profile id (see `jobdiva_profile_id`).
     jobdiva_candidate_id: Optional[str] = None
+
 
 class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str
@@ -446,5 +447,9 @@ class ManualCandidateRequest(BaseModel):
     resume_text: str
 
 class CandidateFeedbackRequest(BaseModel):
-    feedback_type: str # 'Submit' or 'Reject'
+    feedback_type: str # 'Submit', 'Reject', or 'Unreachable'
     reason: Optional[str] = None
+    submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
+    manager_email: Optional[str] = None
+    recruiter_notes: Optional[str] = None
+

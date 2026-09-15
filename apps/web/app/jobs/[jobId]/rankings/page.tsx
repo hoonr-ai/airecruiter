@@ -57,10 +57,12 @@ import { StopOutreachModal, type StopOutreachCandidate } from "@/components/Stop
 import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import { API_BASE, authFetch, api } from "@/lib/api";
+
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
+import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -546,12 +548,17 @@ export default function CandidateRankingsPage() {
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
 
-  const handleConfirmSubmit = async () => {
+  const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
       try {
-        await api.candidates.feedback(jobId as string, String(actionCandidateId), { feedback_type: 'Submit' });
+        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+          feedback_type: 'Submit',
+          submission_type: submissionData.submission_type,
+          manager_email: submissionData.manager_email,
+          recruiter_notes: submissionData.recruiter_notes,
+        });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
       } catch (error) {
@@ -1507,6 +1514,7 @@ export default function CandidateRankingsPage() {
       return dst;
     };
 
+
     const dedupedByIdentity = new Map<string, any>();
     rows.forEach((candidate: any) => {
       const dedupKey = getCanonicalCandidateKey(candidate);
@@ -2161,6 +2169,7 @@ export default function CandidateRankingsPage() {
 
       {/* Table Interface */}
       <div className="space-y-4">
+
         {/* Filter bar: search + activity + candidate count in Row 1; filters in Row 2 */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm mb-3 flex flex-col gap-4 p-4">
           {/* Row 1: Search bar, Activity History, Showing text */}
@@ -2970,54 +2979,23 @@ export default function CandidateRankingsPage() {
       />
 
       {/* Integration Modals */}
-      {integrationModalOpen && actionCandidateId && (
+      <SubmissionModal
+        isOpen={integrationModalOpen === 'submit' && !!actionCandidateId}
+        onClose={() => {
+          setIntegrationModalOpen(null);
+          setActionCandidateId(null);
+        }}
+        candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
+        jobTitle={job?.title || "Job"}
+        jobRef={job?.jobdiva_id || job?.job_id || String(jobId || "")}
+        clientName={job?.customer_name || "-"}
+        onConfirmSubmit={handleConfirmSubmit}
+        isSubmitting={syncingCandidateId === actionCandidateId}
+      />
+
+      {integrationModalOpen === 'reject' && actionCandidateId && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            {integrationModalOpen === 'submit' ? (
-              <>
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <ExternalLink className="w-5 h-5 text-indigo-600" />
-                    Submit to JobDiva
-                  </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
-                </div>
-                <div className="p-6 space-y-4">
-                  <p className="text-sm text-slate-500">
-                    This action will initiate an <strong className="text-slate-900 font-semibold">external submission in JobDiva</strong> for:
-                  </p>
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-3 text-sm text-slate-700">
-                    <div className="flex items-center gap-2.5">
-                      <User className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Candidate:</strong> {candidates.find(c => c.id === actionCandidateId)?.name}</p>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                      <Briefcase className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Job:</strong> {job?.title} ({job?.jobdiva_id || job?.job_id || jobId})</p>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                      <Building2 className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Client:</strong> {job?.customer_name || "—"}</p>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                      <Zap className="w-4 h-4 text-slate-400" />
-                      <p><strong className="text-slate-900">Action:</strong> Create external submission record in JobDiva</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold"
-                    onClick={handleConfirmSubmit}
-                    disabled={syncingCandidateId === actionCandidateId}
-                  >
-                    {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm & Submit to JobDiva'}
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <>
                 <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
@@ -3073,8 +3051,6 @@ export default function CandidateRankingsPage() {
                     {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}
                   </Button>
                 </div>
-              </>
-            )}
           </div>
         </div>
       )}

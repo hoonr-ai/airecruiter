@@ -9,7 +9,7 @@
 //   – role-specific / default category labels
 //   – Add Question + Regenerate (difficulty selector) toolbar
 
-import { useRef, useState } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import { GripVertical, Plus, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TemplateQuestion } from "@/lib/campaigns";
@@ -47,17 +47,27 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
     questions: TemplateQuestion[];
     onChange: (q: TemplateQuestion[]) => void;
     isBooleanMode?: boolean;
+    onWarningChange?: (hasWarning: boolean) => void;
   }
 
   export function ScreeningQuestionsEditor({
     questions,
     onChange,
     isBooleanMode = false,
+    onWarningChange,
   }: ScreeningQuestionsEditorProps) {
 
   // AI policy check (NSFW / rude / discriminatory / nonsensical) on
   // recruiter-added questions — warning only, never blocks.
   const questionModeration = useQuestionModeration();
+
+  const hasWarning = React.useMemo(() => questionModeration.hasBlockingWarning(questions), [questionModeration, questions]);
+
+  useEffect(() => {
+    if (onWarningChange) {
+      onWarningChange(hasWarning);
+    }
+  }, [hasWarning, onWarningChange]);
 
   // ── Drag reorder ────────────────────────────────────────────────────────────
   const move = (from: number, to: number) => {
@@ -148,12 +158,12 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 if (q.is_locked) return;
                 update(index, { question_text: e.target.value });
                 if (isRecruiterAddedQuestion(q.category)) {
-                  questionModeration.scheduleCheck(String(index), e.target.value);
+                  questionModeration.scheduleCheck(String(index), e.target.value, q.pass_criteria ?? "");
                 }
               }}
               onBlur={() => {
                 if (isRecruiterAddedQuestion(q.category)) {
-                  questionModeration.flushCheck(String(index), q.question_text ?? "");
+                  questionModeration.flushCheck(String(index), q.question_text ?? "", q.pass_criteria ?? "");
                 }
               }}
               rows={3}
@@ -163,26 +173,61 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
               }`}
             />
             {isRecruiterAddedQuestion(q.category) && (
-              <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text ?? "")} />
+              <QuestionPolicyWarning
+                verdict={questionModeration.verdictFor(q.question_text ?? "", q.pass_criteria ?? "")}
+                onApplyCorrection={(corrected) => {
+                  update(index, { question_text: corrected });
+                  questionModeration.flushCheck(String(index), corrected, q.pass_criteria ?? "");
+                }}
+              />
             )}
           </div>
 
           {/* Pass criteria */}
           <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
-            <textarea
-              value={q.pass_criteria ?? ""}
-              onChange={(e) => {
-                update(index, { pass_criteria: e.target.value });
-              }}
-              rows={2}
-              placeholder="No hard filter"
+              <textarea
+                value={q.pass_criteria ?? ""}
+                onChange={(e) => {
+                  update(index, { pass_criteria: e.target.value });
+                  if (isRecruiterAddedQuestion(q.category)) {
+                    questionModeration.scheduleCheck(String(index), q.question_text ?? "", e.target.value);
+                  }
+                }}
+                onBlur={() => {
+                  if (isRecruiterAddedQuestion(q.category)) {
+                    questionModeration.flushCheck(String(index), q.question_text ?? "", q.pass_criteria ?? "");
+                  }
+                }}
+                rows={2}
+                readOnly={isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"}
+                placeholder="No hard filter"
               className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
                 q.pass_criteria
                   ? "text-[#4f46e5]"
                   : "text-slate-300 italic"
               }`}
             />
-          </div>
+              </div>
+
+          {isRecruiterAddedQuestion(q.category) && (
+            <div className="w-[130px] flex-shrink-0 border-l border-slate-100 pl-3">
+              <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Question type</label>
+              <select
+                value={q.question_type || "scored"}
+                onChange={(e) => update(index, {
+                  question_type: e.target.value as "hard_filter" | "info_only" | "scored",
+                  is_hard_filter: e.target.value === "hard_filter",
+                  pass_criteria: e.target.value === "hard_filter" ? q.pass_criteria : "",
+                })}
+                className="w-full h-8 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-700"
+                aria-label="Question type"
+              >
+                <option value="hard_filter">Hard filter</option>
+                <option value="info_only">Info only</option>
+                <option value="scored">Scored</option>
+              </select>
+            </div>
+          )}
 
           {/* Category + delete */}
           <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
@@ -198,7 +243,8 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 q.category ?? "",
                 q.order_index ?? index + 1,
                 isBooleanMode,
-                Boolean(q.is_hard_filter)
+                Boolean(q.is_hard_filter),
+                q.question_type
               )}
             />
             {!q.is_locked && (

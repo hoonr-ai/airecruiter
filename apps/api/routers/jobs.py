@@ -152,6 +152,7 @@ def _ensure_monitored_jobs_schema() -> None:
             # Persist the lock so the write path can protect existing core
             # questions even when a caller bypasses the browser UI.
             "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_locked BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS question_type TEXT",
 
             # Columns referenced by recent features but never had a
             # corresponding ADD COLUMN — fresh DBs hit "column does not

@@ -443,14 +443,17 @@ class JobRubricDB:
             question_text = q.get('question_text', '')
             pass_criteria = q.get('pass_criteria', '')
             is_locked = self._is_locked_default_question(question_text)
+            question_type = str(q.get('question_type') or '').strip().lower()
+            if question_type not in ('hard_filter', 'info_only', 'scored'):
+                question_type = None
             
             # Core question wording is locked; its pass criteria remains
             # recruiter-configurable so it can be used as a hard filter.
 
             cur.execute("""
                 INSERT INTO job_screen_questions (
-                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index, is_hard_filter, is_locked
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index, is_hard_filter, is_locked, question_type
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 jobdiva_id,
                 question_text,
@@ -460,6 +463,7 @@ class JobRubricDB:
                 q.get('order_index', i),
                 bool(q.get('is_hard_filter', False)),
                 is_locked,
+                question_type,
             ))
 
     def _get_screen_questions_internal(self, cur, jobdiva_id: str) -> List[Dict]:
@@ -477,7 +481,8 @@ class JobRubricDB:
             )
             SELECT question_text, pass_criteria, is_default, category, order_index,
                    COALESCE(is_hard_filter, FALSE) AS is_hard_filter,
-                   COALESCE(is_locked, FALSE) AS is_locked
+                   COALESCE(is_locked, FALSE) AS is_locked,
+                   question_type
             FROM job_screen_questions
             WHERE jobdiva_id IN (SELECT id FROM keys)
             ORDER BY order_index
@@ -489,5 +494,6 @@ class JobRubricDB:
             "category": r['category'],
             "order_index": r['order_index'],
             "is_hard_filter": bool(r.get('is_hard_filter', False)),
+            "question_type": r.get('question_type'),
             "is_locked": bool(r.get('is_locked', False)) or self._is_locked_default_question(r['question_text']),
         } for r in cur.fetchall()]
