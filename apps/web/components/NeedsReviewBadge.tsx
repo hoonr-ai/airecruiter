@@ -12,9 +12,27 @@ export type NeedsReviewQuestion = {
 
 export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion[] }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelId = useId();
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 16, top: 16 });
+
+  const cancelClose = () => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  };
+
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimerRef.current = setTimeout(() => {
+      setOpen(false);
+      closeTimerRef.current = null;
+    }, 150);
+  };
+
+  useEffect(() => () => cancelClose(), []);
 
   useEffect(() => {
     if (!open) return;
@@ -45,8 +63,13 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
     <div
       id={panelId}
       role="tooltip"
+      tabIndex={-1}
       className="fixed z-[100] w-[min(420px,calc(100vw-2rem))] rounded-2xl border border-amber-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md"
       style={position}
+      onMouseEnter={cancelClose}
+      onMouseLeave={scheduleClose}
+      onFocus={cancelClose}
+      onBlur={scheduleClose}
     >
       <div className="mb-3 flex items-center justify-between border-b border-amber-100 pb-2.5">
         <span className="flex items-center gap-2 text-[12px] font-bold uppercase tracking-widest text-amber-800">
@@ -93,10 +116,13 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
         className="inline-flex cursor-help items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
         aria-expanded={open}
         aria-describedby={open ? panelId : undefined}
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
+        onMouseEnter={() => {
+          cancelClose();
+          setOpen(true);
+        }}
+        onMouseLeave={scheduleClose}
         onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
+        onBlur={scheduleClose}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             setOpen(false);
