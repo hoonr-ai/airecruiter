@@ -137,6 +137,13 @@ def _extract_needs_review_flags(payload: Any) -> tuple:
     questions = payload.get("needs_review_questions") or nested.get("needs_review_questions") or []
     return needs_review, questions
 
+def _apply_needs_review_flags(cand: dict, payload: Any) -> None:
+    needs_review, review_qs = _extract_needs_review_flags(payload)
+    if needs_review:
+        cand["engage_hard_filter_needs_review"] = needs_review
+    if review_qs:
+        cand["engage_needs_review_questions"] = review_qs
+
 def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
     """Return the WHERE condition and DISTINCT ON tiebreaker for a feedback filter.
 
@@ -1594,11 +1601,7 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
-            needs_review, review_qs = _extract_needs_review_flags(cand.get("audit_payload"))
-            if needs_review:
-                cand["engage_hard_filter_needs_review"] = needs_review
-            if review_qs:
-                cand["engage_needs_review_questions"] = review_qs
+            _apply_needs_review_flags(cand, cand.get("audit_payload"))
 
             try:
                 scores_to_avg = [float(r_score)]
@@ -3298,11 +3301,7 @@ async def get_launched_candidates(
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
 
             # Extract Needs Review flags from the webhook payload
-            needs_review, review_qs = _extract_needs_review_flags(original_payload)
-            if needs_review:
-                cand["engage_hard_filter_needs_review"] = needs_review
-            if review_qs:
-                cand["engage_needs_review_questions"] = review_qs
+            _apply_needs_review_flags(cand, original_payload)
 
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
