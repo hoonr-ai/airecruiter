@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import asyncio
 import json
 import logging
@@ -15,7 +15,7 @@ from services.jobdiva import jobdiva_service, jobdiva_profile_id
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
-from services.unified_candidate_search import SearchCriteria, unified_search_service
+from services.unified_candidate_search import SearchCriteria, title_relevance_gate, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
 from services.feedback_metrics import refresh_feedback_metrics_sync
@@ -494,6 +494,27 @@ def _extract_candidate_gender_fields(cand: Dict[str, Any]) -> Dict[str, Any]:
     return to_gender_fields(normalized)
 
 
+def _passes_step5_role_gate(payload: Dict[str, Any], criteria: Optional[SearchCriteria]) -> Tuple[bool, str]:
+    """Cross submissions: the role gate Step 5 applies *before* anyone is scored.
+
+    Step 5 only ever scores candidates the sourcing query returned for this
+    job's title chips (JobDiva ``TITLES=`` / ``_candidate_title_match``), so
+    ``_compute_resume_matching`` alone — title relevance is 15 of 100 points
+    — cannot keep an off-role profile out of a list Step 5 never sourced.
+    Same payload shape as ``_compute_resume_matching``; a stored row's
+    ``data.title`` is the LLM job title Step 5 stamped after enrichment.
+    Returns ``(passed, reason)``.
+    """
+    if not criteria:
+        return True, "no_criteria"
+    candidate = _build_candidate_for_resume_matching(payload)
+    data_blob = _json_load_safe(payload.get("data"), {})
+    stored_title = payload.get("title") or (data_blob.get("title") if isinstance(data_blob, dict) else None)
+    if stored_title:
+        candidate["title"] = stored_title
+    return title_relevance_gate(candidate, getattr(criteria, "title_criteria", None) or [])
+
+
 # Strong references so fire-and-forget cross-submission tasks are not
 # garbage-collected mid-flight (same pattern as the gender_tasks set below).
 _cross_submission_tasks: set = set()
@@ -507,8 +528,12 @@ def _schedule_cross_submissions(job_ref: str, criteria: "SearchCriteria") -> Non
             return
         from services import cross_submissions
 
+        # Same gate + same scorer Step 5 uses, in the same order: role gate
+        # first, then the scoring matrix, then the 60% floor.
         task = asyncio.create_task(
-            cross_submissions.run_for_job_async(job_ref, criteria, _compute_resume_matching)
+            cross_submissions.run_for_job_async(
+                job_ref, criteria, _compute_resume_matching, prescreen=_passes_step5_role_gate,
+            )
         )
         _cross_submission_tasks.add(task)
         task.add_done_callback(_cross_submission_tasks.discard)

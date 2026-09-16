@@ -15,6 +15,7 @@ import pytest
 
 from services import cross_submissions as cs
 
+API_ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
 CUTOFF = NOW - timedelta(days=60)
 
@@ -225,6 +226,54 @@ def test_max_scored_budget_takes_most_recent_first():
     assert [c["candidate_id"] for c in got] == ["new"]
 
 
+def test_prescreen_runs_before_scoring_and_drops_rejected_rows():
+    rows = [_row(candidate_id="qa", email="q@x.com"), _row(candidate_id="da", email="d@x.com")]
+    scored = []
+
+    def scorer(payload, criteria):
+        scored.append(payload["candidate_id"])
+        return {"score": 90}
+
+    def gate(payload, criteria):
+        return (payload["candidate_id"] == "da", "data analyst ~ senior data analyst" if payload["candidate_id"] == "da" else "title_mismatch")
+
+    stats = {}
+    got = _select(rows, scorer=scorer, prescreen=gate, stats=stats)
+    assert [c["candidate_id"] for c in got] == ["da"]
+    assert scored == ["da"]  # rejected rows are never scored
+    assert got[0]["role_match"] == "data analyst ~ senior data analyst"
+    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1}
+
+
+def test_prescreen_error_fails_closed_for_that_row_only():
+    rows = [_row(candidate_id="boom", email="b@x.com"), _row(candidate_id="ok", email="o@x.com")]
+
+    def gate(payload, criteria):
+        if payload["candidate_id"] == "boom":
+            raise RuntimeError("taxonomy down")
+        return True, "match"
+
+    stats = {}
+    got = _select(rows, prescreen=gate, stats=stats)
+    assert [c["candidate_id"] for c in got] == ["ok"]
+    assert stats["gated_reasons"] == {"prescreen_error": 1}
+
+
+def test_gated_out_rows_do_not_consume_the_scoring_budget():
+    rows = [
+        _row(candidate_id="new-offrole", email="n@x.com", days_ago=1),
+        _row(candidate_id="older-onrole", email="o@x.com", days_ago=20),
+    ]
+    got = _select(rows, prescreen=lambda p, c: (p["candidate_id"] == "older-onrole", ""), max_scored=1)
+    assert [c["candidate_id"] for c in got] == ["older-onrole"]
+
+
+def test_no_prescreen_keeps_legacy_behaviour():
+    rows = [_row(candidate_id="a", email="a@x.com")]
+    (c,) = _select(rows)
+    assert "role_match" not in c
+
+
 def test_scoring_payload_matches_refresh_endpoint_shape():
     row = _row()
     blob = json.loads(row["data"])
@@ -272,6 +321,28 @@ def test_run_for_job_persists_and_emails_new_persons():
     sqls = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
     assert "ON CONFLICT (job_id, person_key) DO NOTHING" in sqls
     assert "SET notified_at = NOW()" in sqls
+
+
+def test_run_for_job_passes_prescreen_and_reports_gate_stats():
+    prior = [_row(candidate_id="qa", email="q@x.com", name="QA"), _row(candidate_id="da", email="d@x.com", name="DA")]
+    conn, cur = _mock_conn(JOB, prior=prior)
+    with patch.object(cs, "get_db_connection", return_value=conn), \
+         patch("core.email.notify_cross_submissions", return_value=True) as notify:
+        summary = cs.run_for_job(
+            "26-22222", criteria=object(), scorer=lambda p, c: {"score": 88},
+            prescreen=lambda p, c: (p["candidate_id"] == "da", "title_mismatch" if p["candidate_id"] == "qa" else "ok"),
+        )
+    assert summary["gated_out"] == 1 and summary["gated_reasons"] == {"title_mismatch": 1}
+    assert summary["scored"] == 1 and summary["selected"] == 1
+    assert [c["candidate_id"] for c in notify.call_args.kwargs["candidates"]] == ["da"]
+
+
+def test_both_callers_wire_the_step5_role_gate_next_to_the_step5_scorer():
+    """The service takes the gate as a parameter; both production callers must pass it."""
+    for rel in ("routers/candidates.py", "routers/cross_submissions.py"):
+        src = (API_ROOT / rel).read_text(encoding="utf-8")
+        assert "prescreen=_passes_step5_role_gate" in src, rel
+        assert "_compute_resume_matching" in src, rel
 
 
 def test_run_for_job_throttled_skips_scan_and_email():

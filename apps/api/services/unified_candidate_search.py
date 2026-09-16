@@ -137,6 +137,102 @@ def _compute_title_boost(cand: Dict[str, Any], title_criteria: List[Dict[str, An
         cand["title_match_source"] = {"searched": best_pair[0], "candidate": best_pair[1], "relevance": best_pair[2]}
     return best
 
+
+_TITLE_GATE_WORD_RE = re.compile(r"[^a-z0-9+#.]+")
+# Connective words that carry no role meaning: "Director of Engineering" must
+# match "Director, Engineering". Everything else — including short role words
+# like "QA" / "BI" / "UX" — is significant, so "Tech Lead" does not satisfy
+# "QA Lead" (Step 5's external-source check skipped <4-char tokens; this gate
+# is deliberately the tighter reading of the same rule).
+_TITLE_GATE_STOPWORDS = frozenset({"of", "and", "the", "for", "in", "to", "a", "an", "&", "or", "with", "at"})
+
+
+def _title_gate_normalize(value: Any) -> str:
+    """Lower-case, punctuation → space, collapsed whitespace ("Sr. Data-Analyst" → "sr data analyst")."""
+    text = _TITLE_GATE_WORD_RE.sub(" ", str(value or "").lower())
+    return re.sub(r"\s+", " ", text).strip(" .")
+
+
+def title_relevance_gate(
+    candidate: Dict[str, Any], title_criteria: List[Dict[str, Any]]
+) -> Tuple[bool, str]:
+    """Would this profile have entered the Step-5 pool for these title chips?
+
+    Step 5 never scores a candidate whose *title* is off-role: the JobDiva
+    TalentSearch boolean carries the role chips in the dedicated
+    ``TITLES= (...)`` field (matched against the candidate's job title, not
+    the résumé body — see ``_build_boolean_string``), and every external
+    source runs ``_candidate_title_match``. The scoring matrix then only
+    *ranks* what got in — title relevance is 15 of 100 points, so an
+    off-role profile with the right skills still scores well. Any caller
+    that scores a pool Step 5 did not source (cross submissions re-scoring
+    previously screened people) must apply this gate first, or a "QA Lead"
+    surfaces as a 77% match for a Data Analyst req.
+
+    A candidate title matches a role term when (any of):
+      * the role phrase appears in the title ("data analyst" in "senior data analyst"),
+      * every role word (connectives aside — ``_TITLE_GATE_STOPWORDS``) appears
+        in the title (the ``_candidate_title_match`` token rule, applied to
+        title fields only — never the résumé — and to short words like "QA"),
+      * the role taxonomy puts both in the same tight family
+        (``role_taxonomy.compare`` → exact/similar — the tiers the matrix's
+        title bucket credits).
+
+    Role terms = every included title chip's value plus its recruiter-approved
+    ``similar_terms`` (the same variants the boolean builder ORs together).
+    No title chips → nothing to gate on → pass. Title chips but no title on
+    the profile → fail (that is what ``TITLES=`` does), reason ``no_title_on_profile``.
+
+    Returns ``(passed, reason)``; on a pass the reason names the winning
+    ``role ~ candidate title`` pair for logs / explainability.
+    """
+    role_terms: List[str] = []
+    seen_roles = set()
+    for item in title_criteria or []:
+        if not isinstance(item, dict) or _is_excluded_criterion(item):
+            continue
+        for raw in [item.get("value")] + list(item.get("similar_terms") or []):
+            term = _title_gate_normalize(raw)
+            if term and term not in seen_roles:
+                seen_roles.add(term)
+                role_terms.append(term)
+    if not role_terms:
+        return True, "no_title_criteria"
+
+    raw_titles = list(_candidate_titles(candidate))
+    enhanced = candidate.get("enhanced_info")
+    if isinstance(enhanced, dict):
+        # Step 5 stamps ``title = enhanced_info.job_title`` after enrichment;
+        # a stored row may only carry it here.
+        for key in ("job_title", "title"):
+            val = enhanced.get(key)
+            if isinstance(val, str) and val.strip():
+                raw_titles.extend(p.strip() for p in _TITLE_SEPARATORS.split(val) if p.strip())
+    cand_titles: List[str] = []
+    seen_titles = set()
+    for raw in raw_titles:
+        norm = _title_gate_normalize(raw)
+        if norm and norm not in seen_titles:
+            seen_titles.add(norm)
+            cand_titles.append(norm)
+    if not cand_titles:
+        return False, "no_title_on_profile"
+
+    for role in role_terms:
+        role_tokens = [t for t in role.split() if t not in _TITLE_GATE_STOPWORDS]
+        for title in cand_titles:
+            if role in title:
+                return True, f"{role} ~ {title}"
+            title_tokens = set(title.split()) - _TITLE_GATE_STOPWORDS
+            if role_tokens and all(t in title_tokens for t in role_tokens):
+                return True, f"{role} ~ {title}"
+            try:
+                if role_taxonomy.compare(role, title) in ("exact", "similar"):
+                    return True, f"{role} ~ {title}"
+            except Exception:  # noqa: BLE001 — taxonomy is an assist, never a failure
+                pass
+    return False, "title_mismatch"
+
 logger = logging.getLogger(__name__)
 
 # Sentinel distance for candidates with no usable location data. Big enough
