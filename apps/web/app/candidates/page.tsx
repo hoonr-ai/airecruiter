@@ -1068,15 +1068,24 @@ export default function GlobalCandidatesPage() {
 
                       <TableCell className="border-b border-slate-200 text-center sticky left-[370px] z-10 bg-white group-hover:bg-slate-50 transition-colors border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
                         <div className="flex flex-col gap-1 items-center justify-center">
-                          <button
-                            onClick={() => {
-                              setSelectedCandidate(c);
-                              setDetailsModalOpen(true);
-                            }}
-                            className="text-[14px] font-bold text-indigo-600 hover:text-indigo-700 hover:underline transition-colors text-center whitespace-normal leading-tight"
-                          >
-                            {c.name || "Unknown"}
-                          </button>
+                          {c.jobdiva_id ? (
+                            <Link
+                              href={`/jobs/${c.jobdiva_id}/report?candidateId=${encodeURIComponent(c.candidate_id || c.id)}`}
+                              className="text-[14px] font-bold text-indigo-600 hover:text-indigo-700 hover:underline transition-colors text-center whitespace-normal leading-tight"
+                            >
+                              {c.name || "Unknown"}
+                            </Link>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setSelectedCandidate(c);
+                                setDetailsModalOpen(true);
+                              }}
+                              className="text-[14px] font-bold text-indigo-600 hover:text-indigo-700 hover:underline transition-colors text-center whitespace-normal leading-tight"
+                            >
+                              {c.name || "Unknown"}
+                            </button>
+                          )}
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center px-1 break-all whitespace-normal" title={c.email}>
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {c.email || <span className="font-normal opacity-50">—</span>}
                           </span>
