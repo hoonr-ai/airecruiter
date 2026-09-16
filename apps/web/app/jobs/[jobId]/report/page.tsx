@@ -647,10 +647,10 @@ export default function CandidateEvaluationReportPage() {
                                 type={hf_label === 'Pass' ? 'success' : hf_label === 'Fail' ? 'danger' : 'neutral'} 
                               />
                               {item.needs_review && hf_label === 'Pass' && (
-                                <StatusPill
-                                  status="Needs Review"
-                                  type="warning"
-                                />
+                                <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">
+                                  <AlertCircle className="h-3 w-3 text-amber-500" />
+                                  Needs Review
+                                </span>
                               )}
                             </div>
                           </div>

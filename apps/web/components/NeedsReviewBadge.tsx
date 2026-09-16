@@ -15,7 +15,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelId = useId();
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState({ left: 16, top: 16 });
+  const [position, setPosition] = useState<React.CSSProperties>({ left: 16, top: 16 });
 
   const cancelClose = () => {
     if (closeTimerRef.current) {
@@ -28,8 +28,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
     cancelClose();
     closeTimerRef.current = setTimeout(() => {
       setOpen(false);
-      closeTimerRef.current = null;
-    }, 150);
+    }, 300);
   };
 
   useEffect(() => () => cancelClose(), []);
@@ -42,10 +41,14 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
       if (!rect) return;
 
       const panelWidth = Math.min(420, window.innerWidth - 32);
-      setPosition({
-        left: Math.max(16, Math.min(rect.left + rect.width / 2 - panelWidth / 2, window.innerWidth - panelWidth - 16)),
-        top: rect.bottom + 12,
-      });
+      const left = Math.max(16, Math.min(rect.left + rect.width / 2 - panelWidth / 2, window.innerWidth - panelWidth - 16));
+      const spaceBelow = window.innerHeight - rect.bottom;
+      
+      if (spaceBelow < 350 && rect.top > spaceBelow) {
+        setPosition({ left, bottom: window.innerHeight - rect.top + 12 });
+      } else {
+        setPosition({ left, top: rect.bottom + 12 });
+      }
     };
 
     updatePosition();
