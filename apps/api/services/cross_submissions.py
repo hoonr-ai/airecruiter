@@ -3,9 +3,22 @@
 When a recruiter sources a new job, look back over every candidate PAIR
 already reached out to (through Pairbot) in the last N days who *responded*
 — i.e. the phone screen is at least partially complete (`in_progress`) or
-finished (`passed` / `failed` / `completed`) — score them against the new
-job's Step-5 criteria, and email the recruiter a separate "cross
+finished (`passed` / `failed` / `completed`) — put them through the same
+gate + scorer Step 5 uses, and email the recruiter a separate "cross
 submissions" list of the relevant ones.
+
+Relevance is decided exactly the way Step 5 decides it, in the same order:
+
+1. **Role gate** (``prescreen``) — Step 5 only scores candidates its
+   sourcing query returned for the job's title chips (JobDiva ``TITLES=``,
+   ``_candidate_title_match`` for external sources). This pool was sourced
+   for *other* jobs, so the same title gate runs here first; without it the
+   scorer alone (title relevance is 15 of 100 points) let a "QA Lead" ship
+   as a 77% Data Analyst match. See ``routers.candidates._passes_step5_role_gate``.
+2. **Scorer** — ``routers.candidates._compute_resume_matching``, the exact
+   function behind the Step-5 match % (scoring matrix v2, hard vetoes → 0).
+3. **Floor** — ``CROSS_SUBMISSIONS_MIN_SCORE``, defaulting to the Step-5
+   pool floor (``sourcing_config.JOBDIVA_TALENTSEARCH_MIN_SCORE``).
 
 Data model this reads (nothing new is captured — it all already exists):
 
@@ -82,6 +95,9 @@ RESPONDED_STATUSES: Tuple[str, ...] = (
 _VERSION_SUFFIX_RE = re.compile(r"-v\d+$", re.IGNORECASE)
 
 Scorer = Callable[[Dict[str, Any], Any], Dict[str, Any]]
+# (payload, criteria) -> (passed, reason). Runs before the scorer; a False
+# drops the row without scoring it. See module docstring, step 1.
+Prescreen = Callable[[Dict[str, Any], Any], Tuple[bool, str]]
 
 
 # ---------------------------------------------------------------------------
@@ -250,13 +266,22 @@ def select_candidates(
     min_score: float = CROSS_SUBMISSIONS_MIN_SCORE,
     max_scored: int = CROSS_SUBMISSIONS_MAX_SCORED,
     max_listed: int = CROSS_SUBMISSIONS_MAX_LISTED,
+    prescreen: Optional[Prescreen] = None,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Filter → dedupe by person (most recent screen wins) → score → rank.
+    """Filter → dedupe by person (most recent screen wins) → role gate → score → rank.
 
     ``prior_rows`` are sourced_candidates rows (dicts) joined with their
     job's title/client. Rows for the same base job ref as the new job, rows
     whose person is already in the new job, rows that never responded and
     rows outside the look-back window are dropped before scoring.
+
+    ``prescreen`` is the Step-5 role gate (module docstring, step 1): it runs
+    on the deduped pool *before* the scoring budget so off-role people
+    neither get scored nor eat a ``max_scored`` slot. A gate that raises
+    drops the row (a relevance check that cannot run must not let someone
+    through). ``stats`` (optional dict) receives ``gated_out`` and a
+    per-reason breakdown for the run summary / logs.
     """
     by_person: Dict[str, Dict[str, Any]] = {}
     for row in prior_rows:
@@ -303,8 +328,31 @@ def select_candidates(
         if prev is None or candidate["screened_at"] > prev["screened_at"]:
             by_person[key] = candidate
 
-    # Score the most recently screened first when the pool exceeds the budget.
-    pool = sorted(by_person.values(), key=lambda c: c["screened_at"], reverse=True)[: max(0, int(max_scored))]
+    # Most recently screened first; the role gate runs on the whole pool, the
+    # scoring budget only counts people who cleared it.
+    ordered = sorted(by_person.values(), key=lambda c: c["screened_at"], reverse=True)
+    gated_reasons: Dict[str, int] = {}
+    pool: List[Dict[str, Any]] = []
+    budget = max(0, int(max_scored))
+    for cand in ordered:
+        if len(pool) >= budget:
+            break
+        if prescreen is not None:
+            try:
+                passed, reason = prescreen(build_scoring_payload(cand["_row"], cand["_blob"]), criteria)
+            except Exception as e:  # noqa: BLE001 — an un-runnable gate fails closed for that row
+                logger.warning("cross_submissions: role gate failed for %s: %s", cand.get("candidate_id"), e)
+                passed, reason = False, "prescreen_error"
+            if not passed:
+                key = str(reason or "rejected")
+                gated_reasons[key] = gated_reasons.get(key, 0) + 1
+                continue
+            cand["role_match"] = str(reason or "")
+        pool.append(cand)
+    if stats is not None:
+        stats["gated_out"] = sum(gated_reasons.values())
+        stats["gated_reasons"] = gated_reasons
+        stats["scored"] = len(pool)
 
     selected: List[Dict[str, Any]] = []
     for cand in pool:
@@ -681,17 +729,23 @@ def run_for_job(
     criteria: Any,
     scorer: Optional[Scorer],
     *,
+    prescreen: Optional[Prescreen] = None,
     force: bool = False,
     send_email: bool = True,
     app_base_url: str = "",
 ) -> Dict[str, Any]:
-    """Scan → score → persist → email. Synchronous; call via ``asyncio.to_thread``.
+    """Scan → role gate → score → persist → email. Synchronous; call via ``asyncio.to_thread``.
 
+    ``prescreen`` is the Step-5 role gate (``routers.candidates._passes_step5_role_gate``);
+    ``scorer`` the Step-5 scorer (``_compute_resume_matching``). Both callers
+    pass both — the parameters exist so the service stays free of the
+    heavy router import and testable without it.
     Returns a summary dict; never raises (fail-open, see module docstring).
     """
     summary: Dict[str, Any] = {
         "job_ref": job_ref, "ran": False, "skipped_reason": None,
-        "scanned": 0, "selected": 0, "new": 0, "emailed": False, "candidates": [],
+        "scanned": 0, "gated_out": 0, "gated_reasons": {}, "scored": 0,
+        "selected": 0, "new": 0, "emailed": False, "candidates": [],
     }
     if not CROSS_SUBMISSIONS_ENABLED and not force:
         summary["skipped_reason"] = "disabled"
@@ -718,6 +772,7 @@ def run_for_job(
             prior = fetch_prior_rows(cur, lookback_days=CROSS_SUBMISSIONS_LOOKBACK_DAYS, exclude_keys=keys)
             summary["scanned"] = len(prior)
             cutoff = datetime.now(timezone.utc) - timedelta(days=int(CROSS_SUBMISSIONS_LOOKBACK_DAYS))
+            gate_stats: Dict[str, Any] = {}
             selected = select_candidates(
                 prior,
                 new_job_base_refs=job_base_refs(job, job_ref),
@@ -725,7 +780,12 @@ def run_for_job(
                 cutoff=cutoff,
                 scorer=scorer,
                 criteria=criteria,
+                prescreen=prescreen,
+                stats=gate_stats,
             )
+            summary["gated_out"] = int(gate_stats.get("gated_out") or 0)
+            summary["gated_reasons"] = dict(gate_stats.get("gated_reasons") or {})
+            summary["scored"] = int(gate_stats.get("scored") or 0)
             summary["selected"] = len(selected)
             new_rows = persist_new(cur, job, job_ref, selected)
             conn.commit()
@@ -754,8 +814,9 @@ def run_for_job(
                     mark_notified(cur, [c["id"] for c in new_rows if c.get("id")])
                     conn.commit()
         logger.info(
-            "cross_submissions: job=%s scanned=%s selected=%s new=%s emailed=%s",
-            job_ref, summary["scanned"], summary["selected"], summary["new"], summary["emailed"],
+            "cross_submissions: job=%s scanned=%s gated_out=%s (%s) scored=%s selected=%s new=%s emailed=%s",
+            job_ref, summary["scanned"], summary["gated_out"], summary["gated_reasons"], summary["scored"],
+            summary["selected"], summary["new"], summary["emailed"],
         )
         return summary
     except Exception as e:  # noqa: BLE001 — fail-open by design

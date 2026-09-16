@@ -144,8 +144,13 @@ EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "l
 # job's recruiters as a separate "cross submissions" list.
 CROSS_SUBMISSIONS_ENABLED = get_env_bool("CROSS_SUBMISSIONS_ENABLED", True)
 CROSS_SUBMISSIONS_LOOKBACK_DAYS = int(get_env_with_default("CROSS_SUBMISSIONS_LOOKBACK_DAYS", "60"))
-# Same floor as outreach (no PAIR outreach below 60% under scoring matrix v2).
-CROSS_SUBMISSIONS_MIN_SCORE = float(get_env_with_default("CROSS_SUBMISSIONS_MIN_SCORE", "60"))
+# Same floor Step 5 applies to a machine-sourced pool (JobDiva TalentSearch /
+# external rows below it are never shown), so the list matches what the
+# recruiter would have seen on Step 5. Env override kept for tuning.
+from core.sourcing_config import JOBDIVA_TALENTSEARCH_MIN_SCORE as _STEP5_POOL_MIN_SCORE  # noqa: E402
+CROSS_SUBMISSIONS_MIN_SCORE = float(
+    get_env_with_default("CROSS_SUBMISSIONS_MIN_SCORE", str(_STEP5_POOL_MIN_SCORE))
+)
 # Scoring is deterministic (no LLM) but bounded anyway: most-recent first.
 CROSS_SUBMISSIONS_MAX_SCORED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_SCORED", "500"))
 CROSS_SUBMISSIONS_MAX_LISTED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_LISTED", "25"))
