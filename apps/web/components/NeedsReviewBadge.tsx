@@ -46,9 +46,11 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
       const spaceBelow = window.innerHeight - rect.bottom;
       
       if (spaceBelow < 350 && rect.top > spaceBelow) {
-        setPosition({ left, bottom: window.innerHeight - rect.top + 12 });
+        // Not enough space below, and more space above, so flip it
+        setPosition({ left, bottom: window.innerHeight - rect.top + 12, top: undefined });
       } else {
-        setPosition({ left, top: rect.bottom + 12 });
+        // Default to showing below
+        setPosition({ left, top: rect.bottom + 12, bottom: undefined });
       }
     };
 
@@ -125,7 +127,10 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
           setOpen(true);
         }}
         onMouseLeave={scheduleClose}
-        onFocus={() => setOpen(true)}
+        onFocus={() => {
+          cancelClose();
+          setOpen(true);
+        }}
         onBlur={scheduleClose}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
