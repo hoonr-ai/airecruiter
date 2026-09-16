@@ -1938,6 +1938,13 @@ function NewJobPageContent() {
           keys.add(`${item.source ?? ''}:${item.candidate_id}`);
           ids.add(String(item.candidate_id));
         }
+        // A launched Exa/LinkedIn person now has a JobDiva profile, and the
+        // JobDiva pools return them under that profile id with a JobDiva-*
+        // label. Knowing the id hides that copy as "launched" too, instead of
+        // offering a second launch that would save a JobDiva-labelled twin row.
+        if (item?.jobdiva_candidate_id) {
+          ids.add(String(item.jobdiva_candidate_id));
+        }
       }
       setLaunchedCandidateKeys(keys);
       setLaunchedCandidateIds(ids);

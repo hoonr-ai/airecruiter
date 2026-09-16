@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { jobDivaLinkage, mergeProvisionedTwins } from "@/lib/candidateTwins";
 import {
   Table,
   TableBody,
@@ -1515,8 +1516,18 @@ export default function CandidateRankingsPage() {
     };
 
 
+    // Provisioned twins first: a JobDiva-labelled row whose candidate_id is the
+    // JobDiva profile id another row of this job stores in jobdiva_candidate_id
+    // is the same person, re-imported from JobDiva after Launch PAIR provisioned
+    // them (their contacts may differ, so the identity keys below would not
+    // catch it). The stamped origin row survives with its own source label and
+    // absorbs the twin's engage bookkeeping.
+    const twinFreeRows = mergeProvisionedTwins(rows, (origin, twin) =>
+      mergeRowBestOf({ ...origin }, twin),
+    );
+
     const dedupedByIdentity = new Map<string, any>();
-    rows.forEach((candidate: any) => {
+    twinFreeRows.forEach((candidate: any) => {
       const dedupKey = getCanonicalCandidateKey(candidate);
       const existing = dedupedByIdentity.get(dedupKey);
       if (!existing) {
@@ -2620,6 +2631,21 @@ export default function CandidateRankingsPage() {
                           <span className="text-[12px] font-semibold text-slate-700">
                             {normalizeSourceLabel(candidate.source)}
                           </span>
+                          {(() => {
+                            // Origin stays the label; JobDiva linkage is a separate
+                            // fact, so an Exa person Launch PAIR put into JobDiva
+                            // reads "LinkedIn" + "In JobDiva · via PAIR", never
+                            // "Job-Diva Applicant".
+                            const caption = jobDivaLinkage(candidate).caption;
+                            return caption ? (
+                              <span
+                                className="block text-[10px] font-medium text-slate-400 mt-0.5 whitespace-nowrap"
+                                title="This person has a JobDiva profile and an application on this job. 'via PAIR' means Launch PAIR recorded it; 'applied directly' means they applied in JobDiva."
+                              >
+                                {caption}
+                              </span>
+                            ) : null;
+                          })()}
                         </TableCell>
 
 
