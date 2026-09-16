@@ -152,6 +152,13 @@ CROSS_SUBMISSIONS_MAX_LISTED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_L
 # Step-5 search fires on every run (sample + full); the scan runs at most
 # once per window per job. The endpoint's force flag bypasses this.
 CROSS_SUBMISSIONS_THROTTLE_MINUTES = int(get_env_with_default("CROSS_SUBMISSIONS_THROTTLE_MINUTES", "10"))
+# Ceiling on the one-off embedding warm-up before a cross-submission scan
+# scores its pool (see services/cross_submissions.run_for_job_async). Bounded
+# so a slow embedding provider degrades score fidelity rather than parking a
+# worker thread.
+CROSS_SUBMISSIONS_WARM_TIMEOUT_SECONDS = float(
+    get_env_with_default("CROSS_SUBMISSIONS_WARM_TIMEOUT_SECONDS", "30")
+)
 
 # ---- Apify (LinkedIn Open-to-Work enrichment for Exa-sourced candidates) ----
 APIFY_API_TOKEN = get_env_with_default("APIFY_API_TOKEN", "")
