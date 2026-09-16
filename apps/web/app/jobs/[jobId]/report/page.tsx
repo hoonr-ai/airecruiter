@@ -595,6 +595,7 @@ export default function CandidateEvaluationReportPage() {
                     hard_filter_status:
                       d.status === 'Pass' ? 'passed' : d.status === 'Fail' ? 'failed' : 'pending',
                     reason: d.reason,
+                    needs_review: d.needs_review,
                   }));
 
                   // 1. Filter for items that are EXPLICITLY hard filters
