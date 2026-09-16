@@ -383,23 +383,87 @@ class JobRubricDB:
         """
         return
 
+    def _is_locked_default_question(self, text: str) -> bool:
+        if not text:
+            return False
+        lower_text = text.lower()
+        return (
+            "authorized to work indefinitely" in lower_text or
+            "require visa sponsorship to continue working" in lower_text or
+            "types of working arrangements are you open to and eligible for" in lower_text
+        )
+
+    def _existing_locked_questions(self, cur, jobdiva_id: str) -> List[Dict]:
+        """Return locks already persisted for this job.
+
+        Older rows predate ``is_locked``, so recognise the three legacy core
+        questions by their canonical text as well.  This prevents a direct
+        API caller from editing or deleting a protected row during the
+        DELETE-and-reinsert save operation below.
+        """
+        cur.execute(
+            """
+            SELECT question_text
+            FROM job_screen_questions
+            WHERE jobdiva_id = %s
+              AND (is_locked = TRUE OR LOWER(question_text) LIKE ANY(%s))
+            """,
+            (
+                jobdiva_id,
+                [
+                    "%authorized to work indefinitely%",
+                    "%require visa sponsorship to continue working%",
+                    "%types of working arrangements are you open to and eligible for%",
+                ],
+            ),
+        )
+        return [{"question_text": row[0]} for row in cur.fetchall()]
+
+    def _validate_locked_questions(self, existing_locked: List[Dict], questions: List[Dict]) -> None:
+        """Reject attempts to modify or remove an already locked question."""
+        submitted_texts = {
+            str(question.get("question_text") or "").strip().casefold()
+            for question in questions
+        }
+        missing = [
+            row["question_text"]
+            for row in existing_locked
+            if str(row["question_text"] or "").strip().casefold() not in submitted_texts
+        ]
+        if missing:
+            raise ValueError("Locked screening questions cannot be edited or removed")
+
     def _save_screen_questions_internal(self, cur, jobdiva_id: str, questions: List[Dict]):
         """Internal helper to save screen questions using an existing cursor."""
         self._ensure_hard_filter_column(cur)
+        existing_locked = self._existing_locked_questions(cur, jobdiva_id)
+        self._validate_locked_questions(existing_locked, questions)
         cur.execute("DELETE FROM job_screen_questions WHERE jobdiva_id = %s", (jobdiva_id,))
         for i, q in enumerate(questions):
+            question_text = q.get('question_text', '')
+            pass_criteria = q.get('pass_criteria', '')
+            is_locked = self._is_locked_default_question(question_text)
+            question_type = str(q.get('question_type') or '').strip().lower()
+            if question_type not in ('hard_filter', 'info_only', 'scored'):
+                question_type = None
+            
+            # Core question wording is locked; its pass criteria remains
+            # recruiter-configurable so it can be used as a hard filter.
+
             cur.execute("""
                 INSERT INTO job_screen_questions (
-                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index, is_hard_filter
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index, is_hard_filter, is_locked, question_type
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 jobdiva_id,
-                q.get('question_text', ''),
-                q.get('pass_criteria', ''),
+                question_text,
+                pass_criteria,
                 bool(q.get('is_default', False)),
                 q.get('category', 'other'),
                 q.get('order_index', i),
                 bool(q.get('is_hard_filter', False)),
+                is_locked,
+                question_type,
             ))
 
     def _get_screen_questions_internal(self, cur, jobdiva_id: str) -> List[Dict]:
@@ -416,7 +480,9 @@ class JobRubricDB:
                 SELECT DISTINCT id FROM (VALUES (%s), ((SELECT jobdiva_id FROM job)), ((SELECT job_id FROM job))) AS t(id) WHERE id IS NOT NULL AND id != ''
             )
             SELECT question_text, pass_criteria, is_default, category, order_index,
-                   COALESCE(is_hard_filter, FALSE) AS is_hard_filter
+                   COALESCE(is_hard_filter, FALSE) AS is_hard_filter,
+                   COALESCE(is_locked, FALSE) AS is_locked,
+                   question_type
             FROM job_screen_questions
             WHERE jobdiva_id IN (SELECT id FROM keys)
             ORDER BY order_index
@@ -428,4 +494,6 @@ class JobRubricDB:
             "category": r['category'],
             "order_index": r['order_index'],
             "is_hard_filter": bool(r.get('is_hard_filter', False)),
+            "question_type": r.get('question_type'),
+            "is_locked": bool(r.get('is_locked', False)) or self._is_locked_default_question(r['question_text']),
         } for r in cur.fetchall()]

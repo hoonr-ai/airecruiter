@@ -1,4 +1,97 @@
-from routers.candidates import _extract_rankings_hard_filter_details
+from routers.candidates import _extract_rankings_hard_filter_details, _extract_needs_review_flags
+
+def test_extract_needs_review_flags_tolerates_non_dict():
+    # Helper should safely tolerate missing, malformed, or non-dict payloads
+    for bad in (None, [], "string", 123):
+        needs_review, questions = _extract_needs_review_flags(bad)
+        assert needs_review is False
+        assert questions == []
+
+    # Should also tolerate payload["data"] being non-dict
+    for bad_data in (None, [], "string", 123):
+        needs_review, questions = _extract_needs_review_flags({"data": bad_data})
+        assert needs_review is False
+        assert questions == []
+
+def test_extract_needs_review_flags_finds_nested_data():
+    # Base level payload
+    payload1 = {
+        "hard_filter_needs_review": True,
+        "needs_review_questions": ["q1"]
+    }
+    needs_review, questions = _extract_needs_review_flags(payload1)
+    assert needs_review is True
+    assert questions == ["q1"]
+
+    # Nested under "data"
+    payload2 = {
+        "data": {
+            "hard_filter_needs_review": True,
+            "needs_review_questions": ["q2"]
+        }
+    }
+    needs_review, questions = _extract_needs_review_flags(payload2)
+    assert needs_review is True
+    assert questions == ["q2"]
+
+    # Missing flags completely
+    payload3 = {"data": {"some_other_key": True}}
+    needs_review, questions = _extract_needs_review_flags(payload3)
+    assert needs_review is False
+    assert questions == []
+
+def test_extract_needs_review_flags_string_payload():
+    import json
+    # Valid JSON string
+    payload_str = json.dumps({
+        "hard_filter_needs_review": True,
+        "needs_review_questions": ["q3"]
+    })
+    needs_review, questions = _extract_needs_review_flags(payload_str)
+    assert needs_review is True
+    assert questions == ["q3"]
+
+    # Invalid JSON string
+    needs_review, questions = _extract_needs_review_flags("invalid json")
+    assert needs_review is False
+    assert questions == []
+
+    # None payload
+    needs_review, questions = _extract_needs_review_flags(None)
+    assert needs_review is False
+    assert questions == []
+
+def test_apply_needs_review_flags_cascades_multiple_payloads():
+    from routers.candidates import _apply_needs_review_flags
+    cand = {}
+    
+    # Needs Review is deep in the 3rd payload
+    payloads = [
+        {}, 
+        {"other": True}, 
+        {"hard_filter_needs_review": True, "needs_review_questions": ["q4"]}
+    ]
+    _apply_needs_review_flags(cand, payloads)
+    assert cand.get("engage_hard_filter_needs_review") is True
+    assert cand.get("engage_needs_review_questions") == ["q4"]
+
+    # Stop checking once found
+    cand2 = {}
+    payloads2 = [
+        {"hard_filter_needs_review": True, "needs_review_questions": ["q5"]},
+        {"hard_filter_needs_review": False, "needs_review_questions": []}
+    ]
+    _apply_needs_review_flags(cand2, payloads2)
+    assert cand2.get("engage_hard_filter_needs_review") is True
+    # Split across payloads (Medium priority reviewer note)
+    cand3 = {}
+    payloads3 = [
+        {"hard_filter_needs_review": True},
+        {"needs_review_questions": ["q6"]}
+    ]
+    _apply_needs_review_flags(cand3, payloads3)
+    assert cand3.get("engage_hard_filter_needs_review") is True
+    assert cand3.get("engage_needs_review_questions") == ["q6"]
 
 def test_extract_rankings_hard_filter_details_from_webhook():
     # Test Priority 1: `hard_filter_results` in `engage_last_response`

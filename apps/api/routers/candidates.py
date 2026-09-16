@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 import httpx
+import os
 import re
 
 from services.ai_service import ai_service
@@ -14,7 +15,7 @@ from services.jobdiva import jobdiva_service, jobdiva_profile_id
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
-from services.unified_candidate_search import SearchCriteria, unified_search_service
+from services.unified_candidate_search import SearchCriteria, title_relevance_gate, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
 from services.feedback_metrics import refresh_feedback_metrics_sync
@@ -28,6 +29,21 @@ from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+def _manager_email_allowed(email: str) -> bool:
+    raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
+    allowed = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not allowed:
+        allowed = ["pyramidci.com"]
+    normalized = email.strip().lower()
+    domain = normalized.rsplit("@", 1)[-1]
+    return any(
+        normalized == entry or domain == entry.lstrip("@") or domain.endswith("." + entry.lstrip("@"))
+        for entry in allowed
+    )
+
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
@@ -109,6 +125,63 @@ def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float],
     return s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and (is_boolean_job or engage_score is not None)
 
 
+def _extract_needs_review_flags(payload: Any) -> tuple:
+    # Some DB results (e.g. engage_interview_audit.payload) may be returned as JSON-encoded strings
+    if isinstance(payload, str):
+        payload = _json_load_safe(payload, {})
+    if not isinstance(payload, dict):
+        return False, []
+    nested = payload.get("data")
+    nested = nested if isinstance(nested, dict) else {}
+    needs_review = bool(payload.get("hard_filter_needs_review", False)) or bool(nested.get("hard_filter_needs_review", False))
+    questions = payload.get("needs_review_questions") or nested.get("needs_review_questions") or []
+    return needs_review, questions
+
+def _apply_needs_review_flags(cand: dict, payloads: List[Any]) -> None:
+    for payload in payloads:
+        needs_review, review_qs = _extract_needs_review_flags(payload)
+        if needs_review and "engage_hard_filter_needs_review" not in cand:
+            cand["engage_hard_filter_needs_review"] = needs_review
+        if review_qs and "engage_needs_review_questions" not in cand:
+            cand["engage_needs_review_questions"] = review_qs
+        if cand.get("engage_hard_filter_needs_review") and cand.get("engage_needs_review_questions"):
+            break
+
+def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]:
+    """Return the WHERE condition and DISTINCT ON tiebreaker for a feedback filter.
+
+    Action filters constrain the selected ``sourced_candidates`` row directly;
+    No Feedback remains a job-scoped absence check across a candidate's rows.
+    """
+    if not feedback:
+        return "", ""
+
+    f_lower = feedback.strip().lower()
+    if f_lower in ("no feedback", "none", "no_feedback"):
+        correlation_scaffold = (
+            "SELECT 1 FROM sourced_candidates sc2 "
+            "WHERE sc2.candidate_id = sc.candidate_id "
+            "AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
+        )
+        return f"""
+            AND NOT EXISTS (
+                {correlation_scaffold}
+                  AND sc2.data->>'feedback_type' IS NOT NULL
+                  AND TRIM(sc2.data->>'feedback_type') <> ''
+            )""", "(sc.data->>'feedback_type' IS NULL OR TRIM(sc.data->>'feedback_type') = '')"
+
+    predicates = {
+        "submit": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "submitted": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'submit')",
+        "reject": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "rejected": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
+        "unreachable": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')",
+    }
+    predicate = predicates.get(f_lower, "")
+    return (f"AND {predicate}", predicate) if predicate else ("", "")
+
+
+
 def _extract_rankings_hard_filter_details(
     data_blob: Dict[str, Any],
     audit_response: Any,
@@ -145,6 +218,7 @@ def _extract_rankings_hard_filter_details(
                 "score": None,
                 "total_score": None,
                 "reason": item.get("reason") or "",
+                "needs_review": item.get("needs_review"),
             })
         if details:
             return details
@@ -420,7 +494,55 @@ def _extract_candidate_gender_fields(cand: Dict[str, Any]) -> Dict[str, Any]:
     return to_gender_fields(normalized)
 
 
+def _passes_step5_role_gate(payload: Dict[str, Any], criteria: Optional[SearchCriteria]) -> Tuple[bool, str]:
+    """Cross submissions: the role gate Step 5 applies *before* anyone is scored.
+
+    Step 5 only ever scores candidates the sourcing query returned for this
+    job's title chips (JobDiva ``TITLES=`` / ``_candidate_title_match``), so
+    ``_compute_resume_matching`` alone — title relevance is 15 of 100 points
+    — cannot keep an off-role profile out of a list Step 5 never sourced.
+    Same payload shape as ``_compute_resume_matching``; a stored row's
+    ``data.title`` is the LLM job title Step 5 stamped after enrichment.
+    Returns ``(passed, reason)``.
+    """
+    if not criteria:
+        return True, "no_criteria"
+    candidate = _build_candidate_for_resume_matching(payload)
+    data_blob = _json_load_safe(payload.get("data"), {})
+    stored_title = payload.get("title") or (data_blob.get("title") if isinstance(data_blob, dict) else None)
+    if stored_title:
+        candidate["title"] = stored_title
+    return title_relevance_gate(candidate, getattr(criteria, "title_criteria", None) or [])
+
+
+# Strong references so fire-and-forget cross-submission tasks are not
+# garbage-collected mid-flight (same pattern as the gender_tasks set below).
+_cross_submission_tasks: set = set()
+
+
+def _schedule_cross_submissions(job_ref: str, criteria: "SearchCriteria") -> None:
+    """Kick off services.cross_submissions for this job without blocking the search."""
+    try:
+        from core.config import CROSS_SUBMISSIONS_ENABLED
+        if not CROSS_SUBMISSIONS_ENABLED or not job_ref:
+            return
+        from services import cross_submissions
+
+        # Same gate + same scorer Step 5 uses, in the same order: role gate
+        # first, then the scoring matrix, then the 60% floor.
+        task = asyncio.create_task(
+            cross_submissions.run_for_job_async(
+                job_ref, criteria, _compute_resume_matching, prescreen=_passes_step5_role_gate,
+            )
+        )
+        _cross_submission_tasks.add(task)
+        task.add_done_callback(_cross_submission_tasks.discard)
+    except Exception as e:  # noqa: BLE001 — must never break the search
+        logger.warning("cross_submissions: could not schedule for job %s: %s", job_ref, e)
+
+
 async def _extract_candidate_gender_fields_with_ai(cand: Dict[str, Any]) -> Dict[str, Any]:
+
     fields = _extract_candidate_gender_fields(cand)
     if fields.get("gender_label") in {"male", "female"}:
         return fields
@@ -471,28 +593,6 @@ async def get_open_to_work_diag(user: UserIdentity = Depends(get_current_user)):
     """
     from services.apify_open_to_work import diagnostics
     return diagnostics()
-
-
-# Strong references so fire-and-forget cross-submission tasks are not
-# garbage-collected mid-flight (same pattern as the gender_tasks set below).
-_cross_submission_tasks: set = set()
-
-
-def _schedule_cross_submissions(job_ref: str, criteria: "SearchCriteria") -> None:
-    """Kick off services.cross_submissions for this job without blocking the search."""
-    try:
-        from core.config import CROSS_SUBMISSIONS_ENABLED
-        if not CROSS_SUBMISSIONS_ENABLED or not job_ref:
-            return
-        from services import cross_submissions
-
-        task = asyncio.create_task(
-            cross_submissions.run_for_job_async(job_ref, criteria, _compute_resume_matching)
-        )
-        _cross_submission_tasks.add(task)
-        task.add_done_callback(_cross_submission_tasks.discard)
-    except Exception as e:  # noqa: BLE001 — must never break the search
-        logger.warning("cross_submissions: could not schedule for job %s: %s", job_ref, e)
 
 
 @router.post("/candidates/search")
@@ -654,6 +754,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         _schedule_cross_submissions(str(request.job_id), criteria)
 
         # Execute unified search as a stream. Persist each candidate to
+
         # `sourced_candidates` as it's yielded — fire-and-forget via
         # asyncio.to_thread so the sync SQLAlchemy call doesn't block the
         # event loop. We keep a reference list so pending tasks aren't
@@ -1529,6 +1630,15 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
+            _apply_needs_review_flags(
+                cand,
+                [
+                    cand.get("audit_payload"),
+                    cand.get("audit_response"),
+                    data_blob.get("engage_last_response") if isinstance(data_blob, dict) else None
+                ]
+            )
+
             try:
                 scores_to_avg = [float(r_score)]
                 if is_engage_done and cand.get("engage_score") is not None:
@@ -2035,9 +2145,7 @@ async def save_candidates(
                         # (routers/engagement.py `_resolve_link_candidate_id`).
                         # Recomputed on every save, so it self-heals rows whose
                         # blob predates this and survives the upsert either way.
-                        jd_profile_id = jobdiva_profile_id(
-                            c.source, c.candidate_id, getattr(c, "jobdiva_candidate_id", None)
-                        )
+                        jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
@@ -3040,42 +3148,11 @@ async def get_launched_candidates(
                 # Feedback filter: use an EXISTS subquery checked against ALL rows for a
                 # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
                 # and we only include candidates who match the feedback requirement on ANY row.
-                feedback_exists_condition = ""
-                # Shared SQL predicate: true when a sourced_candidates row has a
-                # non-empty feedback_type.  Used in the "No Feedback" EXISTS clause
-                # and conditionally in ORDER BY to prefer rows with feedback.
-                _HAS_FEEDBACK_PRED = "(sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '')"
-                if feedback:
-                    f_lower = feedback.strip().lower()
-                    
-                    # Shared correlation to scope feedback to the same candidate and job
-                    correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND sc2.jobdiva_id = sc.jobdiva_id"
-
-                    if f_lower in ("no feedback", "none", "no_feedback"):
-                        feedback_exists_condition = f"""
-                            AND NOT EXISTS (
-                                {correlation_scaffold}
-                                  AND sc2.data->>'feedback_type' IS NOT NULL
-                                  AND TRIM(sc2.data->>'feedback_type') <> ''
-                            )"""
-                    elif f_lower in ("submit", "submitted"):
-                        feedback_exists_condition = f"""
-                            AND EXISTS (
-                                {correlation_scaffold}
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
-                            )"""
-                    elif f_lower in ("reject", "rejected"):
-                        feedback_exists_condition = f"""
-                            AND EXISTS (
-                                {correlation_scaffold}
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
-                            )"""
-                    elif f_lower in ("unreachable",):
-                        feedback_exists_condition = f"""
-                            AND EXISTS (
-                                {correlation_scaffold}
-                                  AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
-                            )"""
+                feedback_exists_condition, matching_pred = _build_feedback_filter_condition(feedback)
+                feedback_order_by = (
+                    f"{matching_pred} DESC, (sc.data->>'feedback_at') DESC NULLS LAST, (sc.data->>'feedback_type' IS NOT NULL) DESC, "
+                    if matching_pred else ""
+                )
 
                 if source:
                     search_condition += " AND sc.source = %s"
@@ -3115,6 +3192,15 @@ async def get_launched_candidates(
 
                 # CTE_BODY defines the shared CTEs without a leading 'WITH'.
                 # This makes the downstream queries cleaner to construct.
+                #
+                # SQL Notes for launched_candidates:
+                # - Feedback is recorded per sourced-candidate row and job.
+                #   Keeping only one row per candidate across every job can surface feedback 
+                #   from a different job (or hide the row that actually matched the filter).
+                #   Therefore, we DISTINCT ON (sc.jobdiva_id, sc.candidate_id).
+                # - When a feedback filter is active, we ORDER BY {feedback_order_by} to prefer 
+                #   the row that carries matching feedback data so the UI column matches the filter. 
+                #   Without a filter, we retain pure created_at DESC so the newest source row wins.
                 CTE_BODY = f"""
                     latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
@@ -3142,7 +3228,7 @@ async def get_launched_candidates(
                         ORDER BY lookup_id
                     ),
                     launched_candidates AS (
-                        SELECT DISTINCT ON (sc.candidate_id)
+                        SELECT DISTINCT ON (sc.jobdiva_id, sc.candidate_id)
                             sc.id,
                             sc.jobdiva_id,
                             sc.candidate_id,
@@ -3166,12 +3252,7 @@ async def get_launched_candidates(
                         WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
                           {search_condition}
                           {feedback_exists_condition}
-                        -- When a feedback filter is active, prefer the row that
-                        -- carries actual feedback data so the UI column matches
-                        -- the filter.  Without a filter, fall back to pure
-                        -- created_at DESC to use the existing index and avoid
-                        -- surfacing stale cross-job feedback rows.
-                        ORDER BY sc.candidate_id, {f'{_HAS_FEEDBACK_PRED} DESC,' if feedback_exists_condition else ''} sc.created_at DESC
+                        ORDER BY sc.jobdiva_id, sc.candidate_id, {feedback_order_by}sc.created_at DESC
                     )
                 """
 
@@ -3239,7 +3320,8 @@ async def get_launched_candidates(
 
         for cand in candidates:
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
-            original_payload = cand.get("audit_payload") if isinstance(cand.get("audit_payload"), dict) else {}
+            original_payload = cand.get("audit_payload")
+            original_payload = original_payload if isinstance(original_payload, dict) else _json_load_safe(original_payload, {})
             
             # Promote persisted values from data_blob
             if isinstance(data_blob, dict):
@@ -3253,6 +3335,16 @@ async def get_launched_candidates(
                     cand["engage_total_score"] = data_blob.get("engage_total_score")
                 if data_blob.get("engage_hard_filter_status"):
                     cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
+
+            # Extract Needs Review flags from the webhook payload
+            _apply_needs_review_flags(
+                cand,
+                [
+                    original_payload,
+                    cand.get("audit_response"),
+                    data_blob.get("engage_last_response") if isinstance(data_blob, dict) else None
+                ]
+            )
 
             iid_str = str(cand.get("engage_interview_id") or cand.get("audit_interview_id") or "").strip()
             raw_live_api = payloads_dict.get(iid_str) if iid_str else None
@@ -4034,6 +4126,10 @@ async def get_candidate_evaluation_report(
             "feedback_type":   data_blob.get("feedback_type"),
             "feedback_reason": data_blob.get("feedback_reason"),
             "feedback_at":     data_blob.get("feedback_at"),
+            "submission_type": data_blob.get("submission_type"),
+            "manager_email":   data_blob.get("manager_email"),
+            "recruiter_notes": data_blob.get("recruiter_notes"),
+            "submitted_by":    data_blob.get("submitted_by"),
         }
         candidate_info.update(
             await _extract_candidate_gender_fields_with_ai(
@@ -4085,6 +4181,18 @@ async def get_candidate_evaluation_report(
             if scores_to_average_corrected:
                 total_fit_score = sum(scores_to_average_corrected) / len(scores_to_average_corrected)
 
+        temp_cand = {}
+        _apply_needs_review_flags(
+            temp_cand,
+            [
+                pair_data.get("audit_payload"),
+                pair_data.get("audit_response"),
+                data_blob.get("engage_last_response") if isinstance(data_blob, dict) else None
+            ]
+        )
+        needs_review = temp_cand.get("engage_hard_filter_needs_review", False)
+        review_qs = temp_cand.get("engage_needs_review_questions", [])
+
         scores = {
             "resume_match_score":    resume_match_score,
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
@@ -4097,6 +4205,8 @@ async def get_candidate_evaluation_report(
             "engage_completed_at":   _to_iso_z(engage_completed_at),
             "engage_created_at":     _to_iso_z(engage_created_at),
             "is_boolean_interview":  is_l05,
+            "engage_hard_filter_needs_review": needs_review,
+            "engage_needs_review_questions": review_qs,
             # Same data source as the hover card — avoids a separate live-fetch failure
             "engage_hard_filter_details": _extract_rankings_hard_filter_details(
                 data_blob if isinstance(data_blob, dict) else {},
@@ -4153,15 +4263,27 @@ async def save_candidate_feedback(
     with no assignees.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
+    submission_type = (request.submission_type or "external").strip().lower()
+    if request.feedback_type == "Submit" and submission_type not in {"internal", "external"}:
+        raise HTTPException(status_code=400, detail="submission_type must be 'internal' or 'external'")
+    manager_email = (request.manager_email or "").strip()
+    if request.feedback_type == "Submit" and submission_type == "internal":
+        if not manager_email:
+            raise HTTPException(status_code=400, detail="manager_email is required for internal submission")
+        if not _EMAIL_RE.match(manager_email):
+            raise HTTPException(status_code=400, detail="manager_email must be a valid email address")
+        if not _manager_email_allowed(manager_email):
+            raise HTTPException(status_code=400, detail="manager_email domain is not allowed")
+
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
-        f"{request.feedback_type} (by {user.email})"
+        f"{request.feedback_type} (submission_type={submission_type}, by {user.email})"
     )
 
     # 1. Map to JobDiva Action String
     action_string = ""
     if request.feedback_type == "Submit":
-        action_string = "PAIR Submit - Externally Submitted"
+        action_string = "PAIR Internal Submission" if submission_type == "internal" else "PAIR External Submission"
     elif request.feedback_type == "Reject":
         rejection_mapping = {
             "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
@@ -4197,6 +4319,9 @@ async def save_candidate_feedback(
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+    candidate_name = "Candidate"
+    job_title = "Job"
+    customer_name = ""
 
     try:
         _conn = get_db_connection()
@@ -4207,7 +4332,8 @@ async def save_candidate_feedback(
                     pk_int = int(candidate_id)
                     _cur.execute(
                         """
-                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                           SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                               sc.name, mj.title, mj.customer_name
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -4223,6 +4349,9 @@ async def save_candidate_feedback(
                         sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
                         app_job_ref    = str(row[4]) if row[4] else app_job_ref
+                        candidate_name = str(row[5] or candidate_name)
+                        job_title      = str(row[6] or job_title)
+                        customer_name  = str(row[7] or customer_name)
                         
                         # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -4235,7 +4364,8 @@ async def save_candidate_feedback(
                     # candidate_id is not an integer PK – try matching as a candidate_id string
                     _cur.execute(
                         """
-                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                           SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                               sc.name, mj.title, mj.customer_name
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -4255,6 +4385,9 @@ async def save_candidate_feedback(
                         sc_candidate_id = str(row[1])
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
                         app_job_ref    = str(row[4]) if row[4] else app_job_ref
+                        candidate_name = str(row[5] or candidate_name)
+                        job_title      = str(row[6] or job_title)
+                        customer_name  = str(row[7] or customer_name)
                         
                         # Use JobDiva candidate ID if available in data blob
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -4273,9 +4406,10 @@ async def save_candidate_feedback(
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
-    from core.email import resolve_app_base_url
+    from core.email import candidate_report_link, notify_internal_submission_to_manager, resolve_app_base_url
     
-    report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
 
     if request.feedback_type == "Unreachable":
         logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
@@ -4285,9 +4419,10 @@ async def save_candidate_feedback(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
+
 
         if jobdiva_result.get("status") == "error":
             logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
@@ -4299,12 +4434,20 @@ async def save_candidate_feedback(
     try:
         _conn2 = get_db_connection()
         with _conn2.cursor() as _cur2:
-            feedback_payload = json.dumps({
+            feedback_data = {
                 "feedback_type": request.feedback_type,
                 "feedback_reason": request.reason,
                 "feedback_synced": jobdiva_result.get("status") == "success",
-                "feedback_at": datetime.now(timezone.utc).isoformat()
-            })
+                "feedback_at": datetime.now(timezone.utc).isoformat(),
+                "submitted_by": user.email,
+            }
+            if request.feedback_type == "Submit":
+                feedback_data["submission_type"] = submission_type
+                if submission_type == "internal":
+                    feedback_data["manager_email"] = manager_email
+                    if request.recruiter_notes and request.recruiter_notes.strip():
+                        feedback_data["recruiter_notes"] = request.recruiter_notes.strip()
+            feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved
                 _cur2.execute(
@@ -4327,6 +4470,25 @@ async def save_candidate_feedback(
         _conn2.close()
     except Exception as e:
         logger.error(f"❌ Failed to persist feedback locally: {e}")
+
+    manager_email_sent = None
+    if request.feedback_type == "Submit" and submission_type == "internal":
+        try:
+            manager_email_sent = await asyncio.to_thread(
+                notify_internal_submission_to_manager,
+                manager_email=manager_email,
+                recruiter_name=user.email,
+                recruiter_email=user.email,
+                candidate_name=candidate_name,
+                candidate_id=jd_candidate_id,
+                job_id_or_ref=str(app_job_ref or job_id_or_ref),
+                job_title=job_title,
+                customer_name=customer_name,
+                recruiter_notes=request.recruiter_notes,
+            )
+        except Exception as e:
+            manager_email_sent = False
+            logger.error(f"❌ Failed to send internal submission email to manager {manager_email}: {e}")
 
     # 5. Write through to the dashboard's FEEDBACK COMPLETED and PAIR
     #    SUBMITS columns now. Both are denormalized on monitored_jobs (the
@@ -4357,6 +4519,8 @@ async def save_candidate_feedback(
         "status": "success",
         "jobdiva_sync": jobdiva_result.get("status"),
         "action_string": action_string,
+        "submission_type": submission_type if request.feedback_type == "Submit" else None,
+        "manager_email_sent": manager_email_sent,
         "jobdiva_candidate_id": jd_candidate_id,
         "jobdiva_job_ref": jd_job_ref,
         "feedback_completed": (feedback_metrics or {}).get("feedback_completed"),

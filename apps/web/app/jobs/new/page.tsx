@@ -3,7 +3,8 @@
 import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode } from "@/lib/jobs/wizard-types";
+import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
+import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import {
   DEFAULT_SEARCH_SOURCES,
   SEARCH_SOURCES_VERSION,
@@ -2158,7 +2159,7 @@ function NewJobPageContent() {
             // escape hatches (level change, explicit Regenerate, or rubric
             // change on Next) still work.
             if (rData.screen_questions?.length) {
-              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
+              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: resolveLockedFlag(q) })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
               userHasEditedQuestionsRef.current = true;
               lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
@@ -4820,6 +4821,7 @@ function NewJobPageContent() {
         category: "default",
         order_index: index,
         is_hard_filter: !!q.is_hard_filter,
+        is_locked: isLockedDefaultQuestion(q.text),
       });
     });
 
@@ -7027,6 +7029,7 @@ function NewJobPageContent() {
       category: "other",
       order_index: screenQuestions.length,
       is_hard_filter: false,
+      question_type: "scored",
     };
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions([...screenQuestions, newQuestion]);
@@ -7038,12 +7041,29 @@ function NewJobPageContent() {
     });
   };
 
+  const setRecruiterQuestionType = (id: number, questionType: RecruiterQuestionType) => {
+    userHasEditedQuestionsRef.current = true;
+    setScreenQuestions(prev => prev.map(q => q.id === id ? {
+      ...q,
+      question_type: questionType,
+      is_hard_filter: questionType === "hard_filter",
+      pass_criteria: questionType === "hard_filter" ? q.pass_criteria : "",
+    } : q));
+  };
+
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
+    const target = screenQuestions.find(q => q.id === id);
+    // Core-question wording is immutable, but recruiters may configure its
+    // pass criteria as a hard filter.
+    if (target?.is_locked && field !== 'pass_criteria') return;
     userHasEditedQuestionsRef.current = true;
     if (field === 'question_text') {
-      const target = screenQuestions.find(q => q.id === id);
       if (target && isRecruiterAddedQuestion(target.category)) {
-        questionModeration.scheduleCheck(String(id), String(value ?? ""));
+        questionModeration.scheduleCheck(String(id), String(value ?? ""), target.pass_criteria ?? "");
+      }
+    } else if (field === 'pass_criteria') {
+      if (target && isRecruiterAddedQuestion(target.category)) {
+        questionModeration.scheduleCheck(String(id), target.question_text ?? "", String(value ?? ""));
       }
     }
     setScreenQuestions(prev => prev.map(q => {
@@ -7061,6 +7081,8 @@ function NewJobPageContent() {
   };
 
   const deleteScreenQuestion = (id: number) => {
+    const target = screenQuestions.find(q => q.id === id);
+    if (target?.is_locked) return; // locked default questions are not removable
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
     trackEvent("job_wizard_step4_screen_question_removed", {
@@ -7076,6 +7098,10 @@ function NewJobPageContent() {
     setScreenQuestions(prev => {
       if (from === to || from < 0 || to < 0) return prev;
       if (from >= prev.length || to >= prev.length) return prev;
+      // A splice moves every row in the selected interval. Reject any move
+      // that would move a locked row indirectly, not just a locked endpoint.
+      const [lo, hi] = from < to ? [from, to] : [to, from];
+      if (prev.slice(lo, hi + 1).some(q => q.is_locked)) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
@@ -7327,11 +7353,14 @@ function NewJobPageContent() {
             >
               <button
                 type="button"
-                draggable
+                draggable={!q.is_locked}
                 onDragStart={questionsDrag.onDragStart(index)}
                 onDragEnd={questionsDrag.onDragEnd}
-                className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
-                title="Drag to reorder"
+                disabled={q.is_locked}
+                className={`w-5 flex-shrink-0 flex items-center justify-center mt-1.5 ${
+                  q.is_locked ? "text-slate-200 cursor-not-allowed" : "text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing"
+                }`}
+                title={q.is_locked ? "Locked" : "Drag to reorder"}
                 aria-label="Drag to reorder question"
               >
                 <GripVertical className="w-4 h-4" />
@@ -7346,14 +7375,24 @@ function NewJobPageContent() {
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
                   onBlur={() => {
                     if (isRecruiterAddedQuestion(q.category)) {
-                      questionModeration.flushCheck(String(q.id), q.question_text);
+                      questionModeration.flushCheck(String(q.id), q.question_text, q.pass_criteria ?? "");
                     }
                   }}
-                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
+                  readOnly={q.is_locked}
+                  aria-readonly={q.is_locked}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                    q.is_locked ? "text-slate-500 cursor-text" : "text-slate-900"
+                  }`}
                   rows={3}
                 />
                 {isRecruiterAddedQuestion(q.category) && (
-                  <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text)} />
+                  <QuestionPolicyWarning
+                    verdict={questionModeration.verdictFor(q.question_text, q.pass_criteria ?? "")}
+                    onApplyCorrection={(corrected) => {
+                      updateScreenQuestion(q.id, 'question_text', corrected);
+                      questionModeration.flushCheck(String(q.id), corrected, q.pass_criteria ?? "");
+                    }}
+                  />
                 )}
               </div>
 
@@ -7361,11 +7400,39 @@ function NewJobPageContent() {
                 <textarea
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
+                  onBlur={() => {
+                    if (isRecruiterAddedQuestion(q.category)) {
+                      questionModeration.flushCheck(String(q.id), q.question_text, q.pass_criteria ?? "");
+                    }
+                  }}
                   rows={2}
-                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
-                  placeholder="No hard filter"
+                  readOnly={isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"}
+                  placeholder={q.question_type === "hard_filter" ? "Pass criteria for this hard filter" : "No hard filter"}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${
+                    q.pass_criteria
+                      ? "text-[#4f46e5]"
+                      : isRecruiterAddedQuestion(q.category) && q.question_type !== "hard_filter"
+                      ? "text-slate-300 italic cursor-not-allowed"
+                      : "text-slate-300 italic"
+                  }`}
                 />
               </div>
+
+              {isRecruiterAddedQuestion(q.category) && (
+                <div className="w-[130px] flex-shrink-0 border-l border-slate-100 pl-3">
+                  <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Question type</label>
+                  <select
+                    value={q.question_type || "scored"}
+                    onChange={(e) => setRecruiterQuestionType(q.id, e.target.value as RecruiterQuestionType)}
+                    className="w-full h-8 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-700"
+                    aria-label="Question type"
+                  >
+                    <option value="hard_filter">Hard filter</option>
+                    <option value="info_only">Info only</option>
+                    <option value="scored">Scored</option>
+                  </select>
+                </div>
+              )}
 
               <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
                 {q.category === 'role-specific' && (
@@ -7380,16 +7447,19 @@ function NewJobPageContent() {
                     q.category ?? "",
                     q.order_index ?? index + 1,
                     screeningLevel === "L0.5",
-                    Boolean(q.is_hard_filter)
+                    Boolean(q.is_hard_filter),
+                    q.question_type
                   )}
                 />
-                <button
-                  onClick={() => deleteScreenQuestion(q.id)}
-                  className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
-                  title="Remove"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                {!q.is_locked && (
+                  <button
+                    onClick={() => deleteScreenQuestion(q.id)}
+                    className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
+                    title="Remove"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
             );
@@ -10570,6 +10640,11 @@ const renderStepContent = () => {
   return content;
 };
 
+const hasScreeningWarning = useMemo(
+  () => questionModeration.hasBlockingWarning(screenQuestions),
+  [questionModeration, screenQuestions],
+);
+
 if (isHydratingJobSetup) {
   return (
     <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
@@ -10813,7 +10888,8 @@ return (
 
               if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
             }}
-            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric || (currentStep === 4 && hasScreeningWarning)}
+            title={(currentStep === 4 && hasScreeningWarning) ? "Resolve flagged screening questions to proceed" : undefined}
           >
             {isGeneratingJD ? (
               <>

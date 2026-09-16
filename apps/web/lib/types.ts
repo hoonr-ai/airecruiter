@@ -171,10 +171,15 @@ export interface Rubric {
 }
 
 export interface ScreenQuestion {
-  question: string;
-  answer_type?: string;
-  required?: boolean;
-  [key: string]: unknown;
+  id?: number;
+  question_text: string;
+  pass_criteria?: string;
+  category?: string;
+  order_index?: number;
+  is_default?: boolean;
+  is_hard_filter?: boolean;
+  is_locked?: boolean;
+  [k: string]: unknown;
 }
 
 export interface Job {

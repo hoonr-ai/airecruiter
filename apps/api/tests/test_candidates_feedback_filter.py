@@ -5,79 +5,45 @@ Regression tests for the feedback filter in get_launched_candidates
 These tests guard the correctness of the feedback filter SQL logic without
 requiring a live DB connection.  They verify:
 
-1. The correct SQL EXISTS / NOT EXISTS clause is generated for each filter value.
+1. Action filters constrain the selected source row; No Feedback uses a
+   job-scoped NOT EXISTS clause.
 2. DISTINCT ON row selection: without a feedback filter, ORDER BY uses only
    created_at DESC (index-friendly); with a filter, a feedback-preference
    tiebreaker is injected so the displayed row matches the filter.
-3. The feedback EXISTS condition is placed in WHERE, not ORDER BY.
+3. The feedback condition is placed in WHERE, not ORDER BY.
 4. The shared FULL_CTE is used for both results and count (single source of truth).
 5. Cross-job data isolation: feedback tiebreaker only activates when a filter
    is active, preventing stale feedback from an unrelated job being surfaced.
 
 Background
 ----------
-The feedback filter uses EXISTS subqueries scoped by both candidate_id and
-jobdiva_id so that DISTINCT ON always picks the correct row.  When a feedback
-filter IS active, the ORDER BY additionally prefers rows carrying non-empty
-feedback_type so the UI column matches the filter result.
+Submit, Reject, and Unreachable constrain the selected source row directly,
+so DISTINCT ON cannot return an unfiltered duplicate. No Feedback uses a
+job-scoped NOT EXISTS check.
 """
 import re
 import pytest
+from routers.candidates import _build_feedback_filter_condition
 
 
 # ---------------------------------------------------------------------------
-# Shared constants — must match candidates.py
-# ---------------------------------------------------------------------------
-
-_HAS_FEEDBACK_PRED = "(sc.data->>'feedback_type' IS NOT NULL AND TRIM(sc.data->>'feedback_type') <> '')"
-
-
-# ---------------------------------------------------------------------------
-# Helpers — replicate the filter-building logic from candidates.py
+# Helpers — use the shipped filter-condition builder.
 # ---------------------------------------------------------------------------
 
 def _build_feedback_exists_condition(feedback: str) -> str:
-    """Mirror the feedback_exists_condition construction in get_launched_candidates."""
-    feedback_exists_condition = ""
-    if feedback:
-        f_lower = feedback.strip().lower()
-        correlation_scaffold = "SELECT 1 FROM sourced_candidates sc2 WHERE sc2.candidate_id = sc.candidate_id AND sc2.jobdiva_id = sc.jobdiva_id"
-        if f_lower in ("no feedback", "none", "no_feedback"):
-            feedback_exists_condition = f"""
-                AND NOT EXISTS (
-                    {correlation_scaffold}
-                      AND sc2.data->>'feedback_type' IS NOT NULL
-                      AND TRIM(sc2.data->>'feedback_type') <> ''
-                )"""
-        elif f_lower in ("submit", "submitted"):
-            feedback_exists_condition = f"""
-                AND EXISTS (
-                    {correlation_scaffold}
-                      AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'submit'
-                )"""
-        elif f_lower in ("reject", "rejected"):
-            feedback_exists_condition = f"""
-                AND EXISTS (
-                    {correlation_scaffold}
-                      AND LOWER(TRIM(sc2.data->>'feedback_type')) LIKE 'reject%'
-                )"""
-        elif f_lower in ("unreachable",):
-            feedback_exists_condition = f"""
-                AND EXISTS (
-                    {correlation_scaffold}
-                      AND LOWER(TRIM(sc2.data->>'feedback_type')) = 'unreachable'
-                )"""
-    return feedback_exists_condition
+    cond, _ = _build_feedback_filter_condition(feedback)
+    return cond
 
 
-def _build_full_cte(search_condition: str, feedback_exists_condition: str) -> str:
-    """Minimal replica of FULL_CTE construction used in production code.
-
-    The ORDER BY conditionally includes a feedback-preference tiebreaker
-    ONLY when a feedback filter is active, matching the production logic.
-    """
-    # Conditional tiebreaker — mirrors the f-string logic in candidates.py
-    feedback_tiebreaker = f"{_HAS_FEEDBACK_PRED} DESC," if feedback_exists_condition else ""
+def _build_full_cte(search_condition: str, feedback_exists_condition: str, matching_feedback_pred: str = "") -> str:
+    """Minimal replica of FULL_CTE construction used in production code."""
+    feedback_tiebreaker = (
+        f"{matching_feedback_pred} DESC, "
+        "(sc.data->>'feedback_at') DESC NULLS LAST, "
+        "(sc.data->>'feedback_type' IS NOT NULL) DESC, "
+        if matching_feedback_pred
+        else ""
+    )
     return f"""
         WITH latest_audit AS (
             SELECT DISTINCT ON (candidate_id) candidate_id, interview_id, status,
@@ -92,7 +58,7 @@ def _build_full_cte(search_condition: str, feedback_exists_condition: str) -> st
             ORDER BY lookup_id
         ),
         launched_candidates AS (
-            SELECT DISTINCT ON (sc.candidate_id)
+            SELECT DISTINCT ON (sc.jobdiva_id, sc.candidate_id)
                 sc.id, sc.candidate_id, sc.data, sc.created_at as engage_created_at
             FROM sourced_candidates sc
             JOIN latest_audit la ON la.candidate_id = sc.candidate_id
@@ -100,7 +66,7 @@ def _build_full_cte(search_condition: str, feedback_exists_condition: str) -> st
             WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
               {search_condition}
               {feedback_exists_condition}
-            ORDER BY sc.candidate_id, {feedback_tiebreaker} sc.created_at DESC
+            ORDER BY sc.jobdiva_id, sc.candidate_id, {feedback_tiebreaker}sc.created_at DESC
         )
     """
 
@@ -124,40 +90,36 @@ class TestFeedbackExistsConditionGeneration:
     def test_no_feedback_case_insensitive(self):
         assert _build_feedback_exists_condition("no feedback") == _build_feedback_exists_condition("No Feedback")
 
-    def test_submit_uses_exact_match(self):
+    def test_submit_constrains_current_source_row(self):
         cond = _build_feedback_exists_condition("Submit")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "'submit'" in cond.lower()
 
     def test_reject_uses_like(self):
         cond = _build_feedback_exists_condition("Reject")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "like 'reject%'" in cond.lower()
 
     def test_rejected_variant_uses_like(self):
         cond = _build_feedback_exists_condition("Rejected")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "like 'reject%'" in cond.lower()
 
     def test_unreachable_uses_exact_match(self):
         cond = _build_feedback_exists_condition("Unreachable")
-        assert "EXISTS" in cond
-        assert "NOT EXISTS" not in cond
+        assert "sc2" not in cond
         assert "'unreachable'" in cond.lower()
 
-    def test_all_exists_conditions_reference_sc2(self):
+    def test_action_filters_reference_current_row(self):
         for value in ["Submit", "Reject", "Unreachable"]:
             cond = _build_feedback_exists_condition(value)
-            assert "sc2.candidate_id = sc.candidate_id" in cond
-            assert "sc2.jobdiva_id = sc.jobdiva_id" in cond
+            assert "sc.data" in cond
+            assert "sc2" not in cond
 
     def test_no_feedback_references_sc2(self):
         cond = _build_feedback_exists_condition("No Feedback")
         assert "sc2.candidate_id = sc.candidate_id" in cond
-        assert "sc2.jobdiva_id = sc.jobdiva_id" in cond
+        assert "COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')" in cond
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +136,7 @@ class TestDistinctOnOrdering:
         """Without a feedback filter, ORDER BY should be pure created_at DESC
         to use the existing index and avoid cross-job data mismatch."""
         cte = _build_full_cte("", "")
-        order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+        order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
         # The only thing between candidate_id and created_at should be a comma
         between = order_section.split("sc.candidate_id,")[1].split("sc.created_at")[0]
         assert "feedback_type" not in between, (
@@ -185,9 +147,9 @@ class TestDistinctOnOrdering:
         """When a feedback filter IS active, ORDER BY should prefer rows with
         feedback so the displayed row matches the filter result."""
         for feedback in ["Submit", "Reject", "Unreachable"]:
-            cond = _build_feedback_exists_condition(feedback)
-            cte = _build_full_cte("", cond)
-            order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+            cond, matching_pred = _build_feedback_filter_condition(feedback)
+            cte = _build_full_cte("", cond, matching_pred)
+            order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
             assert "feedback_type" in order_section, (
                 f"ORDER BY must include feedback_type tiebreaker when '{feedback}' filter is active"
             )
@@ -199,20 +161,19 @@ class TestDistinctOnOrdering:
             )
 
     def test_feedback_condition_placed_in_where_before_order_by(self):
-        """The EXISTS/NOT EXISTS condition must be in WHERE, before ORDER BY."""
+        """The feedback condition must be in WHERE, before ORDER BY."""
         for feedback in ["Submit", "Reject", "Unreachable", "No Feedback"]:
-            cond = _build_feedback_exists_condition(feedback)
-            cte = _build_full_cte("", cond)
+            cond, matching_pred = _build_feedback_filter_condition(feedback)
+            cte = _build_full_cte("", cond, matching_pred)
             where_pos = cte.find("WHERE")
-            order_pos = cte.find("ORDER BY sc.candidate_id")
+            order_pos = cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id")
             assert where_pos != -1, f"WHERE clause must exist for '{feedback}'"
             assert where_pos < order_pos, (
                 f"WHERE must come before ORDER BY for '{feedback}'"
             )
-            # The EXISTS condition text must appear between WHERE and ORDER BY
-            exists_pos = cte.find("EXISTS")
-            assert where_pos < exists_pos < order_pos, (
-                f"EXISTS condition for '{feedback}' must be between WHERE and ORDER BY"
+            condition_pos = cte.find(cond.strip())
+            assert where_pos < condition_pos < order_pos, (
+                f"Feedback condition for '{feedback}' must be between WHERE and ORDER BY"
             )
 
 
@@ -222,29 +183,30 @@ class TestDistinctOnOrdering:
 
 class TestCrossJobIsolation:
 
+    def test_distinct_rows_are_scoped_to_job_and_candidate(self):
+        """The same candidate can be launched for multiple jobs with different feedback."""
+        cte = _build_full_cte("", "")
+        assert "DISTINCT ON (sc.jobdiva_id, sc.candidate_id)" in cte
+        assert "ORDER BY sc.jobdiva_id, sc.candidate_id, sc.created_at DESC" in cte
+
     def test_no_filter_uses_index_friendly_order(self):
-        """Without a filter, the ORDER BY must match the existing
-        idx_sourced_candidates_candidate_created_at index:
-        (candidate_id, created_at DESC)."""
+        """Without a filter, the ORDER BY matches the composite row identity."""
         cte = _build_full_cte("", "")
         order_match = re.search(
-            r"ORDER BY sc\.candidate_id,\s*sc\.created_at DESC",
+            r"ORDER BY sc\.jobdiva_id,\s*sc\.candidate_id,\s*sc\.created_at DESC",
             cte,
         )
         assert order_match is not None, (
-            "Without a filter, ORDER BY must be 'sc.candidate_id, sc.created_at DESC' "
-            "to use the existing index"
+            "Without a filter, ORDER BY must be 'sc.jobdiva_id, sc.candidate_id, sc.created_at DESC' "
+            "to use the composite source-row index"
         )
 
     def test_filtered_order_scopes_tiebreaker(self):
-        """When a feedback filter is active, the tiebreaker must reference
-        sc.data (the current row's data), not a cross-table lookup, so it
-        only affects ordering within the rows already matched by the
-        jobdiva_id-scoped EXISTS subquery."""
+        """The tiebreaker must use the current row, never a cross-table lookup."""
         for feedback in ["Submit", "Reject"]:
-            cond = _build_feedback_exists_condition(feedback)
-            cte = _build_full_cte("", cond)
-            order_section = cte[cte.find("ORDER BY sc.candidate_id"):]
+            cond, matching_pred = _build_feedback_filter_condition(feedback)
+            cte = _build_full_cte("", cond, matching_pred)
+            order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
             # The tiebreaker must reference sc.data (same row), not sc2
             assert "sc.data" in order_section, (
                 f"Tiebreaker for '{feedback}' must reference sc.data, not a cross-table join"

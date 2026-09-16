@@ -85,6 +85,28 @@ def test_webhook_accepts_null_question_and_total_score():
     assert payload.transcriptions[0].total_score is None
 
 
+def test_needs_review_questions_accepts_dicts():
+    """Verify that Needs Review questions can be a list of dictionaries as sent by livekit-airecruiter."""
+    raw_payload = {
+        "interview_id": "9999",
+        "status": "completed",
+        "hard_filter_needs_review": True,
+        "needs_review_questions": [
+            {
+                "question": "Are you open to hybrid work?",
+                "answer": "Maybe",
+                "reason": "Candidate responded Maybe, which is ambiguous; flagged for review."
+            }
+        ]
+    }
+    # This should not raise a ValidationError
+    payload = _validate_webhook(raw_payload)
+    
+    assert payload.hard_filter_needs_review is True
+    assert len(payload.needs_review_questions) == 1
+    assert payload.needs_review_questions[0]["answer"] == "Maybe"
+
+
 def test_pending_hard_filter_rows_surface_in_extractor():
     """Explicit pending tokens render as Pending; unmarked rows are not hard filters."""
     data_blob = {
