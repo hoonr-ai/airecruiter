@@ -7,7 +7,7 @@ import re
 from core.config import DATABASE_URL
 from core.db import get_db_connection
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -142,7 +142,7 @@ class VoiceAgentInterviewWebhook(BaseModel):
     candidate_id: Optional[str] = None
     hard_filter_status: Optional[str] = None  # "passed" or "failed"
     hard_filter_needs_review: Optional[bool] = None
-    needs_review_questions: Optional[List[str]] = None
+    needs_review_questions: Optional[List[Union[str, Dict[str, Any]]]] = None
     total_score: Optional[float] = None
     candidate_score: Optional[float] = None
     completed_at: Optional[str] = None
