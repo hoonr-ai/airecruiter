@@ -33,7 +33,7 @@ import { API_BASE, authFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
-
+import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 interface TranscriptionItem {
   question: string;
   answer: string;
@@ -647,10 +647,7 @@ export default function CandidateEvaluationReportPage() {
                                 type={hf_label === 'Pass' ? 'success' : hf_label === 'Fail' ? 'danger' : 'neutral'} 
                               />
                               {item.needs_review && hf_label === 'Pass' && (
-                                <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">
-                                  <AlertCircle className="h-3 w-3 text-amber-500" />
-                                  Needs Review
-                                </span>
+                                <NeedsReviewBadge questions={[{ question: q_text, answer: a_text, reason }]} />
                               )}
                             </div>
                           </div>

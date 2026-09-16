@@ -28,6 +28,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
     cancelClose();
     closeTimerRef.current = setTimeout(() => {
       setOpen(false);
+      closeTimerRef.current = null;
     }, 300);
   };
 
