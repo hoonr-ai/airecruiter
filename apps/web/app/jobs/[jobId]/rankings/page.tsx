@@ -2692,7 +2692,7 @@ export default function CandidateRankingsPage() {
                             const needsReviewQs = candidate.engage_needs_review_questions ||
                               candidate.data?.engage_needs_review_questions || [];
                             return (
-                              <div className="flex flex-col justify-center items-center gap-1 w-full relative">
+                              <div className="flex flex-col justify-center items-center gap-2 w-full relative">
                                 <span
                                   className="px-3 py-1 rounded-full text-[11px] font-bold border"
                                   style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}

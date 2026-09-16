@@ -83,7 +83,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
       <p className="mb-3 text-[11px] leading-relaxed text-amber-700">
         These questions were <strong>passed</strong> but the candidate gave an ambiguous or uncertain answer. Please review before proceeding.
       </p>
-      <div className="max-h-[min(320px,calc(100vh-9rem))] space-y-2.5 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-amber-200">
+      <div className="max-h-[min(320px,calc(100vh-9rem))] space-y-2.5 overflow-y-auto pr-2 overscroll-contain scrollbar-thin scrollbar-thumb-amber-200">
         {questions.map((item, index) => (
           <div
             key={`${item.question}-${index}`}
@@ -99,7 +99,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
             )}
             {item.reason && (
               <div className="text-[11px] leading-relaxed text-amber-700">
-                <span className="font-semibold not-italic">AI Note: </span>{item.reason}
+                <span className="font-semibold not-italic">AI Analysis: </span>{item.reason}
               </div>
             )}
           </div>
