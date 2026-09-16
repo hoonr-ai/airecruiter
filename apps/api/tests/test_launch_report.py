@@ -565,6 +565,34 @@ def test_first_feedback_at_is_none_when_no_feedback():
     assert lr._build_row(job, candidates, [], {})["first_feedback_at"] is None
 
 
+def test_passed_and_failed_candidates():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_status": "passed", "engage_completed_at": "2026-08-27T10:00:00Z"},
+        {"candidate_id": "c2", "engage_status": "pass", "engage_completed_at": "2026-08-26T10:00:00Z"},
+        {"candidate_id": "c3", "engage_status": "failed"},
+        {"candidate_id": "c4", "engage_status": "fail"},
+        {"candidate_id": "c5", "engage_status": "rejected"},
+        {"candidate_id": "c6", "engage_status": "in_progress"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 2
+    assert row["failed_candidates"] == 3
+    # 2026-08-26T10:00:00Z is 06:00 EDT
+    assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_first_pass_at_is_none_when_no_passes():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_status": "failed", "engage_completed_at": "2026-08-27T10:00:00Z"},
+        {"candidate_id": "c2", "engage_status": "in_progress"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 0
+    assert row["first_pass_at"] is None
+
+
 # ---------------------------------------------------------------------------
 # Job versions
 # ---------------------------------------------------------------------------

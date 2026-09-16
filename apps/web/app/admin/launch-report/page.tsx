@@ -50,9 +50,12 @@ interface LaunchReportRow {
   overall_response_time_minutes: number | null;
   submitted_candidates: number;
   rejected_candidates: number;
+  passed_candidates: number;
+  failed_candidates: number;
   outstanding_feedback: number;
   time_to_feedback_minutes: number | null;
   first_feedback_at: string | null;
+  first_pass_at: string | null;
   time_to_first_pass_minutes: number | null;
   call: number;
   sms: number;
@@ -285,11 +288,14 @@ const COLUMN_GROUPS: ColumnGroup[] = [
     title: "Feedback",
     columns: [
       { key: "submitted", label: "Submitted", numeric: true, text: (r) => num(r.submitted_candidates) },
+      { key: "passed", label: "Passed", numeric: true, text: (r) => num(r.passed_candidates) },
+      { key: "failed", label: "Failed", numeric: true, text: (r) => num(r.failed_candidates) },
       { key: "rejected", label: "Rejected", numeric: true, text: (r) => num(r.rejected_candidates) },
       { key: "outstanding", label: "Outstanding", numeric: true, text: (r) => num(r.outstanding_feedback) },
       { key: "tt_feedback", label: "Time to Feedback", numeric: true, text: (r) => formatDuration(r.time_to_feedback_minutes) },
       { key: "tt_first_pass", label: "To First Pass", numeric: true, text: (r) => formatDuration(r.time_to_first_pass_minutes) },
       { key: "first_feedback_at", label: "First Feedback Submitted At", text: (r) => formatDateTime(r.first_feedback_at) },
+      { key: "first_pass_at", label: "First Pass Submitted At", text: (r) => formatDateTime(r.first_pass_at) },
     ],
   },
   {
