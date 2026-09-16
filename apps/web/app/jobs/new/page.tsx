@@ -4829,11 +4829,12 @@ function NewJobPageContent() {
     // which produces depth-probing, seniority-aware questions. Fall back to
     // the legacy per-skill template only if the endpoint fails, so we
     // never leave the recruiter empty-handed.
+    const isBooleanMode = screeningLevel === "L0.5";
     const roleSpecific: ScreenQuestion[] = [];
     try {
       const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
-      const levelForApi = screeningLevel === "L0.5" ? "l0.5" : screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
+      const levelForApi = isBooleanMode ? "l0.5" : screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const requestBody: any = {
         jobTitle: (enhancedTitle || jobTitle || "").trim(),
         jobDescription: (jobPosting || jobData?.description || "").trim(),
@@ -4886,7 +4887,7 @@ function NewJobPageContent() {
               is_default: false,
               category: "role-specific",
               order_index: questions.length + roleSpecific.length,
-              is_hard_filter: false,
+              is_hard_filter: Boolean(q.is_hard_filter),
             });
           });
       }
@@ -4941,7 +4942,7 @@ function NewJobPageContent() {
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
-          is_hard_filter: false,
+          is_hard_filter: isBooleanMode,
         });
       });
 
@@ -4959,7 +4960,7 @@ function NewJobPageContent() {
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
-          is_hard_filter: false,
+          is_hard_filter: isBooleanMode,
         });
       }
     }
@@ -4980,7 +4981,7 @@ function NewJobPageContent() {
         is_default: false,
         category: "role-specific",
         order_index: questions.length + roleSpecific.length,
-        is_hard_filter: false,
+        is_hard_filter: isBooleanMode,
       });
     }
 
