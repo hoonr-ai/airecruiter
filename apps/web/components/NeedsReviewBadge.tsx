@@ -16,6 +16,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
   const panelId = useId();
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<React.CSSProperties>({ left: 16, top: 16 });
+  const [maxHeight, setMaxHeight] = useState<number>(400);
 
   const cancelClose = () => {
     if (closeTimerRef.current) {
@@ -44,6 +45,9 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
       const panelWidth = Math.min(420, window.innerWidth - 32);
       const left = Math.max(16, Math.min(rect.left + rect.width / 2 - panelWidth / 2, window.innerWidth - panelWidth - 16));
       setPosition({ left, top: rect.bottom + 12, bottom: undefined });
+      
+      const spaceBelow = window.innerHeight - rect.bottom - 12 - 16; // 12px gap, 16px window bottom margin
+      setMaxHeight(Math.max(150, spaceBelow));
     };
 
     updatePosition();
@@ -62,14 +66,14 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
       id={panelId}
       role="tooltip"
       tabIndex={-1}
-      className="fixed z-[100] w-[min(420px,calc(100vw-2rem))] rounded-2xl border border-amber-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md"
-      style={position}
+      className="fixed z-[100] w-[min(420px,calc(100vw-2rem))] flex flex-col rounded-2xl border border-amber-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md"
+      style={{ ...position, maxHeight }}
       onMouseEnter={cancelClose}
       onMouseLeave={scheduleClose}
       onFocus={cancelClose}
       onBlur={scheduleClose}
     >
-      <div className="mb-3 flex items-center justify-between border-b border-amber-100 pb-2.5">
+      <div className="mb-3 flex-none flex items-center justify-between border-b border-amber-100 pb-2.5">
         <span className="flex items-center gap-2 text-[12px] font-bold uppercase tracking-widest text-amber-800">
           <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
           Needs Recruiter Review
@@ -78,10 +82,10 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
           {questions.length} Question{questions.length !== 1 ? "s" : ""}
         </span>
       </div>
-      <p className="mb-3 text-[11px] leading-relaxed text-amber-700">
+      <p className="mb-3 flex-none text-[11px] leading-relaxed text-amber-700">
         These questions were <strong>passed</strong> but the candidate gave an ambiguous or uncertain answer. Please review before proceeding.
       </p>
-      <div className="max-h-[min(320px,calc(100vh-9rem))] space-y-2.5 overflow-y-auto pr-2 overscroll-contain scrollbar-thin scrollbar-thumb-amber-200">
+      <div className="flex-1 min-h-0 space-y-2.5 overflow-y-auto pr-2 overscroll-contain scrollbar-thin scrollbar-thumb-amber-200">
         {questions.map((item, index) => (
           <div
             key={`${item.question}-${index}`}
