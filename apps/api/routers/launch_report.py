@@ -417,18 +417,20 @@ def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str,
             jobdiva_id,
             candidate_id,
             created_at,
-            data->>'feedback_type'        AS feedback_type,
-            data->>'feedback_reason'      AS feedback_reason,
-            data->>'feedback_at'          AS feedback_at,
-            data->>'first_attempted_at'   AS first_attempted_at,
-            data->>'first_completed_at'   AS first_completed_at,
-            data->>'engage_completed_at'  AS engage_completed_at,
-            data->>'engage_status'        AS engage_status,
-            data->>'engage_interview_id'  AS engage_interview_id,
-            data->>'phase'                AS phase,
-            data->>'outreach_phase'       AS outreach_phase,
-            data->>'channel'              AS channel,
-            data->>'outreach_channel'     AS outreach_channel
+            data->>'feedback_type'                AS feedback_type,
+            data->>'feedback_reason'              AS feedback_reason,
+            data->>'feedback_at'                  AS feedback_at,
+            data->>'first_attempted_at'           AS first_attempted_at,
+            data->>'first_completed_at'           AS first_completed_at,
+            data->>'engage_completed_at'          AS engage_completed_at,
+            data->>'engage_status'                AS engage_status,
+            data->>'engage_score'                 AS engage_score,
+            data->>'engage_hard_filter_status'    AS engage_hard_filter_status,
+            data->>'engage_interview_id'          AS engage_interview_id,
+            data->>'phase'                        AS phase,
+            data->>'outreach_phase'               AS outreach_phase,
+            data->>'channel'                      AS channel,
+            data->>'outreach_channel'             AS outreach_channel
         FROM sourced_candidates
         WHERE jobdiva_id = ANY(%s)
     """
@@ -791,10 +793,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
 def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Sourcing + recruiter-feedback columns, all from pair's own tables."""
     submitted = rejected = 0
+    passed = failed = 0
     time_to_feedback: List[float] = []
     sourced_at: List[datetime.datetime] = []
     first_attempted_at: List[datetime.datetime] = []
     first_completed_at: List[datetime.datetime] = []
+    first_pass_at: List[datetime.datetime] = []
 
     for row in rows:
         feedback_type = (row.get("feedback_type") or "").strip().lower()
@@ -803,6 +807,38 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             submitted += 1
         elif feedback_type == "reject":
             rejected += 1
+
+        engage_status = (row.get("engage_status") or "").strip().lower()
+        engage_score_raw = row.get("engage_score")
+        engage_score = None
+        try:
+            engage_score = float(engage_score_raw) if engage_score_raw is not None else None
+        except (ValueError, TypeError):
+            pass
+        hf_status = (row.get("engage_hard_filter_status") or "").strip().lower()
+        hf_passed = hf_status in ("", "pass", "passed", "not_hard_filter")
+
+        # Mirror _format_engage_status from candidates.py exactly:
+        # pass/passed/hired -> Pass
+        # fail/failed/rejected -> Fail only when engage_score is not None
+        # completed -> Pass or Fail based on hard-filter status
+        if engage_status in ("pass", "passed", "hired"):
+            passed += 1
+            completed_time = _parse_iso(row.get("engage_completed_at"))
+            if completed_time:
+                first_pass_at.append(completed_time)
+        elif engage_status in ("fail", "failed", "rejected"):
+            if engage_score is not None:
+                failed += 1
+            # else: outreach provisioning failure, not an interview result — skip
+        elif engage_status == "completed":
+            completed_time = _parse_iso(row.get("engage_completed_at"))
+            if hf_passed:
+                passed += 1
+                if completed_time:
+                    first_pass_at.append(completed_time)
+            else:
+                failed += 1
 
         created = _parse_iso(row.get("created_at"))
         if created:
@@ -831,6 +867,9 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "first_completed_at": min(first_completed_at) if first_completed_at else None,
         "submitted_candidates": submitted,
         "rejected_candidates": rejected,
+        "passed_candidates": passed,
+        "failed_candidates": failed,
+        "first_pass_at": min(first_pass_at) if first_pass_at else None,
         "time_to_feedback_minutes": _mean(time_to_feedback),
         "first_feedback_at": min(
             (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
@@ -961,12 +1000,15 @@ def _build_row(
 
         "submitted_candidates": cand["submitted_candidates"],
         "rejected_candidates": cand["rejected_candidates"],
+        "passed_candidates": cand.get("passed_candidates", 0),
+        "failed_candidates": cand.get("failed_candidates", 0),
         # Completed candidates the recruiter has not yet actioned either way.
         "outstanding_feedback": max(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
         ),
         "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
         "first_feedback_at": _edt(cand["first_feedback_at"]),
+        "first_pass_at": _edt(cand.get("first_pass_at")),
         "time_to_first_pass_minutes": (
             round(float(job["time_to_first_pass"]), 1)
             if job.get("time_to_first_pass") is not None

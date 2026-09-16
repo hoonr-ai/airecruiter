@@ -565,6 +565,85 @@ def test_first_feedback_at_is_none_when_no_feedback():
     assert lr._build_row(job, candidates, [], {})["first_feedback_at"] is None
 
 
+def test_passed_and_failed_candidates_basic():
+    """pass/passed/hired -> passed; fail/failed/rejected with engage_score -> failed."""
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_status": "passed", "engage_completed_at": "2026-08-27T10:00:00Z"},
+        {"candidate_id": "c2", "engage_status": "pass", "engage_completed_at": "2026-08-26T10:00:00Z"},
+        {"candidate_id": "c3", "engage_status": "hired", "engage_completed_at": "2026-08-28T10:00:00Z"},
+        {"candidate_id": "c4", "engage_status": "failed", "engage_score": "72.5"},
+        {"candidate_id": "c5", "engage_status": "fail", "engage_score": "60.0"},
+        {"candidate_id": "c6", "engage_status": "rejected", "engage_score": "55.0"},
+        {"candidate_id": "c7", "engage_status": "in_progress"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 3  # passed, pass, hired
+    assert row["failed_candidates"] == 3  # failed, fail, rejected — all have engage_score
+    # 2026-08-26T10:00:00Z is 06:00 EDT — the earliest pass
+    assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_failed_without_engage_score_is_not_counted():
+    """failed/rejected with no engage_score = outreach provisioning failure, not interview fail."""
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        # No engage_score -> outreach failure, should not count as a real failed interview
+        {"candidate_id": "c1", "engage_status": "failed"},
+        {"candidate_id": "c2", "engage_status": "rejected"},
+        {"candidate_id": "c3", "engage_status": "fail"},
+        # Has engage_score -> real interview result
+        {"candidate_id": "c4", "engage_status": "failed", "engage_score": "65.0"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["failed_candidates"] == 1  # only c4 has engage_score
+    assert row["passed_candidates"] == 0
+
+
+def test_completed_status_with_hard_filter_pass_counts_as_passed():
+    """completed + hf_status in ('', 'pass', 'passed', 'not_hard_filter') -> Pass."""
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_status": "completed",
+         "engage_hard_filter_status": "not_hard_filter",
+         "engage_completed_at": "2026-08-26T10:00:00Z"},
+        {"candidate_id": "c2", "engage_status": "completed",
+         "engage_hard_filter_status": "",
+         "engage_completed_at": "2026-08-27T10:00:00Z"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 2
+    assert row["failed_candidates"] == 0
+    assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_completed_status_with_hard_filter_fail_counts_as_failed():
+    """completed + hf_status not in pass group -> Fail."""
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_status": "completed",
+         "engage_hard_filter_status": "hard_filter"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 0
+    assert row["failed_candidates"] == 1
+    assert row["first_pass_at"] is None
+
+
+def test_first_pass_at_is_none_when_no_passes():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        # Has engage_score so it IS a real fail, but not a pass
+        {"candidate_id": "c1", "engage_status": "failed", "engage_score": "50.0",
+         "engage_completed_at": "2026-08-27T10:00:00Z"},
+        {"candidate_id": "c2", "engage_status": "in_progress"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 0
+    assert row["first_pass_at"] is None
+
+
+
 # ---------------------------------------------------------------------------
 # Job versions
 # ---------------------------------------------------------------------------

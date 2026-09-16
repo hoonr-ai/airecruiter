@@ -50,9 +50,12 @@ interface LaunchReportRow {
   overall_response_time_minutes: number | null;
   submitted_candidates: number;
   rejected_candidates: number;
+  passed_candidates: number;
+  failed_candidates: number;
   outstanding_feedback: number;
   time_to_feedback_minutes: number | null;
   first_feedback_at: string | null;
+  first_pass_at: string | null;
   time_to_first_pass_minutes: number | null;
   call: number;
   sms: number;
@@ -254,6 +257,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "pending", label: "Pending", numeric: true, text: (r) => num(r.pending) },
       { key: "in_progress", label: "In Progress", numeric: true, text: (r) => num(r.in_progress) },
       { key: "completed", label: "Completed", numeric: true, text: (r) => num(r.completed) },
+      { key: "passed", label: "Passed", numeric: true, text: (r) => num(r.passed_candidates) },
+      { key: "failed", label: "Failed", numeric: true, text: (r) => num(r.failed_candidates) },
       { key: "partial", label: "Partial Complete", numeric: true, text: (r) => num(r.partial_complete) },
       {
         key: "percentage",
@@ -289,6 +294,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "outstanding", label: "Outstanding", numeric: true, text: (r) => num(r.outstanding_feedback) },
       { key: "tt_feedback", label: "Time to Feedback", numeric: true, text: (r) => formatDuration(r.time_to_feedback_minutes) },
       { key: "tt_first_pass", label: "To First Pass", numeric: true, text: (r) => formatDuration(r.time_to_first_pass_minutes) },
+      { key: "first_pass_at", label: "First Pass Completed At", text: (r) => formatDateTime(r.first_pass_at) },
       { key: "first_feedback_at", label: "First Feedback Submitted At", text: (r) => formatDateTime(r.first_feedback_at) },
     ],
   },
