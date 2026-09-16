@@ -1174,7 +1174,7 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center py-3 border-l border-slate-200 overflow-visible relative">
-                        <div className="flex flex-col justify-center items-center gap-1 w-full relative">
+                        <div className="flex flex-col justify-center items-center gap-2 w-full relative">
                           <span
                             className="px-3 py-1 rounded-full text-[11px] font-bold border"
                             style={{ backgroundColor: `${statusInfo.color}08`, color: statusInfo.color, borderColor: `${statusInfo.color}30` }}
