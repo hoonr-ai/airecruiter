@@ -991,12 +991,7 @@ async def generate_screening_questions(
             })
 
     # Re-index role-specific entries to sit after the front-matter.
-    # For L0.5 (boolean_mode), only questions at offset ≥ 5 are qualifying hard filters.
-    # The first 5 role-specific questions (offsets 0–4) are background/informational:
-    #   Hybrid (base=3): offsets 0-4 → order_index 3-7 → question_orders 4-8  (background)
-    #                    offsets 5+  → order_index 8+  → question_orders 9+   (qualifying)
-    #   Remote  (base=2): offsets 0-4 → order_index 2-6 → question_orders 3-7  (background)
-    #                    offsets 5+  → order_index 7+  → question_orders 8+   (qualifying)
+    # For L0.5 (boolean_mode), ALL role-specific questions are qualifying hard filters.
     # For L1/L2 no role-specific question is qualifying. Deliberately so: Pairbot has
     # always ignored hard filters on L1/L2 role-specific questions, and
     # _sanitize_pre_screen_questions_for_pair (routers/engagement.py) preserves that by
@@ -1006,7 +1001,7 @@ async def generate_screening_questions(
     base_index = len(questions)
     for offset, q in enumerate(role_specific):
         if boolean_mode:
-            q["is_hard_filter"] = offset >= 5
+            q["is_hard_filter"] = True
         q["order_index"] = base_index + offset
         questions.append(q)
 
