@@ -43,15 +43,7 @@ export function NeedsReviewBadge({ questions }: { questions: NeedsReviewQuestion
 
       const panelWidth = Math.min(420, window.innerWidth - 32);
       const left = Math.max(16, Math.min(rect.left + rect.width / 2 - panelWidth / 2, window.innerWidth - panelWidth - 16));
-      const spaceBelow = window.innerHeight - rect.bottom;
-      
-      if (spaceBelow < 350 && rect.top > spaceBelow) {
-        // Not enough space below, and more space above, so flip it
-        setPosition({ left, bottom: window.innerHeight - rect.top + 12, top: undefined });
-      } else {
-        // Default to showing below
-        setPosition({ left, top: rect.bottom + 12, bottom: undefined });
-      }
+      setPosition({ left, top: rect.bottom + 12, bottom: undefined });
     };
 
     updatePosition();
