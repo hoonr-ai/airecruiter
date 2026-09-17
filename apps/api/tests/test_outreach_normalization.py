@@ -21,6 +21,7 @@ def test_normalize_phase_standard_and_aliases():
     assert normalize_phase("phase2_extra") == "phase2_extra"
     assert normalize_phase("Extra Outreach Phase 3") == "phase2_extra"
     assert normalize_phase("high_score_extra") == "phase1_extra"
+    assert normalize_phase("Extra 2") == "phase1_6hr_extra"
     assert normalize_phase("unknown_phase") is None
     assert normalize_phase(None) is None
 

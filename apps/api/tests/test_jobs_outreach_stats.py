@@ -37,9 +37,9 @@ def test_get_job_outreach_stats_live_api_wins(
         cur.fetchone.return_value = ("jobdiva_123", "job_123")
         
         # Second execute for launched rows
-        # (iid, status_val, raw_resp, sc_status, sc_phase)
+        # (iid, status_val, raw_resp, sc_status, sc_phase, score, hf, completed, first_completed, updated)
         cur.fetchall.return_value = [
-            ("int_1", "fail", '{"status": "fail"}', "in_progress", "phase1")
+            ("int_1", "fail", '{"status": "fail"}', "in_progress", "phase1", None, None, None, None, None)
         ]
         
         # Mock live API
@@ -50,10 +50,12 @@ def test_get_job_outreach_stats_live_api_wins(
         user_mock = MagicMock()
         result = await get_job_outreach_stats("job_123", user=user_mock)
         
-        # Live API should win (pass -> completed bucket, phase3 -> phase3 bucket)
+        # Live API should win (pass -> completed bucket).
+        # Rankings/launch-report shift: PairBot phase3 (P4) -> phase4 column.
         assert result["buckets"]["passed"] == 1
         assert result["buckets"]["failed"] == 0
-        assert result["phases"]["phase3"] == 1
+        assert result["phases"]["phase4"] == 1
+        assert result["phases"]["phase3"] == 0
         assert result["phases"]["phase1"] == 0
         
     asyncio.run(_test())
@@ -70,9 +72,9 @@ def test_get_job_outreach_stats_fallback_wins_when_live_api_empty(
         
         cur.fetchone.return_value = ("jobdiva_123", "job_123")
         
-        # (iid, status_val, raw_resp, sc_status, sc_phase)
+        # (iid, status_val, raw_resp, sc_status, sc_phase, score, hf, completed, first_completed, updated)
         cur.fetchall.return_value = [
-            ("int_1", "in_progress", '{"status": "in_progress", "outreach_channel": "sms"}', "sent", "phase2")
+            ("int_1", "in_progress", '{"status": "in_progress", "outreach_channel": "sms"}', "sent", "phase2", None, None, None, None, None)
         ]
         
         # Mock live API returning empty (404/Timeout)
@@ -81,10 +83,11 @@ def test_get_job_outreach_stats_fallback_wins_when_live_api_empty(
         user_mock = MagicMock()
         result = await get_job_outreach_stats("job_123", user=user_mock)
         
-        # Audit fallback wins (in_progress)
+        # Audit fallback wins (in_progress). PairBot phase2 (P3) shifts to phase3.
         assert result["buckets"]["in_progress"] == 1
         assert result["channels"]["sms"] == 1
-        assert result["phases"]["phase2"] == 1 # cand_fallback phase wins if audit doesn't have it
+        assert result["phases"]["phase3"] == 1
+        assert result["phases"]["phase2"] == 0
         
     asyncio.run(_test())
 
@@ -110,5 +113,49 @@ def test_get_job_outreach_stats_empty_zero_buckets(
         assert result["buckets"]["in_progress"] == 0
         assert result["buckets"]["passed"] == 0
         assert result["phases"]["phase1"] == 0
+
+    asyncio.run(_test())
+
+
+def test_empty_outreach_stats_returns_independent_nested_dicts():
+    from routers.jobs import _empty_outreach_stats
+
+    first = _empty_outreach_stats()
+    second = _empty_outreach_stats()
+    first["phases"]["phase1"] += 1
+    assert second["phases"]["phase1"] == 0
+    assert first is not second
+    assert first["phases"] is not second["phases"]
+    assert first["buckets"] is not second["buckets"]
+
+
+def test_get_job_outreach_stats_extra_phases_match_launch_report(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        conn = mock_db_connection.return_value
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ("jobdiva_123", "job_123")
+        cur.fetchall.return_value = [
+            ("int_1", "in_progress", "{}", "in_progress", "phase1", None, None, None, None, None),
+            ("int_2", "in_progress", "{}", "in_progress", "phase1_extra", None, None, None, None, None),
+            ("int_3", "in_progress", "{}", "in_progress", "phase1_6hr", None, None, None, None, None),
+            ("int_4", "in_progress", "{}", "in_progress", "phase1_6hr_extra", None, None, None, None, None),
+        ]
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
+            "int_2": {"outreach_status": "in_progress", "outreach_phase": "phase1_extra"},
+            "int_3": {"outreach_status": "in_progress", "outreach_phase": "phase1_6hr"},
+            "int_4": {"outreach_status": "in_progress", "outreach_phase": "phase1_6hr_extra"},
+        }
+
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["phase1"] == 1
+        assert result["phases"]["extra1"] == 1
+        assert result["phases"]["phase2"] == 1
+        assert result["phases"]["extra2"] == 1
+        assert result["phases"]["extra"] == 2
 
     asyncio.run(_test())

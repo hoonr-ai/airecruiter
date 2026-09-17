@@ -1660,6 +1660,30 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
         logger.error(f"Save Requirements Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save requirements: {str(e)}")
 
+def _empty_outreach_stats() -> dict:
+    """Fresh nested zeros so empty-job responses never share mutable dicts."""
+    return {
+        "buckets": {
+            "pending": 0,
+            "in_progress": 0,
+            "completed": 0,
+            "partial_complete": 0,
+            "passed": 0,
+            "failed": 0,
+        },
+        "phases": {
+            "phase1": 0,
+            "phase2": 0,
+            "phase3": 0,
+            "phase4": 0,
+            "extra": 0,
+            "extra1": 0,
+            "extra2": 0,
+            "extra3": 0,
+        },
+    }
+
+
 @router.get("/jobs/{job_id_or_ref}/outreach-stats")
 async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1679,7 +1703,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             """, (job_id_or_ref, job_id_or_ref))
             result = cur.fetchone()
             if not result:
-                return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
+                return _empty_outreach_stats()
             
             # Note: We rely on Python's 'or' treating an empty string as falsy here.
             # This ensures that if jobdiva_id is '', we fall back to job_id instead
@@ -1694,7 +1718,12 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
                     COALESCE(NULLIF(ea.status, ''), sc.data->>'engage_status') AS status,
                     ea.response,
                     sc.data->>'engage_status' AS sc_status,
-                    sc.data->>'outreach_phase' AS sc_phase
+                    sc.data->>'outreach_phase' AS sc_phase,
+                    sc.data->>'engage_score' AS sc_score,
+                    sc.data->>'engage_hard_filter_status' AS sc_hf,
+                    sc.data->>'engage_completed_at' AS sc_completed,
+                    sc.data->>'first_completed_at' AS sc_first_completed,
+                    sc.data->>'engage_updated_at' AS sc_updated
                 FROM (
                     SELECT DISTINCT ON (candidate_id)
                         candidate_id, interview_id, status, response
@@ -1722,7 +1751,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         conn.close()
 
     if not launched_rows:
-        return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
+        return _empty_outreach_stats()
 
     interview_ids = sorted({
         str(row[0]) for row in launched_rows
@@ -1740,12 +1769,27 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         status_val = row[1]
         raw_resp = row[2]
         sc_phase = row[4]
+        sc_score = row[5]
+        sc_hf = row[6]
+        sc_completed = row[7]
+        sc_first_completed = row[8]
+        sc_updated = row[9]
 
         cand_fallback = {}
         if status_val:
             cand_fallback["outreach_status"] = status_val
         if sc_phase:
             cand_fallback["outreach_phase"] = sc_phase
+        if sc_score is not None:
+            cand_fallback["engage_score"] = sc_score
+        if sc_hf:
+            cand_fallback["engage_hard_filter_status"] = sc_hf
+        if sc_completed:
+            cand_fallback["engage_completed_at"] = sc_completed
+        if sc_first_completed:
+            cand_fallback["first_completed_at"] = sc_first_completed
+        if sc_updated:
+            cand_fallback["engage_updated_at"] = sc_updated
 
         audit_fallback = {}
         if isinstance(raw_resp, dict):
@@ -1770,7 +1814,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         if merged:
             merged_payloads.append(merged)
 
-    return _summarise_outreach(merged_payloads)
+    return _summarise_outreach(merged_payloads, shift_phases=True)
 
 @router.get("/jobs/{job_id}/monitored-data")
 async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):
