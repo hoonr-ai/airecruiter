@@ -914,6 +914,71 @@ def _audit_covered_candidates(
     return ids, iids
 
 
+def collect_merged_outreach_payloads(
+    audit_rows: List[Dict[str, Any]],
+    candidate_rows: List[Dict[str, Any]],
+    outreach_by_interview: Dict[str, Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Build one merged payload per launched interview.
+
+    Rankings outreach-stats and the launch report both use this so Pending /
+    In Progress / Completed / Passed / Failed partition the same interviews.
+    Empty pair-bot payloads default to pending so bucket totals match launched.
+    """
+    cand_by_interview = {
+        str(c["engage_interview_id"]): c
+        for c in candidate_rows
+        if c.get("engage_interview_id")
+    }
+    cand_by_id = {
+        str(c["candidate_id"]): c
+        for c in candidate_rows
+        if c.get("candidate_id")
+    }
+
+    payloads: List[Dict[str, Any]] = []
+    num_resolved = 0
+    for a in audit_rows:
+        iid = str(a.get("interview_id") or "").strip()
+        if not iid:
+            continue
+
+        cid = str(a.get("candidate_id") or "")
+        cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
+        raw_resp = a.get("response")
+        audit_status = a.get("status")
+        live_api = outreach_by_interview.get(iid)
+
+        if live_api is not None or cand_data or raw_resp or audit_status:
+            num_resolved += 1
+
+        merged_payload = build_merged_outreach_payload(
+            cand_data,
+            raw_resp,
+            audit_status,
+            live_api,
+        )
+        if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
+            merged_payload = {**merged_payload, "outreach_status": "pending"}
+        payloads.append(merged_payload)
+
+    return payloads, num_resolved
+
+
+def apply_uncovered_pass_fail(
+    buckets: Dict[str, int],
+    candidate_rows: List[Dict[str, Any]],
+    audit_rows: List[Dict[str, Any]],
+) -> List[datetime.datetime]:
+    """Add JSONB Pass/Fail for candidates the audit walk never saw."""
+    extra_passed, extra_failed, extra_pass_at = _pass_fail_for_uncovered_candidates(
+        candidate_rows, audit_rows
+    )
+    buckets["passed"] = buckets.get("passed", 0) + extra_passed
+    buckets["failed"] = buckets.get("failed", 0) + extra_failed
+    return extra_pass_at
+
+
 def _pass_fail_for_uncovered_candidates(
     candidate_rows: List[Dict[str, Any]],
     audit_rows: List[Dict[str, Any]],
@@ -961,46 +1026,9 @@ def _build_row(
 ) -> Dict[str, Any]:
     cand = _summarise_candidates(sourced_rows if sourced_rows is not None else candidate_rows)
 
-    cand_by_interview = {
-        str(c["engage_interview_id"]): c
-        for c in candidate_rows
-        if c.get("engage_interview_id")
-    }
-    cand_by_id = {
-        str(c["candidate_id"]): c
-        for c in candidate_rows
-        if c.get("candidate_id")
-    }
-
-    payloads = []
-    num_resolved = 0
-    for a in audit_rows:
-        iid = str(a.get("interview_id") or "")
-        if not iid:
-            continue
-
-        cid = str(a.get("candidate_id") or "")
-        cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
-        raw_resp = a.get("response")
-        audit_status = a.get("status")
-        live_api = outreach_by_interview.get(iid)
-
-        if live_api is not None or cand_data or raw_resp or audit_status:
-            num_resolved += 1
-
-        merged_payload = build_merged_outreach_payload(
-            cand_data,
-            raw_resp,
-            audit_status,
-            live_api
-        )
-
-        # Enforce total fallback contract: an unresolved or empty payload must
-        # never be dropped. Default to pending so sum(buckets) == total_launched.
-        if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
-            merged_payload = {**merged_payload, "outreach_status": "pending"}
-        payloads.append(merged_payload)
-
+    payloads, num_resolved = collect_merged_outreach_payloads(
+        audit_rows, candidate_rows, outreach_by_interview
+    )
     outreach = _summarise_outreach(payloads, shift_phases=True)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
@@ -1020,9 +1048,7 @@ def _build_row(
     )
 
     buckets = outreach["buckets"]
-    extra_passed, extra_failed, extra_pass_at = _pass_fail_for_uncovered_candidates(
-        candidate_rows, audit_rows
-    )
+    extra_pass_at = apply_uncovered_pass_fail(buckets, candidate_rows, audit_rows)
     pass_times = [t for t in (outreach.get("first_pass_at"), cand.get("first_pass_at"), *extra_pass_at) if t]
     merged_first_pass = min(pass_times) if pass_times else None
     live_ttp = _minutes_between(launch_at, merged_first_pass)
@@ -1083,8 +1109,8 @@ def _build_row(
         "rejected_candidates": cand["rejected_candidates"],
         # Live merged outreach for launched interviews, plus JSONB Pass/Fail
         # for candidates the webhook wrote without an audit row.
-        "passed_candidates": buckets["passed"] + extra_passed,
-        "failed_candidates": buckets["failed"] + extra_failed,
+        "passed_candidates": buckets["passed"],
+        "failed_candidates": buckets["failed"],
         # Completed candidates the recruiter has not yet actioned either way.
         "outstanding_feedback": max(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0

@@ -1304,15 +1304,13 @@ async def get_job_candidates(
                     """
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) AS total_candidates,
-                        COUNT(DISTINCT sc.candidate_id) FILTER (
-                            WHERE (
-                                COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                            ) OR EXISTS (
-                                SELECT 1 FROM engage_interview_audit ea
-                                WHERE ea.candidate_id = sc.candidate_id
-                                  AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
-                                  AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                            )
+                        (
+                            -- Same grain as launch report / rankings outreach-stats:
+                            -- distinct launched interviews, not sourced rows with a status.
+                            SELECT COUNT(DISTINCT NULLIF(ea.interview_id, ''))
+                            FROM engage_interview_audit ea
+                            WHERE (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                              AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
                         ) AS launched_count,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE sc.data->>'_stage' = 'dropped' 
