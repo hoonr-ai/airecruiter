@@ -214,6 +214,37 @@ def test_get_job_outreach_stats_promotes_phase1_to_extra1_from_live_jobs(
     asyncio.run(_test())
 
 
+def test_get_job_outreach_stats_pending_extra_stays_phase1(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    """Opened Extra (Pair Bot E1 Opened) must count as Phase 1 on rankings."""
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_one_launched_candidate(mock_db_connection, status="pending", sc_phase="phase1")
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {
+                "outreach": {"outreach_status": "pending", "outreach_phase": "phase1"},
+                "scheduled_jobs": [
+                    {
+                        "status": "pending",
+                        "payload": {
+                            "is_high_score_extra": True,
+                            "high_score_phase": "phase1",
+                            "reminder_type": "high_score_extra",
+                        },
+                    }
+                ],
+            }
+        }
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["phase1"] == 1
+        assert result["phases"]["extra1"] == 0
+        assert result["phases"]["extra"] == 0
+
+    asyncio.run(_test())
+
+
 def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
 ):

@@ -121,7 +121,7 @@ def test_promote_high_score_extra_phase2_from_matching_job():
 
 def test_promote_high_score_extra_dedupes_nested_scheduled_jobs():
     job = {
-        "status": "pending",
+        "status": "processing",
         "job_type": "reminder",
         "payload": {
             "is_high_score_extra": True,
@@ -135,6 +135,28 @@ def test_promote_high_score_extra_dedupes_nested_scheduled_jobs():
         "outreach": {"scheduled_jobs": [job]},
     }
     assert promote_high_score_extra_phase(payload, "phase1") == "phase1_extra"
+
+
+def test_pending_opened_extra_keeps_phase1_on_rankings():
+    """PairBot shows Phase 1 + E1 Opened; rankings must not count Extra 1."""
+    payload = {
+        "outreach_phase": "phase1",
+        "scheduled_jobs": [
+            {
+                "status": "pending",
+                "payload": {
+                    "is_high_score_extra": True,
+                    "high_score_phase": "phase1",
+                    "reminder_type": "high_score_extra",
+                },
+            }
+        ],
+    }
+    assert promote_high_score_extra_phase(payload, "phase1") == "phase1_extra"
+    assert (
+        promote_high_score_extra_phase(payload, "phase1", include_pending_extra=False)
+        == "phase1"
+    )
 
 
 def test_promote_extra3_from_phase2_extra_communications():
@@ -194,8 +216,8 @@ def test_promote_uses_normalized_alias_for_anti_regression():
     assert promote_high_score_extra_phase(payload, "phase 3") == "phase2"
 
 
-def test_promote_pending_extra_outranks_lower_comms_extra():
-    """A higher-ranked pending Extra must not lose to a lower confirmed Extra."""
+def test_pending_extra_outranks_lower_comms_extra_on_launch_report_only():
+    """Launch report still counts a pending Extra 3; rankings stay on Extra 1 comms."""
     payload = {
         "outreach_phase": "phase1",
         "communications": [{"phase": "phase1_extra", "channel": "sms"}],
@@ -211,6 +233,10 @@ def test_promote_pending_extra_outranks_lower_comms_extra():
         ],
     }
     assert promote_high_score_extra_phase(payload, "phase1") == "phase2_extra"
+    assert (
+        promote_high_score_extra_phase(payload, "phase1", include_pending_extra=False)
+        == "phase1_extra"
+    )
 
 
 def test_promote_extra3_from_completed_high_score_job():

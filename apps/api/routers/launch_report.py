@@ -307,14 +307,21 @@ def _normalize_phase(
     return None
 
 
-def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Optional[str]:
+def _extract_phase(
+    outreach: Dict[str, Any],
+    *,
+    shift_phases: bool = True,
+    include_pending_extra: bool = True,
+) -> Optional[str]:
     """Pick phase from known keys, then fall back to status-shaped phase values."""
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
-    raw = promote_high_score_extra_phase(outreach, raw)
+    raw = promote_high_score_extra_phase(
+        outreach, raw, include_pending_extra=include_pending_extra
+    )
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -670,7 +677,12 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
+def _summarise_outreach(
+    payloads: List[Dict[str, Any]],
+    *,
+    shift_phases: bool = False,
+    include_pending_extra: bool = True,
+) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -757,7 +769,11 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         elif display == "Fail":
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged, shift_phases=shift_phases)
+        phase = _extract_phase(
+            merged,
+            shift_phases=shift_phases,
+            include_pending_extra=include_pending_extra,
+        )
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
