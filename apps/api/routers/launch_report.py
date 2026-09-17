@@ -728,10 +728,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         if display == "Pass":
             buckets["passed"] += 1
             passed_at = (
-                _parse_iso(merged.get("first_completed_at"))
+                _parse_iso(merged.get("first_pass_at"))
+                or _parse_iso(merged.get("first_completed_at"))
                 or _parse_iso(merged.get("engage_completed_at"))
                 or _parse_iso(merged.get("engage_updated_at"))
                 or _parse_iso(merged.get("completed_at"))
+                or _parse_iso(merged.get("updated_at"))
             )
             if passed_at:
                 first_pass_timestamps.append(passed_at)

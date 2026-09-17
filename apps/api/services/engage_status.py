@@ -24,13 +24,13 @@ def format_engage_status(
     if not engage_status:
         return "Pending"
     s = engage_status.lower()
-    if s in ("passed", "hired", "pass"):
+    if s in ("passed", "hired", "pass", "qualified", "shortlisted", "selected"):
         return "Pass"
-    if s in ("failed", "rejected", "fail"):
+    if s in ("failed", "rejected", "fail", "disqualified", "declined"):
         if engage_score is None:
             return "Pending"
         return "Fail"
-    if s in ("in_progress", "in progress"):
+    if s in ("in_progress", "in progress", "screening", "interview_completed", "interview completed", "contacted"):
         return "In Progress"
     if s in ("completed", "complete"):
         hf_passed = (hf_display or "").strip().lower() in (
