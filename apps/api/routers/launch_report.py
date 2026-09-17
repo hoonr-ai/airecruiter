@@ -87,7 +87,8 @@ _PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_sta
 _IN_PROGRESS_STATUSES = {
     "in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent",
     "call_in_progress", "screening", "interview_completed", "interview completed",
-    "contacted",
+    "contacted", "extra", "extra1", "extra2", "extra3", "phase1_extra",
+    "phase1_6hr_extra", "phase2_extra", "phase3_extra",
 }
 _COMPLETED_STATUSES = {
     "completed", "passed", "failed", "pass", "fail", "complete", "hired",
@@ -225,6 +226,23 @@ def _eastern_date(dt: Optional[datetime.datetime]) -> Optional[datetime.date]:
 
 def _mean(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 1) if values else None
+
+
+def _status_rank(raw: Optional[str]) -> int:
+    return _STATUS_HIERARCHY.get((raw or "").strip().lower(), 0)
+
+
+def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -> Optional[str]:
+    """Status for Pending / In Progress / Completed buckets.
+
+    Pair Bot Interviews uses `interviews.status`. Outreach can stay `pending`
+    while that interview is already `in_progress` (still receiving later
+    phases). Prefer whichever recognised value is further along.
+    """
+    interview_status = merged.get("interview_status")
+    if _status_rank(interview_status) > _status_rank(outreach_status):
+        return interview_status
+    return outreach_status
 
 
 def _bucket_status(raw: Optional[str]) -> str:
@@ -758,12 +776,13 @@ def _summarise_outreach(
                 status_raw = "pending"
                 normalized_status = "pending"
 
-        buckets[_bucket_status(status_raw)] += 1
+        funnel_raw = _funnel_status_raw(merged, status_raw)
+        buckets[_bucket_status(funnel_raw)] += 1
 
         # Passed/Failed must match rankings (`format_engage_status`): pair-bot
         # often reports `completed` while the ranking table already shows Pass.
         display = format_engage_status(
-            normalized_status,
+            (funnel_raw or "").strip().lower() or normalized_status,
             score_from_payload(merged),
             hf_display_from_payload(merged),
         )
