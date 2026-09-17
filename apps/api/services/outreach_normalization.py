@@ -110,7 +110,6 @@ _PHASE_ALIASES = {
     "extra_phase3": "phase2_extra",
     "extra outreach phase 3": "phase2_extra",
     "extra outreach 3": "phase2_extra",
-    "phase3_extra": "phase3_extra",
     "extra": "phase1_extra",
     "extra outreach": "phase1_extra",
     "extra outreach (>80% match)": "phase1_extra",
@@ -238,10 +237,14 @@ def promote_high_score_extra_phase(
         return raw_phase
     if phase in {"pass", "fail", "completed", "passed", "failed"}:
         return phase
+    # Already-persisted extra tokens win immediately.
+    if "extra" in phase:
+        return phase
     if not isinstance(payload, dict):
         return phase
 
-    stored_rank = _phase_rank(phase)
+    canonical = normalize_phase(phase) or phase
+    stored_rank = _phase_rank(canonical)
     best_extra: Optional[str] = None
     best_rank = stored_rank
 
@@ -253,10 +256,6 @@ def promote_high_score_extra_phase(
         if rank > best_rank:
             best_extra = token
             best_rank = rank
-
-    # Already-persisted extra tokens win immediately.
-    if "extra" in phase:
-        return phase
 
     nested = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
     for source in (payload, nested):
@@ -278,7 +277,7 @@ def promote_high_score_extra_phase(
     # PairBot SQL: latest high-score job's high_score_phase → that phase's
     # `_extra`, unless stored is already at/past that extra. We cannot see
     # completed jobs here, but pending/processing still carry the signal, and
-    # we never regress past a higher stored/comms rank.
+    # we never regress past a higher stored/comms/pending rank.
     pending_extra: Optional[str] = None
     for job in _iter_outreach_jobs(payload):
         job_payload = _parse_job_payload(job.get("payload"))
@@ -295,19 +294,20 @@ def promote_high_score_extra_phase(
                 phase,
             )
             continue
-        target = _extra_token_for_base(high)
+        high_canonical = normalize_phase(high) or high
+        target = _extra_token_for_base(high_canonical)
         if not target:
             continue
         if status in {"completed", "processing"}:
             _consider(target)
         elif _phase_rank(target) > stored_rank:
-            # Keep the highest pending target; apply only if nothing stronger
-            # was found from comms/completed/processing.
             if pending_extra is None or _phase_rank(target) > _phase_rank(pending_extra):
                 pending_extra = target
 
+    if pending_extra and _phase_rank(pending_extra) > best_rank:
+        return pending_extra
     if best_extra:
         return best_extra
     if pending_extra:
         return pending_extra
-    return phase
+    return canonical if canonical in _OUTREACH_PHASE_RANK else phase
