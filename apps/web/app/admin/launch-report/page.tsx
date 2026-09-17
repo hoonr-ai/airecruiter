@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseOutreachInfo } from "./PhaseOutreachInfo";
 import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
@@ -195,7 +196,7 @@ type Column = {
   numeric?: boolean;
 };
 
-type ColumnGroup = { title: string; columns: Column[] };
+type ColumnGroup = { title: string; columns: Column[]; showInfo?: boolean };
 
 const num = (value: number) => (value ? value.toLocaleString() : "0");
 
@@ -308,6 +309,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Phase",
+    showInfo: true,
     columns: [
       { key: "phase1", label: "Phase 1", numeric: true, text: (r) => num(r.phase1) },
       { key: "phase2", label: "Phase 2", numeric: true, text: (r) => num(r.phase2) },
@@ -317,6 +319,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Extra Outreach (>80% Match)",
+    showInfo: true,
     columns: [
       { key: "extra1", label: "Extra 1", numeric: true, text: (r) => num(r.extra1) },
       { key: "extra2", label: "Extra 2", numeric: true, text: (r) => num(r.extra2) },
@@ -648,7 +651,10 @@ export default function LaunchReportPage() {
                     colSpan={group.columns.length}
                     className="text-left px-3 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-400 border-l border-slate-200"
                   >
-                    {group.title}
+                    <span className="inline-flex items-center gap-0.5">
+                      {group.title}
+                      {group.showInfo && <PhaseOutreachInfo />}
+                    </span>
                   </th>
                 ))}
               </tr>
