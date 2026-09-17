@@ -196,7 +196,7 @@ type Column = {
   numeric?: boolean;
 };
 
-type ColumnGroup = { title: string; columns: Column[] };
+type ColumnGroup = { title: string; columns: Column[]; showInfo?: boolean };
 
 const num = (value: number) => (value ? value.toLocaleString() : "0");
 
@@ -309,6 +309,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Phase",
+    showInfo: true,
     columns: [
       { key: "phase1", label: "Phase 1", numeric: true, text: (r) => num(r.phase1) },
       { key: "phase2", label: "Phase 2", numeric: true, text: (r) => num(r.phase2) },
@@ -318,6 +319,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Extra Outreach (>80% Match)",
+    showInfo: true,
     columns: [
       { key: "extra1", label: "Extra 1", numeric: true, text: (r) => num(r.extra1) },
       { key: "extra2", label: "Extra 2", numeric: true, text: (r) => num(r.extra2) },
@@ -651,7 +653,7 @@ export default function LaunchReportPage() {
                   >
                     <span className="inline-flex items-center gap-0.5">
                       {group.title}
-                      {group.title === "Phase" && <PhaseOutreachInfo />}
+                      {group.showInfo && <PhaseOutreachInfo />}
                     </span>
                   </th>
                 ))}

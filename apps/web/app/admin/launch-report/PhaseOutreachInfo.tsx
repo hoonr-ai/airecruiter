@@ -34,6 +34,8 @@ export function PhaseOutreachInfo() {
           type="button"
           className="ml-1 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-indigo-50 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
           aria-label="Explain outreach phases, timing, and extra outreach"
+          // Parent <th> has no click handler today; stop bubbling so a future
+          // group-header sort/toggle cannot swallow opening this dialog.
           onClick={(e) => e.stopPropagation()}
         >
           <HelpCircle className="h-3.5 w-3.5" />
@@ -46,7 +48,9 @@ export function PhaseOutreachInfo() {
           </DialogTitle>
           <DialogDescription className="text-[13px] text-slate-500">
             PAIR reminds a candidate a few times if they have not started the interview yet. Think of it as a
-            short sequence of nudges — not four different interviews.
+            short sequence of nudges — not four different interviews. Times and the 80% bar below are{" "}
+            <span className="font-semibold text-slate-600">typical defaults</span>; a job’s campaign can use
+            different waits, skip a call, or change the extra-outreach score cutoff.
           </DialogDescription>
         </DialogHeader>
 
@@ -54,20 +58,20 @@ export function PhaseOutreachInfo() {
           <div className="space-y-2">
             <p>
               <span className="font-semibold text-slate-900">Step 1 starts immediately</span> at launch. Each
-              next step waits a little while after the one before it (usually 30 minutes; later reminders wait
-              longer).
+              next step typically waits a little while after the one before it (often 30 minutes; later
+              reminders often wait longer).
             </p>
             <p>
-              On a regular phase, email and SMS go out together, then a call about{" "}
+              On a regular phase, email and SMS go out together, then a call often about{" "}
               <span className="font-semibold">10 minutes</span> later. Extra steps are email and SMS only — no
-              call.
+              call — unless that campaign is set up differently.
             </p>
           </div>
 
           <div className="grid sm:grid-cols-2 gap-3">
             <div className="rounded-lg border border-slate-200 px-3 py-2.5 space-y-1">
               <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400">
-                Score 80% or higher
+                Typical: score 80% or higher
               </p>
               <p>
                 They get the full 7-step plan: the four phases <span className="font-semibold">and</span> three
@@ -76,7 +80,7 @@ export function PhaseOutreachInfo() {
             </div>
             <div className="rounded-lg border border-slate-200 px-3 py-2.5 space-y-1">
               <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400">
-                Score below 80%
+                Typical: score below 80%
               </p>
               <p>
                 No extra outreach. They only get campaign steps{" "}
@@ -91,9 +95,9 @@ export function PhaseOutreachInfo() {
               <thead>
                 <tr className="bg-slate-50 text-left text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
                   <th className="px-3 py-2">Campaign step</th>
-                  <th className="px-3 py-2">Wait after previous</th>
-                  <th className="px-3 py-2">If score ≥ 80%</th>
-                  <th className="px-3 py-2">If score &lt; 80%</th>
+                  <th className="px-3 py-2">Typical wait after previous</th>
+                  <th className="px-3 py-2">If score ≥ 80% (typical)</th>
+                  <th className="px-3 py-2">If score &lt; 80% (typical)</th>
                   <th className="px-3 py-2">Call</th>
                 </tr>
               </thead>
@@ -113,7 +117,8 @@ export function PhaseOutreachInfo() {
 
           <p className="text-[12px] text-slate-500">
             Extra 1 / Extra 2 / Extra 3 and Total Extra on this report only count those in-between nudges for
-            80%+ candidates who still have not started.
+            high-match candidates (typically 80%+) who still have not started. Check the job’s campaign if a
+            row’s real timing or cutoff differs from this table.
           </p>
 
           <div className="border border-slate-200 rounded-lg px-3 py-2.5 space-y-1.5">
@@ -124,8 +129,9 @@ export function PhaseOutreachInfo() {
               can.
             </p>
             <p>
-              We do not SMS or call outside <span className="font-semibold">8:00 AM–8:00 PM</span> in that
-              timezone. If a step lands overnight, it waits until morning.
+              We typically do not SMS or call outside{" "}
+              <span className="font-semibold">8:00 AM–8:00 PM</span> in that timezone (a campaign can use a
+              narrower window). If a step lands overnight, it waits until morning.
             </p>
           </div>
         </div>
