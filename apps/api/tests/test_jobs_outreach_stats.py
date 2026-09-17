@@ -37,9 +37,9 @@ def test_get_job_outreach_stats_live_api_wins(
         cur.fetchone.return_value = ("jobdiva_123", "job_123")
         
         # Second execute for launched rows
-        # (iid, status_val, raw_resp, sc_status, sc_phase)
+        # (iid, status_val, raw_resp, sc_status, sc_phase, score, hf, completed, first_completed, updated)
         cur.fetchall.return_value = [
-            ("int_1", "fail", '{"status": "fail"}', "in_progress", "phase1")
+            ("int_1", "fail", '{"status": "fail"}', "in_progress", "phase1", None, None, None, None, None)
         ]
         
         # Mock live API
@@ -72,9 +72,9 @@ def test_get_job_outreach_stats_fallback_wins_when_live_api_empty(
         
         cur.fetchone.return_value = ("jobdiva_123", "job_123")
         
-        # (iid, status_val, raw_resp, sc_status, sc_phase)
+        # (iid, status_val, raw_resp, sc_status, sc_phase, score, hf, completed, first_completed, updated)
         cur.fetchall.return_value = [
-            ("int_1", "in_progress", '{"status": "in_progress", "outreach_channel": "sms"}', "sent", "phase2")
+            ("int_1", "in_progress", '{"status": "in_progress", "outreach_channel": "sms"}', "sent", "phase2", None, None, None, None, None)
         ]
         
         # Mock live API returning empty (404/Timeout)
@@ -115,6 +115,18 @@ def test_get_job_outreach_stats_empty_zero_buckets(
         assert result["phases"]["phase1"] == 0
 
     asyncio.run(_test())
+
+
+def test_empty_outreach_stats_returns_independent_nested_dicts():
+    from routers.jobs import _empty_outreach_stats
+
+    first = _empty_outreach_stats()
+    second = _empty_outreach_stats()
+    first["phases"]["phase1"] += 1
+    assert second["phases"]["phase1"] == 0
+    assert first is not second
+    assert first["phases"] is not second["phases"]
+    assert first["buckets"] is not second["buckets"]
 
 
 def test_get_job_outreach_stats_extra_phases_match_launch_report(

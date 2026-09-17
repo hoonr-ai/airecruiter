@@ -108,23 +108,7 @@ def _json_load_safe(value: Any, default: Any):
 from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_row_display
 
 
-def _format_engage_status(engage_status: Optional[str], engage_score: Optional[float], hf_display: str) -> str:
-    if not engage_status:
-        return "Pending"
-    s = engage_status.lower()
-    if s in ["passed", "hired", "pass"]:
-        return "Pass"
-    elif s in ["failed", "rejected", "fail"]:
-        if engage_score is None:
-            return "Pending"
-        else:
-            return "Fail"
-    elif s in ["in_progress", "in progress"]:
-        return "In Progress"
-    elif s == "completed":
-        hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-        return "Pass" if hf_passed else "Fail"
-    return "Pending"
+from services.engage_status import format_engage_status as _format_engage_status
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
