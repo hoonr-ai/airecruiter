@@ -23,6 +23,23 @@ def mock_get_current_user():
 
 import asyncio
 
+
+def _stub_one_launched_candidate(
+    mock_db_connection,
+    *,
+    iid="int_1",
+    status="pending",
+    sc_phase="phase2",
+):
+    conn = mock_db_connection.return_value
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.fetchone.return_value = ("jobdiva_123", "job_123")
+    cur.fetchall.return_value = [
+        (iid, status, "{}", status, sc_phase, None, None, None, None, None),
+    ]
+    return cur
+
+
 def test_get_job_outreach_stats_live_api_wins(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
 ):
@@ -228,20 +245,11 @@ def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
     asyncio.run(_test())
 
 
-def test_get_job_outreach_stats_promotes_extra3_from_completed_extra_job(
-    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
-):
-    from routers.jobs import get_job_outreach_stats
-
-    async def _test():
-        conn = mock_db_connection.return_value
-        cur = conn.cursor.return_value.__enter__.return_value
-        cur.fetchone.return_value = ("jobdiva_123", "job_123")
-        cur.fetchall.return_value = [
-            ("int_1", "pending", "{}", "pending", "phase2", None, None, None, None, None),
-        ]
-        mock_fetch_all_outreach.return_value = {
-            "int_1": {
+@pytest.mark.parametrize(
+    "live_payload",
+    [
+        pytest.param(
+            {
                 "outreach": {
                     "outreach_status": "pending",
                     "outreach_phase": "phase2",
@@ -261,30 +269,11 @@ def test_get_job_outreach_stats_promotes_extra3_from_completed_extra_job(
                     {"phase": "phase2", "channel": "email"},
                     {"phase": "phase2", "channel": "sms"},
                 ],
-            }
-        }
-
-        result = await get_job_outreach_stats("job_123", user=MagicMock())
-        assert result["phases"]["extra3"] == 1
-        assert result["phases"]["phase3"] == 0
-
-    asyncio.run(_test())
-
-
-def test_get_job_outreach_stats_counts_canonical_phase2_extra_from_live_api(
-    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
-):
-    from routers.jobs import get_job_outreach_stats
-
-    async def _test():
-        conn = mock_db_connection.return_value
-        cur = conn.cursor.return_value.__enter__.return_value
-        cur.fetchone.return_value = ("jobdiva_123", "job_123")
-        cur.fetchall.return_value = [
-            ("int_1", "pending", "{}", "pending", "phase2", None, None, None, None, None),
-        ]
-        mock_fetch_all_outreach.return_value = {
-            "int_1": {
+            },
+            id="completed_extra_job",
+        ),
+        pytest.param(
+            {
                 "outreach": {
                     "outreach_status": "pending",
                     "outreach_phase": "phase2_extra",
@@ -292,11 +281,34 @@ def test_get_job_outreach_stats_counts_canonical_phase2_extra_from_live_api(
                 },
                 "scheduled_jobs": [],
                 "communications": [{"phase": "phase2", "channel": "email"}],
-            }
-        }
+            },
+            id="canonical_phase2_extra",
+        ),
+    ],
+)
+def test_get_job_outreach_stats_counts_extra3_for_pairbot_extra_phase_3(
+    mock_db_connection,
+    mock_verify_job_access,
+    mock_fetch_all_outreach,
+    mock_get_current_user,
+    live_payload,
+):
+    """Extra Outreach Phase 3 must count Extra 3, not Phase 3.
 
+    Covers completed Extra jobs (comms still say phase2) and live API
+    already returning canonical phase2_extra.
+    """
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_one_launched_candidate(mock_db_connection, status="pending", sc_phase="phase2")
+        mock_fetch_all_outreach.return_value = {"int_1": live_payload}
         result = await get_job_outreach_stats("job_123", user=MagicMock())
         assert result["phases"]["extra3"] == 1
         assert result["phases"]["phase3"] == 0
+        assert result["phases"]["extra"] == 1
+        assert result["buckets"]["pending"] == 1
+        assert result["buckets"]["passed"] == 0
+        assert result["buckets"]["failed"] == 0
 
     asyncio.run(_test())
