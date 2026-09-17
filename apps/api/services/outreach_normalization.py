@@ -142,36 +142,52 @@ def _parse_job_payload(raw: Any) -> Dict[str, Any]:
 
 
 def _truthy_flag(value: Any) -> bool:
-    if value is True:
+    if value is True or value == 1:
         return True
+    if value is False or value == 0:
+        return False
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes"}
     return False
 
 
-def _is_high_score_extra_job(job: Dict[str, Any]) -> bool:
-    payload = _parse_job_payload(job.get("payload"))
+def _is_high_score_extra_job(job: Dict[str, Any], job_payload: Optional[Dict[str, Any]] = None) -> bool:
+    payload = job_payload if job_payload is not None else _parse_job_payload(job.get("payload"))
     if _truthy_flag(payload.get("is_high_score_extra")):
         return True
     reminder = str(payload.get("reminder_type") or job.get("reminder_type") or "").strip().lower()
     return reminder == "high_score_extra"
 
 
+def _job_dedupe_key(job: Dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "job_type": job.get("job_type"),
+            "scheduled_at": str(job.get("scheduled_at") or ""),
+            "status": job.get("status"),
+            "payload": _parse_job_payload(job.get("payload")),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
 def _iter_outreach_jobs(payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    for key in ("scheduled_jobs", "jobs", "outreach_jobs"):
-        items = payload.get(key)
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict):
-                    yield item
-    nested = payload.get("outreach")
-    if isinstance(nested, dict):
+    seen = set()
+    nested = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+    for source in (payload, nested):
         for key in ("scheduled_jobs", "jobs", "outreach_jobs"):
-            items = nested.get(key)
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        yield item
+            items = source.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                marker = _job_dedupe_key(item)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                yield item
 
 
 def promote_high_score_extra_phase(
@@ -207,14 +223,20 @@ def promote_high_score_extra_phase(
 
     pending_match = False
     for job in _iter_outreach_jobs(payload):
-        if not _is_high_score_extra_job(job):
+        job_payload = _parse_job_payload(job.get("payload"))
+        if not _is_high_score_extra_job(job, job_payload):
             continue
         status = str(job.get("status") or "").strip().lower()
         if status not in {"completed", "processing", "pending"}:
             continue
-        high = str(
-            _parse_job_payload(job.get("payload")).get("high_score_phase") or "phase1"
-        ).strip().lower()
+        high = str(job_payload.get("high_score_phase") or "").strip().lower()
+        if not high:
+            logger.warning(
+                "OUTREACH-NORMALIZATION: high-score extra job missing high_score_phase "
+                "— not promoting stored phase %r",
+                phase,
+            )
+            continue
         if high != phase:
             continue
         if status in {"completed", "processing"}:

@@ -86,6 +86,57 @@ def test_promote_high_score_extra_from_communication_phase():
     assert promote_high_score_extra_phase(payload, "phase1") == "phase1_extra"
 
 
+def test_promote_high_score_extra_skips_missing_high_score_phase():
+    payload = {
+        "outreach_phase": "phase1",
+        "scheduled_jobs": [
+            {
+                "status": "processing",
+                "payload": {
+                    "is_high_score_extra": True,
+                    "reminder_type": "high_score_extra",
+                },
+            }
+        ],
+    }
+    assert promote_high_score_extra_phase(payload, "phase1") == "phase1"
+
+
+def test_promote_high_score_extra_phase2_from_matching_job():
+    payload = {
+        "outreach_phase": "phase1_6hr",
+        "scheduled_jobs": [
+            {
+                "status": "processing",
+                "payload": {
+                    "is_high_score_extra": 1,
+                    "high_score_phase": "phase1_6hr",
+                    "reminder_type": "high_score_extra",
+                },
+            }
+        ],
+    }
+    assert promote_high_score_extra_phase(payload, "phase1_6hr") == "phase1_6hr_extra"
+
+
+def test_promote_high_score_extra_dedupes_nested_scheduled_jobs():
+    job = {
+        "status": "pending",
+        "job_type": "reminder",
+        "payload": {
+            "is_high_score_extra": True,
+            "high_score_phase": "phase1",
+            "reminder_type": "high_score_extra",
+        },
+    }
+    payload = {
+        "outreach_phase": "phase1",
+        "scheduled_jobs": [job],
+        "outreach": {"scheduled_jobs": [job]},
+    }
+    assert promote_high_score_extra_phase(payload, "phase1") == "phase1_extra"
+
+
 def test_normalize_channel_standard_and_aliases():
     assert normalize_channel("call") == "call"
     assert normalize_channel("voice") == "call"

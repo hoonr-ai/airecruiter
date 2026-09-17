@@ -1262,6 +1262,15 @@ def test_build_merged_outreach_payload_unrecognised_audit_status():
     assert payload["outreach_status"] == "brand_new_state"
 
 
+def test_build_merged_does_not_override_equal_rank_audit_response_status():
+    """Audit JSON status wins over an equal-rank column/candidate alias."""
+    cand_data = {"engage_status": "completed"}
+    audit_response = {"outreach_status": "passed", "status": "passed"}
+    payload = lr.build_merged_outreach_payload(cand_data, audit_response, "completed", None)
+    assert payload["outreach_status"] == "passed"
+    assert payload["status"] == "passed"
+
+
 def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     """_fetch_jobs_launched_on filters on l.first_launch_at in the outer query, not a.created_at in the CTE."""
     class FakeCursor:
