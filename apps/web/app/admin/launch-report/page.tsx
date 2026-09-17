@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseOutreachInfo } from "./PhaseOutreachInfo";
 import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
@@ -648,7 +649,10 @@ export default function LaunchReportPage() {
                     colSpan={group.columns.length}
                     className="text-left px-3 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-400 border-l border-slate-200"
                   >
-                    {group.title}
+                    <span className="inline-flex items-center gap-0.5">
+                      {group.title}
+                      {group.title === "Phase" && <PhaseOutreachInfo />}
+                    </span>
                   </th>
                 ))}
               </tr>
