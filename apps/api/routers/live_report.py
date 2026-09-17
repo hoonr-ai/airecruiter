@@ -13,7 +13,8 @@ logger = logging.getLogger("live_report_router")
 
 router = APIRouter(tags=["Live Report"])
 
-EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
+def _get_external_interview_api_url() -> str:
+    return os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
 
 
 def _require_admin_or_team_lead(user: UserIdentity) -> None:
@@ -37,7 +38,7 @@ def _get_pair_headers() -> Dict[str, str]:
 async def get_live_report_launches(user: UserIdentity = Depends(get_current_user)):
     """Fetch all bulk launches (live, replayable, archived) from PairBot."""
     _require_admin_or_team_lead(user)
-    target_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/analytics/live-report/launches"
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
     headers = _get_pair_headers()
 
     try:
@@ -56,7 +57,7 @@ async def get_live_report_launches(user: UserIdentity = Depends(get_current_user
 async def get_live_report_health(user: UserIdentity = Depends(get_current_user)):
     """Fetch system health strip (DB pool, worker fleet, queue backlog)."""
     _require_admin_or_team_lead(user)
-    target_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/analytics/live-report/health"
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/health"
     headers = _get_pair_headers()
 
     try:
@@ -79,7 +80,7 @@ async def get_live_report_snapshot(
 ):
     """Fetch baseline snapshot of a specific launch."""
     _require_admin_or_team_lead(user)
-    target_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/analytics/live-report/{bulk_id}"
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/{bulk_id}"
     headers = _get_pair_headers()
     params = {"reveal": "true" if reveal else "false"}
 
@@ -105,7 +106,7 @@ async def stream_live_report(
 ):
     """Proxy the SSE delta event stream from PairBot to the client."""
     _require_admin_or_team_lead(user)
-    target_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/analytics/live-report/{bulk_id}/stream"
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/{bulk_id}/stream"
     headers = _get_pair_headers()
 
     async def event_generator():
