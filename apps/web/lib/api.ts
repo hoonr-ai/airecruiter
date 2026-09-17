@@ -338,4 +338,12 @@ export const api = {
     remove: (teamId: string) =>
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
   },
+  liveReport: {
+    getLaunches: () => req<any>(`/api/analytics/live-report/launches`),
+    getHealth: () => req<any>(`/api/analytics/live-report/health`),
+    getSnapshot: (bulkId: string, reveal = false) =>
+      req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`),
+    streamUrl: (bulkId: string) =>
+      `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
+  },
 };
