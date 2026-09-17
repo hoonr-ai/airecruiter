@@ -227,6 +227,54 @@ def _mean(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 1) if values else None
 
 
+def _status_rank(raw: Optional[str]) -> int:
+    return _STATUS_HIERARCHY.get((raw or "").strip().lower(), 0)
+
+
+# Extra-outreach phase strings used as outreach_phase values (not outreach_status).
+# A candidate at an extra phase has an outreach_status of "pending" or "in_progress"
+# while pair-bot is still working through extra outreach rounds. We upgrade any
+# pending candidate whose phase is one of these to "in_progress" so the header
+# counts reflect reality.
+_IN_PROGRESS_PHASES = {
+    "extra", "extra1", "extra2", "extra3",
+    "phase1_extra", "phase1_6hr_extra", "phase2_extra", "phase3_extra",
+}
+
+
+def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -> Optional[str]:
+    """Status for Pending / In Progress / Completed buckets.
+
+    Three promotion paths — whichever ranks highest wins:
+    1. ``interview_status`` from the live pair-bot API response
+       (``GET /api/interviews/{id}/outreach-status`` returns this field at the
+       top level alongside ``outreach``). Outreach can stay ``pending`` while
+       the interview is already ``in_progress`` (still receiving later phases).
+    2. ``outreach_phase`` — extra-outreach phase strings are ``outreach_phase``
+       values, not ``outreach_status`` values. A candidate in an extra phase
+       with a pending status is actively being worked and must count as
+       In Progress, not Pending.
+    3. Falls back to ``outreach_status`` unchanged.
+    """
+    # Path 1: interview_status from the live API response.
+    interview_status = merged.get("interview_status")
+    if _status_rank(interview_status) > _status_rank(outreach_status):
+        return interview_status
+
+    # Path 2: pending candidates in an extra outreach phase are in_progress.
+    normalized_os = (outreach_status or "").strip().lower()
+    if normalized_os in _PENDING_STATUSES:
+        phase_raw = (
+            merged.get("outreach_phase")
+            or merged.get("phase")
+            or merged.get("current_phase")
+        )
+        if (phase_raw or "").strip().lower() in _IN_PROGRESS_PHASES:
+            return "in_progress"
+
+    return outreach_status
+
+
 def _bucket_status(raw: Optional[str]) -> str:
     """Map a pair-bot outreach_status onto one of the four report buckets."""
     status = (raw or "").strip().lower()
@@ -758,12 +806,13 @@ def _summarise_outreach(
                 status_raw = "pending"
                 normalized_status = "pending"
 
-        buckets[_bucket_status(status_raw)] += 1
+        funnel_raw = _funnel_status_raw(merged, status_raw)
+        buckets[_bucket_status(funnel_raw)] += 1
 
         # Passed/Failed must match rankings (`format_engage_status`): pair-bot
         # often reports `completed` while the ranking table already shows Pass.
         display = format_engage_status(
-            normalized_status,
+            (funnel_raw or "").strip().lower(),
             score_from_payload(merged),
             hf_display_from_payload(merged),
         )
