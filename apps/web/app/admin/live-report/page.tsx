@@ -61,8 +61,31 @@ export default function LiveReportPage() {
         `#${event.interviewId} ${event.type}${event.subtype ? ` (${event.subtype})` : ""} [${event.phase || "phase"}]`,
         event.status === "failed"
       );
+
+      // Mutate snapshot candidate in real-time
+      setSnapshot((prev) => {
+        if (!prev || !prev.jobs) return prev;
+        const updatedJobs = prev.jobs.map((job) => ({
+          ...job,
+          candidates: job.candidates.map((cand) => {
+            if (cand.interview_id === event.interviewId) {
+              const updatedPhase = event.phase || cand.phase;
+              const isDone = updatedPhase === "completed" || event.type === "evaluation_completed";
+              return {
+                ...cand,
+                phase: updatedPhase,
+                outreach_status: event.status || cand.outreach_status,
+                call_outcome: isDone ? "completed" : cand.call_outcome,
+                terminal_reason: isDone ? "passed" : cand.terminal_reason,
+              };
+            }
+            return cand;
+          }),
+        }));
+        return { ...prev, jobs: updatedJobs };
+      });
     },
-    [pushFeed]
+    [pushFeed, setSnapshot]
   );
 
   // Self-healing SSE stream with auto-reconciling snapshot
