@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useReducer } from "react";
+import React, { useState, useEffect, useCallback, useReducer, useRef } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -48,6 +48,22 @@ export default function LiveReportPage() {
     ]);
   }, []);
 
+  // Self-healing SSE stream with auto-reconciling snapshot
+  const activityEventRef = useRef<((event: any) => void) | null>(null);
+
+  const {
+    snapshot,
+    setSnapshot,
+    isLoading: isSnapshotLoading,
+    isConnected,
+    error: snapshotError,
+    refreshSnapshot,
+  } = useLiveReportStream({
+    bulkId: selectedBulkId,
+    revealPii,
+    onActivityEvent: (evt) => activityEventRef.current?.(evt),
+  });
+
   // Handle real-time activity events arriving via SSE
   const handleActivityEvent = useCallback(
     (event: {
@@ -88,19 +104,7 @@ export default function LiveReportPage() {
     [pushFeed, setSnapshot]
   );
 
-  // Self-healing SSE stream with auto-reconciling snapshot
-  const {
-    snapshot,
-    setSnapshot,
-    isLoading: isSnapshotLoading,
-    isConnected,
-    error: snapshotError,
-    refreshSnapshot,
-  } = useLiveReportStream({
-    bulkId: selectedBulkId,
-    revealPii,
-    onActivityEvent: handleActivityEvent,
-  });
+  activityEventRef.current = handleActivityEvent;
 
   // Fetch launch list and health stats
   const fetchLaunchesAndHealth = useCallback(async () => {
