@@ -263,6 +263,7 @@ def _normalize_phase(
       phase1_extra           -> extra1
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
+      phase3_extra           -> extra3
 
     When shift_phases=False (raw PairBot vocabulary, tests / other callers):
       contact_check / phase1 -> phase1
@@ -272,6 +273,7 @@ def _normalize_phase(
       phase1_extra           -> extra1
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
+      phase3_extra           -> extra3
     """
     norm = normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
     if not norm:
@@ -289,7 +291,7 @@ def _normalize_phase(
             return "extra1"
         if norm == "phase1_6hr_extra":
             return "extra2"
-        if norm == "phase2_extra":
+        if norm in ("phase2_extra", "phase3_extra"):
             return "extra3"
     else:
         if norm in ("contact_check", "phase1"):
@@ -300,7 +302,7 @@ def _normalize_phase(
             return "extra1"
         if norm == "phase1_6hr_extra":
             return "extra2"
-        if norm == "phase2_extra":
+        if norm in ("phase2_extra", "phase3_extra"):
             return "extra3"
     return None
 
