@@ -85,6 +85,17 @@ _PHASE_ALIASES = {
     "extra outreach": "phase1_extra",
     "extra outreach (>80% match)": "phase1_extra",
     "high_score_extra": "phase1_extra",
+    # PairBot analytics short labels (P1 / P2 / E1 …)
+    "p1": "phase1",
+    "p2": "phase1_6hr",
+    "p3": "phase2",
+    "p4": "phase3",
+    "e1": "phase1_extra",
+    "e2": "phase1_6hr_extra",
+    "e3": "phase2_extra",
+    "extra 1": "phase1_extra",
+    "extra 2": "phase1_6hr_extra",
+    "extra 3": "phase2_extra",
 }
 
 
