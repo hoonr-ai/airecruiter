@@ -8,6 +8,7 @@ def test_pending_status_for_failed_outreach_without_score():
     assert _format_engage_status('fail', 80.0, '') == 'Fail'
     assert _format_engage_status('completed', None, 'passed') == 'Pass'
     assert _format_engage_status('completed', None, 'failed') == 'Fail'
+    assert _format_engage_status('complete', None, '') == 'Pass'
 
 def test_is_engage_done_logic():
     # Test _is_engage_done helper directly for both boolean and non-boolean jobs

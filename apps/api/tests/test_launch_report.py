@@ -418,9 +418,19 @@ def test_summarise_outreach_passed_failed_sub_buckets():
         _outreach("completed"),
     ]
     summary = lr._summarise_outreach(payloads)
-    assert summary["buckets"]["passed"] == 1
+    # `completed` with no hard-filter fail is Pass — same as rankings.
+    assert summary["buckets"]["passed"] == 2
     assert summary["buckets"]["failed"] == 1
     assert summary["buckets"]["completed"] == 3
+
+
+def test_summarise_outreach_completed_hard_filter_fail_is_failed():
+    payload = _outreach("completed")
+    payload["outreach"]["engage_hard_filter_status"] = "failed"
+    summary = lr._summarise_outreach([payload])
+    assert summary["buckets"]["completed"] == 1
+    assert summary["buckets"]["passed"] == 0
+    assert summary["buckets"]["failed"] == 1
 
 
 def test_summarise_outreach_unengaged_failed_buckets_as_pending():
@@ -641,6 +651,44 @@ def test_first_pass_at_is_none_when_no_passes():
     row = lr._build_row(job, candidates, [], {})
     assert row["passed_candidates"] == 0
     assert row["first_pass_at"] is None
+
+
+def test_first_pass_at_falls_back_to_engage_updated_at():
+    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_status": "passed",
+         "engage_updated_at": "2026-08-26T10:00:00Z"},
+    ]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["passed_candidates"] == 1
+    assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_live_completed_status_counts_as_passed_even_if_jsonb_is_stale():
+    """Rankings merge live pair-bot `completed` into Pass; launch report must too.
+
+    Stale sourced_candidates.engage_status=in_progress used to leave Passed=0
+    and First Pass Completed At blank even when time_to_first_pass was set.
+    """
+    job = {
+        **_job(1),
+        "first_launch_at": datetime.datetime(2026, 8, 26, 10, 0, tzinfo=datetime.timezone.utc),
+        "time_to_first_pass": 7.0,
+    }
+    candidates = [{
+        "candidate_id": "c1",
+        "engage_interview_id": "1",
+        "engage_status": "in_progress",
+        "engage_updated_at": "2026-08-26T10:07:00Z",
+        "created_at": datetime.datetime(2026, 8, 26, 9, 0, tzinfo=datetime.timezone.utc),
+    }]
+    audit = [{"interview_id": "1", "candidate_id": "c1"}]
+    row = lr._build_row(job, candidates, audit, {"1": _outreach("completed")})
+    assert row["completed"] == 1
+    assert row["passed_candidates"] == 1
+    assert row["failed_candidates"] == 0
+    assert row["first_pass_at"] == "2026-08-26T06:07:00-04:00"
+    assert row["time_to_first_pass_minutes"] == 7.0
 
 
 

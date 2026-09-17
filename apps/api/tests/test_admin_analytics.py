@@ -75,6 +75,14 @@ def test_compute_jobs_timeline_dedup_key_is_job_id_not_jobdiva_id():
     assert "COALESCE(jobdiva_id" not in main_query
 
 
+def test_funnel_sql_maps_completed_like_rankings():
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "routers" / "admin_analytics.py"
+    text = src.read_text()
+    assert "IN ('completed', 'complete')" in text
+    assert "AND NULLIF(TRIM(COALESCE(sc.data->>'engage_score', '')), '') IS NOT NULL THEN 'failed'" in text
+
+
 def test_compute_jobs_timeline_recruiter_emails_scoped_to_team():
     """A job shared across teams must not leak recruiters outside the
     requesting team's scope through recruiter_emails — mirrors the guard

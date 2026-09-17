@@ -39,6 +39,12 @@ from routers._helpers import (
     _parse_posted_date,
     _parse_recruiter_emails,
 )
+from services.engage_status import (
+    format_engage_status,
+    hf_display_from_payload,
+    parse_engage_score,
+    score_from_payload,
+)
 from services.outreach_normalization import normalize_channel, normalize_phase
 
 
@@ -423,6 +429,7 @@ def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str,
             data->>'first_attempted_at'           AS first_attempted_at,
             data->>'first_completed_at'           AS first_completed_at,
             data->>'engage_completed_at'          AS engage_completed_at,
+            data->>'engage_updated_at'            AS engage_updated_at,
             data->>'engage_status'                AS engage_status,
             data->>'engage_score'                 AS engage_score,
             data->>'engage_hard_filter_status'    AS engage_hard_filter_status,
@@ -604,6 +611,14 @@ def build_merged_outreach_payload(
     raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
     if raw_comp:
         cand_fallback["first_completed_at"] = raw_comp
+    if cand_data.get("engage_completed_at"):
+        cand_fallback["engage_completed_at"] = cand_data["engage_completed_at"]
+    if cand_data.get("engage_updated_at"):
+        cand_fallback["engage_updated_at"] = cand_data["engage_updated_at"]
+    if cand_data.get("engage_score") is not None:
+        cand_fallback["engage_score"] = cand_data["engage_score"]
+    if cand_data.get("engage_hard_filter_status"):
+        cand_fallback["engage_hard_filter_status"] = cand_data["engage_hard_filter_status"]
 
     # Layer 2: Local DB Audit Row Response
     audit_fallback = {}
@@ -662,6 +677,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
     first_contact_timestamps: List[datetime.datetime] = []
     first_attempted_timestamps: List[datetime.datetime] = []
     first_completed_timestamps: List[datetime.datetime] = []
+    first_pass_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
@@ -702,13 +718,24 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
 
         buckets[_bucket_status(status_raw)] += 1
 
-        # Passed/Failed are sub-buckets within "completed".
-        # _bucket_status already maps pass/fail → "completed", so we
-        # read the raw status directly to classify the sub-bucket without
-        # double-incrementing the completed counter.
-        if normalized_status in ("passed", "pass"):
+        # Passed/Failed must match rankings (`format_engage_status`): pair-bot
+        # often reports `completed` while the ranking table already shows Pass.
+        display = format_engage_status(
+            normalized_status,
+            score_from_payload(merged),
+            hf_display_from_payload(merged),
+        )
+        if display == "Pass":
             buckets["passed"] += 1
-        elif normalized_status in ("failed", "fail"):
+            passed_at = (
+                _parse_iso(merged.get("first_completed_at"))
+                or _parse_iso(merged.get("engage_completed_at"))
+                or _parse_iso(merged.get("engage_updated_at"))
+                or _parse_iso(merged.get("completed_at"))
+            )
+            if passed_at:
+                first_pass_timestamps.append(passed_at)
+        elif display == "Fail":
             buckets["failed"] += 1
 
         phase = _extract_phase(merged, shift_phases=shift_phases)
@@ -784,6 +811,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         "first_contact_at": min(first_contact_timestamps) if first_contact_timestamps else None,
         "first_attempted_at": min(first_attempted_timestamps) if first_attempted_timestamps else None,
         "first_completed_at": min(first_completed_timestamps) if first_completed_timestamps else None,
+        "first_pass_at": min(first_pass_timestamps) if first_pass_timestamps else None,
     }
 
 
@@ -809,36 +837,20 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             rejected += 1
 
         engage_status = (row.get("engage_status") or "").strip().lower()
-        engage_score_raw = row.get("engage_score")
-        engage_score = None
-        try:
-            engage_score = float(engage_score_raw) if engage_score_raw is not None else None
-        except (ValueError, TypeError):
-            pass
+        engage_score = parse_engage_score(row.get("engage_score"))
         hf_status = (row.get("engage_hard_filter_status") or "").strip().lower()
-        hf_passed = hf_status in ("", "pass", "passed", "not_hard_filter")
-
-        # Mirror _format_engage_status from candidates.py exactly:
-        # pass/passed/hired -> Pass
-        # fail/failed/rejected -> Fail only when engage_score is not None
-        # completed -> Pass or Fail based on hard-filter status
-        if engage_status in ("pass", "passed", "hired"):
+        display = format_engage_status(engage_status, engage_score, hf_status)
+        if display == "Pass":
             passed += 1
-            completed_time = _parse_iso(row.get("engage_completed_at"))
+            completed_time = (
+                _parse_iso(row.get("first_completed_at"))
+                or _parse_iso(row.get("engage_completed_at"))
+                or _parse_iso(row.get("engage_updated_at"))
+            )
             if completed_time:
                 first_pass_at.append(completed_time)
-        elif engage_status in ("fail", "failed", "rejected"):
-            if engage_score is not None:
-                failed += 1
-            # else: outreach provisioning failure, not an interview result — skip
-        elif engage_status == "completed":
-            completed_time = _parse_iso(row.get("engage_completed_at"))
-            if hf_passed:
-                passed += 1
-                if completed_time:
-                    first_pass_at.append(completed_time)
-            else:
-                failed += 1
+        elif display == "Fail":
+            failed += 1
 
         created = _parse_iso(row.get("created_at"))
         if created:
@@ -883,8 +895,10 @@ def _build_row(
     candidate_rows: List[Dict[str, Any]],
     audit_rows: List[Dict[str, Any]],
     outreach_by_interview: Dict[str, Dict[str, Any]],
+    *,
+    sourced_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    cand = _summarise_candidates(candidate_rows)
+    cand = _summarise_candidates(sourced_rows if sourced_rows is not None else candidate_rows)
 
     cand_by_interview = {
         str(c["engage_interview_id"]): c
@@ -1000,19 +1014,29 @@ def _build_row(
 
         "submitted_candidates": cand["submitted_candidates"],
         "rejected_candidates": cand["rejected_candidates"],
-        "passed_candidates": cand.get("passed_candidates", 0),
-        "failed_candidates": cand.get("failed_candidates", 0),
+        # Live merged outreach is the ranking-page source of truth when interviews
+        # exist; candidate JSONB is the fallback for jobs with no audit rows.
+        "passed_candidates": (
+            buckets["passed"] if payloads else cand.get("passed_candidates", 0)
+        ),
+        "failed_candidates": (
+            buckets["failed"] if payloads else cand.get("failed_candidates", 0)
+        ),
         # Completed candidates the recruiter has not yet actioned either way.
         "outstanding_feedback": max(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
         ),
         "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
         "first_feedback_at": _edt(cand["first_feedback_at"]),
-        "first_pass_at": _edt(cand.get("first_pass_at")),
+        "first_pass_at": _edt(outreach.get("first_pass_at") or cand.get("first_pass_at")),
         "time_to_first_pass_minutes": (
-            round(float(job["time_to_first_pass"]), 1)
-            if job.get("time_to_first_pass") is not None
-            else None
+            _minutes_between(launch_at, outreach.get("first_pass_at") or cand.get("first_pass_at"))
+            if (outreach.get("first_pass_at") or cand.get("first_pass_at"))
+            else (
+                round(float(job["time_to_first_pass"]), 1)
+                if job.get("time_to_first_pass") is not None
+                else None
+            )
         ),
 
         "call": outreach["channels"]["call"],
@@ -1229,12 +1253,14 @@ async def get_launch_report(
             for key in _keys_for(job)
             for row in candidates_by_key.get(key, [])
         }
+        all_candidate_rows = list(candidate_rows.values())
         rows.append(
             _build_row(
                 job,
-                _candidate_rows_as_of_first_launch(list(candidate_rows.values()), job),
+                all_candidate_rows,
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
+                sourced_rows=_candidate_rows_as_of_first_launch(all_candidate_rows, job),
             )
         )
 
