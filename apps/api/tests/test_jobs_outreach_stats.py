@@ -192,7 +192,7 @@ def test_get_job_outreach_stats_promotes_phase1_to_extra1_from_live_jobs(
         ]
         mock_fetch_all_outreach.return_value = {
             "int_1": {
-                "outreach": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
+                "outreach": {"outreach_status": "in_progress", "outreach_phase": "phase1_extra"},
                 "scheduled_jobs": [
                     {
                         "status": "processing",
@@ -259,7 +259,7 @@ def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
         ]
         mock_fetch_all_outreach.return_value = {
             "int_1": {
-                "outreach": {"outreach_status": "pending", "outreach_phase": "phase2"},
+                "outreach": {"outreach_status": "pending", "outreach_phase": "phase2_extra"},
                 "scheduled_jobs": [],
                 "communications": [
                     {"phase": "phase2_extra", "channel": "email"},
@@ -283,8 +283,7 @@ def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
             {
                 "outreach": {
                     "outreach_status": "pending",
-                    "outreach_phase": "phase2",
-                    "stored_outreach_phase": "phase2",
+                    "outreach_phase": "phase2_extra",
                 },
                 "scheduled_jobs": [
                     {

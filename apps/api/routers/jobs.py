@@ -1790,10 +1790,10 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         if merged:
             merged_payloads.append(merged)
 
-    # Rankings matches Pair Bot's current phase: pending extra is "E1 Opened"
-    # on Phase 1, not Extra 1. Launch report still counts opened extras.
+    # Trust Pair Bot analytics current_phase (outreach-status.outreach_phase).
+    # Do not re-promote Extra from pending jobs/comms — that is how P1 became Extra 1.
     return _summarise_outreach(
-        merged_payloads, shift_phases=True, include_pending_extra=False
+        merged_payloads, shift_phases=True, promote_extra=False
     )
 
 @router.get("/jobs/{job_id}/monitored-data")

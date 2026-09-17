@@ -311,17 +311,21 @@ def _extract_phase(
     outreach: Dict[str, Any],
     *,
     shift_phases: bool = True,
-    include_pending_extra: bool = True,
+    promote_extra: bool = True,
 ) -> Optional[str]:
-    """Pick phase from known keys, then fall back to status-shaped phase values."""
+    """Pick phase from known keys, then fall back to status-shaped phase values.
+
+    Rankings sets promote_extra=False so the header uses Pair Bot analytics'
+    canonical outreach_phase (P1 / Extra 1 / P2 / …) without re-promoting
+    pending Extra jobs that analytics still counts as Phase 1.
+    """
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
-    raw = promote_high_score_extra_phase(
-        outreach, raw, include_pending_extra=include_pending_extra
-    )
+    if promote_extra:
+        raw = promote_high_score_extra_phase(outreach, raw)
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -681,7 +685,7 @@ def _summarise_outreach(
     payloads: List[Dict[str, Any]],
     *,
     shift_phases: bool = False,
-    include_pending_extra: bool = True,
+    promote_extra: bool = True,
 ) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
@@ -772,7 +776,7 @@ def _summarise_outreach(
         phase = _extract_phase(
             merged,
             shift_phases=shift_phases,
-            include_pending_extra=include_pending_extra,
+            promote_extra=promote_extra,
         )
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
