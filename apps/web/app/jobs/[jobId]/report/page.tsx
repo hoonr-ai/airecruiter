@@ -194,6 +194,10 @@ export default function CandidateEvaluationReportPage() {
         });
 
         if (response.ok) {
+          const resJson = await response.json().catch(() => ({}));
+          if (resJson?.jobdiva_sync === 'error') {
+            console.warn('Submission saved locally, but JobDiva sync had an error:', resJson?.jobdiva_message);
+          }
           // Optimistically update local state
           setData(prev => {
             if (!prev) return prev;
@@ -439,10 +443,24 @@ export default function CandidateEvaluationReportPage() {
                 </button>
                 <button 
                   onClick={() => setIntegrationModalOpen('submit')}
-                  className="flex items-center gap-2 px-4 py-2 bg-[#10b981] rounded-lg text-sm font-semibold text-white hover:bg-[#059669] transition-all shadow-md shadow-emerald-100"
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-all shadow-md",
+                    isInternalSubmission
+                      ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-200"
+                      : "bg-[#10b981] hover:bg-[#059669] shadow-emerald-100"
+                  )}
                 >
-                  <Send className="w-4 h-4" />
-                  Submit
+                  {isInternalSubmission ? (
+                    <>
+                      <ExternalLink className="w-4 h-4" />
+                      Externally Submit
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4" />
+                      Submit
+                    </>
+                  )}
                 </button>
                 <button 
                   onClick={() => setIntegrationModalOpen('reject')}

@@ -3794,6 +3794,9 @@ async def get_candidate_evaluation_report(
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. sourced_candidates — prefer the row tied to this job
+                cand_id_str = str(candidate_id).strip()
+                pk_val = int(cand_id_str) if (cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+
                 if job_id:
                     cur.execute(
                         """
@@ -3802,25 +3805,33 @@ async def get_candidate_evaluation_report(
                         JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id
                          OR mj.job_id      = sc.jobdiva_id
-                        WHERE sc.candidate_id = %s
+                        WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
                           AND (mj.job_id = %s OR mj.jobdiva_id = %s)
                         ORDER BY sc.updated_at DESC
                         LIMIT 1
                         """,
-                        (candidate_id, job_id, job_id),
+                        (cand_id_str, pk_val, pk_val, job_id, job_id),
                     )
                     cand_row = cur.fetchone()
                     if not cand_row:
                         # Fallback: any row for this candidate
                         cur.execute(
-                            "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
-                            (candidate_id,),
+                            """
+                            SELECT * FROM sourced_candidates
+                            WHERE candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s)
+                            ORDER BY updated_at DESC LIMIT 1
+                            """,
+                            (cand_id_str, pk_val, pk_val),
                         )
                         cand_row = cur.fetchone()
                 else:
                     cur.execute(
-                        "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
-                        (candidate_id,),
+                        """
+                        SELECT * FROM sourced_candidates
+                        WHERE candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s)
+                        ORDER BY updated_at DESC LIMIT 1
+                        """,
+                        (cand_id_str, pk_val, pk_val),
                     )
                     cand_row = cur.fetchone()
 
@@ -4321,10 +4332,14 @@ async def save_candidate_feedback(
         action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
     
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
-    #    The frontend sends `candidate.id` (the sourced_candidates integer PK) in the URL.
+    # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
+    #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
-    #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.jobdiva_id).
-    jd_candidate_id = candidate_id   # fallback: use whatever was passed
+    #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.job_id).
+    cand_id_str = str(candidate_id).strip()
+    pk_val = int(cand_id_str) if (cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+
+    jd_candidate_id = cand_id_str   # fallback: use whatever was passed
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
@@ -4336,74 +4351,73 @@ async def save_candidate_feedback(
         _conn = get_db_connection()
         try:
             with _conn.cursor() as _cur:
-                # Try treating candidate_id as the integer PK (candidate.id from the frontend)
-                try:
-                    pk_int = int(candidate_id)
+                # Resolve candidate row matching either candidate_id or integer PK id, scoped to job
+                _cur.execute(
+                    """
+                    SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                           sc.name, mj.title, mj.customer_name, mj.jobdiva_id
+                    FROM sourced_candidates sc
+                    LEFT JOIN monitored_jobs mj
+                      ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                    WHERE (
+                        sc.candidate_id = %s
+                        OR (%s::bigint IS NOT NULL AND sc.id = %s)
+                    )
+                    AND (
+                        sc.jobdiva_id = %s
+                        OR mj.job_id = %s
+                        OR mj.jobdiva_id = %s
+                        OR sc.jobdiva_id IN (
+                            SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                        )
+                    )
+                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                )
+                row = _cur.fetchone()
+
+                # Fallback: if not matched with job scope, try candidate ID alone
+                if not row:
                     _cur.execute(
                         """
-                           SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                               sc.name, mj.title, mj.customer_name
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                               sc.name, mj.title, mj.customer_name, mj.jobdiva_id
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
-                        WHERE sc.id = %s
+                        WHERE (
+                            sc.candidate_id = %s
+                            OR (%s::bigint IS NOT NULL AND sc.id = %s)
+                        )
                         ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
                         LIMIT 1
                         """,
-                        (pk_int,)
+                        (cand_id_str, pk_val, pk_val)
                     )
                     row = _cur.fetchone()
-                    if row:
-                        sc_row_id      = row[0]
-                        sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
-                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
-                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
-                        candidate_name = str(row[5] or candidate_name)
-                        job_title      = str(row[6] or job_title)
-                        customer_name  = str(row[7] or customer_name)
-                        
-                        # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
-                        data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
-                        if data_blob.get("jobdiva_candidate_id"):
-                            jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
-                        else:
-                            jd_candidate_id = sc_candidate_id
-                            
-                except (ValueError, TypeError):
-                    # candidate_id is not an integer PK – try matching as a candidate_id string
-                    _cur.execute(
-                        """
-                           SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                               sc.name, mj.title, mj.customer_name
-                        FROM sourced_candidates sc
-                        LEFT JOIN monitored_jobs mj
-                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
-                        WHERE sc.candidate_id = %s
-                          AND (sc.jobdiva_id = %s
-                               OR sc.jobdiva_id IN (
-                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
-                               ))
-                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
-                        LIMIT 1
-                        """,
-                        (candidate_id, job_id_or_ref, job_id_or_ref)
-                    )
-                    row = _cur.fetchone()
-                    if row:
-                        sc_row_id      = row[0]
-                        sc_candidate_id = str(row[1])
-                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
-                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
-                        candidate_name = str(row[5] or candidate_name)
-                        job_title      = str(row[6] or job_title)
-                        customer_name  = str(row[7] or customer_name)
-                        
-                        # Use JobDiva candidate ID if available in data blob
-                        data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
-                        if data_blob.get("jobdiva_candidate_id"):
-                            jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
-                        else:
-                            jd_candidate_id = sc_candidate_id
+
+                if row:
+                    sc_row_id       = row[0]
+                    sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
+                    mj_job_id       = str(row[4]) if row[4] else ""
+                    sc_jobdiva_ref  = str(row[2]) if row[2] else ""
+
+                    # For JobDiva API note creation, numeric JobDiva ID (mj.job_id) is preferred
+                    jd_job_ref      = mj_job_id or sc_jobdiva_ref or job_id_or_ref
+                    # For web deep-links, prefer jobdiva_id or job_id
+                    app_job_ref     = mj_job_id or sc_jobdiva_ref or job_id_or_ref
+                    candidate_name  = str(row[5] or candidate_name)
+                    job_title       = str(row[6] or job_title)
+                    customer_name   = str(row[7] or customer_name)
+
+                    # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
+                    data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
+                    if data_blob.get("jobdiva_candidate_id"):
+                        jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
+                    else:
+                        jd_candidate_id = sc_candidate_id
         finally:
             _conn.close()
     except Exception as e:
@@ -4444,12 +4458,12 @@ async def save_candidate_feedback(
                 _cur2.execute(
                     """UPDATE sourced_candidates
                           SET data = data || %s::jsonb
-                        WHERE candidate_id = %s
+                        WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
                           AND (jobdiva_id = %s
                                OR jobdiva_id IN (
-                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                                ))""",
-                    (feedback_payload, jd_candidate_id, job_id_or_ref, job_id_or_ref)
+                    (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
                 )
             _conn2.commit()
         _conn2.close()
@@ -4499,12 +4513,12 @@ async def save_candidate_feedback(
                         _cur_sync.execute(
                             """UPDATE sourced_candidates
                                   SET data = data || %s::jsonb
-                                WHERE candidate_id = %s
+                                WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
                                   AND (jobdiva_id = %s
                                        OR jobdiva_id IN (
-                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                                        ))""",
-                            (sync_payload, jd_candidate_id, job_id_or_ref, job_id_or_ref)
+                            (sync_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
                         )
                     _conn_sync.commit()
                 _conn_sync.close()
@@ -4562,6 +4576,7 @@ async def save_candidate_feedback(
     return {
         "status": "success",
         "jobdiva_sync": jobdiva_result.get("status"),
+        "jobdiva_message": jobdiva_result.get("message"),
         "action_string": action_string,
         "submission_type": submission_type if request.feedback_type == "Submit" else None,
         "manager_email_sent": manager_email_sent,
