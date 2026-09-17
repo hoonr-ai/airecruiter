@@ -1732,6 +1732,9 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
             launched_rows = cur.fetchall()
 
+            # Engage-touched or JSONB Pass/Fail only. Never-contacted sourced
+            # rows are not needed for outreach-stats; idx_sourced_candidates_jobdiva_id
+            # already bounds this to the job.
             cur.execute("""
                 SELECT DISTINCT ON (candidate_id)
                     candidate_id,
@@ -1745,6 +1748,11 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
                     data->>'engage_updated_at'
                 FROM sourced_candidates
                 WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                  AND (
+                    COALESCE(NULLIF(data->>'engage_interview_id', ''), '') <> ''
+                    OR COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
+                    OR COALESCE(NULLIF(data->>'engage_hard_filter_status', ''), '') <> ''
+                  )
                 ORDER BY candidate_id, id DESC
             """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
             sourced_rows = cur.fetchall()

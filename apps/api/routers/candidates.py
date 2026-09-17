@@ -1305,12 +1305,13 @@ async def get_job_candidates(
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) AS total_candidates,
                         (
-                            -- Same grain as launch report / rankings outreach-stats:
-                            -- distinct launched interviews, not sourced rows with a status.
-                            SELECT COUNT(DISTINCT NULLIF(ea.interview_id, ''))
+                            -- UI "Candidates Launched" is candidate grain (next to
+                            -- total_candidates). Outreach buckets stay interview grain.
+                            SELECT COUNT(DISTINCT ea.candidate_id)
                             FROM engage_interview_audit ea
                             WHERE (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
                               AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                              AND COALESCE(NULLIF(ea.candidate_id, ''), '') <> ''
                         ) AS launched_count,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE sc.data->>'_stage' = 'dropped' 
