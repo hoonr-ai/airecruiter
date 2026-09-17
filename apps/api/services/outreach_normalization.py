@@ -227,9 +227,13 @@ def promote_high_score_extra_phase(
 ) -> Optional[str]:
     """Promote to Extra 1/2/3 from high-score extra jobs and extra comms.
 
-    PairBot's current phase uses completed/processing extra jobs. A still-pending
-    extra is Phase 1 + "E1 Opened", not Extra 1. Rankings passes
-    include_pending_extra=False. Launch report keeps the default.
+    Pair Bot analytics only advances Extra from completed/processing extra jobs.
+    A still-pending extra stays Phase 1. Rankings calls this with
+    include_pending_extra=False; launch report keeps the default (True).
+
+    Extra tokens are chosen by rank (_phase_rank): a later Extra (or P2+)
+    never loses to an older Extra 1 job. Already-stored extra tokens win
+    immediately.
     """
     phase = (raw_phase or "").strip().lower()
     if not phase:
@@ -274,6 +278,8 @@ def promote_high_score_extra_phase(
                         _consider(aliased)
 
     pending_extra: Optional[str] = None
+    # Completed/processing extra jobs compete by rank so Extra 1 cannot
+    # overwrite Extra 2/3. Pending extra is opt-in (launch report only).
     for job in _iter_outreach_jobs(payload):
         job_payload = _parse_job_payload(job.get("payload"))
         if not _is_high_score_extra_job(job, job_payload):

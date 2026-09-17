@@ -312,12 +312,13 @@ def _extract_phase(
     *,
     shift_phases: bool = True,
     promote_extra: bool = True,
+    include_pending_extra: bool = True,
 ) -> Optional[str]:
     """Pick phase from known keys, then fall back to status-shaped phase values.
 
-    Rankings sets promote_extra=False so the header uses Pair Bot analytics'
-    canonical outreach_phase (P1 / Extra 1 / P2 / …) without re-promoting
-    pending Extra jobs that analytics still counts as Phase 1.
+    Rankings keeps promotion on but sets include_pending_extra=False so a
+    queued Extra job cannot bump P1→Extra 1. Completed/processing Extra jobs
+    and confirmed Extra comms still promote when Pair Bot's raw column lags.
     """
     raw = (
         outreach.get("outreach_phase")
@@ -325,7 +326,9 @@ def _extract_phase(
         or outreach.get("current_phase")
     )
     if promote_extra:
-        raw = promote_high_score_extra_phase(outreach, raw)
+        raw = promote_high_score_extra_phase(
+            outreach, raw, include_pending_extra=include_pending_extra
+        )
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -686,6 +689,7 @@ def _summarise_outreach(
     *,
     shift_phases: bool = False,
     promote_extra: bool = True,
+    include_pending_extra: bool = True,
 ) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
@@ -777,6 +781,7 @@ def _summarise_outreach(
             merged,
             shift_phases=shift_phases,
             promote_extra=promote_extra,
+            include_pending_extra=include_pending_extra,
         )
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
