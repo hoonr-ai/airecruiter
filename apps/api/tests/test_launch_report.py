@@ -507,7 +507,7 @@ def test_funnel_status_raw_returns_outreach_status_when_no_interview_status():
 
 
 def test_funnel_status_raw_interview_status_wins_when_higher_rank():
-    """interview_status=in_progress beats outreach_status=pending (path 1)."""
+    """interview_status=in_progress beats outreach_status=pending."""
     merged = {"outreach_status": "pending", "interview_status": "in_progress"}
     assert lr._funnel_status_raw(merged, "pending") == "in_progress"
 
@@ -523,54 +523,17 @@ def test_funnel_status_raw_interview_status_missing_falls_back():
     assert lr._funnel_status_raw(merged, "pending") == "pending"
 
 
-def test_funnel_status_raw_extra_phase_upgrades_pending_to_in_progress():
-    """Path 2: pending outreach_status + extra outreach_phase => in_progress (the bug fix)."""
+def test_funnel_status_raw_pending_with_extra_phase_stays_pending():
+    """pending outreach_status in an extra phase must NOT be promoted to in_progress.
+    A candidate at phase1_extra with outreach_status=pending means the extra outreach
+    job is queued but not yet sent — they have not been contacted and are still Pending."""
     for extra_phase in ("phase1_extra", "phase1_6hr_extra", "phase2_extra", "phase3_extra",
                         "extra", "extra1", "extra2", "extra3"):
         merged = {"outreach_phase": extra_phase}
         result = lr._funnel_status_raw(merged, "pending")
-        assert result == "in_progress", f"expected in_progress for phase {extra_phase!r}, got {result!r}"
-
-
-def test_funnel_status_raw_extra_phase_does_not_downgrade_completed():
-    """An already-completed candidate must not be downgraded by an extra phase."""
-    merged = {"outreach_phase": "phase1_extra"}
-    assert lr._funnel_status_raw(merged, "completed") == "completed"
-
-
-def test_funnel_status_raw_extra_phase_does_not_downgrade_in_progress():
-    """Already-in_progress stays in_progress (no change needed, still correct)."""
-    merged = {"outreach_phase": "phase1_extra"}
-    assert lr._funnel_status_raw(merged, "in_progress") == "in_progress"
-
-
-def test_summarise_outreach_pending_with_extra_phase_counts_as_in_progress():
-    """End-to-end: a candidate with pending outreach_status but an extra outreach_phase
-    must appear in the In Progress bucket, not Pending. This is the root bug from PR #669."""
-    payload = {
-        "outreach": {
-            "outreach_status": "pending",
-            "outreach_phase": "phase1_extra",
-        },
-        "communications": [],
-    }
-    summary = lr._summarise_outreach([payload], shift_phases=True)
-    assert summary["buckets"]["in_progress"] == 1, "Extra-phase pending candidate should be In Progress"
-    assert summary["buckets"]["pending"] == 0
-
-
-def test_summarise_outreach_pending_with_phase1_6hr_extra_counts_as_in_progress():
-    payload = {
-        "outreach": {
-            "outreach_status": "pending",
-            "outreach_phase": "phase1_6hr_extra",
-        },
-        "communications": [],
-    }
-    summary = lr._summarise_outreach([payload], shift_phases=True)
-    assert summary["buckets"]["in_progress"] == 1
-    assert summary["buckets"]["pending"] == 0
-    assert summary["phases"]["extra2"] == 1
+        assert result == "pending", (
+            f"pending+{extra_phase!r} should stay pending (not promoted to in_progress), got {result!r}"
+        )
 
 
 
