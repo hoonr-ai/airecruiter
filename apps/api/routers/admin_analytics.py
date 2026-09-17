@@ -428,7 +428,11 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                 SELECT
                     CASE
                         WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('pass', 'passed', 'qualified', 'shortlisted', 'hired', 'selected') THEN 'passed'
-                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('fail', 'failed', 'rejected', 'disqualified', 'declined') THEN 'failed'
+                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('fail', 'failed', 'rejected', 'disqualified', 'declined')
+                             AND NULLIF(TRIM(COALESCE(sc.data->>'engage_score', '')), '') IS NOT NULL THEN 'failed'
+                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('completed', 'complete')
+                             AND LOWER(COALESCE(sc.data->>'engage_hard_filter_status', '')) IN ('', 'pass', 'passed', 'not_hard_filter') THEN 'passed'
+                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('completed', 'complete') THEN 'failed'
                         WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('in_progress', 'in progress', 'screening', 'interview_completed', 'interview completed', 'contacted') THEN 'in_progress'
                         WHEN COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
                              OR EXISTS (
@@ -438,7 +442,8 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                              ) THEN 'launched'
                         WHEN LOWER(COALESCE(sc.status, '')) IN ('launched', 'submitted') THEN 'launched'
                         WHEN LOWER(COALESCE(sc.status, '')) IN ('pass', 'passed', 'qualified', 'shortlisted') THEN 'passed'
-                        WHEN LOWER(COALESCE(sc.status, '')) IN ('fail', 'failed', 'rejected') THEN 'failed'
+                        WHEN LOWER(COALESCE(sc.status, '')) IN ('fail', 'failed', 'rejected')
+                             AND NULLIF(TRIM(COALESCE(sc.data->>'engage_score', '')), '') IS NOT NULL THEN 'failed'
                         ELSE COALESCE(NULLIF(TRIM(sc.status), ''), 'pending')
                     END AS effective_status,
                     COUNT(*)

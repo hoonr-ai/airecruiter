@@ -1694,7 +1694,12 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
                     COALESCE(NULLIF(ea.status, ''), sc.data->>'engage_status') AS status,
                     ea.response,
                     sc.data->>'engage_status' AS sc_status,
-                    sc.data->>'outreach_phase' AS sc_phase
+                    sc.data->>'outreach_phase' AS sc_phase,
+                    sc.data->>'engage_score' AS sc_score,
+                    sc.data->>'engage_hard_filter_status' AS sc_hf,
+                    sc.data->>'engage_completed_at' AS sc_completed,
+                    sc.data->>'first_completed_at' AS sc_first_completed,
+                    sc.data->>'engage_updated_at' AS sc_updated
                 FROM (
                     SELECT DISTINCT ON (candidate_id)
                         candidate_id, interview_id, status, response
@@ -1740,12 +1745,27 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         status_val = row[1]
         raw_resp = row[2]
         sc_phase = row[4]
+        sc_score = row[5]
+        sc_hf = row[6]
+        sc_completed = row[7]
+        sc_first_completed = row[8]
+        sc_updated = row[9]
 
         cand_fallback = {}
         if status_val:
             cand_fallback["outreach_status"] = status_val
         if sc_phase:
             cand_fallback["outreach_phase"] = sc_phase
+        if sc_score is not None:
+            cand_fallback["engage_score"] = sc_score
+        if sc_hf:
+            cand_fallback["engage_hard_filter_status"] = sc_hf
+        if sc_completed:
+            cand_fallback["engage_completed_at"] = sc_completed
+        if sc_first_completed:
+            cand_fallback["first_completed_at"] = sc_first_completed
+        if sc_updated:
+            cand_fallback["engage_updated_at"] = sc_updated
 
         audit_fallback = {}
         if isinstance(raw_resp, dict):
