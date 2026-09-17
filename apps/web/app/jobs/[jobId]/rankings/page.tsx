@@ -277,6 +277,11 @@ interface OutreachStats {
     phase1: number;
     phase2: number;
     phase3: number;
+    phase4?: number;
+    extra?: number;
+    extra1?: number;
+    extra2?: number;
+    extra3?: number;
   };
 }
 
@@ -1935,7 +1940,7 @@ export default function CandidateRankingsPage() {
                 Couldn&apos;t load live outreach stats. Showing last known counts may be unavailable — try refreshing.
               </div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
                 <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
                   {isInitialLoading || !statsLoaded ? (
                     <StatsGroupSkeleton count={3} />
@@ -1974,9 +1979,9 @@ export default function CandidateRankingsPage() {
                   )}
                 </div>
 
-                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
                   {isInitialLoading || !statsLoaded ? (
-                    <StatsGroupSkeleton count={3} />
+                    <StatsGroupSkeleton count={4} />
                   ) : (
                     <>
                       <div className="flex justify-between items-center">
@@ -1990,6 +1995,31 @@ export default function CandidateRankingsPage() {
                       <div className="flex justify-between items-center">
                         <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 3:</span>
                         <strong className="text-indigo-600">{outreachStats!.phases?.phase3 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 4:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase4 ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={3} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-amber-300"></div>Extra 1:</span>
+                        <strong className="text-amber-700">{outreachStats!.phases?.extra1 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-amber-300"></div>Extra 2:</span>
+                        <strong className="text-amber-700">{outreachStats!.phases?.extra2 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-amber-300"></div>Extra 3:</span>
+                        <strong className="text-amber-700">{outreachStats!.phases?.extra3 ?? 0}</strong>
                       </div>
                     </>
                   )}

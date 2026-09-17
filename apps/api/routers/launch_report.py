@@ -45,7 +45,11 @@ from services.engage_status import (
     parse_engage_score,
     score_from_payload,
 )
-from services.outreach_normalization import normalize_channel, normalize_phase
+from services.outreach_normalization import (
+    normalize_channel,
+    normalize_phase,
+    promote_high_score_extra_phase,
+)
 
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
@@ -251,8 +255,7 @@ def _normalize_phase(
 ) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3/phase4/extra.
 
-    When shift_phases=True (Launch Report mode), PairBot retry phases are shifted
-    into Launch Report column indices:
+    When shift_phases=True (Launch Report and rankings outreach-stats):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase2
       phase2                 -> phase3
@@ -260,8 +263,9 @@ def _normalize_phase(
       phase1_extra           -> extra1
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
+      phase3_extra           -> extra3
 
-    When shift_phases=False (standard mode for routers.jobs::get_job_outreach_stats):
+    When shift_phases=False (raw PairBot vocabulary, tests / other callers):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase1_6hr
       phase2                 -> phase2
@@ -269,6 +273,7 @@ def _normalize_phase(
       phase1_extra           -> extra1
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
+      phase3_extra           -> extra3
     """
     norm = normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
     if not norm:
@@ -286,7 +291,7 @@ def _normalize_phase(
             return "extra1"
         if norm == "phase1_6hr_extra":
             return "extra2"
-        if norm == "phase2_extra":
+        if norm in ("phase2_extra", "phase3_extra"):
             return "extra3"
     else:
         if norm in ("contact_check", "phase1"):
@@ -297,18 +302,33 @@ def _normalize_phase(
             return "extra1"
         if norm == "phase1_6hr_extra":
             return "extra2"
-        if norm == "phase2_extra":
+        if norm in ("phase2_extra", "phase3_extra"):
             return "extra3"
     return None
 
 
-def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Optional[str]:
-    """Pick phase from known keys, then fall back to status-shaped phase values."""
+def _extract_phase(
+    outreach: Dict[str, Any],
+    *,
+    shift_phases: bool = True,
+    promote_extra: bool = True,
+    include_pending_extra: bool = True,
+) -> Optional[str]:
+    """Pick phase from known keys, then fall back to status-shaped phase values.
+
+    Rankings keeps promotion on but sets include_pending_extra=False so a
+    queued Extra job cannot bump P1→Extra 1. Completed/processing Extra jobs
+    and confirmed Extra comms still promote when Pair Bot's raw column lags.
+    """
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
+    if promote_extra:
+        raw = promote_high_score_extra_phase(
+            outreach, raw, include_pending_extra=include_pending_extra
+        )
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -641,13 +661,17 @@ def build_merged_outreach_payload(
     if audit_status:
         st_hier = str(audit_status).strip().lower()
         curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
-        if st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
-            if _STATUS_HIERARCHY[st_hier] >= _STATUS_HIERARCHY[curr_st]:
-                audit_fallback["outreach_status"] = audit_status
-                audit_fallback["status"] = audit_status
-        else:
+        # Backfill missing keys only; never replace an already-recorded audit
+        # response status at equal rank (passed vs completed, fail vs failed).
+        if not curr_st:
             audit_fallback["outreach_status"] = audit_status
             audit_fallback["status"] = audit_status
+        elif st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
+            if _STATUS_HIERARCHY[st_hier] > _STATUS_HIERARCHY[curr_st]:
+                audit_fallback["outreach_status"] = audit_status
+                audit_fallback["status"] = audit_status
+        # Unrecognised overlay must not clobber a status the audit response
+        # already stored; missing-key backfill above covers the empty case.
 
     # Layer 3: Live PairBot HTTP API Response
     # Unwrap nested `outreach` key from live API payload if present
@@ -660,7 +684,13 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
+def _summarise_outreach(
+    payloads: List[Dict[str, Any]],
+    *,
+    shift_phases: bool = False,
+    promote_extra: bool = True,
+    include_pending_extra: bool = True,
+) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -747,7 +777,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         elif display == "Fail":
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged, shift_phases=shift_phases)
+        phase = _extract_phase(
+            merged,
+            shift_phases=shift_phases,
+            promote_extra=promote_extra,
+            include_pending_extra=include_pending_extra,
+        )
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
