@@ -471,6 +471,27 @@ def test_phase_distribution_does_not_promote_contact_check_status_to_phase1_when
     assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0, "phase4": 0, "extra": 0, "extra1": 0, "extra2": 0, "extra3": 0}
 
 
+def test_summarise_outreach_promotes_phase1_to_extra1_from_processing_job():
+    payload = {
+        "outreach": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
+        "scheduled_jobs": [
+            {
+                "status": "processing",
+                "payload": {
+                    "is_high_score_extra": True,
+                    "high_score_phase": "phase1",
+                    "reminder_type": "high_score_extra",
+                },
+            }
+        ],
+        "communications": [],
+    }
+    phases = lr._summarise_outreach([payload], shift_phases=True)["phases"]
+    assert phases["extra1"] == 1
+    assert phases["phase1"] == 0
+    assert phases["extra"] == 1
+
+
 def test_outstanding_feedback_never_goes_negative():
     """More feedback than completions (e.g. a candidate actioned before the
     webhook landed) must clamp at zero, not render as a negative backlog.

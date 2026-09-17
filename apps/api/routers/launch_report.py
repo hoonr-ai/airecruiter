@@ -45,7 +45,11 @@ from services.engage_status import (
     parse_engage_score,
     score_from_payload,
 )
-from services.outreach_normalization import normalize_channel, normalize_phase
+from services.outreach_normalization import (
+    normalize_channel,
+    normalize_phase,
+    promote_high_score_extra_phase,
+)
 
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
@@ -308,6 +312,7 @@ def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Op
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
+    raw = promote_high_score_extra_phase(outreach, raw)
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase

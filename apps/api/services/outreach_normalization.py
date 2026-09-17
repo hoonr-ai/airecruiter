@@ -11,8 +11,9 @@ map PairBot status, phase, and channel variants onto canonical values:
 PairBot persists the canonical `phase1` / `phase1_6hr` / `phase*_extra` tokens,
 not the table shorthand P1/E1. Those shorthand strings are UI labels only.
 """
+import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -126,3 +127,99 @@ def normalize_channel(raw: Optional[str]) -> Optional[str]:
         return mapped
     logger.warning(f"OUTREACH-NORMALIZATION: unrecognised communication channel/source {value!r} — not counted")
     return None
+
+
+def _parse_job_payload(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _truthy_flag(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return False
+
+
+def _is_high_score_extra_job(job: Dict[str, Any]) -> bool:
+    payload = _parse_job_payload(job.get("payload"))
+    if _truthy_flag(payload.get("is_high_score_extra")):
+        return True
+    reminder = str(payload.get("reminder_type") or job.get("reminder_type") or "").strip().lower()
+    return reminder == "high_score_extra"
+
+
+def _iter_outreach_jobs(payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    for key in ("scheduled_jobs", "jobs", "outreach_jobs"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    yield item
+    nested = payload.get("outreach")
+    if isinstance(nested, dict):
+        for key in ("scheduled_jobs", "jobs", "outreach_jobs"):
+            items = nested.get(key)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        yield item
+
+
+def promote_high_score_extra_phase(
+    payload: Optional[Dict[str, Any]],
+    raw_phase: Optional[str],
+) -> Optional[str]:
+    """Append `_extra` when PairBot analytics would show Extra 1/2/3.
+
+    PairBot's interview list uses get_canonical_outreach_phase_sql: stored
+    `outreach_phase` can stay `phase1` while a processing/completed high-score
+    extra job is active. The outreach-status API returns that raw column plus
+    scheduled_jobs — without this promotion, rankings/launch report count P1
+    for E1.
+    """
+    phase = (raw_phase or "").strip().lower()
+    if not phase:
+        return raw_phase
+    if "extra" in phase or phase in {"pass", "fail", "completed", "passed", "failed"}:
+        return phase
+    if not isinstance(payload, dict):
+        return phase
+
+    extra_token = f"{phase}_extra"
+    nested = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+    for source in (payload, nested):
+        for bucket_key in ("communications", "events"):
+            for item in source.get(bucket_key) or []:
+                if not isinstance(item, dict):
+                    continue
+                item_phase = str(item.get("phase") or "").strip().lower()
+                if item_phase == extra_token:
+                    return extra_token
+
+    pending_match = False
+    for job in _iter_outreach_jobs(payload):
+        if not _is_high_score_extra_job(job):
+            continue
+        status = str(job.get("status") or "").strip().lower()
+        if status not in {"completed", "processing", "pending"}:
+            continue
+        high = str(
+            _parse_job_payload(job.get("payload")).get("high_score_phase") or "phase1"
+        ).strip().lower()
+        if high != phase:
+            continue
+        if status in {"completed", "processing"}:
+            return extra_token
+        pending_match = True
+    # outreach-status omits completed jobs; a still-queued extra retry is the
+    # only remaining signal that PairBot already moved this candidate to Extra.
+    return extra_token if pending_match else phase
