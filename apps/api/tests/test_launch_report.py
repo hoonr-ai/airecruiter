@@ -492,6 +492,22 @@ def test_summarise_outreach_promotes_phase1_to_extra1_from_processing_job():
     assert phases["extra"] == 1
 
 
+def test_summarise_outreach_promotes_phase2_to_extra3_from_communications():
+    """PairBot Extra Outreach Phase 3 with stored phase2 and completed Extra sends."""
+    payload = {
+        "outreach": {"outreach_status": "pending", "outreach_phase": "phase2"},
+        "scheduled_jobs": [],
+        "communications": [
+            {"phase": "phase2_extra", "channel": "email"},
+            {"phase": "phase2_extra", "channel": "sms"},
+        ],
+    }
+    phases = lr._summarise_outreach([payload], shift_phases=True)["phases"]
+    assert phases["extra3"] == 1
+    assert phases["phase3"] == 0
+    assert phases["extra"] == 1
+
+
 def test_outstanding_feedback_never_goes_negative():
     """More feedback than completions (e.g. a candidate actioned before the
     webhook landed) must clamp at zero, not render as a negative backlog.
