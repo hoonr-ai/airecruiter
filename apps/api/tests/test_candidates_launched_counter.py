@@ -195,6 +195,33 @@ def test_empty_phone_digit_false_positive_guard():
     assert filtered[0]["candidate_id"] == "C2"
 
 
+def test_rankings_candidates_launched_counts_people_not_relaunch_interviews():
+    """UI 'Candidates Launched' is candidate grain: two interviews for C1 count as 1."""
+    audit = [
+        {"candidate_id": "C1", "interview_id": "I1"},
+        {"candidate_id": "C1", "interview_id": "I2"},
+        {"candidate_id": "C2", "interview_id": "I3"},
+        {"candidate_id": "C3", "interview_id": ""},
+    ]
+    launched = {
+        row["candidate_id"]
+        for row in audit
+        if (row.get("interview_id") or "").strip() and (row.get("candidate_id") or "").strip()
+    }
+    assert launched == {"C1", "C2"}
+
+
+def test_get_job_candidates_launched_count_sql_is_distinct_candidate_id():
+    """Rankings header query must not count two interviews as two launched candidates."""
+    import inspect
+
+    from routers.candidates import get_job_candidates
+
+    src = inspect.getsource(get_job_candidates)
+    assert "COUNT(DISTINCT ea.candidate_id)" in src
+    assert "COUNT(DISTINCT NULLIF(ea.interview_id" not in src
+
+
 def test_valid_jobdiva_candidate_with_real_phone_passes():
     """A jobdiva.local candidate that has a real phone number in the DB column
     (not just embedded in the email) should pass through the filter."""

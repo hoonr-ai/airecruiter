@@ -28,7 +28,12 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
-from routers.launch_report import _fetch_all_outreach, _summarise_outreach, build_merged_outreach_payload
+from routers.launch_report import (
+    _fetch_all_outreach,
+    _summarise_outreach,
+    apply_uncovered_pass_fail,
+    collect_merged_outreach_payloads,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1660,6 +1665,7 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
         logger.error(f"Save Requirements Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save requirements: {str(e)}")
 
+
 def _empty_outreach_stats() -> dict:
     """Fresh nested zeros so empty-job responses never share mutable dicts."""
     return {
@@ -1690,9 +1696,9 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
     Fetches live outreach statistics from pair-bot for all candidates launched on a specific job.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
-    
 
-    
+    launched_rows: list = []
+    sourced_rows: list = []
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -1712,85 +1718,92 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             resolved_jobdiva_id = result[0] or result[1]
             resolved_numeric_job_id = result[1] or result[0]
             
+            # One row per launched interview (same grain as launch report),
+            # not per sourced candidate. DISTINCT ON candidate_id dropped a
+            # second interview for the same person; a FULL OUTER JOIN on
+            # engage_status counted unlaunched sourced rows as Pending.
             cur.execute("""
-                SELECT
-                    COALESCE(NULLIF(ea.interview_id, ''), sc.data->>'engage_interview_id') AS interview_id,
-                    COALESCE(NULLIF(ea.status, ''), sc.data->>'engage_status') AS status,
-                    ea.response,
-                    sc.data->>'engage_status' AS sc_status,
-                    sc.data->>'outreach_phase' AS sc_phase,
-                    sc.data->>'engage_score' AS sc_score,
-                    sc.data->>'engage_hard_filter_status' AS sc_hf,
-                    sc.data->>'engage_completed_at' AS sc_completed,
-                    sc.data->>'first_completed_at' AS sc_first_completed,
-                    sc.data->>'engage_updated_at' AS sc_updated
-                FROM (
-                    SELECT DISTINCT ON (candidate_id)
-                        candidate_id, interview_id, status, response
-                    FROM engage_interview_audit
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                    ORDER BY candidate_id, id DESC
-                ) ea
-                FULL OUTER JOIN (
-                    SELECT DISTINCT ON (candidate_id)
-                        candidate_id, data
-                    FROM sourced_candidates
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                      AND (
-                          COALESCE(NULLIF(data->>'engage_interview_id', ''), '') <> ''
-                          OR COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
-                      )
-                    ORDER BY candidate_id, id DESC
-                ) sc ON sc.candidate_id = ea.candidate_id
-            """, (
-                str(resolved_jobdiva_id), str(resolved_numeric_job_id),
-                str(resolved_jobdiva_id), str(resolved_numeric_job_id),
-            ))
+                SELECT DISTINCT ON (interview_id)
+                    interview_id, status, response, candidate_id
+                FROM engage_interview_audit
+                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                  AND COALESCE(NULLIF(interview_id, ''), '') <> ''
+                ORDER BY interview_id, id DESC
+            """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
             launched_rows = cur.fetchall()
+
+            # Engage-touched or JSONB Pass/Fail only. Never-contacted sourced
+            # rows are not needed for outreach-stats; idx_sourced_candidates_jobdiva_id
+            # already bounds this to the job.
+            cur.execute("""
+                SELECT DISTINCT ON (candidate_id)
+                    candidate_id,
+                    data->>'engage_interview_id',
+                    data->>'engage_status',
+                    data->>'outreach_phase',
+                    data->>'engage_score',
+                    data->>'engage_hard_filter_status',
+                    data->>'engage_completed_at',
+                    data->>'first_completed_at',
+                    data->>'engage_updated_at'
+                FROM sourced_candidates
+                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                  AND (
+                    COALESCE(NULLIF(data->>'engage_interview_id', ''), '') <> ''
+                    OR COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
+                    OR COALESCE(NULLIF(data->>'engage_hard_filter_status', ''), '') <> ''
+                  )
+                ORDER BY candidate_id, id DESC
+            """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
+            sourced_rows = cur.fetchall()
     finally:
         conn.close()
 
-    if not launched_rows:
+    if not launched_rows and not sourced_rows:
         return _empty_outreach_stats()
 
+    audit_rows = [
+        {
+            "interview_id": row[0],
+            "status": row[1],
+            "response": row[2],
+            "candidate_id": row[3],
+        }
+        for row in launched_rows
+        if row and row[0]
+    ]
+    candidate_rows = [
+        {
+            "candidate_id": row[0],
+            "engage_interview_id": row[1],
+            "engage_status": row[2],
+            "outreach_phase": row[3],
+            "engage_score": row[4],
+            "engage_hard_filter_status": row[5],
+            "engage_completed_at": row[6],
+            "first_completed_at": row[7],
+            "engage_updated_at": row[8],
+        }
+        for row in sourced_rows
+        if row and row[0]
+    ]
+
     interview_ids = sorted({
-        str(row[0]) for row in launched_rows
-        if row[0] and str(row[0]).strip()
+        str(row["interview_id"]).strip()
+        for row in audit_rows
+        if str(row.get("interview_id") or "").strip()
     })
     payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
 
-    # Merge live pair-bot HTTP response with local database fallback (matching launch_report.py
-    # fallback order, though here we collapse to one row per candidate before merging).
-    # If live API returns data for an interview, live API is authoritative.
-    # If live API fails, 404s, or times out, local audit/candidate fallback prevents data loss.
-    merged_payloads = []
-    for row in launched_rows:
-        iid = str(row[0] or "").strip()
-        status_val = row[1]
-        raw_resp = row[2]
-        sc_phase = row[4]
-        sc_score = row[5]
-        sc_hf = row[6]
-        sc_completed = row[7]
-        sc_first_completed = row[8]
-        sc_updated = row[9]
-
-        cand_data = {
-            "engage_status": status_val,
-            "outreach_phase": sc_phase,
-            "engage_score": sc_score,
-            "engage_hard_filter_status": sc_hf,
-            "engage_completed_at": sc_completed,
-            "first_completed_at": sc_first_completed,
-            "engage_updated_at": sc_updated,
-        }
-        live_api = payloads_dict.get(iid) if iid else None
-        merged = build_merged_outreach_payload(cand_data, raw_resp, status_val, live_api)
-
-        if merged:
-            merged_payloads.append(merged)
-
-    return _summarise_outreach(merged_payloads, shift_phases=True)
+    merged_payloads, _num_resolved = collect_merged_outreach_payloads(
+        audit_rows, candidate_rows, payloads_dict
+    )
+    # Rankings keeps shift_phases=False (this branch's existing mapping).
+    # Status buckets still match launch report because they share the same
+    # interview grain and Pass/Fail helpers.
+    summary = _summarise_outreach(merged_payloads)
+    apply_uncovered_pass_fail(summary["buckets"], candidate_rows, audit_rows)
+    return summary
 
 @router.get("/jobs/{job_id}/monitored-data")
 async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):

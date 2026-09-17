@@ -222,15 +222,18 @@ def _iter_outreach_jobs(payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
 def promote_high_score_extra_phase(
     payload: Optional[Dict[str, Any]],
     raw_phase: Optional[str],
+    *,
+    include_pending_extra: bool = True,
 ) -> Optional[str]:
-    """Promote to Extra 1/2/3 when PairBot analytics would show E1/E2/E3.
+    """Promote to Extra 1/2/3 from high-score extra jobs and extra comms.
 
-    PairBot's interview list uses get_canonical_outreach_phase_sql, which can
-    resolve Extra from completed/processing high-score jobs even when the
-    stored `outreach_phase` column still says phase1/phase1_6hr/phase2.
-    outreach-status returns that raw column and only pending/processing jobs,
-    so PAIR must also read communications/events (which keep completed Extra
-    sends) and apply the same anti-regression rank rules.
+    Pair Bot analytics only advances Extra from completed/processing extra jobs.
+    A still-pending extra stays Phase 1. Rankings calls this with
+    include_pending_extra=False; launch report keeps the default (True).
+
+    Extra tokens are chosen by rank (_phase_rank): a later Extra (or P2+)
+    never loses to an older Extra 1 job. Already-stored extra tokens win
+    immediately.
     """
     phase = (raw_phase or "").strip().lower()
     if not phase:
@@ -274,11 +277,9 @@ def promote_high_score_extra_phase(
                     if aliased and "extra" in aliased:
                         _consider(aliased)
 
-    # PairBot SQL: latest high-score job's high_score_phase → that phase's
-    # `_extra`, unless stored is already at/past that extra. We cannot see
-    # completed jobs here, but pending/processing still carry the signal, and
-    # we never regress past a higher stored/comms/pending rank.
     pending_extra: Optional[str] = None
+    # Completed/processing extra jobs compete by rank so Extra 1 cannot
+    # overwrite Extra 2/3. Pending extra is opt-in (launch report only).
     for job in _iter_outreach_jobs(payload):
         job_payload = _parse_job_payload(job.get("payload"))
         if not _is_high_score_extra_job(job, job_payload):
@@ -300,7 +301,7 @@ def promote_high_score_extra_phase(
             continue
         if status in {"completed", "processing"}:
             _consider(target)
-        elif _phase_rank(target) > stored_rank:
+        elif include_pending_extra and _phase_rank(target) > stored_rank:
             if pending_extra is None or _phase_rank(target) > _phase_rank(pending_extra):
                 pending_extra = target
 

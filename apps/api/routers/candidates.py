@@ -1304,15 +1304,14 @@ async def get_job_candidates(
                     """
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) AS total_candidates,
-                        COUNT(DISTINCT sc.candidate_id) FILTER (
-                            WHERE (
-                                COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                            ) OR EXISTS (
-                                SELECT 1 FROM engage_interview_audit ea
-                                WHERE ea.candidate_id = sc.candidate_id
-                                  AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
-                                  AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                            )
+                        (
+                            -- UI "Candidates Launched" is candidate grain (next to
+                            -- total_candidates). Outreach buckets stay interview grain.
+                            SELECT COUNT(DISTINCT ea.candidate_id)
+                            FROM engage_interview_audit ea
+                            WHERE (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                              AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                              AND COALESCE(NULLIF(ea.candidate_id, ''), '') <> ''
                         ) AS launched_count,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE sc.data->>'_stage' = 'dropped' 
