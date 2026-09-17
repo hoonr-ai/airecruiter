@@ -45,7 +45,11 @@ from services.engage_status import (
     parse_engage_score,
     score_from_payload,
 )
-from services.outreach_normalization import normalize_channel, normalize_phase
+from services.outreach_normalization import (
+    normalize_channel,
+    normalize_phase,
+    promote_high_score_extra_phase,
+)
 
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
@@ -308,6 +312,7 @@ def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Op
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
+    raw = promote_high_score_extra_phase(outreach, raw)
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -640,13 +645,17 @@ def build_merged_outreach_payload(
     if audit_status:
         st_hier = str(audit_status).strip().lower()
         curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
-        if st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
-            if _STATUS_HIERARCHY[st_hier] >= _STATUS_HIERARCHY[curr_st]:
-                audit_fallback["outreach_status"] = audit_status
-                audit_fallback["status"] = audit_status
-        else:
+        # Backfill missing keys only; never replace an already-recorded audit
+        # response status at equal rank (passed vs completed, fail vs failed).
+        if not curr_st:
             audit_fallback["outreach_status"] = audit_status
             audit_fallback["status"] = audit_status
+        elif st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
+            if _STATUS_HIERARCHY[st_hier] > _STATUS_HIERARCHY[curr_st]:
+                audit_fallback["outreach_status"] = audit_status
+                audit_fallback["status"] = audit_status
+        # Unrecognised overlay must not clobber a status the audit response
+        # already stored; missing-key backfill above covers the empty case.
 
     # Layer 3: Live PairBot HTTP API Response
     # Unwrap nested `outreach` key from live API payload if present
