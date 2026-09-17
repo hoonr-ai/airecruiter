@@ -536,6 +536,32 @@ def test_funnel_status_raw_pending_with_extra_phase_stays_pending():
         )
 
 
+def test_summarise_outreach_pending_with_extra_phase_stays_in_pending_bucket():
+    """End-to-end regression: a candidate with outreach_status=pending and an extra
+    outreach_phase must land in the Pending bucket, not In Progress.
+
+    This logic has flip-flopped (PR #669 promoted it, PR #670 reverted). This
+    test closes the loop at the bucket level so a future change to _funnel_status_raw
+    or _bucket_status cannot silently reintroduce the regression.
+    """
+    for extra_phase in ("phase1_extra", "phase1_6hr_extra", "phase2_extra",
+                        "phase3_extra", "extra1", "extra2", "extra3"):
+        payload = {
+            "outreach": {
+                "outreach_status": "pending",
+                "outreach_phase": extra_phase,
+            },
+            "communications": [],
+        }
+        summary = lr._summarise_outreach([payload], shift_phases=True)
+        assert summary["buckets"]["pending"] == 1, (
+            f"outreach_phase={extra_phase!r} with pending status should be Pending, "
+            f"got buckets={summary['buckets']}"
+        )
+        assert summary["buckets"]["in_progress"] == 0, (
+            f"outreach_phase={extra_phase!r} with pending status must NOT be In Progress"
+        )
+
 
 def test_phase_distribution_falls_back_to_status_when_phase_missing():
     payload = {"outreach": {"outreach_status": "phase2"}, "communications": []}

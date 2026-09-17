@@ -248,7 +248,6 @@ def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -
     return outreach_status
 
 
-
 def _bucket_status(raw: Optional[str]) -> str:
     """Map a pair-bot outreach_status onto one of the four report buckets."""
     status = (raw or "").strip().lower()
