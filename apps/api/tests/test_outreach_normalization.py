@@ -213,6 +213,32 @@ def test_promote_pending_extra_outranks_lower_comms_extra():
     assert promote_high_score_extra_phase(payload, "phase1") == "phase2_extra"
 
 
+def test_promote_extra3_from_completed_high_score_job():
+    """After Pair Bot includes completed Extra jobs, promote even when comms say phase2."""
+    payload = {
+        "outreach_phase": "phase2",
+        "communications": [
+            {"phase": "phase2", "channel": "email"},
+            {"phase": "phase2", "channel": "sms"},
+        ],
+        "scheduled_jobs": [
+            {
+                "status": "completed",
+                "payload": {
+                    "is_high_score_extra": True,
+                    "high_score_phase": "phase2",
+                    "reminder_type": "high_score_extra",
+                },
+            }
+        ],
+    }
+    assert promote_high_score_extra_phase(payload, "phase2") == "phase2_extra"
+
+
+def test_promote_extra3_when_live_api_already_returns_canonical_phase():
+    assert promote_high_score_extra_phase({}, "phase2_extra") == "phase2_extra"
+
+
 def test_normalize_channel_standard_and_aliases():
     assert normalize_channel("call") == "call"
     assert normalize_channel("voice") == "call"
