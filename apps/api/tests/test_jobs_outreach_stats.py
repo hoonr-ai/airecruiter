@@ -61,10 +61,11 @@ def test_get_job_outreach_stats_live_api_wins(
 
         result = await get_job_outreach_stats("job_123", user=MagicMock())
 
-        # Live API should win (pass -> completed bucket, phase3 -> phase3 bucket)
+        # Live API wins; Pair Bot phase3 is rankings Phase 4
         assert result["buckets"]["passed"] == 1
         assert result["buckets"]["failed"] == 0
-        assert result["phases"]["phase3"] == 1
+        assert result["phases"]["phase4"] == 1
+        assert result["phases"]["phase3"] == 0
         assert result["phases"]["phase1"] == 0
 
     asyncio.run(_test())
@@ -88,7 +89,7 @@ def test_get_job_outreach_stats_fallback_wins_when_live_api_empty(
         # Audit fallback wins (in_progress)
         assert result["buckets"]["in_progress"] == 1
         assert result["channels"]["sms"] == 1
-        assert result["phases"]["phase2"] == 1  # cand_fallback phase wins if audit doesn't have it
+        assert result["phases"]["phase3"] == 1  # Pair Bot phase2 -> rankings Phase 3
 
     asyncio.run(_test())
 
@@ -199,5 +200,82 @@ def test_uncovered_jsonb_pass_counts_like_launch_report(
         assert result["buckets"]["in_progress"] == 1
         assert result["buckets"]["passed"] == 1
         assert result["buckets"]["pending"] == 0
+
+    asyncio.run(_test())
+
+
+def test_get_job_outreach_stats_pairbot_phase4_counts_phase4(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    """Pair Bot Interviews 'Phase 4' (phase3) must land in rankings Phase 4, not Phase 3."""
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_outreach_db(
+            mock_db_connection,
+            [_audit_row("int_1", "pending", cid="c1")],
+            [_sourced_row("c1", "int_1", "pending", "phase3")],
+        )
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {"outreach_status": "pending", "outreach_phase": "phase3"},
+        }
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["phase4"] == 1
+        assert result["phases"]["phase3"] == 0
+
+    asyncio.run(_test())
+
+
+def test_get_job_outreach_stats_extra2_stays_extra2(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_outreach_db(
+            mock_db_connection,
+            [_audit_row("int_1", "pending", cid="c1")],
+            [_sourced_row("c1", "int_1", "pending", "phase1_6hr_extra")],
+        )
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {"outreach_status": "pending", "outreach_phase": "phase1_6hr_extra"},
+        }
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["extra2"] == 1
+        assert result["phases"]["extra"] == 1
+        assert result["phases"]["phase2"] == 0
+
+    asyncio.run(_test())
+
+
+def test_get_job_outreach_stats_pending_extra_stays_phase1(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_outreach_db(
+            mock_db_connection,
+            [_audit_row("int_1", "pending", cid="c1")],
+            [_sourced_row("c1", "int_1", "pending", "phase1")],
+        )
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {
+                "outreach": {"outreach_status": "pending", "outreach_phase": "phase1"},
+                "scheduled_jobs": [
+                    {
+                        "status": "pending",
+                        "payload": {
+                            "is_high_score_extra": True,
+                            "high_score_phase": "phase1",
+                            "reminder_type": "high_score_extra",
+                        },
+                    }
+                ],
+            }
+        }
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["phase1"] == 1
+        assert result["phases"]["extra1"] == 0
 
     asyncio.run(_test())

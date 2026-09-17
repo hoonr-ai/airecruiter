@@ -255,6 +255,11 @@ def _normalize_phase(
 ) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3/phase4/extra.
 
+    Caller matrix (single source of truth for phase shifts):
+      - Launch Report (_summarise_outreach default): shift_phases=True, include_pending_extra=True
+      - Rankings (get_job_outreach_stats): shift_phases=True, include_pending_extra=False
+      - Raw PairBot (tests/other callers): shift_phases=False
+
     When shift_phases=True (Launch Report and rankings outreach-stats):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase2
