@@ -1,8 +1,15 @@
 """Shared normalization helpers for outreach phase and communication channel.
 
-Used across routers (e.g. launch_report, voice_agent) to map PairBot status,
-phase, and channel variants onto canonical values (contact_check, phase1/phase1_6hr/phase2/phase3,
-extra outreach phases, and call/sms/web).
+Used across routers (e.g. launch_report, voice_agent, jobs outreach-stats) to
+map PairBot status, phase, and channel variants onto canonical values:
+
+  contact_check,
+  phase1 / phase1_6hr / phase2 / phase3  (PairBot analytics labels P1–P4),
+  phase1_extra / phase1_6hr_extra / phase2_extra  (Extra 1–3, resume score ≥ 80),
+  and call/sms/web.
+
+PairBot persists the canonical `phase1` / `phase1_6hr` / `phase*_extra` tokens,
+not the table shorthand P1/E1. Those shorthand strings are UI labels only.
 """
 import logging
 from typing import Any, Dict, Optional
@@ -85,6 +92,9 @@ _PHASE_ALIASES = {
     "extra outreach": "phase1_extra",
     "extra outreach (>80% match)": "phase1_extra",
     "high_score_extra": "phase1_extra",
+    "extra 1": "phase1_extra",
+    "extra 2": "phase1_6hr_extra",
+    "extra 3": "phase2_extra",
 }
 
 

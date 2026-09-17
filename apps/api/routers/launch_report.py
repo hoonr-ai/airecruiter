@@ -251,8 +251,7 @@ def _normalize_phase(
 ) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3/phase4/extra.
 
-    When shift_phases=True (Launch Report mode), PairBot retry phases are shifted
-    into Launch Report column indices:
+    When shift_phases=True (Launch Report and rankings outreach-stats):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase2
       phase2                 -> phase3
@@ -261,7 +260,7 @@ def _normalize_phase(
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
 
-    When shift_phases=False (standard mode for routers.jobs::get_job_outreach_stats):
+    When shift_phases=False (raw PairBot vocabulary, tests / other callers):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase1_6hr
       phase2                 -> phase2
