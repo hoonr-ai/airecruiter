@@ -1800,6 +1800,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
     )
     # Same P1/P2/P3/P4 and Extra 1/2/3 columns as Pair Bot Interviews / launch report.
     # Pending Extra stays Phase 1; completed Extra still promotes.
+    # See `promote_high_score_extra_phase` docstring for why include_pending_extra=False specifically applies to rankings.
     summary = _summarise_outreach(
         merged_payloads, shift_phases=True, include_pending_extra=False
     )
