@@ -139,10 +139,10 @@ def test_get_job_outreach_stats_extra_phases_match_launch_report(
         cur = conn.cursor.return_value.__enter__.return_value
         cur.fetchone.return_value = ("jobdiva_123", "job_123")
         cur.fetchall.return_value = [
-            ("int_1", "in_progress", "{}", "in_progress", "phase1"),
-            ("int_2", "in_progress", "{}", "in_progress", "phase1_extra"),
-            ("int_3", "in_progress", "{}", "in_progress", "phase1_6hr"),
-            ("int_4", "in_progress", "{}", "in_progress", "phase1_6hr_extra"),
+            ("int_1", "in_progress", "{}", "in_progress", "phase1", None, None, None, None, None),
+            ("int_2", "in_progress", "{}", "in_progress", "phase1_extra", None, None, None, None, None),
+            ("int_3", "in_progress", "{}", "in_progress", "phase1_6hr", None, None, None, None, None),
+            ("int_4", "in_progress", "{}", "in_progress", "phase1_6hr_extra", None, None, None, None, None),
         ]
         mock_fetch_all_outreach.return_value = {
             "int_1": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
