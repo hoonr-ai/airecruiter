@@ -27,6 +27,9 @@ export function useLiveReportStream({
   const [error, setError] = useState<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const eventCallbackRef = useRef(onActivityEvent);
+  eventCallbackRef.current = onActivityEvent;
+
   const retryCountRef = useRef<number>(0);
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatWatchdogRef = useRef<NodeJS.Timeout | null>(null);
@@ -107,7 +110,7 @@ export function useLiveReportStream({
           return;
         }
         if (payload.type === "activity" && payload.interview_id) {
-          onActivityEvent?.({
+          eventCallbackRef.current?.({
             interviewId: Number(payload.interview_id),
             type: payload.event_type,
             subtype: payload.subtype ?? null,
@@ -142,7 +145,7 @@ export function useLiveReportStream({
         connectStream();
       }, delay);
     };
-  }, [bulkId, onActivityEvent, resetWatchdog, refreshSnapshot]);
+  }, [bulkId, resetWatchdog, refreshSnapshot]);
 
   // Manage Stream Lifecycle
   useEffect(() => {
