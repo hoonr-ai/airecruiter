@@ -139,10 +139,17 @@ favoured the JobDiva-labelled twin.
    and shows linkage as a caption ("In JobDiva · via PAIR" / "applied directly")
    under the origin label. `GET /jobs/{id}/candidates` promotes the provenance keys.
 5. **Backfill (admin).** `GET /api/v1/engagement/engage/applicant-origin-audit?job_id=`
-   lists twin pairs; `POST .../applicant-origin-audit/repair {job_id, dry_run}`
-   (dry-run by default) folds the twin's engage state into the origin row, notes
-   `jobdiva_twin_merged_at`, and deletes the twin. Legacy rows keep
-   `jobdiva_application_origin` unknown -- it is not guessed.
+   lists twin pairs (one origin can have several twins: the sync's Applicants row
+   and a re-launch's TalentSearch/JobAgent row); `POST .../applicant-origin-audit/repair
+   {job_id, dry_run}` (dry-run by default) folds the engage state of ALL of an
+   origin's twins into it -- key by key, the most recently updated twin winning,
+   never overwriting what the origin already has -- notes `jobdiva_twin_merged_at`
+   / `jobdiva_twin_sources` / `jobdiva_twin_count`, and deletes the twins. The fold
+   is a correlated subquery, not an `UPDATE ... FROM` join (which applies SET from
+   one arbitrary twin when there are two). Verified against a real Postgres in
+   `tests/test_applicant_origin_repair_postgres.py` (runs when `pgserver` is
+   installed). Legacy rows keep `jobdiva_application_origin` unknown -- it is not
+   guessed.
 6. **Tests.** `tests/test_applicant_sync_provenance.py` (index, matching, blob,
    one full cycle), `tests/test_jobdiva_provisioner_failsafes.py` (stamps per
    scope), `tests/test_jobdiva_link_via_create_job_application.py` and

@@ -1436,32 +1436,6 @@ async def _wait_for_pairbot_creation(
 _PAIR_SYNTHETIC_EMAIL_DOMAIN = "@no-email.jobdiva.local"
 
 
-def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[str, Any]) -> None:
-    """Brief write to stamp jobdiva_candidate_id into sourced_candidates.data.
-
-    Split out of _provision_candidate_to_jobdiva so the pool slot is held only
-    for the UPDATE itself, never across the multi-second JobDiva HTTP calls.
-
-    ``cand_data`` MUST be the delta to merge, never a whole row blob. The UPDATE
-    has no ``jobdiva_id`` predicate — correct for the id, since a JobDiva profile
-    is person-level and the id is valid on every job's row for that person — so
-    passing a full blob would splat one job's match_score / engage_status /
-    enhanced_info onto every other job's row for the same candidate. That in turn
-    trips ``/engage/launch`` idempotency (``engage_status NOT IN ('', 'failed')``)
-    and permanently silences outreach on jobs the person was never contacted for.
-    """
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE sourced_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE candidate_id = %s",
-                (json.dumps(cand_data), candidate_id_internal),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1488,8 +1462,14 @@ def _persist_jobdiva_link_state(
       application exists per job -- splatting it onto another job's row would
       claim PAIR applied the person there too.
 
-    Both are merge deltas (``||``), never whole blobs -- see
-    ``_persist_jobdiva_candidate_id`` for why a full blob here is destructive.
+    Both are merge deltas (``||``), never whole blobs. The person-level UPDATE
+    has no ``jobdiva_id`` predicate -- correct for the profile facts, which hold
+    on every job's row for that person -- so a whole-row blob here would splat
+    one job's match_score / engage_status / enhanced_info onto every other job's
+    row for the same candidate. That in turn trips ``/engage/launch`` idempotency
+    (``engage_status NOT IN ('', 'failed')``) and permanently silences outreach
+    on jobs the person was never contacted for. The pool slot is held only for
+    the UPDATEs themselves, never across the JobDiva HTTP calls.
     """
     if not person_delta and not job_delta:
         return
@@ -4115,14 +4095,26 @@ def _require_admin(user: UserIdentity) -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
-async def _jobdiva_profile_audit_job_filter(job_id: Optional[str]) -> Tuple[str, list]:
-    """SQL fragment + params scoping an audit query to one job (any id form), or none."""
+async def _audit_job_ids(job_id: Optional[str]) -> List[str]:
+    """Every stored spelling of ``job_id`` (as given, numeric PK, reference) for an
+    admin audit's job scope; ``[]`` means no job filter."""
     job_id = str(job_id or "").strip()
     if not job_id:
-        return "", []
+        return []
     numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(job_id)
-    ids = [job_id] + [str(x) for x in (numeric_job_id, ref_job_id) if x and str(x) != job_id]
-    return " AND sc.jobdiva_id = ANY(%s)", [ids]
+    return [job_id] + [str(x) for x in (numeric_job_id, ref_job_id) if x and str(x) != job_id]
+
+
+def _audit_job_filter_sql(job_ids: List[str], alias: str) -> str:
+    """``" AND <alias>.jobdiva_id = ANY(%s)"`` for a scoped audit, ``""`` for all jobs.
+    The matching param is ``[job_ids]`` (one list param) or none -- see callers."""
+    return f" AND {alias}.jobdiva_id = ANY(%s)" if job_ids else ""
+
+
+async def _jobdiva_profile_audit_job_filter(job_id: Optional[str]) -> Tuple[str, list]:
+    """SQL fragment + params scoping a profile-audit query (alias ``sc``) to one job, or none."""
+    job_ids = await _audit_job_ids(job_id)
+    return _audit_job_filter_sql(job_ids, "sc"), ([job_ids] if job_ids else [])
 
 
 class JobDivaProfileAuditRepairRequest(BaseModel):
@@ -4234,33 +4226,30 @@ async def jobdiva_profile_audit_repair(
 # origin row (which keeps its origin `source`) and deletes the twin. Neither
 # touches JobDiva.
 
-_APPLICANT_TWIN_JOIN = """
-              FROM sourced_candidates t
-              JOIN sourced_candidates o
-                ON o.jobdiva_id = t.jobdiva_id
-               AND o.id <> t.id
-               AND o.candidate_id <> t.candidate_id
-               AND o.data->>'jobdiva_candidate_id' = t.candidate_id
-               AND lower(o.source) NOT LIKE 'jobdiva%%'
-             WHERE lower(t.source) LIKE 'jobdiva%%'
+# A twin `t` of an origin row `o`: same job, a JobDiva-labelled row whose own
+# candidate_id is the JobDiva profile id the origin stores. Correlated on both
+# aliases so it can sit inside a subquery over `t` for a given `o`.
+_TWIN_OF_ORIGIN = """t.jobdiva_id = o.jobdiva_id
+               AND t.id <> o.id
+               AND t.candidate_id <> o.candidate_id
+               AND t.candidate_id = o.data->>'jobdiva_candidate_id'
+               AND lower(t.source) LIKE 'jobdiva%%'
                AND t.candidate_id ~ '^[0-9]+$'"""
 
-# Engage bookkeeping the twin may hold from its own (duplicate) auto-launch;
+_APPLICANT_TWIN_JOIN = f"""
+              FROM sourced_candidates t
+              JOIN sourced_candidates o
+                ON {_TWIN_OF_ORIGIN}
+               AND lower(o.source) NOT LIKE 'jobdiva%%'
+             WHERE TRUE"""
+
+# Engage bookkeeping a twin may hold from its own (duplicate) auto-launch;
 # folded into the origin row only where the origin has nothing.
 _APPLICANT_TWIN_FOLD_KEYS = (
     "engage_status", "engage_interview_id", "engage_score", "engage_updated_at",
     "engage_last_response", "engage_hard_filter_status", "engage_hard_filter_reason",
     "engage_passed_email_sent", "engage_candidate_score", "engage_total_score",
 )
-
-
-async def _applicant_twin_job_filter(job_id: Optional[str]) -> Tuple[str, list]:
-    job_id = str(job_id or "").strip()
-    if not job_id:
-        return "", []
-    numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(job_id)
-    ids = [job_id] + [str(x) for x in (numeric_job_id, ref_job_id) if x and str(x) != job_id]
-    return " AND t.jobdiva_id = ANY(%s)", [ids]
 
 
 class ApplicantOriginRepairRequest(BaseModel):
@@ -4282,10 +4271,14 @@ async def applicant_origin_audit(
     `twin` (a JobDiva-* row whose candidate_id IS that profile id) on the same
     job. The twin is the sync's or a re-launch's re-import of the same person;
     the origin row is the one that should survive, keeping its source label.
+    One origin can have several twins (an Applicants row from the sync and a
+    TalentSearch/JobAgent row from a re-launch); each pair is one row here.
     """
     _require_admin(user)
     limit = max(1, min(int(limit or 200), 2000))
-    job_sql, job_params = await _applicant_twin_job_filter(job_id)
+    job_ids = await _audit_job_ids(job_id)
+    job_sql = _audit_job_filter_sql(job_ids, "t")
+    job_params: list = [job_ids] if job_ids else []
     conn = _get_db_connection()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -4327,16 +4320,23 @@ async def applicant_origin_audit_repair(
     request: ApplicantOriginRepairRequest,
     user: UserIdentity = Depends(get_current_user),
 ):
-    """Admin: merge each JobDiva-labelled twin into its origin row and delete the twin.
+    """Admin: fold every JobDiva-labelled twin into its origin row, then delete the twins.
 
-    Per pair: engage bookkeeping the twin holds and the origin lacks is copied
-    onto the origin row (never overwriting the origin's own), the merge is
-    noted in data.jobdiva_twin_merged_at, and the twin row is deleted. The
+    Per origin row: engage bookkeeping the origin lacks is taken from its twins
+    -- ALL of them, key by key, the most recently updated twin winning a key
+    that several carry -- the merge is noted in data.jobdiva_twin_merged_at /
+    jobdiva_twin_sources / jobdiva_twin_count, and the twins are deleted. The
     origin keeps its `source` -- that is the whole point. `dry_run` (default)
     only counts. Idempotent: a repaired job has no pairs left.
+
+    The fold is a correlated subquery over the origin, not an ``UPDATE ... FROM``
+    join: with a join, an origin with two twins is matched twice and Postgres
+    applies SET from one arbitrary match, so the other twin's engage state would
+    be dropped -- and then deleted with the twin.
     """
     _require_admin(user)
-    job_sql, job_params = await _applicant_twin_job_filter(request.job_id)
+    job_ids = await _audit_job_ids(request.job_id)
+    job_params: list = [job_ids] if job_ids else []
     conn = _get_db_connection()
     try:
         cur = conn.cursor()
@@ -4344,7 +4344,7 @@ async def applicant_origin_audit_repair(
             cur.execute(
                 f"""
                 SELECT COUNT(*)
-                {_APPLICANT_TWIN_JOIN}{job_sql}
+                {_APPLICANT_TWIN_JOIN}{_audit_job_filter_sql(job_ids, "t")}
                 """,
                 job_params,
             )
@@ -4359,52 +4359,63 @@ async def applicant_origin_audit_repair(
             UPDATE sourced_candidates AS o
             SET data = COALESCE(o.data, '{{}}'::jsonb)
                        || COALESCE((
-                            SELECT jsonb_object_agg(e.k, e.v)
-                            FROM jsonb_each(COALESCE(t.data, '{{}}'::jsonb)) AS e(k, v)
-                            WHERE e.k IN ({fold_keys_sql})
-                              AND (o.data -> e.k) IS NULL
+                            -- Every engage key the origin lacks, from whichever twin
+                            -- carries it; when several do, the most recently updated
+                            -- twin's value wins (deterministic, no state dropped).
+                            SELECT jsonb_object_agg(folded.k, folded.v)
+                            FROM (
+                                SELECT DISTINCT ON (e.k) e.k, e.v
+                                FROM sourced_candidates AS t
+                                CROSS JOIN LATERAL jsonb_each(COALESCE(t.data, '{{}}'::jsonb)) AS e(k, v)
+                                WHERE {_TWIN_OF_ORIGIN}
+                                  AND e.k IN ({fold_keys_sql})
+                                  AND (o.data -> e.k) IS NULL
+                                ORDER BY e.k, t.updated_at DESC NULLS LAST, t.id DESC
+                            ) AS folded
                           ), '{{}}'::jsonb)
                        || jsonb_build_object(
                             'jobdiva_twin_merged_at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-                            'jobdiva_twin_source', t.source
+                            'jobdiva_twin_sources', (
+                                SELECT COALESCE(jsonb_agg(DISTINCT t.source), '[]'::jsonb)
+                                FROM sourced_candidates AS t
+                                WHERE {_TWIN_OF_ORIGIN}
+                            ),
+                            'jobdiva_twin_count', (
+                                SELECT COUNT(*)
+                                FROM sourced_candidates AS t
+                                WHERE {_TWIN_OF_ORIGIN}
+                            )
                           ),
                 updated_at = CURRENT_TIMESTAMP
-            FROM sourced_candidates AS t
-            WHERE o.jobdiva_id = t.jobdiva_id
-              AND o.id <> t.id
-              AND o.candidate_id <> t.candidate_id
-              AND o.data->>'jobdiva_candidate_id' = t.candidate_id
-              AND lower(o.source) NOT LIKE 'jobdiva%%'
-              AND lower(t.source) LIKE 'jobdiva%%'
-              AND t.candidate_id ~ '^[0-9]+$'{job_sql}
+            WHERE lower(o.source) NOT LIKE 'jobdiva%%'
+              AND EXISTS (
+                  SELECT 1
+                  FROM sourced_candidates AS t
+                  WHERE {_TWIN_OF_ORIGIN}
+              ){_audit_job_filter_sql(job_ids, "o")}
             """,
             list(_APPLICANT_TWIN_FOLD_KEYS) + job_params,
         )
-        merged = cur.rowcount
+        origins_updated = cur.rowcount
         cur.execute(
             f"""
             DELETE FROM sourced_candidates AS t
             USING sourced_candidates AS o
-            WHERE o.jobdiva_id = t.jobdiva_id
-              AND o.id <> t.id
-              AND o.candidate_id <> t.candidate_id
-              AND o.data->>'jobdiva_candidate_id' = t.candidate_id
-              AND lower(o.source) NOT LIKE 'jobdiva%%'
-              AND lower(t.source) LIKE 'jobdiva%%'
-              AND t.candidate_id ~ '^[0-9]+$'{job_sql}
+            WHERE {_TWIN_OF_ORIGIN}
+              AND lower(o.source) NOT LIKE 'jobdiva%%'{_audit_job_filter_sql(job_ids, "t")}
             """,
             job_params,
         )
-        deleted = cur.rowcount
+        twins_deleted = cur.rowcount
         conn.commit()
         cur.close()
     finally:
         conn.close()
     logger.info(
-        "applicant origin audit repair: job=%s merged=%s deleted=%s by=%s",
-        request.job_id or "ALL", merged, deleted, user.email,
+        "applicant origin audit repair: job=%s origins_updated=%s twins_deleted=%s by=%s",
+        request.job_id or "ALL", origins_updated, twins_deleted, user.email,
     )
     return {
         "success": True, "job_id": request.job_id or None, "dry_run": False,
-        "merged": merged, "deleted": deleted,
+        "origins_updated": origins_updated, "twins_deleted": twins_deleted,
     }

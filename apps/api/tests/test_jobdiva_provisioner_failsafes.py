@@ -101,16 +101,12 @@ def harness(monkeypatch):
             "person": person_delta, "job": job_delta,
         })
 
-    def _legacy_persist(*_a, **_k):
-        raise AssertionError("provisioner must persist through _persist_jobdiva_link_state")
-
     def run(rows, fake):
         monkeypatch.setattr(eng, "get_db_connection", lambda: _Conn(rows))
         monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
         monkeypatch.setattr(eng, "jobdiva_service", fake)
         monkeypatch.setattr(eng, "_utc_now_iso", lambda: NOW)
         monkeypatch.setattr(eng, "_persist_jobdiva_link_state", _record_link_state)
-        monkeypatch.setattr(eng, "_persist_jobdiva_candidate_id", _legacy_persist)
         return asyncio.run(eng._provision_batch_to_jobdiva([r["candidate_id"] for r in rows], JOB))
 
     run.persisted = persisted  # type: ignore[attr-defined]

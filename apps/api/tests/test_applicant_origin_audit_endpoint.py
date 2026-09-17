@@ -6,6 +6,7 @@ profile id -- the applicant sync's (or a re-launch's) re-import of a person
 Launch PAIR had provisioned. The repair folds the twin's engage state into the
 origin row and deletes the twin; the origin keeps its `source`.
 """
+import re
 from typing import Any, Dict, List
 
 import pytest
@@ -91,7 +92,7 @@ def test_audit_lists_twin_pairs_for_admin(sql_log):
     assert row["jobdiva_candidate_id"] == "462058065251"
     sql = sql_log["store"][-1]["sql"]
     # The pairing rule: same job, JobDiva-labelled row whose id is the origin's stamp.
-    assert "o.data->>'jobdiva_candidate_id' = t.candidate_id" in sql
+    assert "t.candidate_id = o.data->>'jobdiva_candidate_id'" in sql
     assert "lower(o.source) NOT LIKE 'jobdiva%%'" in sql
     assert "lower(t.source) LIKE 'jobdiva%%'" in sql
     assert "ANY(%s)" not in sql
@@ -121,24 +122,40 @@ def test_repair_defaults_to_dry_run_and_only_counts(sql_log):
     assert sql_log["conns"][-1].committed is False
 
 
-def test_repair_folds_engage_state_into_origin_then_deletes_twin(sql_log):
+def test_repair_folds_all_twins_into_origin_then_deletes_them(sql_log):
     res = _client("admin").post(
         "/engage/applicant-origin-audit/repair", json={"job_id": "26-1", "dry_run": False}
     )
     assert res.status_code == 200, res.text
-    assert res.json() == {"success": True, "job_id": "26-1", "dry_run": False, "merged": 4, "deleted": 4}
+    # One origin can have several twins, so the two counts are reported apart.
+    assert res.json() == {
+        "success": True, "job_id": "26-1", "dry_run": False, "origins_updated": 4, "twins_deleted": 4,
+    }
     update, delete = sql_log["store"][-2], sql_log["store"][-1]
     assert update["sql"].startswith("UPDATE sourced_candidates AS o")
+    # The fold is a correlated subquery over the origin, NOT an `UPDATE ... FROM`
+    # join: a join matches an origin with two twins twice and Postgres applies SET
+    # from one arbitrary match, dropping the other twin's engage state before the
+    # DELETE removes it for good.
+    assert " FROM sourced_candidates AS t\n" not in update["sql"].replace("\n", " ")
+    assert "UPDATE sourced_candidates AS o SET data =" in update["sql"]
+    assert "FROM sourced_candidates AS t WHERE" not in update["sql"].split(" WHERE lower(o.source)")[0].split("SET data =")[0]
+    assert "SELECT DISTINCT ON (e.k) e.k, e.v" in update["sql"]
+    assert "ORDER BY e.k, t.updated_at DESC NULLS LAST, t.id DESC" in update["sql"]
     # Only gaps are filled: the origin's own engage bookkeeping wins.
     assert "AND (o.data -> e.k) IS NULL" in update["sql"]
     assert "'jobdiva_twin_merged_at'" in update["sql"]
+    assert "'jobdiva_twin_sources'" in update["sql"] and "'jobdiva_twin_count'" in update["sql"]
     assert "engage_status" in update["params"] and "engage_interview_id" in update["params"]
+    # Every origin with at least one twin is updated once, scoped to the job.
+    assert "AND EXISTS ( SELECT 1 FROM sourced_candidates AS t WHERE" in update["sql"]
+    assert update["sql"].rstrip().endswith("AND o.jobdiva_id = ANY(%s)")
     assert update["params"][-1] == ["26-1", "31920032"]
-    # The origin's `source` is never part of the SET list.
-    set_clause = update["sql"].split(" FROM sourced_candidates AS t")[0]
-    assert "SET data =" in set_clause and "source =" not in set_clause
-    assert delete["sql"].startswith("DELETE FROM sourced_candidates AS t")
+    # The origin's `source` is never assigned.
+    assert re.search(r"\bsource\s*=", update["sql"]) is None
+    assert delete["sql"].startswith("DELETE FROM sourced_candidates AS t USING sourced_candidates AS o")
     assert "lower(t.source) LIKE 'jobdiva%%'" in delete["sql"]
+    assert delete["sql"].rstrip().endswith("AND t.jobdiva_id = ANY(%s)")
     assert delete["params"] == [["26-1", "31920032"]]
     assert sql_log["conns"][-1].committed is True
 
