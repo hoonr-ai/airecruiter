@@ -1790,7 +1790,8 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         if merged:
             merged_payloads.append(merged)
 
-    return _summarise_outreach(merged_payloads, shift_phases=True)
+    # Pending Extra stays Phase 1 (Pair Bot analytics). Completed Extra still promotes.
+    return _summarise_outreach(merged_payloads, shift_phases=True, include_pending_extra=False)
 
 @router.get("/jobs/{job_id}/monitored-data")
 async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):

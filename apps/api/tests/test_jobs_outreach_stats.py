@@ -181,6 +181,7 @@ def test_get_job_outreach_stats_extra_phases_match_launch_report(
 def test_get_job_outreach_stats_promotes_phase1_to_extra1_from_live_jobs(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
 ):
+    """Processing Extra job still promotes Rankings Extra 1 when raw phase is P1."""
     from routers.jobs import get_job_outreach_stats
 
     async def _test():
@@ -214,9 +215,41 @@ def test_get_job_outreach_stats_promotes_phase1_to_extra1_from_live_jobs(
     asyncio.run(_test())
 
 
+def test_get_job_outreach_stats_pending_extra_stays_phase1(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    """Opened Extra (Pair Bot E1 Opened) must count as Phase 1 on rankings."""
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_one_launched_candidate(mock_db_connection, status="pending", sc_phase="phase1")
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {
+                "outreach": {"outreach_status": "pending", "outreach_phase": "phase1"},
+                "scheduled_jobs": [
+                    {
+                        "status": "pending",
+                        "payload": {
+                            "is_high_score_extra": True,
+                            "high_score_phase": "phase1",
+                            "reminder_type": "high_score_extra",
+                        },
+                    }
+                ],
+            }
+        }
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["phase1"] == 1
+        assert result["phases"]["extra1"] == 0
+        assert result["phases"]["extra"] == 0
+
+    asyncio.run(_test())
+
+
 def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
 ):
+    """Confirmed Extra 3 comms promote Rankings when raw outreach_phase is still P3."""
     from routers.jobs import get_job_outreach_stats
 
     async def _test():
@@ -253,7 +286,6 @@ def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
                 "outreach": {
                     "outreach_status": "pending",
                     "outreach_phase": "phase2",
-                    "stored_outreach_phase": "phase2",
                 },
                 "scheduled_jobs": [
                     {
@@ -295,8 +327,8 @@ def test_get_job_outreach_stats_counts_extra3_for_pairbot_extra_phase_3(
 ):
     """Extra Outreach Phase 3 must count Extra 3, not Phase 3.
 
-    Covers completed Extra jobs (comms still say phase2) and live API
-    already returning canonical phase2_extra.
+    completed_extra_job: raw phase still P3, completed Extra job promotes Extra 3.
+    canonical_phase2_extra: Pair Bot already returned Extra 3 (passthrough).
     """
     from routers.jobs import get_job_outreach_stats
 

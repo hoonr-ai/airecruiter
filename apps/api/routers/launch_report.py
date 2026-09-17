@@ -307,14 +307,28 @@ def _normalize_phase(
     return None
 
 
-def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Optional[str]:
-    """Pick phase from known keys, then fall back to status-shaped phase values."""
+def _extract_phase(
+    outreach: Dict[str, Any],
+    *,
+    shift_phases: bool = True,
+    promote_extra: bool = True,
+    include_pending_extra: bool = True,
+) -> Optional[str]:
+    """Pick phase from known keys, then fall back to status-shaped phase values.
+
+    Rankings keeps promotion on but sets include_pending_extra=False so a
+    queued Extra job cannot bump P1→Extra 1. Completed/processing Extra jobs
+    and confirmed Extra comms still promote when Pair Bot's raw column lags.
+    """
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
-    raw = promote_high_score_extra_phase(outreach, raw)
+    if promote_extra:
+        raw = promote_high_score_extra_phase(
+            outreach, raw, include_pending_extra=include_pending_extra
+        )
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -670,7 +684,13 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
+def _summarise_outreach(
+    payloads: List[Dict[str, Any]],
+    *,
+    shift_phases: bool = False,
+    promote_extra: bool = True,
+    include_pending_extra: bool = True,
+) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -757,7 +777,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         elif display == "Fail":
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged, shift_phases=shift_phases)
+        phase = _extract_phase(
+            merged,
+            shift_phases=shift_phases,
+            promote_extra=promote_extra,
+            include_pending_extra=include_pending_extra,
+        )
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
