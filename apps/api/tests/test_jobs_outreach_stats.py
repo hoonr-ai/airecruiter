@@ -159,3 +159,70 @@ def test_get_job_outreach_stats_extra_phases_match_launch_report(
         assert result["phases"]["extra"] == 2
 
     asyncio.run(_test())
+
+
+def test_get_job_outreach_stats_promotes_phase1_to_extra1_from_live_jobs(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        conn = mock_db_connection.return_value
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ("jobdiva_123", "job_123")
+        cur.fetchall.return_value = [
+            ("int_1", "in_progress", "{}", "in_progress", "phase1", None, None, None, None, None),
+        ]
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {
+                "outreach": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
+                "scheduled_jobs": [
+                    {
+                        "status": "processing",
+                        "payload": {
+                            "is_high_score_extra": True,
+                            "high_score_phase": "phase1",
+                            "reminder_type": "high_score_extra",
+                        },
+                    }
+                ],
+            }
+        }
+
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["extra1"] == 1
+        assert result["phases"]["phase1"] == 0
+        assert result["phases"]["extra"] == 1
+
+    asyncio.run(_test())
+
+
+def test_get_job_outreach_stats_promotes_phase2_to_extra3_from_comms(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        conn = mock_db_connection.return_value
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ("jobdiva_123", "job_123")
+        cur.fetchall.return_value = [
+            ("int_1", "pending", "{}", "pending", "phase2", None, None, None, None, None),
+        ]
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {
+                "outreach": {"outreach_status": "pending", "outreach_phase": "phase2"},
+                "scheduled_jobs": [],
+                "communications": [
+                    {"phase": "phase2_extra", "channel": "email"},
+                    {"phase": "phase2_extra", "channel": "sms"},
+                ],
+            }
+        }
+
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+        assert result["phases"]["extra3"] == 1
+        assert result["phases"]["phase3"] == 0
+        assert result["phases"]["extra"] == 1
+
+    asyncio.run(_test())

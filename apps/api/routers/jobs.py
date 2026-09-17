@@ -28,7 +28,7 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
-from routers.launch_report import _fetch_all_outreach, _summarise_outreach, merge_outreach_payloads
+from routers.launch_report import _fetch_all_outreach, _summarise_outreach, build_merged_outreach_payload
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1775,41 +1775,17 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         sc_first_completed = row[8]
         sc_updated = row[9]
 
-        cand_fallback = {}
-        if status_val:
-            cand_fallback["outreach_status"] = status_val
-        if sc_phase:
-            cand_fallback["outreach_phase"] = sc_phase
-        if sc_score is not None:
-            cand_fallback["engage_score"] = sc_score
-        if sc_hf:
-            cand_fallback["engage_hard_filter_status"] = sc_hf
-        if sc_completed:
-            cand_fallback["engage_completed_at"] = sc_completed
-        if sc_first_completed:
-            cand_fallback["first_completed_at"] = sc_first_completed
-        if sc_updated:
-            cand_fallback["engage_updated_at"] = sc_updated
-
-        audit_fallback = {}
-        if isinstance(raw_resp, dict):
-            audit_fallback = dict(raw_resp)
-        elif isinstance(raw_resp, str) and raw_resp.strip():
-            try:
-                audit_fallback = json.loads(raw_resp)
-            except Exception as e:
-                logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
-                audit_fallback = {}
-
-        if status_val:
-            if "outreach_status" not in audit_fallback:
-                audit_fallback["outreach_status"] = status_val
-            if "status" not in audit_fallback:
-                audit_fallback["status"] = status_val
-
+        cand_data = {
+            "engage_status": status_val,
+            "outreach_phase": sc_phase,
+            "engage_score": sc_score,
+            "engage_hard_filter_status": sc_hf,
+            "engage_completed_at": sc_completed,
+            "first_completed_at": sc_first_completed,
+            "engage_updated_at": sc_updated,
+        }
         live_api = payloads_dict.get(iid) if iid else None
-
-        merged = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
+        merged = build_merged_outreach_payload(cand_data, raw_resp, status_val, live_api)
 
         if merged:
             merged_payloads.append(merged)
