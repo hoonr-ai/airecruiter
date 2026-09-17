@@ -1745,11 +1745,11 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         status_val = row[1]
         raw_resp = row[2]
         sc_phase = row[4]
-        sc_score = row[5] if len(row) > 5 else None
-        sc_hf = row[6] if len(row) > 6 else None
-        sc_completed = row[7] if len(row) > 7 else None
-        sc_first_completed = row[8] if len(row) > 8 else None
-        sc_updated = row[9] if len(row) > 9 else None
+        sc_score = row[5]
+        sc_hf = row[6]
+        sc_completed = row[7]
+        sc_first_completed = row[8]
+        sc_updated = row[9]
 
         cand_fallback = {}
         if status_val:

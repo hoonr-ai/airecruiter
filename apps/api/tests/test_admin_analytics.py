@@ -77,10 +77,21 @@ def test_compute_jobs_timeline_dedup_key_is_job_id_not_jobdiva_id():
 
 def test_funnel_sql_maps_completed_like_rankings():
     from pathlib import Path
+    from services.engage_status import effective_funnel_status
+
     src = Path(__file__).resolve().parents[1] / "routers" / "admin_analytics.py"
     text = src.read_text()
     assert "IN ('completed', 'complete')" in text
     assert "AND NULLIF(TRIM(COALESCE(sc.data->>'engage_score', '')), '') IS NOT NULL THEN 'failed'" in text
+
+    assert effective_funnel_status("completed", None, "passed", has_interview=True) == "passed"
+    assert effective_funnel_status("completed", None, "failed", has_interview=True) == "failed"
+    assert effective_funnel_status("failed", None, "", has_interview=True) == "launched"
+    assert effective_funnel_status("failed", "65", "", has_interview=True) == "failed"
+    assert effective_funnel_status("qualified", None, "", has_interview=False) == "passed"
+    assert effective_funnel_status("in_progress", None, "", has_interview=True) == "in_progress"
+    assert effective_funnel_status("", None, "", has_interview=True) == "launched"
+    assert effective_funnel_status("", None, "", has_interview=False, sc_status="pending") == "pending"
 
 
 def test_compute_jobs_timeline_recruiter_emails_scoped_to_team():

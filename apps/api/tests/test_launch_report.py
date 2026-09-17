@@ -41,6 +41,15 @@ from routers import launch_report as lr
         ("completed", "completed"),
         ("passed", "completed"),
         ("failed", "completed"),
+        ("qualified", "completed"),
+        ("shortlisted", "completed"),
+        ("selected", "completed"),
+        ("hired", "completed"),
+        ("disqualified", "completed"),
+        ("declined", "completed"),
+        ("rejected", "completed"),
+        ("screening", "in_progress"),
+        ("contacted", "in_progress"),
         ("outreach_incomplete", "partial_complete"),
         ("expired", "partial_complete"),
         ("no_response", "partial_complete"),
@@ -688,6 +697,48 @@ def test_live_completed_status_counts_as_passed_even_if_jsonb_is_stale():
     assert row["passed_candidates"] == 1
     assert row["failed_candidates"] == 0
     assert row["first_pass_at"] == "2026-08-26T06:07:00-04:00"
+    assert row["time_to_first_pass_minutes"] == 7.0
+
+
+def test_pass_fail_includes_jsonb_terminal_without_audit_row():
+    """Webhook can write engage_status without an audit row; still count it."""
+    job = {**_job(1), "job_created_at_text": "2026-08-25 12:00:00"}
+    candidates = [
+        {"candidate_id": "c1", "engage_interview_id": "1", "engage_status": "in_progress"},
+        {
+            "candidate_id": "c2",
+            "engage_status": "passed",
+            "engage_updated_at": "2026-08-26T10:00:00Z",
+        },
+    ]
+    audit = [{"interview_id": "1", "candidate_id": "c1"}]
+    row = lr._build_row(job, candidates, audit, {"1": _outreach("completed")})
+    assert row["passed_candidates"] == 2
+    assert row["failed_candidates"] == 0
+    assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
+
+
+def test_qualified_status_is_completed_and_passed():
+    payloads = [_outreach("qualified")]
+    summary = lr._summarise_outreach(payloads)
+    assert summary["buckets"]["completed"] == 1
+    assert summary["buckets"]["passed"] == 1
+    assert summary["buckets"]["pending"] == 0
+
+
+def test_time_to_first_pass_falls_back_when_derived_stamp_is_before_launch():
+    job = {
+        **_job(1),
+        "first_launch_at": datetime.datetime(2026, 8, 26, 12, 0, tzinfo=datetime.timezone.utc),
+        "time_to_first_pass": 7.0,
+    }
+    candidates = [{
+        "candidate_id": "c1",
+        "engage_status": "passed",
+        "engage_updated_at": "2026-08-26T10:00:00Z",
+    }]
+    row = lr._build_row(job, candidates, [], {})
+    assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
     assert row["time_to_first_pass_minutes"] == 7.0
 
 

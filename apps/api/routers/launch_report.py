@@ -80,8 +80,15 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # let a candidate land in two buckets and break the Percentage denominator.
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
 _PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started", "initiated"}
-_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent", "call_in_progress"}
-_COMPLETED_STATUSES = {"completed", "passed", "failed", "pass", "fail", "complete"}
+_IN_PROGRESS_STATUSES = {
+    "in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent",
+    "call_in_progress", "screening", "interview_completed", "interview completed",
+    "contacted",
+}
+_COMPLETED_STATUSES = {
+    "completed", "passed", "failed", "pass", "fail", "complete", "hired",
+    "qualified", "shortlisted", "selected", "disqualified", "declined", "rejected",
+}
 _PARTIAL_STATUSES = {
     "outreach_incomplete", "partial", "partial_complete", "incomplete",
     "expired", "no_response", "unreachable", "abandoned", "outreach_failed",
@@ -892,6 +899,58 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _audit_covered_candidates(
+    audit_rows: List[Dict[str, Any]],
+) -> Tuple[set, set]:
+    ids: set = set()
+    iids: set = set()
+    for row in audit_rows:
+        cid = str(row.get("candidate_id") or "").strip()
+        iid = str(row.get("interview_id") or "").strip()
+        if cid:
+            ids.add(cid)
+        if iid:
+            iids.add(iid)
+    return ids, iids
+
+
+def _pass_fail_for_uncovered_candidates(
+    candidate_rows: List[Dict[str, Any]],
+    audit_rows: List[Dict[str, Any]],
+) -> Tuple[int, int, List[datetime.datetime]]:
+    """JSONB Pass/Fail for candidates the audit walk never saw.
+
+    Voice-agent webhooks can persist a terminal engage_status on
+    sourced_candidates without creating an engage_interview_audit row.
+    Those candidates must still count once any other audit payload exists.
+    """
+    covered_ids, covered_iids = _audit_covered_candidates(audit_rows)
+    extra_passed = extra_failed = 0
+    extra_pass_at: List[datetime.datetime] = []
+    for row in candidate_rows:
+        cid = str(row.get("candidate_id") or "").strip()
+        iid = str(row.get("engage_interview_id") or "").strip()
+        if (cid and cid in covered_ids) or (iid and iid in covered_iids):
+            continue
+        display = format_engage_status(
+            (row.get("engage_status") or "").strip().lower(),
+            parse_engage_score(row.get("engage_score")),
+            (row.get("engage_hard_filter_status") or "").strip().lower(),
+        )
+        if display == "Pass":
+            extra_passed += 1
+            passed_at = (
+                _parse_iso(row.get("first_completed_at"))
+                or _parse_iso(row.get("engage_completed_at"))
+                or _parse_iso(row.get("engage_updated_at"))
+            )
+            if passed_at:
+                extra_pass_at.append(passed_at)
+        elif display == "Fail":
+            extra_failed += 1
+    return extra_passed, extra_failed, extra_pass_at
+
+
 def _build_row(
     job: Dict[str, Any],
     candidate_rows: List[Dict[str, Any]],
@@ -961,6 +1020,12 @@ def _build_row(
     )
 
     buckets = outreach["buckets"]
+    extra_passed, extra_failed, extra_pass_at = _pass_fail_for_uncovered_candidates(
+        candidate_rows, audit_rows
+    )
+    pass_times = [t for t in (outreach.get("first_pass_at"), cand.get("first_pass_at"), *extra_pass_at) if t]
+    merged_first_pass = min(pass_times) if pass_times else None
+    live_ttp = _minutes_between(launch_at, merged_first_pass)
     # Percentage = (Completed + Partial Complete) / Total Launched * 100.
     #
     # Undefined rather than 0 when nothing launched, and undefined when the
@@ -1016,24 +1081,20 @@ def _build_row(
 
         "submitted_candidates": cand["submitted_candidates"],
         "rejected_candidates": cand["rejected_candidates"],
-        # Live merged outreach is the ranking-page source of truth when interviews
-        # exist; candidate JSONB is the fallback for jobs with no audit rows.
-        "passed_candidates": (
-            buckets["passed"] if payloads else cand.get("passed_candidates", 0)
-        ),
-        "failed_candidates": (
-            buckets["failed"] if payloads else cand.get("failed_candidates", 0)
-        ),
+        # Live merged outreach for launched interviews, plus JSONB Pass/Fail
+        # for candidates the webhook wrote without an audit row.
+        "passed_candidates": buckets["passed"] + extra_passed,
+        "failed_candidates": buckets["failed"] + extra_failed,
         # Completed candidates the recruiter has not yet actioned either way.
         "outstanding_feedback": max(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
         ),
         "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
         "first_feedback_at": _edt(cand["first_feedback_at"]),
-        "first_pass_at": _edt(outreach.get("first_pass_at") or cand.get("first_pass_at")),
+        "first_pass_at": _edt(merged_first_pass),
         "time_to_first_pass_minutes": (
-            _minutes_between(launch_at, outreach.get("first_pass_at") or cand.get("first_pass_at"))
-            if (outreach.get("first_pass_at") or cand.get("first_pass_at"))
+            live_ttp
+            if live_ttp is not None
             else (
                 round(float(job["time_to_first_pass"]), 1)
                 if job.get("time_to_first_pass") is not None
