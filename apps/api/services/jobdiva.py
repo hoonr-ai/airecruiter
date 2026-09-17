@@ -524,13 +524,19 @@ def _pair_resume_source_names() -> set:
 # JobDiva BI applicant rows are not in Swagger, so the provenance hints are read
 # under every plausible spelling (get_field matches case- and punctuation-
 # insensitively: RESUMESOURCE / resumeSource / resume_source are one key).
+#
+# Only APPLICATION-level fields are read. Candidate-level ones (a profile's
+# SOURCE / OWNERID) are deliberately left out: a profile PAIR minted carries
+# PAIR's source and owner for life, so reading them would make the sync treat
+# that person's later, genuine application to ANOTHER job as PAIR-filed and
+# skip it. Losing a real applicant is worse than the twin the stamp match
+# already prevents, so an ambiguous signal counts as "not PAIR".
 _APPLICANT_RESUME_SOURCE_KEYS = [
-    "resumeSourceName", "resumeSource", "resumeSourceId",
-    "applicationSource", "sourceName", "source",
+    "resumeSourceName", "resumeSource", "resumeSourceId", "applicationSource",
 ]
 _APPLICANT_RECRUITER_KEYS = [
-    "recruiterId", "recruiter", "submittedBy", "submittedById",
-    "createdBy", "createdById", "enteredBy", "ownerId",
+    # `recruiterid` is the field PAIR sets on the application itself.
+    "recruiterId", "submittedBy", "submittedById", "createdBy", "createdById", "enteredBy",
 ]
 
 

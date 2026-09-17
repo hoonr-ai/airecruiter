@@ -63,9 +63,16 @@ def _normalize_profile_url(value: Any) -> str:
 def _phone_index_keys(digits: str) -> List[str]:
     """Digit strings a phone is indexed under: as stored and, when it carries a
     country code, its national 10 digits -- JobDiva and the sourcing pools do
-    not agree on '1' prefixes."""
+    not agree on '1' prefixes.
+
+    A shared or placeholder line (000-000-0000, 555-555-5555: fewer than four
+    distinct digits) yields no key at all. A phone is the only signal that can
+    merge two DIFFERENT people here, and one agency switchboard must never fold
+    a whole agency's applicants into one row -- the same rule the Step-5 dedupe
+    applies (apps/web/app/jobs/new/page.tsx `normalizePhoneValue`).
+    """
     digits = "".join(ch for ch in str(digits or "") if ch.isdigit())
-    if len(digits) < 7:
+    if len(digits) < 7 or len(set(digits)) < 4:
         return []
     keys = [digits]
     if len(digits) > 10:

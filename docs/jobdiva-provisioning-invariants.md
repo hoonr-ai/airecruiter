@@ -152,8 +152,11 @@ favoured the JobDiva-labelled twin.
 ### Still to verify live
 
 Whether `bi/JobApplicantsDetail` returns the application's Resume Source / recruiter
-(the sync reads `resumeSource*`, `applicationSource`, `source*`, `recruiterId`,
-`submittedBy`, `createdBy`, `enteredBy`, `ownerId` spellings). If it does not, layer 3's
-"PAIR-filed but unlinked" branch never fires and the stamp/email/phone/URL match
-carries the whole load -- which is sufficient once the profile id is stamped.
+(the sync reads the application-level spellings `resumeSource*`, `applicationSource`,
+`recruiterId`, `submittedBy`, `createdBy`, `enteredBy`; candidate-level `SOURCE` /
+`OWNERID` are deliberately ignored -- a profile PAIR minted carries them for life,
+and reading them would drop that person's genuine application to another job).
+If the BI row carries none of these, layer 3's "PAIR-filed but unlinked" branch
+never fires and the stamp/email/phone/URL match carries the whole load -- which is
+sufficient once the profile id is stamped.
 
