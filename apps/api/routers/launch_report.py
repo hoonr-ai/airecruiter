@@ -625,13 +625,13 @@ def merge_outreach_payloads(
             for k, v in source.items():
                 if v is not None:
                     if k in ("outreach_status", "status"):
-                        existing_st = str(merged_payload.get(k) or "").strip().lower().replace(" ", "_")
-                        new_st = str(v).strip().lower().replace(" ", "_")
+                        existing_rank = _status_rank(merged_payload.get(k))
+                        new_rank = _status_rank(v)
                         # If both statuses are recognized in the hierarchy, enforce monotonic progression.
                         # If either is unrecognised, allow the higher-priority layer to win so genuinely
                         # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
-                        if existing_st in _STATUS_HIERARCHY and new_st in _STATUS_HIERARCHY:
-                            if _STATUS_HIERARCHY[new_st] >= _STATUS_HIERARCHY[existing_st]:
+                        if existing_rank and new_rank:
+                            if new_rank >= existing_rank:
                                 merged_payload[k] = v
                         else:
                             merged_payload[k] = v
@@ -686,15 +686,16 @@ def build_merged_outreach_payload(
             audit_fallback = {}
             
     if audit_status:
-        st_hier = str(audit_status).strip().lower().replace(" ", "_")
-        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower().replace(" ", "_")
+        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip()
+        audit_status_rank = _status_rank(audit_status)
+        current_status_rank = _status_rank(curr_st)
         # Backfill missing keys only; never replace an already-recorded audit
         # response status at equal rank (passed vs completed, fail vs failed).
         if not curr_st:
             audit_fallback["outreach_status"] = audit_status
             audit_fallback["status"] = audit_status
-        elif st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
-            if _STATUS_HIERARCHY[st_hier] > _STATUS_HIERARCHY[curr_st]:
+        elif audit_status_rank and current_status_rank:
+            if audit_status_rank > current_status_rank:
                 audit_fallback["outreach_status"] = audit_status
                 audit_fallback["status"] = audit_status
         # Unrecognised overlay must not clobber a status the audit response
@@ -1395,10 +1396,12 @@ async def get_launch_report(
                     existing["created_at"] = row["created_at"]
 
                 # 2. Monotonic status hierarchy: favor higher progression state
-                row_st = _extract_audit_status(row).lower()
-                ex_st = _extract_audit_status(existing).lower()
-                if row_st in _STATUS_HIERARCHY and ex_st in _STATUS_HIERARCHY:
-                    if _STATUS_HIERARCHY[row_st] > _STATUS_HIERARCHY[ex_st]:
+                row_st = _extract_audit_status(row).strip().lower()
+                ex_st = _extract_audit_status(existing).strip().lower()
+                row_rank = _status_rank(row_st)
+                existing_rank = _status_rank(ex_st)
+                if row_rank and existing_rank:
+                    if row_rank > existing_rank:
                         existing["status"] = row.get("status") or row_st
                         if row.get("response"):
                             existing["response"] = row.get("response")

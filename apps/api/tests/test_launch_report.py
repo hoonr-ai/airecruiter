@@ -1273,10 +1273,10 @@ def test_deduplication_preserves_earliest_created_at_and_highest_status(monkeypa
     jobs = [{**_job(999), "job_id": "55", "jobdiva_id": "26-01234", "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}]
     audit_by_key = {
         "26-01234": [
-            # Later event on Aug 29 with 'completed'
-            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 29, 14, 0), "status": "completed", "response": '{"status": "completed"}'},
-            # Earlier launch event on Aug 27 with 'initiated'
-            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "status": "Initiated", "response": None},
+            # Later stale event on Aug 29 with pending status.
+            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 29, 14, 0), "status": "pending", "response": '{"status": "pending"}'},
+            # Earlier launch event on Aug 27 has Pair Bot's spaced status form.
+            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "status": "In Progress", "response": None},
         ]
     }
 
@@ -1302,8 +1302,8 @@ def test_deduplication_preserves_earliest_created_at_and_highest_status(monkeypa
     row = response["data"]["jobs"][0]
     # Candidate should still belong to Aug 27 report because earliest created_at was preserved
     assert row["total_candidates_launched"] == 1
-    # Status progression retained 'completed' rather than being clobbered by 'Initiated'
-    assert row["completed"] == 1
+    # Spaced In Progress retained rather than being clobbered by stale Pending.
+    assert row["in_progress"] == 1
 
 
 def test_merge_outreach_payloads_monotonic_state_progression():
@@ -1320,6 +1320,28 @@ def test_merge_outreach_payloads_monotonic_state_progression():
     live2 = {"outreach_status": "completed"}
     merged2 = lr.merge_outreach_payloads(cand2, {}, live2)
     assert merged2["outreach_status"] == "completed"
+
+
+def test_merge_outreach_payloads_spaced_in_progress_is_not_downgraded():
+    """A stale Pending layer cannot overwrite Pair Bot's spaced status form."""
+    merged = lr.merge_outreach_payloads(
+        {"outreach_status": "in progress"},
+        {"outreach_status": "pending"},
+        None,
+    )
+    assert merged["outreach_status"] == "in progress"
+
+
+def test_build_merged_payload_spaced_in_progress_audit_status_overrides_pending():
+    """The audit column's spaced status must rank above its stale JSON payload."""
+    payload = lr.build_merged_outreach_payload(
+        {"engage_status": "pending"},
+        {"outreach_status": "pending", "status": "pending"},
+        "in progress",
+        None,
+    )
+    assert payload["outreach_status"] == "in progress"
+    assert payload["status"] == "in progress"
 
 
 def test_eastern_date_expr_sql():
@@ -1448,6 +1470,4 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     assert "total_launched" not in sql
     # Outer query filters on l.first_launch_at
     assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
-
-
 
