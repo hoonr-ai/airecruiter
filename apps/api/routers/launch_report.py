@@ -65,6 +65,7 @@ from services.engage_status import (
     hf_display_from_payload,
     parse_engage_score,
     score_from_payload,
+    select_engage_status,
 )
 from services.outreach_normalization import (
     normalize_channel,
@@ -249,18 +250,18 @@ def _status_rank(raw: Optional[str]) -> int:
 def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -> Optional[str]:
     """Status for Pending / In Progress / Completed buckets.
 
-    ``interview_status`` from the live pair-bot API response takes priority when
-    it ranks higher than ``outreach_status``. This handles the case where
+    The rule lives in ``services.engage_status.select_engage_status`` (shared
+    with the rank list table): a live ``interview_status`` replaces
+    ``outreach_status`` only when it reads further along on the display
+    ladder (Pending < In Progress < Pass/Fail), never on the raw pair-bot rank
+    alone — so ``active`` or ``phase2`` cannot displace a status the rank list
+    calls Pending, and nothing is ever downgraded. Handles the case where
     ``GET /api/interviews/{id}/outreach-status`` returns ``interview_status:
-    in_progress`` at the top level while ``outreach_status`` is still
-    ``pending`` (pair-bot has not yet written back the final status for later
-    phases). Prefer whichever recognised value is further along the hierarchy.
+    in_progress`` while ``outreach_status`` is still ``pending`` (the reminder
+    sequence has not finished).
     """
-    # interview_status comes from the live pair-bot API top-level response field.
-    interview_status = merged.get("interview_status")
-    if _status_rank(interview_status) > _status_rank(outreach_status):
-        return interview_status
-    return outreach_status
+    chosen = select_engage_status({**merged, "outreach_status": outreach_status})
+    return chosen if chosen is not None else outreach_status
 
 
 def _bucket_status(raw: Optional[str]) -> str:
@@ -689,15 +690,22 @@ def _summarise_outreach(
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
-        merged = {**payload, **outreach_dict}
+        # Top-level keys win. For a payload that came through
+        # build_merged_outreach_payload they hold the stored → audit → live
+        # monotonic merge and `outreach` is only a copy of pair-bot's live
+        # block; re-applying that block on top used to let its still-`pending`
+        # outreach-sequence state wipe a stored `in_progress` — the rank list
+        # table never did that, so header and table disagreed on one person.
+        # For a raw pair-bot body the top level has no status keys and the
+        # block simply fills them in.
+        merged = {**outreach_dict, **payload}
 
-        # If the payload came wrapped with an "outreach" dict (like from the UI or candidates API),
-        # we strictly avoid falling back to the top-level `payload["status"]` (which is the candidate's
-        # resume-screening status). If it's a flat payload, `payload["status"]` IS the outreach status.
-        if "outreach" in payload:
-            status_raw = merged.get("outreach_status") or outreach_dict.get("status")
-        else:
-            status_raw = merged.get("outreach_status") or merged.get("status")
+        # ONE status per candidate, the same selection the rank list table
+        # makes for its row (select_engage_status): the merge, lifted by a
+        # live interview_status only when that reads further along. Passing
+        # the original payload keeps a raw UI body's top-level `status` (the
+        # candidate's sourcing status) out of the running.
+        status_raw = select_engage_status(payload)
         normalized_status = (status_raw or "").strip().lower()
 
         # Candidates marked as failed/rejected who never actually engaged/attended
@@ -724,7 +732,7 @@ def _summarise_outreach(
                 status_raw = "pending"
                 normalized_status = "pending"
 
-        funnel_raw = _funnel_status_raw(merged, status_raw)
+        funnel_raw = status_raw
 
         # Classify exactly like the rank list's table (`format_engage_status`
         # is what candidates.py stamps on each row), then bucket:
@@ -733,23 +741,22 @@ def _summarise_outreach(
         #   partial vocabulary     -> partial_complete (the table has no such
         #                             label and shows these as Pending)
         #   anything else          -> pending — including `sent` / `Initiated`
-        #                             (stamped at launch, before any contact)
-        #                             and reminder phases reported as a status.
+        #                             (stamped at launch, before any contact),
+        #                             reminder phases reported as a status, and
+        #                             a terminal token without the score or
+        #                             hard-filter verdict the table needs to
+        #                             call it Pass or Fail.
         # Bucketing off the raw pair-bot vocabulary instead used to count a
         # just-launched `sent` candidate as In Progress while the table said
         # Pending — the two screens must never disagree on one candidate.
         display = format_engage_status(
-            (funnel_raw or "").strip().lower(),
+            normalized_status,
             score_from_payload(merged),
             hf_display_from_payload(merged),
         )
-        raw_bucket = _bucket_status(funnel_raw)
-        if raw_bucket == "partial_complete":
+        if _bucket_status(funnel_raw) == "partial_complete":
             bucket = "partial_complete"
-        elif display in ("Pass", "Fail") or raw_bucket == "completed":
-            # `raw_bucket == "completed"` keeps a terminal pair-bot status the
-            # table cannot call Pass or Fail (e.g. `disqualified` with no
-            # score) out of Pending — the interview is over either way.
+        elif display in ("Pass", "Fail"):
             bucket = "completed"
         elif display == "In Progress":
             bucket = "in_progress"

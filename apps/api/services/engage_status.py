@@ -9,7 +9,7 @@ not started. The Rankings header and launch-report buckets split Pending / In
 Progress on this same function (see _summarise_outreach), so a candidate can
 never read Pending in the table and In Progress in a count.
 """
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def parse_engage_score(raw: Any) -> Optional[float]:
@@ -105,3 +105,67 @@ def effective_funnel_status(
     if s in ("fail", "failed", "rejected") and parse_engage_score(engage_score) is not None:
         return "failed"
     return s or "pending"
+
+
+# ---------------------------------------------------------------------------
+# One status per candidate, for every screen
+# ---------------------------------------------------------------------------
+# Display ladder used to pick ONE status per candidate out of several raw
+# candidates (stored outreach_status, stored status, live interview_status…).
+# Pass and Fail tie on purpose: a decided outcome is never replaced by another
+# decided outcome coming from a lower-priority source.
+_DISPLAY_RANK = {"Pending": 0, "In Progress": 1, "Fail": 2, "Pass": 2}
+
+
+def status_candidates(merged: Dict[str, Any]) -> List[str]:
+    """Raw status strings for one candidate, most authoritative first.
+
+    ``merged`` is either a ``build_merged_outreach_payload`` result — flat; the
+    stored → audit → live monotonic merge sits in ``outreach_status`` /
+    ``status`` and a copy of pair-bot's live body may sit under ``outreach`` —
+    or a raw pair-bot / UI body: a nested ``outreach`` block and no top-level
+    ``outreach_status``. For a raw body the top-level ``status`` is the
+    candidate's sourcing status, not an outreach status, and is ignored.
+    """
+    nested = merged.get("outreach") if isinstance(merged.get("outreach"), dict) else {}
+    raw_body = "outreach_status" not in merged and bool(nested)
+    if raw_body:
+        ordered = [nested.get("outreach_status"), nested.get("status")]
+    else:
+        ordered = [merged.get("outreach_status"), merged.get("status")]
+    # pair-bot's interview state runs ahead of its outreach-sequence state: the
+    # interview can be in progress while reminders are still scheduled.
+    ordered += [merged.get("interview_status"), nested.get("interview_status")]
+    if not raw_body:
+        # The live block exactly as fetched — fill-in only, it never outranks
+        # the merge it was already folded into.
+        ordered += [nested.get("outreach_status"), nested.get("status")]
+    return [str(value).strip() for value in ordered if value is not None and str(value).strip()]
+
+
+def select_engage_status(merged: Dict[str, Any]) -> Optional[str]:
+    """The ONE raw status a candidate is classified by, on every screen.
+
+    The first candidate (see ``status_candidates``) whose display label reads
+    the furthest along wins. Consequences, all deliberate:
+
+    * a stored ``in_progress`` is never demoted by the live outreach block
+      still saying ``pending``;
+    * a live ``interview_status: in_progress`` lifts a launch-time ``sent``;
+    * a token the display rules do not recognise as progress (``active``,
+      ``phase2``) cannot displace anything;
+    * a decided Pass or Fail is never replaced by the other.
+
+    The rank list table (candidates.py), the Rankings header and the launch
+    report (``_summarise_outreach``) all classify through this function, so a
+    candidate reads the same everywhere.
+    """
+    score = score_from_payload(merged)
+    hf = hf_display_from_payload(merged)
+    best: Optional[str] = None
+    best_rank = -1
+    for raw in status_candidates(merged):
+        rank = _DISPLAY_RANK[format_engage_status(raw.lower(), score, hf)]
+        if rank > best_rank:
+            best, best_rank = raw, rank
+    return best

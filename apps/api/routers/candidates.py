@@ -110,6 +110,7 @@ from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_ro
 
 
 from services.engage_status import format_engage_status as _format_engage_status
+from services.engage_status import select_engage_status
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
@@ -1567,7 +1568,12 @@ async def get_job_candidates(
                 raw_live_api
             )
             
-            outreach_status = merged.get("outreach_status") or merged.get("status")
+            # ONE status per candidate for every screen — this row, the Rankings
+            # header and the launch report all classify through
+            # select_engage_status: the stored → audit → live merge, lifted by a
+            # live interview_status that reads further along, never demoted by
+            # pair-bot's still-`pending` outreach-sequence state.
+            outreach_status = select_engage_status(merged)
             if outreach_status:
                 cand["engage_status"] = outreach_status
                 if isinstance(data_blob, dict):
@@ -3363,7 +3369,12 @@ async def get_launched_candidates(
                 raw_live_api
             )
             
-            outreach_status = merged.get("outreach_status") or merged.get("status")
+            # ONE status per candidate for every screen — this row, the Rankings
+            # header and the launch report all classify through
+            # select_engage_status: the stored → audit → live merge, lifted by a
+            # live interview_status that reads further along, never demoted by
+            # pair-bot's still-`pending` outreach-sequence state.
+            outreach_status = select_engage_status(merged)
             if outreach_status:
                 cand["engage_status"] = outreach_status
                 if isinstance(data_blob, dict):

@@ -1290,6 +1290,72 @@ def test_launched_row_status_is_the_rank_list_rows_status():
     assert summary["launched"] == summary["resolved"] == 2
 
 
+def test_live_outreach_block_cannot_demote_a_stored_in_progress():
+    """QA, 2026-09-18: header/report said Pending 6 / In Progress 0 while the
+    table showed one In Progress. pair-bot's live body is
+    {outreach: {outreach_status, outreach_phase}, communications} and its
+    outreach_status stays `pending` while reminders are scheduled, even after
+    the interview started. The summariser used to re-apply that block over the
+    merged status and wipe the stored `in_progress`."""
+    row = _launched("i1", "c1", engage_status="in_progress",
+                    audit_status="in_progress", audit_response={"status": "in_progress"})
+    live = {"outreach": {"outreach_status": "pending", "outreach_phase": "phase2"}, "communications": []}
+    summary = lr.summarise_launched_candidates([row], {"i1": live})
+    assert summary["buckets"]["in_progress"] == 1
+    assert summary["buckets"]["pending"] == 0
+    assert summary["phases"]["phase3"] == 1          # the live phase still counts
+
+
+def test_unrecognised_live_interview_status_cannot_demote_a_stored_in_progress():
+    row = _launched("i1", "c1", engage_status="in_progress", audit_status="in_progress")
+    live = {"interview_status": "active", "outreach": {"outreach_status": "pending"}, "communications": []}
+    summary = lr.summarise_launched_candidates([row], {"i1": live})
+    assert summary["buckets"]["in_progress"] == 1
+
+
+def test_live_interview_status_lifts_a_launch_time_sent():
+    """The mirror-image gap: before the webhook lands only pair-bot knows the
+    interview started. Header, report and table all say In Progress."""
+    row = _launched("i1", "c1", engage_status="sent", audit_status="Initiated")
+    live = {"interview_status": "in_progress", "outreach": {"outreach_status": "pending"}, "communications": []}
+    summary = lr.summarise_launched_candidates([row], {"i1": live})
+    assert summary["buckets"]["in_progress"] == 1
+    assert summary["buckets"]["pending"] == 0
+
+
+def test_table_and_buckets_classify_one_candidate_identically():
+    """candidates.py stamps format_engage_status(select_engage_status(merged))
+    on each table row; the buckets must agree for every payload shape."""
+    import inspect
+    from routers.candidates import get_job_candidates
+    from services.engage_status import format_engage_status, select_engage_status
+
+    src = inspect.getsource(get_job_candidates)
+    assert "outreach_status = select_engage_status(merged)" in src
+    assert 'merged.get("outreach_status") or merged.get("status")' not in src
+
+    started = dict(engage_status="in_progress", audit_status="in_progress", audit_response={"status": "in_progress"})
+    stamped = dict(engage_status="sent", audit_status="Initiated", audit_response={"status": "pending"})
+    shapes = [
+        (started, {"outreach": {"outreach_status": "pending"}, "communications": []}),
+        (started, {"interview_status": "in_progress", "outreach": {"outreach_status": "pending"}}),
+        (started, {"interview_status": "active", "outreach": {"outreach_status": "pending"}}),
+        (started, None),
+        (stamped, {"interview_status": "in_progress", "outreach": {"outreach_status": "pending"}}),
+        (stamped, {"outreach": {"outreach_status": "in_progress"}}),
+        (stamped, {"outreach": {"outreach_status": "completed"}, "hard_filter_status": "failed"}),
+        (stamped, None),
+    ]
+    to_bucket = {"Pending": "pending", "In Progress": "in_progress", "Pass": "completed", "Fail": "completed"}
+    for fields, live in shapes:
+        row = _launched("i1", "c1", **fields)
+        merged = lr.candidate_outreach_payload(row, live)
+        table_label = format_engage_status(select_engage_status(merged), lr.score_from_payload(merged), lr.hf_display_from_payload(merged))
+        summary = lr.summarise_launched_candidates([row], {"i1": live} if live is not None else {})
+        header_bucket = next(k for k in ("pending", "in_progress", "completed", "partial_complete") if summary["buckets"][k])
+        assert header_bucket == to_bucket[table_label], (fields, live, table_label, header_bucket)
+
+
 def test_launched_row_with_no_status_evidence_is_pending_and_unresolved():
     summary = lr.summarise_launched_candidates([_launched("1", "c1")], {})
     assert summary["buckets"]["pending"] == 1
