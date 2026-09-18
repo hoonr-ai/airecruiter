@@ -85,8 +85,9 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
 _PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started", "initiated"}
 _IN_PROGRESS_STATUSES = {
-    "in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent",
-    "call_in_progress", "screening", "interview_completed", "interview completed",
+    "in_progress",
+    "phase1", "phase2", "phase3", "phase4", "active", "sent",
+    "call_in_progress", "screening", "interview_completed",
     "contacted",
 }
 _COMPLETED_STATUSES = {
@@ -228,7 +229,7 @@ def _mean(values: List[float]) -> Optional[float]:
 
 
 def _status_rank(raw: Optional[str]) -> int:
-    return _STATUS_HIERARCHY.get((raw or "").strip().lower(), 0)
+    return _STATUS_HIERARCHY.get((raw or "").strip().lower().replace(" ", "_"), 0)
 
 
 def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -> Optional[str]:
@@ -250,7 +251,7 @@ def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -
 
 def _bucket_status(raw: Optional[str]) -> str:
     """Map a pair-bot outreach_status onto one of the four report buckets."""
-    status = (raw or "").strip().lower()
+    status = (raw or "").strip().lower().replace(" ", "_")
     if not status:
         return "pending"
     if status in _PENDING_STATUSES:
