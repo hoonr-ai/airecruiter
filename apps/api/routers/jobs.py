@@ -28,12 +28,8 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
-from routers.launch_report import (
-    _fetch_all_outreach,
-    _summarise_outreach,
-    apply_uncovered_pass_fail,
-    collect_merged_outreach_payloads,
-)
+from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
+from services.launched_candidates import fetch_launched_candidates, interview_id_of
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1689,18 +1685,25 @@ def _empty_outreach_stats() -> dict:
             "extra2": 0,
             "extra3": 0,
         },
+        "channels": {"call": 0, "sms": 0, "web": 0},
+        "launched": 0,
+        "resolved": 0,
     }
 
 
 @router.get("/jobs/{job_id_or_ref}/outreach-stats")
 async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
-    """
-    Fetches live outreach statistics from pair-bot for all candidates launched on a specific job.
+    """Live outreach statistics for the candidates launched on one job.
+
+    Exactly the computation behind this job's launch-report row
+    (`summarise_launched_candidates` over `fetch_launched_candidates`), so the
+    Rankings header, its "Candidates Launched" figure and the launch report
+    always agree: one unit per launched PERSON (their latest interview), over
+    the job's whole lifetime. A re-launched candidate is one candidate, and
+    Pending + In Progress + Completed + Partial Complete == Candidates Launched.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
 
-    launched_rows: list = []
-    sourced_rows: list = []
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -1710,117 +1713,27 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
                 LIMIT 1
             """, (job_id_or_ref, job_id_or_ref))
             result = cur.fetchone()
-            if not result:
-                return _empty_outreach_stats()
-            
-            # Note: We rely on Python's 'or' treating an empty string as falsy here.
-            # This ensures that if jobdiva_id is '', we fall back to job_id instead
-            # of querying engage_interview_audit with jobdiva_id='' (which would pool
-            # candidates from all jobs missing a JobDiva reference).
-            resolved_jobdiva_id = result[0] or result[1]
-            resolved_numeric_job_id = result[1] or result[0]
-            
-            # One row per launched interview (same grain as launch report),
-            # not per sourced candidate. DISTINCT ON candidate_id dropped a
-            # second interview for the same person; a FULL OUTER JOIN on
-            # engage_status counted unlaunched sourced rows as Pending.
-            cur.execute("""
-                SELECT DISTINCT ON (interview_id)
-                    interview_id, status, response, candidate_id
-                FROM engage_interview_audit
-                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                  AND COALESCE(NULLIF(interview_id, ''), '') <> ''
-                ORDER BY interview_id, id DESC
-            """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
-            launched_rows = cur.fetchall()
+        if not result:
+            return _empty_outreach_stats()
 
-            # Engage-touched or JSONB Pass/Fail only. Never-contacted sourced
-            # rows are not needed for outreach-stats; idx_sourced_candidates_jobdiva_id
-            # already bounds this to the job.
-            cur.execute("""
-                -- A person may be launched more than once for the same job.
-                -- Keep one row per interview, not per candidate, so Rankings
-                -- retains the same population as Pair Bot and the launch report.
-                -- Rows without an interview ID (JSONB-only Pass/Fail fallback)
-                -- still deduplicate by candidate.
-                SELECT DISTINCT ON (
-                    COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id)
-                )
-                    candidate_id,
-                    data->>'engage_interview_id',
-                    data->>'engage_status',
-                    data->>'outreach_phase',
-                    data->>'engage_score',
-                    data->>'engage_hard_filter_status',
-                    data->>'engage_completed_at',
-                    data->>'first_completed_at',
-                    data->>'engage_updated_at'
-                FROM sourced_candidates
-                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                  AND (
-                    COALESCE(NULLIF(data->>'engage_interview_id', ''), '') <> ''
-                    OR COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
-                    OR COALESCE(NULLIF(data->>'engage_hard_filter_status', ''), '') <> ''
-                  )
-                ORDER BY
-                    COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id),
-                    id DESC
-            """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
-            sourced_rows = cur.fetchall()
+        # Note: We rely on Python's 'or' treating an empty string as falsy here.
+        # This ensures that if jobdiva_id is '', we fall back to job_id instead
+        # of querying engage_interview_audit with jobdiva_id='' (which would pool
+        # candidates from all jobs missing a JobDiva reference).
+        resolved_jobdiva_id = result[0] or result[1]
+        resolved_numeric_job_id = result[1] or result[0]
+        launched_rows = fetch_launched_candidates(
+            conn, [str(resolved_jobdiva_id), str(resolved_numeric_job_id)]
+        )
     finally:
         conn.close()
 
-    if not launched_rows and not sourced_rows:
+    if not launched_rows:
         return _empty_outreach_stats()
 
-    audit_rows = [
-        {
-            "interview_id": row[0],
-            "status": row[1],
-            "response": row[2],
-            "candidate_id": row[3],
-        }
-        for row in launched_rows
-        if row and row[0]
-    ]
-    candidate_rows = [
-        {
-            "candidate_id": row[0],
-            "engage_interview_id": row[1],
-            "engage_status": row[2],
-            "outreach_phase": row[3],
-            "engage_score": row[4],
-            "engage_hard_filter_status": row[5],
-            "engage_completed_at": row[6],
-            "first_completed_at": row[7],
-            "engage_updated_at": row[8],
-        }
-        for row in sourced_rows
-        if row and row[0]
-    ]
-
-    interview_ids = sorted({
-        str(iid).strip()
-        for row in audit_rows
-        if (iid := row.get("interview_id")) and str(iid).strip()
-    } | {
-        str(iid).strip()
-        for row in candidate_rows
-        if (iid := row.get("engage_interview_id")) and str(iid).strip()
-    })
-    payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
-
-    merged_payloads, _num_resolved = collect_merged_outreach_payloads(
-        audit_rows, candidate_rows, payloads_dict
-    )
-    # Same P1/P2/P3/P4 and Extra 1/2/3 columns as Pair Bot Interviews / launch report.
-    # Pending Extra stays Phase 1; completed Extra still promotes.
-    # See `promote_high_score_extra_phase` docstring for why include_pending_extra=False specifically applies to rankings.
-    summary = _summarise_outreach(
-        merged_payloads, shift_phases=True, include_pending_extra=False
-    )
-    apply_uncovered_pass_fail(summary["buckets"], candidate_rows, audit_rows)
-    return summary
+    interview_ids = sorted({iid for row in launched_rows if (iid := interview_id_of(row))})
+    live_by_interview = await _fetch_all_outreach(interview_ids) if interview_ids else {}
+    return summarise_launched_candidates(launched_rows, live_by_interview)
 
 @router.get("/jobs/{job_id}/monitored-data")
 async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):

@@ -8,8 +8,14 @@
 // day, not to the next UTC one. Every timestamp here renders in
 // America/New_York for the same reason.
 //
-// The outreach columns (Pending → Phase 3) are fetched live from pair-bot,
-// one call per launched interview. They can come back partially resolved, so
+// Each row is that job's rank list, summarised: the same candidate counts
+// the Rankings page shows for the job today (one unit per launched person,
+// over the job's whole lifetime), indexed by the day the job first launched.
+// The backend shares its population and classification code with the
+// Rankings header, so the two screens cannot disagree.
+//
+// The outreach columns (Pending → Extra 3) are fetched live from pair-bot,
+// one call per launched candidate. They can come back partially resolved, so
 // a row that did not fully resolve is marked rather than silently showing
 // zeros — see the "partial" badge on the job cell.
 
@@ -232,6 +238,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "jd_published", label: "JobDiva Published", text: (r) => formatDate(r.jobdiva_published_date) },
       { key: "pair_published", label: "PAIR Published", text: (r) => formatDateTime(r.pair_published_at) },
       { key: "tt_source", label: "Time to Source", numeric: true, text: (r) => formatDuration(r.time_to_source_minutes) },
+      // Same population as the job's Rankings page ("Showing N of M candidates").
       { key: "sourced", label: "Sourced", numeric: true, text: (r) => num(r.total_candidates_sourced) },
     ],
   },
@@ -239,6 +246,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
     title: "Launch",
     columns: [
       { key: "launch_at", label: "PAIR Launch", text: (r) => formatDateTime(r.pair_launch_at) },
+      // The Rankings page's "Candidates Launched": people, not interviews. The
+      // Interview Status buckets below are computed over exactly this set.
       { key: "launched", label: "Launched", numeric: true, text: (r) => num(r.total_candidates_launched) },
       { key: "tt_launch", label: "Time to Launch", numeric: true, text: (r) => formatDuration(r.time_to_launch_minutes) },
       {
@@ -456,7 +465,7 @@ export default function LaunchReportPage() {
   const rows = useMemo(() => data?.jobs ?? [], [data]);
 
   // A row is "partial" when pair-bot did not answer for every launched
-  // interview — its outreach columns undercount and must not read as real.
+  // candidate — its outreach columns undercount and must not read as real.
   const partialRows = useMemo(
     () => rows.filter((r) => r.outreach_detail_resolved < r.outreach_detail_expected).length,
     [rows],
@@ -598,8 +607,10 @@ export default function LaunchReportPage() {
             data?.end_date ?? requestedRange?.end ?? (isRange ? selectedEndDate : selectedDate),
           )}
         </span>. Dates and times
-        are Eastern (EDT/EST), so a job launched late in the evening belongs to that day rather than the next. Interview
-        status, channel, phase and response columns are read live from PAIR Bot. Date ranges are limited to{" "}
+        are Eastern (EDT/EST), so a job launched late in the evening belongs to that day rather than the next. Each row
+        shows the job&apos;s current rank-list numbers — one per launched candidate, over the whole life of the job — so
+        Sourced, Launched and the interview status columns match the job&apos;s Rankings page. Interview status, channel,
+        phase and response columns are read live from PAIR Bot. Date ranges are limited to{" "}
         {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
 
@@ -612,7 +623,7 @@ export default function LaunchReportPage() {
           <TriangleAlert className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
           <p className="text-[13px] text-amber-800 leading-relaxed">
             PAIR Bot answered for {data?.totals.outreach_detail_resolved ?? 0} of{" "}
-            {data?.totals.outreach_detail_expected ?? 0} launched interviews. {partialRows}{" "}
+            {data?.totals.outreach_detail_expected ?? 0} launched candidates. {partialRows}{" "}
             {partialRows === 1 ? "row has" : "rows have"} incomplete outreach columns — status, channel, phase and
             response figures on those rows undercount. Generate report again to retry.
           </p>
@@ -723,7 +734,7 @@ export default function LaunchReportPage() {
                           {isPartial && (
                             <span
                               className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-700"
-                              title={`PAIR Bot answered for ${row.outreach_detail_resolved} of ${row.outreach_detail_expected} interviews — outreach columns undercount`}
+                              title={`PAIR Bot answered for ${row.outreach_detail_resolved} of ${row.outreach_detail_expected} launched candidates — outreach columns undercount`}
                             >
                               Partial
                             </span>

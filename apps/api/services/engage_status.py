@@ -3,6 +3,11 @@
 Rankings, the launch report, and admin analytics must use the same rules:
 pass/passed/hired → Pass; fail/failed/rejected with a score → Fail (no score is
 an outreach miss, not an interview Fail); completed follows hard-filter status.
+Everything else — including the launch-time `sent` / `Initiated` stamps and the
+reminder phases pair-bot reports as a status — is Pending: the candidate has
+not started. The Rankings header and launch-report buckets split Pending / In
+Progress on this same function (see _summarise_outreach), so a candidate can
+never read Pending in the table and In Progress in a count.
 """
 from typing import Any, Dict, Optional
 
@@ -30,7 +35,12 @@ def format_engage_status(
         if engage_score is None:
             return "Pending"
         return "Fail"
-    if s in ("in_progress", "in progress", "screening", "interview_completed", "interview completed", "contacted"):
+    if s in (
+        "in_progress", "in progress", "screening", "interview_completed",
+        "interview completed", "contacted",
+        # pair-bot: the screening call is happening right now.
+        "call_in_progress",
+    ):
         return "In Progress"
     if s in ("completed", "complete"):
         hf_passed = (hf_display or "").strip().lower() in (

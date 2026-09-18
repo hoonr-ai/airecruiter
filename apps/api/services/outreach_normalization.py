@@ -228,8 +228,10 @@ def promote_high_score_extra_phase(
     """Promote to Extra 1/2/3 from high-score extra jobs and extra comms.
 
     Pair Bot analytics only advances Extra from completed/processing extra jobs.
-    A still-pending extra stays Phase 1. Rankings calls this with
-    include_pending_extra=False; launch report keeps the default (True).
+    A still-pending extra stays Phase 1. Rankings and the launch report both
+    call this with include_pending_extra=False (via
+    summarise_launched_candidates); the default (True) is kept for callers that
+    want a queued Extra job to show up as Extra already.
 
     Extra tokens are chosen by rank (_phase_rank): a later Extra (or P2+)
     never loses to an older Extra 1 job. Already-stored extra tokens win
