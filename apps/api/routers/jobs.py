@@ -365,10 +365,12 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END) AS cm,
                             COUNT(DISTINCT CASE
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END) AS ps,
                             """
