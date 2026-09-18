@@ -1114,7 +1114,6 @@ def _build_row(
     outreach_by_interview: Dict[str, Dict[str, Any]],
     *,
     sourced_rows: Optional[List[Dict[str, Any]]] = None,
-    phase_candidate_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     cand = _summarise_candidates(sourced_rows if sourced_rows is not None else candidate_rows)
 
@@ -1122,21 +1121,6 @@ def _build_row(
         audit_rows, candidate_rows, outreach_by_interview
     )
     outreach = _summarise_outreach(payloads, shift_phases=True)
-
-    # Keep the existing status buckets intact, but calculate phase columns
-    # from every known interview ID. The sourcing view is candidate-oriented
-    # and can collapse repeat launches for the same person; Pair Bot phases
-    # are interview-oriented. Rankings already follows this per-interview
-    # rule, and the launch report must use it too.
-    if phase_candidate_rows is not None:
-        phase_payloads, _ = collect_merged_outreach_payloads(
-            audit_rows, phase_candidate_rows, outreach_by_interview
-        )
-        outreach["phases"] = _summarise_outreach(
-            phase_payloads,
-            shift_phases=True,
-            include_pending_extra=False,
-        )["phases"]
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -1441,12 +1425,6 @@ async def get_launch_report(
 
         audit_by_job[str(job["job_id"])] = day_rows
         interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
-        interview_ids.extend(
-            str(row.get("engage_interview_id")).strip()
-            for key in _keys_for(job)
-            for row in candidates_by_key.get(key, [])
-            if str(row.get("engage_interview_id") or "").strip()
-        )
 
     outreach_by_interview = await _fetch_all_outreach(sorted(set(interview_ids)))
 
@@ -1462,19 +1440,23 @@ async def get_launch_report(
             for row in raw_candidate_rows
         }
         all_candidate_rows = list(candidate_rows.values())
-        phase_candidate_rows = {
+        in_scope_interview_ids = {
+            str(row.get("interview_id") or "").strip()
+            for row in audit_by_job[str(job["job_id"])]
+            if str(row.get("interview_id") or "").strip()
+        }
+        report_candidate_rows = {
             str(row.get("engage_interview_id")): row
             for row in raw_candidate_rows
-            if str(row.get("engage_interview_id") or "").strip()
+            if str(row.get("engage_interview_id") or "").strip() in in_scope_interview_ids
         }
         rows.append(
             _build_row(
                 job,
-                all_candidate_rows,
+                list(report_candidate_rows.values()),
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
                 sourced_rows=_candidate_rows_as_of_first_launch(all_candidate_rows, job),
-                phase_candidate_rows=list(phase_candidate_rows.values()),
             )
         )
 

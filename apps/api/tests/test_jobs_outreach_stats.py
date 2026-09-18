@@ -206,8 +206,8 @@ def test_outreach_stats_selects_sourced_rows_per_interview_not_candidate(
         assert result["phases"]["phase1"] == 1
         assert result["phases"]["phase4"] == 1
 
-        sourced_query = cur.execute.call_args_list[2].args[0]
-        assert "DISTINCT ON (\n                    COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id)" in sourced_query
+        sourced_query = " ".join(cur.execute.call_args_list[2].args[0].split())
+        assert "DISTINCT ON ( COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id) )" in sourced_query
 
     asyncio.run(_test())
 

@@ -1188,34 +1188,58 @@ def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys(
     assert row["phase4"] == 1
 
 
-def test_build_row_uses_per_interview_payloads_for_phases_without_changing_buckets():
-    """Repeat launches may add a phase, but must not alter legacy status buckets."""
-    job = _job(1)
-    audit_rows = [{"interview_id": "int_1", "candidate_id": "cand_1", "status": "pending"}]
-    candidate_rows = [{"candidate_id": "cand_1", "engage_interview_id": "int_1", "engage_status": "pending"}]
-    phase_candidate_rows = [
-        *candidate_rows,
-        {"candidate_id": "cand_1", "engage_interview_id": "int_2", "engage_status": "pending"},
-    ]
-    live = {
-        "int_1": {"outreach_status": "pending", "outreach_phase": "phase1"},
-        "int_2": {"outreach_status": "in_progress", "outreach_phase": "phase1_6hr"},
+def test_launch_report_scopes_phase_fetch_and_buckets_to_day_interviews(monkeypatch):
+    """A historical repeat launch cannot inflate a day-scoped report row."""
+    job = {**_job(1), "job_id": "job_1", "jobdiva_id": "26-01234"}
+    audit_by_key = {
+        "26-01234": [
+            {
+                "interview_id": "in_scope",
+                "candidate_id": "cand_1",
+                "created_at": datetime.datetime(2026, 8, 28, 2, 10),
+                "status": "pending",
+                "response": None,
+            },
+        ]
     }
+    candidates_by_key = {
+        "26-01234": [
+            {"candidate_id": "cand_1", "engage_interview_id": "in_scope", "engage_status": "pending"},
+            {"candidate_id": "cand_1", "engage_interview_id": "historical", "engage_status": "in_progress"},
+        ]
+    }
+    fetched = []
 
-    baseline = lr._build_row(job, candidate_rows, audit_rows, live)
-    row = lr._build_row(
-        job,
-        candidate_rows,
-        audit_rows,
-        live,
-        phase_candidate_rows=phase_candidate_rows,
-    )
+    def _load_inputs(_start, _end, _scope):
+        return [job], candidates_by_key, audit_by_key
 
-    assert (row["pending"], row["in_progress"], row["completed"]) == (
-        baseline["pending"], baseline["in_progress"], baseline["completed"],
+    async def _fetch_outreach(ids):
+        fetched.extend(ids)
+        return {
+            "in_scope": {"outreach_status": "pending", "outreach_phase": "phase1_6hr"},
+            "historical": {"outreach_status": "in_progress", "outreach_phase": "phase3"},
+        }
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _fetch_outreach)
+
+    response = asyncio.run(
+        lr.get_launch_report(
+            date="2026-08-27",
+            start_date=None,
+            end_date=None,
+            team_id=None,
+            user=_admin_user(),
+        )
     )
-    assert row["phase1"] == 1
-    assert row["phase2"] == 1
+    row = response["data"]["jobs"][0]
+
+    assert fetched == ["in_scope"]
+    assert row["total_candidates_launched"] == 1
+    assert (row["pending"], row["in_progress"], row["completed"]) == (1, 0, 0)
+    assert (row["phase1"], row["phase2"], row["phase3"], row["phase4"]) == (0, 1, 0, 0)
+
+
 
 
 
