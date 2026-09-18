@@ -29,6 +29,7 @@ from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
+from services.launched_candidates import count_launched_candidates
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -1312,16 +1313,6 @@ async def get_job_candidates(
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) AS total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
-                            WHERE (
-                                COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                            ) OR EXISTS (
-                                SELECT 1 FROM engage_interview_audit ea
-                                WHERE ea.candidate_id = sc.candidate_id
-                                  AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
-                                  AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                            )
-                        ) AS launched_count,
-                        COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE sc.data->>'_stage' = 'dropped' 
                               AND sc.data->>'_drop_reason' = 'cross_source_duplicate'
                         ) AS duplicate_candidate_count,
@@ -1365,12 +1356,17 @@ async def get_job_candidates(
                     """,
                     (resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id),
-                     resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
-                launched_count = int(counts_row.get("launched_count") or 0)
+                # UI "Candidates Launched" is candidate grain: one per launched
+                # person, latest interview. It is the SAME population the
+                # outreach-stats header buckets and the launch report are computed
+                # over (services/launched_candidates.py), so the buckets sum to it.
+                launched_count = count_launched_candidates(
+                    conn, [str(resolved_jobdiva_id), str(resolved_numeric_job_id)]
+                )
                 duplicate_candidate_count = int(counts_row.get("duplicate_candidate_count") or 0)
                 invalid_contact_count = int(counts_row.get("invalid_contact_count") or 0)
 

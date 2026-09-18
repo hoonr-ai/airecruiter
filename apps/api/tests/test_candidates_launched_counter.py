@@ -195,6 +195,42 @@ def test_empty_phone_digit_false_positive_guard():
     assert filtered[0]["candidate_id"] == "C2"
 
 
+def test_rankings_candidates_launched_counts_people_not_relaunch_interviews():
+    """UI 'Candidates Launched' is candidate grain: two interviews for C1 count as 1."""
+    audit = [
+        {"candidate_id": "C1", "interview_id": "I1"},
+        {"candidate_id": "C1", "interview_id": "I2"},
+        {"candidate_id": "C2", "interview_id": "I3"},
+        {"candidate_id": "C3", "interview_id": ""},
+    ]
+    launched = {
+        row["candidate_id"]
+        for row in audit
+        if (row.get("interview_id") or "").strip() and (row.get("candidate_id") or "").strip()
+    }
+    assert launched == {"C1", "C2"}
+
+
+def test_get_job_candidates_launched_count_uses_the_shared_population():
+    """Rankings "Candidates Launched" must be the ONE launched-candidate
+    population every screen shares (services/launched_candidates.py) — people,
+    not interviews — so the header buckets and the launch report sum to it.
+    A private COUNT in this endpoint is how the screens drifted apart before.
+    """
+    import inspect
+
+    from routers.candidates import get_job_candidates
+    from services.launched_candidates import LAUNCHED_CANDIDATE_COUNT_SQL
+
+    src = inspect.getsource(get_job_candidates)
+    assert "count_launched_candidates(" in src
+    assert "COUNT(DISTINCT ea.candidate_id)" not in src
+    assert "COUNT(DISTINCT NULLIF(ea.interview_id" not in src
+    # The shared SQL is candidate grain (one row per person, latest interview).
+    assert "DISTINCT ON (candidate_id)" in LAUNCHED_CANDIDATE_COUNT_SQL
+    assert "DISTINCT ON (interview_id)" not in LAUNCHED_CANDIDATE_COUNT_SQL
+
+
 def test_valid_jobdiva_candidate_with_real_phone_passes():
     """A jobdiva.local candidate that has a real phone number in the DB column
     (not just embedded in the email) should pass through the filter."""
