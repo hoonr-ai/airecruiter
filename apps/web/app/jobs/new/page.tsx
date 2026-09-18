@@ -10442,9 +10442,7 @@ function NewJobPageContent() {
           best {SAMPLE_MIN_PER_SOURCE}–{SAMPLE_PER_SOURCE} candidates per source.{" "}
           <span className="font-semibold text-slate-700">Source &amp; Launch PAIR</span> runs
           the full search and launches the best {launchCount} (the &quot;Launch up to&quot;
-          number) at {AUTO_LAUNCH_MIN_SCORE}% or higher; afterwards{" "}
-          <span className="font-semibold text-slate-700">Launch PAIR</span> launches the
-          remaining ones. Unscored (N/A) rows are never auto-launched.
+          number) at {AUTO_LAUNCH_MIN_SCORE}% or higher. Unscored (N/A) rows are never auto-launched.
         </p>
       </div>
     </div>
