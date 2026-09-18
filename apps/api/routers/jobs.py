@@ -29,7 +29,6 @@ from models import (
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
 from routers.launch_report import (
-    dedupe_audit_rows_monotonic,
     _fetch_all_outreach,
     _summarise_outreach,
     apply_uncovered_pass_fail,
@@ -1721,12 +1720,13 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             resolved_jobdiva_id = result[0] or result[1]
             resolved_numeric_job_id = result[1] or result[0]
             
-            # Fetch every audit record for each launched interview. The
-            # Python dedupe below keeps the furthest-progressed status, which
-            # prevents a later stale Pending audit event from overwriting In
-            # Progress (the same rule used by Launch Report).
+            # One row per launched interview (same grain as launch report),
+            # not per sourced candidate. DISTINCT ON candidate_id dropped a
+            # second interview for the same person; a FULL OUTER JOIN on
+            # engage_status counted unlaunched sourced rows as Pending.
             cur.execute("""
-                SELECT interview_id, status, response, candidate_id
+                SELECT DISTINCT ON (interview_id)
+                    interview_id, status, response, candidate_id
                 FROM engage_interview_audit
                 WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                   AND COALESCE(NULLIF(interview_id, ''), '') <> ''
@@ -1783,7 +1783,6 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         for row in launched_rows
         if row and row[0]
     ]
-    audit_rows = dedupe_audit_rows_monotonic(audit_rows)
     candidate_rows = [
         {
             "candidate_id": row[0],
