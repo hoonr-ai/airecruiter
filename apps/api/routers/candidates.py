@@ -3795,7 +3795,7 @@ async def get_candidate_evaluation_report(
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. sourced_candidates — prefer the row tied to this job
                 cand_id_str = str(candidate_id).strip()
-                pk_val = int(cand_id_str) if (cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+                pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
 
                 if job_id:
                     cur.execute(
@@ -4332,12 +4332,11 @@ async def save_candidate_feedback(
         action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
     
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
-    # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
     #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.job_id).
     cand_id_str = str(candidate_id).strip()
-    pk_val = int(cand_id_str) if (cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+    pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
 
     jd_candidate_id = cand_id_str   # fallback: use whatever was passed
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
@@ -4355,7 +4354,7 @@ async def save_candidate_feedback(
                 _cur.execute(
                     """
                     SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                           sc.name, mj.title, mj.customer_name, mj.jobdiva_id
+                           sc.name, mj.title, mj.customer_name
                     FROM sourced_candidates sc
                     LEFT JOIN monitored_jobs mj
                       ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -4383,7 +4382,7 @@ async def save_candidate_feedback(
                     _cur.execute(
                         """
                         SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                               sc.name, mj.title, mj.customer_name, mj.jobdiva_id
+                               sc.name, mj.title, mj.customer_name
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id

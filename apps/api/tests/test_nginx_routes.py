@@ -7,7 +7,6 @@ def test_nginx_jobs_regex_is_comprehensive():
     Ensure all /jobs/{job_id}/<subpath> endpoints in the jobs_router
     are accounted for in the nginx-app-locations.conf regex.
     """
-    import os
     from pathlib import Path
 
     # Find nginx-app-locations.conf relative to this test file or repository root
