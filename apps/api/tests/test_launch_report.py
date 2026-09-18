@@ -1220,8 +1220,16 @@ def test_launch_report_scopes_phase_fetch_and_buckets_to_day_interviews(monkeypa
             "historical": {"outreach_status": "in_progress", "outreach_phase": "phase3"},
         }
 
+    async def _fetch_pairbot_launches(_jobdiva_id, _start, _end):
+        return [{
+            "id": "in_scope", "jobdiva_id": "26-01234",
+            "created_at": "2026-08-27T12:00:00Z", "status": "pending",
+            "outreach_status": "pending", "outreach_phase": "phase1_6hr",
+        }]
+
     monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
     monkeypatch.setattr(lr, "_fetch_all_outreach", _fetch_outreach)
+    monkeypatch.setattr(lr, "_fetch_pairbot_launches", _fetch_pairbot_launches)
 
     response = asyncio.run(
         lr.get_launch_report(
@@ -1238,6 +1246,44 @@ def test_launch_report_scopes_phase_fetch_and_buckets_to_day_interviews(monkeypa
     assert row["total_candidates_launched"] == 1
     assert (row["pending"], row["in_progress"], row["completed"]) == (1, 0, 0)
     assert (row["phase1"], row["phase2"], row["phase3"], row["phase4"]) == (0, 1, 0, 0)
+
+
+def test_launch_report_uses_pairbot_launch_day_population_for_phases(monkeypatch):
+    """A missed audit webhook must not hide a Pair Bot launch from the day row."""
+    job = {**_job(1), "job_id": "job_1", "jobdiva_id": "26-01234"}
+    audit_by_key = {"26-01234": [{
+        "interview_id": "audit_only", "candidate_id": "cand_1",
+        "created_at": datetime.datetime(2026, 8, 28, 2, 10),
+        "status": "pending", "response": None,
+    }]}
+
+    def _load_inputs(_start, _end, _scope):
+        return [job], {"26-01234": []}, audit_by_key
+
+    async def _fetch_pairbot_launches(_jobdiva_id, _start, _end):
+        return [
+            {"id": "pair_1", "jobdiva_id": "26-01234", "created_at": "2026-08-27T12:00:00Z", "status": "pending", "outreach_status": "pending", "outreach_phase": "phase1"},
+            {"id": "pair_2", "jobdiva_id": "26-01234", "created_at": "2026-08-27T13:00:00Z", "status": "in_progress", "outreach_status": "pending", "outreach_phase": "phase1_6hr"},
+        ]
+
+    async def _fetch_outreach(ids):
+        assert ids == ["pair_1", "pair_2"]
+        return {
+            "pair_1": {"outreach_status": "pending", "outreach_phase": "phase1"},
+            "pair_2": {"interview_status": "in_progress", "outreach_status": "pending", "outreach_phase": "phase1_6hr"},
+        }
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_pairbot_launches", _fetch_pairbot_launches)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _fetch_outreach)
+
+    response = asyncio.run(lr.get_launch_report(
+        date="2026-08-27", start_date=None, end_date=None, team_id=None, user=_admin_user(),
+    ))
+    row = response["data"]["jobs"][0]
+    assert row["total_candidates_launched"] == 2
+    assert (row["pending"], row["in_progress"], row["completed"]) == (1, 1, 0)
+    assert (row["phase1"], row["phase2"], row["phase3"], row["phase4"]) == (1, 1, 0, 0)
 
 
 

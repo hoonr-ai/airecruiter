@@ -588,6 +588,83 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     return fetched
 
 
+async def _fetch_pairbot_launches(
+    jobdiva_id: str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> Optional[List[Dict[str, Any]]]:
+    """Return PAIR Bot interviews created for one JobDiva job in the report window.
+
+    ``engage_interview_audit`` is a delivery log, not the source of truth for
+    when PAIR Bot created an interview. When its webhook misses a record, the
+    audit-only population drops valid Phase 2/3/4 interviews. PAIR Bot's list
+    endpoint carries both the canonical job ID and ``created_at``.
+    """
+    lookup_id = str(jobdiva_id or "").strip()
+    if not lookup_id:
+        return None
+    headers = {}
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
+    try:
+        async with httpx.AsyncClient(
+            base_url=EXTERNAL_INTERVIEW_API_URL,
+            headers=headers,
+            timeout=_OUTREACH_TIMEOUT_S,
+        ) as client:
+            res = await client.get(
+                "/api/interviews/",
+                params={
+                    "search": lookup_id,
+                    "date_start": start_date.isoformat(),
+                    "date_end": end_date.isoformat(),
+                    "limit": 500,
+                    "paginated": "true",
+                },
+            )
+            res.raise_for_status()
+            body = res.json()
+    except Exception as exc:
+        logger.warning("LAUNCH-REPORT: pair-bot launch lookup failed for %s: %s", lookup_id, exc)
+        return None
+
+    data = body.get("data") if isinstance(body, dict) and body.get("success") is True else body
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        logger.warning("LAUNCH-REPORT: pair-bot launch lookup returned an unexpected payload for %s", lookup_id)
+        return None
+    # Search is deliberately broad in Pair Bot; never let a partial JobDiva
+    # match leak another job's interviews into this report row.
+    return [
+        item for item in items
+        if isinstance(item, dict) and str(item.get("jobdiva_id") or "").strip() == lookup_id
+    ]
+
+
+def _pairbot_launch_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Adapt Pair Bot list records to the launch-report audit-row shape."""
+    rows: List[Dict[str, Any]] = []
+    for item in items:
+        interview_id = str(item.get("id") or item.get("interview_id") or "").strip()
+        if not interview_id:
+            continue
+        rows.append({
+            "interview_id": interview_id,
+            "candidate_id": str(item.get("person_email") or item.get("candidate_id") or "").strip(),
+            "created_at": item.get("created_at"),
+            "status": item.get("status") or item.get("outreach_status"),
+            "response": {
+                "interview_status": item.get("status"),
+                "outreach_status": item.get("outreach_status"),
+                "outreach_phase": item.get("outreach_phase"),
+                "overall_score": item.get("overall_score"),
+                "hard_filter_overall": item.get("hard_filter_overall"),
+            },
+        })
+    return rows
+
+
 def _extract_audit_status(row: Dict[str, Any]) -> str:
     """Extract outreach or audit status from row dict or its response payload."""
     st = str(row.get("status") or "").strip()
@@ -1426,6 +1503,26 @@ async def get_launch_report(
         audit_by_job[str(job["job_id"])] = day_rows
         interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
 
+    # Pair Bot is authoritative for its own creation date. If an audit webhook
+    # was missed, replace the incomplete audit population with PAIR Bot's exact
+    # job/day population so launched, status, and phase totals stay aligned.
+    pairbot_launch_results = await asyncio.gather(*(
+        _fetch_pairbot_launches(
+            str(job.get("jobdiva_id") or ""), report_start_date, report_end_date
+        )
+        for job in jobs
+    ))
+    for job, pairbot_items in zip(jobs, pairbot_launch_results):
+        pairbot_rows = _pairbot_launch_rows(pairbot_items or []) if pairbot_items else []
+        if pairbot_rows:
+            audit_by_job[str(job["job_id"])] = pairbot_rows
+
+    interview_ids = [
+        str(row.get("interview_id"))
+        for rows_for_job in audit_by_job.values()
+        for row in rows_for_job
+        if row.get("interview_id")
+    ]
     outreach_by_interview = await _fetch_all_outreach(sorted(set(interview_ids)))
 
     rows = []
