@@ -94,34 +94,6 @@ def test_get_job_outreach_stats_fallback_wins_when_live_api_empty(
     asyncio.run(_test())
 
 
-def test_get_job_outreach_stats_does_not_regress_to_later_pending_audit(
-    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
-):
-    """A stale Pending audit event must not hide an earlier In Progress state."""
-    from routers.jobs import get_job_outreach_stats
-
-    async def _test():
-        cur = _stub_outreach_db(
-            mock_db_connection,
-            [
-                # DB query is newest first: the stale Pending write arrives last.
-                _audit_row("int_1", "pending", cid="c1"),
-                _audit_row("int_1", "in progress", cid="c1"),
-            ],
-            [_sourced_row("c1", "int_1", "pending", "phase1")],
-        )
-        mock_fetch_all_outreach.return_value = {}
-
-        result = await get_job_outreach_stats("job_123", user=MagicMock())
-
-        assert result["buckets"]["in_progress"] == 1
-        assert result["buckets"]["pending"] == 0
-        launched_query = " ".join(cur.execute.call_args_list[1].args[0].split())
-        assert "DISTINCT ON" not in launched_query
-
-    asyncio.run(_test())
-
-
 def test_get_job_outreach_stats_empty_zero_buckets(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
 ):

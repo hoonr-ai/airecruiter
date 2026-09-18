@@ -606,49 +606,6 @@ def _extract_audit_status(row: Dict[str, Any]) -> str:
     return ""
 
 
-def dedupe_audit_rows_monotonic(
-    audit_rows: List[Dict[str, Any]], *, track_first_launch: bool = False
-) -> List[Dict[str, Any]]:
-    """Keep one row per interview without regressing a higher known status.
-
-    Input rows are normally newest-first. Equal-ranked entries therefore keep
-    the newer status/response; a response is only backfilled from an older row
-    when both rows have the same recognised rank. This avoids attaching a
-    stale Pending phase or channel to a Completed interview.
-    """
-    deduped: Dict[str, Dict[str, Any]] = {}
-    for row in audit_rows:
-        interview_id = str(row.get("interview_id") or "").strip()
-        if not interview_id:
-            continue
-        if interview_id not in deduped:
-            existing = dict(row)
-            if track_first_launch:
-                existing["first_launched_at"] = row.get("created_at")
-            deduped[interview_id] = existing
-            continue
-
-        existing = deduped[interview_id]
-        if track_first_launch:
-            existing_launch = _parse_iso(existing.get("first_launched_at") or existing.get("created_at"))
-            row_launch = _parse_iso(row.get("created_at"))
-            if row_launch and (existing_launch is None or row_launch < existing_launch):
-                existing["first_launched_at"] = row["created_at"]
-                existing["created_at"] = row["created_at"]
-
-        row_status = _extract_audit_status(row)
-        existing_status = _extract_audit_status(existing)
-        row_rank = _status_rank(row_status)
-        existing_rank = _status_rank(existing_status)
-        if row_rank > existing_rank or (row_status and not existing_status):
-            existing["status"] = row.get("status") or row_status
-            if row.get("response"):
-                existing["response"] = row["response"]
-        elif row_rank == existing_rank and row_rank and row.get("response") and not existing.get("response"):
-            existing["response"] = row["response"]
-    return list(deduped.values())
-
-
 def merge_outreach_payloads(
     cand_fallback: Dict[str, Any],
     audit_fallback: Dict[str, Any],
@@ -1417,10 +1374,45 @@ async def get_launch_report(
         #    INITIAL launch timestamp (earliest created_at).
         # 2. Status: Once in scope, it is bucketed using its latest known status
         #    and monotonic state hierarchy (completed > partial > in_progress > pending).
-        deduped = {
-            str(row.get("interview_id")): row
-            for row in dedupe_audit_rows_monotonic(rows, track_first_launch=True)
-        }
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            iid = str(row.get("interview_id") or "").strip()
+            if not iid:
+                continue
+            if iid not in deduped:
+                deduped[iid] = dict(row)
+                deduped[iid]["first_launched_at"] = row.get("created_at")
+            else:
+                existing = deduped[iid]
+                # 1. Track earliest created_at for launch-window scoping
+                ex_dt = _parse_iso(existing.get("first_launched_at") or existing.get("created_at"))
+                row_dt = _parse_iso(row.get("created_at"))
+                if ex_dt and row_dt:
+                    if row_dt < ex_dt:
+                        existing["first_launched_at"] = row["created_at"]
+                        existing["created_at"] = row["created_at"]
+                elif row_dt and not ex_dt:
+                    existing["first_launched_at"] = row["created_at"]
+                    existing["created_at"] = row["created_at"]
+
+                # 2. Monotonic status hierarchy: favor higher progression state
+                row_st = _extract_audit_status(row).strip().lower()
+                ex_st = _extract_audit_status(existing).strip().lower()
+                row_rank = _status_rank(row_st)
+                existing_rank = _status_rank(ex_st)
+                if row_rank and existing_rank:
+                    if row_rank > existing_rank:
+                        existing["status"] = row.get("status") or row_st
+                        if row.get("response"):
+                            existing["response"] = row.get("response")
+                    elif row.get("response") and not existing.get("response"):
+                        existing["response"] = row.get("response")
+                elif row_st and not ex_st:
+                    existing["status"] = row.get("status") or row_st
+                    if row.get("response"):
+                        existing["response"] = row.get("response")
+                elif row.get("response") and not existing.get("response"):
+                    existing["response"] = row.get("response")
 
         # Report scoping: decides which interviews are in scope based strictly on
         # initial launch date, never dropping candidates due to subsequent status updates.
