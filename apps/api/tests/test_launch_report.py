@@ -38,6 +38,8 @@ from routers import launch_report as lr
         ("phase1", "in_progress"),
         ("phase3", "in_progress"),
         ("in_progress", "in_progress"),
+        ("In Progress", "in_progress"),
+        ("in progress", "in_progress"),
         ("completed", "completed"),
         ("passed", "completed"),
         ("failed", "completed"),
@@ -50,6 +52,8 @@ from routers import launch_report as lr
         ("rejected", "completed"),
         ("screening", "in_progress"),
         ("contacted", "in_progress"),
+        ("interview_completed", "in_progress"),
+        ("interview completed", "in_progress"),
         ("outreach_incomplete", "partial_complete"),
         ("expired", "partial_complete"),
         ("no_response", "partial_complete"),
@@ -493,6 +497,9 @@ def test_status_rank_known_values():
     assert lr._status_rank("passed") == 4
     assert lr._status_rank("partial_complete") == 3
     assert lr._status_rank("in_progress") == 2
+    assert lr._status_rank("In Progress") == 2
+    assert lr._status_rank("in progress") == 2
+    assert lr._status_rank("interview completed") == 2
     assert lr._status_rank("phase1") == 2
     assert lr._status_rank("pending") == 1
     assert lr._status_rank("scheduled") == 1
@@ -507,9 +514,9 @@ def test_funnel_status_raw_returns_outreach_status_when_no_interview_status():
 
 
 def test_funnel_status_raw_interview_status_wins_when_higher_rank():
-    """interview_status=in_progress beats outreach_status=pending."""
-    merged = {"outreach_status": "pending", "interview_status": "in_progress"}
-    assert lr._funnel_status_raw(merged, "pending") == "in_progress"
+    """interview_status=In Progress beats outreach_status=pending."""
+    merged = {"outreach_status": "pending", "interview_status": "In Progress"}
+    assert lr._funnel_status_raw(merged, "pending") == "In Progress"
 
 
 def test_funnel_status_raw_interview_status_does_not_win_when_lower_rank():
