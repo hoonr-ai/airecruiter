@@ -109,10 +109,12 @@ export function useLiveReportStream({
         if (payload.type === "connected") {
           return;
         }
-        if (payload.type === "activity" && payload.interview_id) {
+        const interviewId = payload.interview_id ?? payload.interviewId;
+        const eventType = payload.event_type ?? payload.type;
+        if (interviewId && eventType && eventType !== "connected") {
           eventCallbackRef.current?.({
-            interviewId: Number(payload.interview_id),
-            type: payload.event_type,
+            interviewId: Number(interviewId),
+            type: eventType,
             subtype: payload.subtype ?? null,
             phase: payload.phase ?? null,
             status: payload.status ?? null,

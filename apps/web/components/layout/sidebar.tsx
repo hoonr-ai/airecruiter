@@ -14,13 +14,13 @@ export function Sidebar() {
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
+        { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
         // Admins get the full analytics + team management; team leads get the
         // same analytics page auto-scoped to their team by the backend.
         ...(isAdmin
             ? [
                   { label: "Candidates", href: "/candidates", icon: Users, disabled: false },
                   { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
-                  { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
                   { label: "Teams", href: "/admin/teams", icon: UsersRound, disabled: false },
                   { label: "No Contact List", href: "/admin/no-contact", icon: ShieldOff, disabled: false },
@@ -30,12 +30,12 @@ export function Sidebar() {
         ...(!isAdmin && isTeamLead
             ? [
                   { label: "Team Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
-                  { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
               ]
             : []),
         { label: "Settings", href: "/settings", icon: Settings, disabled: false },
     ];
+
 
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">

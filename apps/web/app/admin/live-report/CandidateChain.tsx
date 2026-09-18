@@ -1,133 +1,356 @@
 "use client";
 
-import React, { memo } from "react";
+import React, { memo, useEffect, useRef, useState } from "react";
 import {
-  Phone,
   Check,
-  Voicemail,
-  PhoneMissed,
-  PhoneOff,
-  UserX,
-  AlertTriangle,
-  X,
-  Clock,
   Mail,
   MessageSquare,
+  Phone,
+  Link2,
+  Hourglass,
+  Clock,
+  PhoneOff,
+  PhoneMissed,
+  Voicemail,
+  AlertTriangle,
+  UserX,
+  X,
+  Minus,
 } from "lucide-react";
-import type { CandidateRow, CallOutcome } from "./types";
-import { CHAIN_STOPS, phaseToStopIndex, TERMINAL_REASON_LABEL } from "./types";
+import type { CandidateRow, CallOutcome, ActivityEvent } from "./types";
+import {
+  CHAIN_STOPS,
+  CHANNEL_COLOR,
+  OUTCOME_META,
+  SCHEDULED_WAIT_EVENTS,
+  TERMINAL_REASON_LABEL,
+  TERMINAL_PHASES,
+  isKnownPhase,
+  phaseToStopIndex,
+} from "./types";
+
+const OUTCOME_ICON: Record<CallOutcome, React.ReactNode> = {
+  answered: <Phone size={12} />,
+  completed: <Check size={12} />,
+  voicemail: <Voicemail size={12} />,
+  no_answer: <PhoneMissed size={12} />,
+  busy: <PhoneOff size={12} />,
+  candidate_hangup: <UserX size={12} />,
+  system_drop: <AlertTriangle size={12} />,
+  failed: <X size={12} />,
+  in_progress: <Phone size={12} />,
+};
+
+const TONE_BADGE: Record<string, string> = {
+  good: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  warning: "bg-amber-50 text-amber-700 border-amber-200",
+  critical: "bg-rose-50 text-rose-700 border-rose-200",
+  neutral: "bg-slate-50 text-slate-600 border-slate-200",
+  info: "bg-indigo-50 text-indigo-700 border-indigo-200",
+};
+
+/** Small channel icon for Col 3 history logs */
+const HistoryIcon: React.FC<{ type: string; subtype: string | null; failed?: boolean }> = ({
+  type,
+  subtype,
+  failed,
+}) => {
+  const isWait = SCHEDULED_WAIT_EVENTS.has(type);
+  const channel = isWait ? null : subtype ?? (type.includes("call") ? "call" : null);
+  const color = channel ? CHANNEL_COLOR[channel] : undefined;
+  let icon: React.ReactNode = <Minus size={11} />;
+  if (isWait) icon = <Clock size={11} />;
+  else if (channel === "email") icon = <Mail size={11} />;
+  else if (channel === "sms") icon = <MessageSquare size={11} />;
+  else if (channel === "call") icon = <Phone size={11} />;
+  else if (type === "link_opened") icon = <Link2 size={11} />;
+  else if (type.startsWith("interview_")) icon = <Check size={11} />;
+
+  return (
+    <span
+      className="relative inline-flex h-6 w-6 items-center justify-center rounded-full border bg-white shadow-2xs transition-transform hover:scale-110"
+      style={{ color: color ?? "#64748b", borderColor: color ?? "#e2e8f0" }}
+      title={`${type}${subtype ? ` (${subtype})` : ""}${failed ? " — failed" : ""}`}
+    >
+      {icon}
+      {failed && (
+        <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border border-white bg-rose-600" />
+      )}
+    </span>
+  );
+};
 
 interface CandidateChainProps {
   candidate: CandidateRow;
 }
 
-const OUTCOME_ICONS: Record<CallOutcome, React.ReactNode> = {
-  answered: <Phone className="h-3 w-3 text-emerald-600" />,
-  completed: <Check className="h-3 w-3 text-emerald-600" />,
-  voicemail: <Voicemail className="h-3 w-3 text-amber-600" />,
-  no_answer: <PhoneMissed className="h-3 w-3 text-slate-500" />,
-  busy: <PhoneOff className="h-3 w-3 text-amber-600" />,
-  candidate_hangup: <UserX className="h-3 w-3 text-rose-500" />,
-  system_drop: <AlertTriangle className="h-3 w-3 text-rose-600" />,
-  failed: <X className="h-3 w-3 text-rose-600" />,
-  in_progress: <Phone className="h-3 w-3 text-indigo-600 animate-pulse" />,
-};
-
 export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }) => {
-  const currentStopIndex = phaseToStopIndex(candidate.phase);
-  const isTerminal = currentStopIndex === 6;
+  const reached = phaseToStopIndex(candidate.phase);
+  const isTerminal = TERMINAL_PHASES.has(candidate.phase);
+  const passed = candidate.phase === "pass" || candidate.terminal_reason === "passed";
+  const restedNoResponse = candidate.phase === "pending";
+  const failedTerminal =
+    isTerminal && !passed && !restedNoResponse && candidate.phase !== "completed";
+  const outcome = candidate.call_outcome ? OUTCOME_META[candidate.call_outcome] : null;
+  const unknownPhase = !isKnownPhase(candidate.phase);
+  const idle = candidate.idle_minutes;
+  const stuckDetail =
+    candidate.events?.length === 0
+      ? "no events"
+      : idle == null
+      ? "no recent events"
+      : idle >= 120
+      ? `idle ${Math.floor(idle / 60)}h`
+      : `idle ${idle}m`;
+
+  const neverPlaced = (candidate.handoff_expired ?? 0) > 0;
+
+  const reasonLabel = candidate.terminal_reason
+    ? TERMINAL_REASON_LABEL[candidate.terminal_reason]
+    : null;
+  const scoreLabel =
+    candidate.overall_score != null
+      ? `score ${Math.round(candidate.overall_score)}${reasonLabel ? ` · ${reasonLabel}` : ""}`
+      : null;
+
+  // Check if candidate completed the interview (passed, completed, or call completed)
+  const isInterviewCompleted =
+    passed ||
+    candidate.phase === "completed" ||
+    candidate.terminal_reason === "passed" ||
+    candidate.call_outcome === "completed" ||
+    (candidate.events || []).some(
+      (e) =>
+        e.type === "interview_completed" ||
+        e.type === "call_completed" ||
+        e.status === "completed" && (e.type.includes("interview") || e.type.includes("call"))
+    );
+
+  // The specific phase node where the interview was completed
+  const completedStopIndex = isInterviewCompleted ? reached : -1;
+
+  const nextAttempt = candidate.next_attempt_at
+    ? new Date(candidate.next_attempt_at)
+    : null;
+  const nextAttemptLabel =
+    nextAttempt && !Number.isNaN(nextAttempt.getTime())
+      ? nextAttempt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : null;
+
+  // Track pop animation when node completes
+  const prevReached = useRef(reached);
+  const [popIndex, setPopIndex] = useState<number | null>(null);
+  useEffect(() => {
+    if (reached > prevReached.current) {
+      setPopIndex(reached);
+      const t = setTimeout(() => setPopIndex(null), 500);
+      prevReached.current = reached;
+      return () => clearTimeout(t);
+    }
+    prevReached.current = reached;
+  }, [reached]);
+
+  const events = candidate.events || [];
+
+  /**
+   * Selective node coloring:
+   * Only color/fill circles that got updates (or is active).
+   * Leave uncontacted/un-updated phases in between as uncolored empty circles with their number.
+   */
+  const phaseHasEvents = (stopKey: string, stopIndex: number): boolean => {
+    const count = candidate.event_counts_by_phase?.[stopKey] ?? 0;
+    if (count > 0) return true;
+    return events.some((e) => e.phase === stopKey);
+  };
+
+  // Col 3 distinct event list (Email, Phone, SMS) + total counter
+  const totalEvents = candidate.event_count ?? events.length;
 
   return (
-    <div className="flex items-center justify-between py-2 px-3 border-b border-slate-100 last:border-b-0 hover:bg-slate-50/70 transition-colors text-xs">
-      {/* Candidate Identifier */}
-      <div className="w-44 shrink-0 flex flex-col justify-center">
-        <div className="flex items-center gap-1.5 font-medium text-slate-800 truncate">
-          <span>{candidate.name}</span>
-          {candidate.is_stuck && (
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-300">
-              Stuck {candidate.idle_minutes ? `(${candidate.idle_minutes}m)` : ""}
+    <div
+      className={`grid h-16 grid-cols-[150px_1fr_170px_150px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
+        candidate.is_stuck ? "lr-row-stuck bg-amber-50/15" : "bg-white"
+      }`}
+    >
+      {/* ── COL 1: PROFILE ─────────────────────────────────────────────── */}
+      <div className="min-w-0 flex flex-col justify-center">
+        <p className="truncate text-sm font-semibold tracking-tight text-slate-900">
+          {candidate.name}
+        </p>
+        <p className="truncate text-xs text-slate-500 mt-0.5">
+          {candidate.is_stuck ? (
+            <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
+              <Hourglass size={11} className="text-amber-600 shrink-0" /> stuck · {stuckDetail}
             </span>
-          )}
-          {candidate.awaiting_retry && (
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
-              Next try soon
+          ) : candidate.awaiting_retry || nextAttemptLabel ? (
+            <span
+              className="inline-flex items-center gap-1 text-slate-600"
+              title={
+                candidate.next_attempt_at
+                  ? `Next scheduled attempt: ${new Date(candidate.next_attempt_at).toLocaleString()}`
+                  : "Waiting on a scheduled attempt"
+              }
+            >
+              <Clock size={11} className="text-slate-400 shrink-0" /> waiting{nextAttemptLabel ? ` · next ${nextAttemptLabel}` : ""}
             </span>
+          ) : unknownPhase ? (
+            <span className="text-slate-400" title={`Unrecognized phase: ${candidate.phase}`}>
+              unknown phase · {candidate.phase}
+            </span>
+          ) : (
+            candidate.outreach_status ?? "—"
           )}
-        </div>
-        <div className="text-[11px] text-slate-400">#{candidate.interview_id}</div>
+        </p>
       </div>
 
-      {/* Animated Node Chain (Stops) */}
-      <div className="flex-1 max-w-xl mx-4 flex items-center justify-between relative">
-        {CHAIN_STOPS.map((stop, idx) => {
-          const isPassed = idx < currentStopIndex;
-          const isCurrent = idx === currentStopIndex;
+      {/* ── COL 2: PROGRESS PIPELINE (Horizontal Stepper Track 1 to 6) ── */}
+      <div className="flex items-center w-full min-w-[240px] px-2">
+        {CHAIN_STOPS.map((stop, i) => {
+          const hasUpdates = phaseHasEvents(stop.key, i);
+          const isCurrentActive = i === reached && !isTerminal;
+          const isResultStop = i === CHAIN_STOPS.length - 1;
+          const resultFail = isResultStop && failedTerminal;
+          const resultPass = isResultStop && passed;
+          const resultNoResponse = isResultStop && restedNoResponse;
+
+          // Only color nodes that received updates or is active
+          const isNodeDone = hasUpdates && i <= reached;
+
+          // Check if this specific node is where the candidate completed the interview
+          const isCompletedNode = i === completedStopIndex;
+
+          let nodeCls =
+            "relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-300";
+          if (isCompletedNode) {
+            nodeCls += " border-emerald-600 bg-emerald-600 text-white shadow-2xs ring-2 ring-emerald-200";
+          } else if (isNodeDone) {
+            nodeCls += " lr-node-done border-indigo-700 bg-indigo-600 text-white shadow-2xs";
+          } else if (isCurrentActive) {
+            nodeCls += " lr-node-active border-indigo-600 bg-indigo-50 text-indigo-700 ring-2 ring-indigo-200";
+          } else {
+            nodeCls += " border-slate-200 bg-white text-slate-400";
+          }
+
+          if (popIndex === i) nodeCls += " lr-node-pop";
+
+          const prevHasUpdates = i > 0 ? phaseHasEvents(CHAIN_STOPS[i - 1].key, i - 1) : false;
+          const connectorFilled = (prevHasUpdates || hasUpdates) && i <= reached;
 
           return (
             <React.Fragment key={stop.key}>
-              <div className="flex flex-col items-center z-10">
-                <div
-                  className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold border transition-all ${
-                    isPassed
-                      ? "bg-indigo-600 border-indigo-700 text-white"
-                      : isCurrent
-                      ? "bg-white border-indigo-600 text-indigo-600 ring-4 ring-indigo-100 animate-pulse"
-                      : "bg-slate-100 border-slate-200 text-slate-400"
-                  }`}
-                >
-                  {isPassed ? <Check className="h-3 w-3" /> : stop.short}
+              {/* Connector line between steps */}
+              {i > 0 && (
+                <div className="relative flex-1 self-center">
+                  <div className="h-[2px] w-full bg-slate-200 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-500 ${
+                        connectorFilled ? "bg-indigo-600" : "bg-slate-200"
+                      }`}
+                    />
+                  </div>
                 </div>
-                <span className="text-[9px] mt-1 text-slate-500">{stop.short}</span>
-              </div>
-              {idx < CHAIN_STOPS.length - 1 && (
-                <div
-                  className={`flex-1 h-0.5 mx-1 transition-all ${
-                    idx < currentStopIndex ? "bg-indigo-500" : "bg-slate-200"
-                  }`}
-                />
               )}
+
+              {/* Node Circle */}
+              <div
+                className="relative flex flex-col items-center"
+                title={`${stop.label} (${stop.short})`}
+              >
+                <div className={nodeCls}>
+                  {i === completedStopIndex ? (
+                    <Check size={13} strokeWidth={2.5} />
+                  ) : (
+                    <span
+                      className={`text-[10px] font-semibold tracking-tight ${
+                        isNodeDone ? "text-white" : ""
+                      }`}
+                    >
+                      {stop.short}
+                    </span>
+                  )}
+                </div>
+              </div>
             </React.Fragment>
           );
         })}
       </div>
 
-      {/* Outcome & Counters */}
-      <div className="w-56 shrink-0 flex items-center justify-end gap-3">
-        {/* Comms counts */}
-        <div className="flex items-center gap-2 text-[11px] text-slate-500">
-          {(candidate.call_attempts ?? 0) > 0 && (
-            <span className="flex items-center gap-0.5" title="Call attempts">
-              <Phone className="h-3 w-3 text-slate-400" />
-              {candidate.call_attempts}
-            </span>
-          )}
-          {(candidate.sms_sent ?? 0) > 0 && (
-            <span className="flex items-center gap-0.5" title="SMS sent">
-              <MessageSquare className="h-3 w-3 text-slate-400" />
-              {candidate.sms_sent}
-            </span>
-          )}
-        </div>
+      {/* ── COL 3: HISTORY LOGS (Sub-div with scroll actions annotated by phase) ── */}
+      <div className="flex items-center overflow-x-auto lr-scroll gap-1.5 justify-start pl-1 max-w-full py-1">
+        {events.length > 0 ? (
+          events.map((evt, idx) => {
+            const isEmail = evt.type.includes("email") || evt.subtype === "email";
+            const isCall = evt.type.includes("call") || evt.subtype === "call";
+            const isSms = evt.type.includes("sms") || evt.subtype === "sms";
 
-        {/* Outcome Badge */}
-        {candidate.call_outcome && (
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 bg-white text-[11px] font-medium shadow-xs">
-            {OUTCOME_ICONS[candidate.call_outcome] || null}
-            <span className="capitalize">{candidate.call_outcome.replace("_", " ")}</span>
+            let phaseTag = "P1";
+            if (evt.phase === "contact_check") phaseTag = "CC";
+            else if (evt.phase === "phase1_6hr") phaseTag = "P2";
+            else if (evt.phase === "phase2") phaseTag = "P3";
+            else if (evt.phase === "phase3") phaseTag = "P4";
+            else if (evt.phase === "phase1_extra") phaseTag = "Ex1";
+            else if (evt.phase === "phase1_6hr_extra") phaseTag = "Ex2";
+            else if (evt.phase === "phase2_extra") phaseTag = "Ex3";
+
+            return (
+              <span
+                key={idx}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 shadow-2xs transition-transform hover:scale-105"
+                title={`${evt.phase ?? "Outreach"}: ${evt.type} (${evt.status ?? "done"})`}
+              >
+                <span className="font-bold text-indigo-600 text-[9px]">{phaseTag}</span>
+                {isEmail && <Mail size={11} className="text-purple-600 shrink-0" />}
+                {isCall && <Phone size={11} className="text-indigo-600 shrink-0" />}
+                {isSms && <MessageSquare size={11} className="text-teal-600 shrink-0" />}
+                {!isEmail && !isCall && !isSms && <Check size={11} className="text-slate-500 shrink-0" />}
+              </span>
+            );
+          })
+        ) : (
+          <div className="flex items-center gap-1">
+            <span
+              className="relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-400 shadow-2xs"
+              title="Email Outreach"
+            >
+              <Mail size={11} />
+            </span>
+            <span
+              className="relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-400 shadow-2xs"
+              title="Call Outreach"
+            >
+              <Phone size={11} />
+            </span>
+            <span
+              className="relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-400 shadow-2xs"
+              title="SMS Outreach"
+            >
+              <MessageSquare size={11} />
+            </span>
           </div>
         )}
+      </div>
 
-        {/* Terminal Badge if finished */}
-        {candidate.terminal_reason && (
+      {/* ── COL 4: ACTION / CTA (Badge / Voicemail Button) ───────────── */}
+      <div className="flex items-center justify-end pr-1">
+        {outcome ? (
           <span
-            className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
-              candidate.terminal_reason === "passed"
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-slate-100 text-slate-700 border-slate-200"
+            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors ${
+              TONE_BADGE[outcome.tone] || TONE_BADGE.neutral
             }`}
           >
-            {TERMINAL_REASON_LABEL[candidate.terminal_reason] || candidate.terminal_reason}
+            {OUTCOME_ICON[candidate.call_outcome as CallOutcome]}
+            {outcome.label}
           </span>
+        ) : neverPlaced ? (
+          <span
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium border-rose-200 bg-rose-50 text-rose-700 shadow-2xs"
+            title={`${candidate.handoff_expired} call handoff(s) expired`}
+          >
+            <PhoneMissed size={12} />
+            Never placed
+          </span>
+        ) : (
+          <span className="text-xs text-slate-400 whitespace-nowrap">no call yet</span>
         )}
       </div>
     </div>
@@ -135,3 +358,4 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
 });
 
 CandidateChain.displayName = "CandidateChain";
+export default CandidateChain;

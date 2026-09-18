@@ -133,35 +133,70 @@ export default function LiveReportPage() {
   }, [selectedBulkId]);
 
   useEffect(() => {
-    if (isAdmin || isTeamLead) {
-      fetchLaunchesAndHealth();
+    fetchLaunchesAndHealth();
+  }, [fetchLaunchesAndHealth]);
+
+  // Reset feed when user switches launches
+  useEffect(() => {
+    setFeed([]);
+  }, [selectedBulkId]);
+
+  // Seed the Live Activity Feed with recent candidate events when snapshot loads
+  useEffect(() => {
+    if (!snapshot || !snapshot.jobs) return;
+    const allRecentEvents: Array<{
+      id: number;
+      ts: string;
+      rawTs: string;
+      text: string;
+      critical: boolean;
+    }> = [];
+
+    for (const job of snapshot.jobs) {
+      for (const cand of job.candidates) {
+        for (const evt of cand.events || []) {
+          const isFailed = evt.status === "failed";
+          const d = evt.ts ? new Date(evt.ts) : new Date();
+          const tsStr = !Number.isNaN(d.getTime())
+            ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "—";
+
+          allRecentEvents.push({
+            id: Math.random(),
+            rawTs: evt.ts || "",
+            ts: tsStr,
+            text: `${cand.name} (${evt.phase || "outreach"}): ${evt.subtype ?? evt.type} [${evt.status ?? "completed"}]`,
+            critical: isFailed,
+          });
+        }
+      }
     }
-  }, [isAdmin, isTeamLead, fetchLaunchesAndHealth]);
+
+    // Sort newest first, keep top 30
+    allRecentEvents.sort((a, b) => b.rawTs.localeCompare(a.rawTs));
+    if (allRecentEvents.length > 0) {
+      setFeed((prev) => {
+        if (prev.length === 0) {
+          return allRecentEvents.slice(0, 30).map(({ rawTs, ...item }) => item);
+        }
+        return prev;
+      });
+    }
+  }, [snapshot]);
 
   if (isRoleLoading) {
     return (
       <div className="flex h-96 items-center justify-center">
-        <div className="text-slate-400 text-sm">Verifying access...</div>
-      </div>
-    );
-  }
-
-  if (!isAdmin && !isTeamLead) {
-    return (
-      <div className="flex h-96 flex-col items-center justify-center gap-2">
-        <AlertTriangle className="h-8 w-8 text-amber-500" />
-        <h2 className="text-base font-semibold text-slate-900">Access Restricted</h2>
-        <p className="text-xs text-slate-500">
-          The Live Report monitor is available to Admins and Team Leads only.
-        </p>
+        <div className="text-slate-400 text-sm">Loading Live Report...</div>
       </div>
     );
   }
 
   const selectedLaunch = launches.find((l) => l.bulk_id === selectedBulkId);
 
+
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
+    <div className="p-6 w-full max-w-[1600px] mx-auto space-y-6">
       {/* Top Header & Launch Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
@@ -268,9 +303,9 @@ export default function LiveReportPage() {
       </div>
 
       {/* Main Grid: Job Blocks on Left, Event Feed on Right */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Job Blocks (2 columns) */}
-        <div className="lg:col-span-2 space-y-4">
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+        {/* Job Blocks (3 columns) */}
+        <div className="xl:col-span-3 space-y-4">
           <h2 className="text-sm font-semibold text-slate-900 flex items-center justify-between">
             <span>Active Campaign Job Blocks</span>
             {snapshot?.jobs && (
@@ -304,7 +339,7 @@ export default function LiveReportPage() {
         </div>
 
         {/* Event Feed & Anomalies (1 column) */}
-        <div className="space-y-4">
+        <div className="xl:col-span-1 space-y-4">
           {/* Anomalies Banner if any */}
           {snapshot?.anomalies && snapshot.anomalies.length > 0 && (
             <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5">

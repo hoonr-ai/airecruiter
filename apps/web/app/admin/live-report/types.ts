@@ -159,30 +159,82 @@ export const TERMINAL_PHASES = new Set([
   "abandoned",
 ]);
 
+export const SCHEDULED_WAIT_EVENTS = new Set([
+  "outreach_deferred_quiet_hours",
+  "outreach_retry_scheduled",
+]);
+
 export interface PhaseStop {
   key: string;
   label: string;
   short: string;
 }
 
-export const CHAIN_STOPS: PhaseStop[] = [
-  { key: "contact_check", label: "Contact Check", short: "Check" },
+export const CHAIN_STOPS: readonly PhaseStop[] = [
+  { key: "contact_check", label: "Contact check", short: "CC" },
   { key: "phase1", label: "Phase 1", short: "P1" },
-  { key: "phase2", label: "Phase 2", short: "P2" },
-  { key: "phase3", label: "Phase 3", short: "P3" },
-  { key: "phase4", label: "Phase 4", short: "P4" },
-  { key: "extra", label: "Extra", short: "Ex" },
-  { key: "completed", label: "Done", short: "Done" },
-];
+  { key: "phase1_6hr", label: "Phase 2", short: "P2" },
+  { key: "phase2", label: "Phase 3", short: "P3" },
+  { key: "phase3", label: "Phase 4", short: "P4" },
+  { key: "phase1_extra", label: "Extra 1", short: "Ex1" },
+  { key: "phase1_6hr_extra", label: "Extra 2", short: "Ex2" },
+  { key: "phase2_extra", label: "Extra 3", short: "Ex3" },
+] as const;
+
+export const isKnownPhase = (phase: string): boolean => {
+  const p = (phase || "").toLowerCase();
+  return (
+    p === "contact_check" ||
+    p === "phase1" ||
+    p === "phase1_6hr" ||
+    p === "phase2" ||
+    p === "phase3" ||
+    p.includes("extra") ||
+    p.includes("high_score") ||
+    TERMINAL_PHASES.has(p)
+  );
+};
 
 export const phaseToStopIndex = (phase: string): number => {
-  const norm = (phase || "").toLowerCase().trim();
-  if (norm === "contact_check") return 0;
-  if (norm.startsWith("phase1")) return 1;
-  if (norm.startsWith("phase2")) return 2;
-  if (norm.startsWith("phase3")) return 3;
-  if (norm.startsWith("phase4")) return 4;
-  if (norm.includes("extra")) return 5;
-  if (TERMINAL_PHASES.has(norm)) return 6;
-  return 0;
+  const p = (phase || "").toLowerCase();
+  if (p === "phase2_extra" || p.includes("extra_phase3") || p.includes("extra 3")) return 7;
+  if (p === "phase1_6hr_extra" || p.includes("extra_phase2") || p.includes("extra 2")) return 6;
+  if (p.includes("extra") || p.includes("high_score")) return 5;
+
+  switch (p) {
+    case "contact_check":
+      return 0;
+    case "phase1":
+      return 1;
+    case "phase1_6hr":
+      return 2;
+    case "phase2":
+      return 3;
+    case "phase3":
+      return 4;
+    default:
+      return TERMINAL_PHASES.has(p) ? 4 : 0;
+  }
 };
+
+export const CHANNEL_COLOR: Record<string, string> = {
+  email: "#7C6DD6",
+  sms: "#C8901F",
+  call: "#0D9488",
+};
+
+export const OUTCOME_META: Record<
+  CallOutcome,
+  { label: string; tone: "good" | "warning" | "critical" | "neutral" | "info" }
+> = {
+  answered: { label: "Answered", tone: "good" },
+  completed: { label: "Completed", tone: "good" },
+  voicemail: { label: "Voicemail", tone: "neutral" },
+  no_answer: { label: "No answer", tone: "neutral" },
+  busy: { label: "Busy", tone: "neutral" },
+  candidate_hangup: { label: "Candidate hung up", tone: "warning" },
+  system_drop: { label: "System drop", tone: "critical" },
+  failed: { label: "Call failed", tone: "critical" },
+  in_progress: { label: "On call", tone: "info" },
+};
+
