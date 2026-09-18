@@ -1194,10 +1194,16 @@ class AutoAssignService:
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                    -- Exclude unlaunched candidates (failed launch with no interview ID).
+                                    -- Must match the identical guard in _backfill_monitored_jobs_counters_sync.
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END)                                                          AS complete_submissions,
                             COUNT(DISTINCT CASE
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                    -- Exclude unlaunched candidates (failed launch with no interview ID).
+                                    -- Must match the identical guard in _backfill_monitored_jobs_counters_sync.
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END)                                                          AS pass_submissions
                         FROM sourced_candidates sc
