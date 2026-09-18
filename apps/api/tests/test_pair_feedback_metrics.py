@@ -402,3 +402,103 @@ def test_unresolvable_jobdiva_id_still_writes_local_metrics(monkeypatch):
     assert "time_to_first_pass = %s" in updates[0]
     # No numeric id → nothing JobDiva-derived to write.
     assert "pair_external_subs" not in updates[0]
+
+
+# --------------------------------------------------------------------------
+# Regression: _compute_candidate_counters must not count unlaunched candidates
+# (engage_status in terminal states but no engage_interview_id) toward
+# complete_submissions / pass_submissions.  This is the auto-sync path that
+# runs every ~15 min; if it lacks the guard, it silently overwrites the
+# one-time backfill fix within 15 minutes of deploy.
+# --------------------------------------------------------------------------
+
+class _CounterFakeCursor:
+    """Minimal cursor for _compute_candidate_counters.
+
+    Returns a configurable tuple for the aggregate SELECT so we can
+    assert the guard is present in the SQL without needing a real DB.
+    """
+
+    def __init__(self, agg_result):
+        self._agg_result = agg_result  # (sourced, launched, complete, pass)
+        self._last_sql = ""
+
+    def execute(self, sql: str, params=None):
+        self._last_sql = sql
+        if sql.startswith("SET LOCAL"):
+            self._result = None
+        elif "FROM monitored_jobs" in sql:
+            self._result = ("26-99999", "31999999")
+        elif "FROM sourced_candidates" in sql:
+            self._result = self._agg_result
+        else:
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    def fetchone(self):
+        return self._result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class _CounterFakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self, cursor_factory=None):
+        return self._cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_compute_candidate_counters_guard_in_sql(monkeypatch):
+    """The SQL emitted by _compute_candidate_counters must include the
+    NULLIF(…engage_interview_id…) IS NOT NULL guard on both aggregates.
+
+    This pins the fix for the auto-sync path regression: without the guard
+    the 15-min job refresh silently overwrites the one-time backfill with the
+    old (inflated) counts.
+    """
+    captured_sql = {}
+    cursor = _CounterFakeCursor(agg_result=(10, 8, 3, 2))
+
+    original_execute = cursor.execute
+
+    def _capturing_execute(sql: str, params=None):
+        if "FROM sourced_candidates" in sql:
+            captured_sql["agg"] = sql
+        original_execute(sql, params)
+
+    cursor.execute = _capturing_execute
+
+    monkeypatch.setattr(
+        auto_assign_service,
+        "_get_db_connection",
+        lambda: _CounterFakeConn(cursor),
+    )
+
+    result = auto_assign_service._compute_candidate_counters("26-99999")
+
+    # Counters should be returned correctly.
+    assert result["complete_submissions"] == 3
+    assert result["pass_submissions"] == 2
+
+    # The guard must appear in the aggregate SQL for BOTH aggregates.
+    agg_sql = captured_sql.get("agg", "")
+    assert "NULLIF" in agg_sql and "engage_interview_id" in agg_sql, (
+        "engage_interview_id guard missing from _compute_candidate_counters SQL — "
+        "unlaunched candidates would inflate complete_submissions / pass_submissions "
+        "on every 15-min auto-sync cycle"
+    )
+    # Verify the guard appears at least twice (once per CASE WHEN aggregate).
+    assert agg_sql.count("engage_interview_id") >= 2, (
+        "guard should appear in both complete_submissions and pass_submissions CASE WHEN blocks"
+    )
+

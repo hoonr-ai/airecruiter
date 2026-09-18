@@ -365,10 +365,12 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END) AS cm,
                             COUNT(DISTINCT CASE
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END) AS ps,
                             """
@@ -1789,9 +1791,13 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
     ]
 
     interview_ids = sorted({
-        str(row["interview_id"]).strip()
+        str(iid).strip()
         for row in audit_rows
-        if str(row.get("interview_id") or "").strip()
+        if (iid := row.get("interview_id")) and str(iid).strip()
+    } | {
+        str(iid).strip()
+        for row in candidate_rows
+        if (iid := row.get("engage_interview_id")) and str(iid).strip()
     })
     payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
 
