@@ -177,6 +177,12 @@ export default function CandidateEvaluationReportPage() {
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [syncingCandidateId, setSyncingCandidateId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "warning" | "info" } | null>(null);
+
+  const showToast = (message: string, type: "success" | "error" | "warning" | "info" = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (candidateId) {
@@ -197,6 +203,9 @@ export default function CandidateEvaluationReportPage() {
           const resJson = await response.json().catch(() => ({}));
           if (resJson?.jobdiva_sync === 'error') {
             console.warn('Submission saved locally, but JobDiva sync had an error:', resJson?.jobdiva_message);
+            showToast(`Submission saved, but JobDiva sync failed: ${resJson?.jobdiva_message || "Unknown error"}`, "warning");
+          } else {
+            showToast("Candidate submitted and synchronized successfully", "success");
           }
           // Optimistically update local state
           setData(prev => {
@@ -216,10 +225,12 @@ export default function CandidateEvaluationReportPage() {
           setIntegrationModalOpen(null);
         } else {
           console.error('Failed to sync submission with JobDiva');
+          showToast("Failed to save candidate submission", "error");
           setIntegrationModalOpen(null);
         }
       } catch (error) {
         console.error('Error syncing submission:', error);
+        showToast("Error syncing submission", "error");
         setIntegrationModalOpen(null);
       } finally {
         setSyncingCandidateId(null);
@@ -241,6 +252,13 @@ export default function CandidateEvaluationReportPage() {
         });
 
         if (response.ok) {
+          const resJson = await response.json().catch(() => ({}));
+          if (resJson?.jobdiva_sync === 'error') {
+            console.warn('Rejection saved locally, but JobDiva sync had an error:', resJson?.jobdiva_message);
+            showToast(`Rejection recorded, but JobDiva sync failed: ${resJson?.jobdiva_message || "Unknown error"}`, "warning");
+          } else {
+            showToast("Candidate rejection recorded successfully", "success");
+          }
           // Optimistically update local state
           setData(prev => {
             if (!prev) return prev;
@@ -257,10 +275,12 @@ export default function CandidateEvaluationReportPage() {
           setIntegrationModalOpen(null);
         } else {
           console.error('Failed to sync rejection with JobDiva');
+          showToast("Failed to record candidate rejection", "error");
           setIntegrationModalOpen(null);
         }
       } catch (error) {
         console.error('Error syncing rejection:', error);
+        showToast("Error syncing rejection", "error");
         setIntegrationModalOpen(null);
       } finally {
         setSyncingCandidateId(null);
@@ -925,6 +945,27 @@ export default function CandidateEvaluationReportPage() {
                     {syncingCandidateId ? 'Syncing...' : 'Confirm Rejection'}
                   </button>
                 </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed right-4 top-4 z-[90]">
+          <div
+            className={cn(
+              "flex items-center gap-2 rounded-xl border px-4 py-3 text-xs font-bold shadow-lg transition-all animate-in fade-in slide-in-from-top-2 duration-200 max-w-md",
+              toast.type === "success" && "border-emerald-200 bg-emerald-50 text-emerald-800",
+              toast.type === "warning" && "border-amber-200 bg-amber-50 text-amber-800",
+              toast.type === "error" && "border-rose-200 bg-rose-50 text-rose-800",
+              toast.type === "info" && "border-blue-200 bg-blue-50 text-blue-800"
+            )}
+          >
+            {toast.type === "warning" && <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />}
+            {toast.type === "error" && <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />}
+            {toast.type === "success" && <CircleCheck className="w-4 h-4 shrink-0 text-emerald-600" />}
+            {toast.type === "info" && <Info className="w-4 h-4 shrink-0 text-blue-600" />}
+            <span className="leading-snug">{toast.message}</span>
           </div>
         </div>
       )}
