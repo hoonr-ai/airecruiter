@@ -1000,12 +1000,17 @@ def collect_merged_outreach_payloads(
 
     payloads: List[Dict[str, Any]] = []
     num_resolved = 0
+    covered_iids: set = set()
+    covered_cids: set = set()
     for a in audit_rows:
         iid = str(a.get("interview_id") or "").strip()
         if not iid:
             continue
 
+        covered_iids.add(iid)
         cid = str(a.get("candidate_id") or "")
+        if cid:
+            covered_cids.add(cid)
         cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
         raw_resp = a.get("response")
         audit_status = a.get("status")
@@ -1022,6 +1027,28 @@ def collect_merged_outreach_payloads(
         )
         if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
             merged_payload = {**merged_payload, "outreach_status": "pending"}
+        payloads.append(merged_payload)
+
+    # Also include candidates whose engage_interview_id never produced an audit
+    # row (e.g. the audit webhook lagged or failed).  These candidates have live
+    # Pair Bot data in outreach_by_interview — fetched above — but the audit
+    # loop above would never find them, leaving them invisible to the bucket
+    # counts.  apply_uncovered_pass_fail handles the passed/failed edge-case;
+    # this handles the pending/in_progress/completed case the same way.
+    for row in candidate_rows:
+        iid = str(row.get("engage_interview_id") or "").strip()
+        cid = str(row.get("candidate_id") or "").strip()
+        if not iid:
+            continue
+        # Skip if already covered by an audit row (avoid double-counting).
+        if iid in covered_iids or (cid and cid in covered_cids):
+            continue
+        live_api = outreach_by_interview.get(iid)
+        merged_payload = build_merged_outreach_payload(row, None, None, live_api)
+        if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
+            merged_payload = {**merged_payload, "outreach_status": "pending"}
+        if live_api is not None:
+            num_resolved += 1
         payloads.append(merged_payload)
 
     return payloads, num_resolved

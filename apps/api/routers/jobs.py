@@ -1788,23 +1788,14 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         if row and row[0]
     ]
 
-    # Include engage_interview_id from candidate_rows as well as the audit-log
-    # interview_id.  When the audit webhook lags or fails the header would
-    # otherwise skip the live API fetch and fall back to stale DB state
-    # ("Pending") while the individual table rows — which also check the
-    # candidate row's engage_interview_id — would correctly show "In Progress".
-    # Unioning both sets makes the header fetch exactly the same live data
-    # that each table row fetches, keeping the counts in sync.
     interview_ids = sorted({
         str(iid).strip()
         for row in audit_rows
-        for iid in [row.get("interview_id")]
-        if str(iid or "").strip()
+        if (iid := row.get("interview_id")) and str(iid).strip()
     } | {
         str(iid).strip()
         for row in candidate_rows
-        for iid in [row.get("engage_interview_id")]
-        if str(iid or "").strip()
+        if (iid := row.get("engage_interview_id")) and str(iid).strip()
     })
     payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
 
