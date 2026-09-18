@@ -231,6 +231,23 @@ def test_terminal_jsonb_status_without_an_interview_id_is_not_in_the_population(
     assert not hasattr(jobs_module, "apply_uncovered_pass_fail")
 
 
+def test_started_candidate_stays_in_progress_when_live_outreach_block_says_pending(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_launched
+):
+    """QA 2026-09-18: pair-bot's outreach-status body keeps outreach_status
+    `pending` while reminders are scheduled even after the interview started.
+    The header must follow the stored in_progress, like the table does."""
+    result = _run(
+        mock_launched, mock_fetch_all_outreach,
+        [_launched("c1", "int_1", status="in_progress", audit_status="in_progress",
+                   audit_response={"status": "in_progress"})],
+        {"int_1": {"outreach": {"outreach_status": "pending", "outreach_phase": "phase2"}, "communications": []}},
+    )
+    assert result["buckets"]["in_progress"] == 1
+    assert result["buckets"]["pending"] == 0
+    assert result["phases"]["phase3"] == 1
+
+
 def test_pairbot_phase3_counts_as_rankings_phase4(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_launched
 ):
