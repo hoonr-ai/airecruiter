@@ -279,3 +279,51 @@ def test_get_job_outreach_stats_pending_extra_stays_phase1(
         assert result["phases"]["extra1"] == 0
 
     asyncio.run(_test())
+
+
+def test_candidate_with_no_audit_row_uses_live_api_status(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    """Regression: candidate with engage_interview_id but no audit row must be
+    counted using the live Pair Bot status, not silently dropped.
+
+    This covers the 'audit webhook lagged or failed' scenario described in
+    PR #673: the header showed Pending: 4 while the table showed 2 In Progress
+    + 2 Pending, because candidates with no audit row were excluded from
+    collect_merged_outreach_payloads even when their live API status was known.
+    """
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        _stub_outreach_db(
+            mock_db_connection,
+            # Only c1 has an audit row — c2 was launched but the webhook never fired.
+            [_audit_row("int_1", "pending", cid="c1")],
+            [
+                _sourced_row("c1", "int_1", "pending", "phase1"),
+                # c2 has an engage_interview_id but NO audit row.
+                _sourced_row("c2", "int_2", "pending", "phase1"),
+            ],
+        )
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {"outreach_status": "pending", "outreach_phase": "phase1"},
+            # Live API says c2 is in_progress — this must be reflected in the header.
+            "int_2": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
+        }
+
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+
+        # c1 → Pending (audit + live both say pending)
+        # c2 → In Progress (no audit row, but live API says in_progress)
+        assert result["buckets"]["pending"] == 1, (
+            f"expected 1 Pending, got {result['buckets']['pending']} — "
+            "c1 should be Pending"
+        )
+        assert result["buckets"]["in_progress"] == 1, (
+            f"expected 1 In Progress, got {result['buckets']['in_progress']} — "
+            "c2 has no audit row but live API says in_progress; "
+            "collect_merged_outreach_payloads must include it"
+        )
+
+    asyncio.run(_test())
+
