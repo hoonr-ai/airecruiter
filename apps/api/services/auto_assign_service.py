@@ -3,16 +3,82 @@ import logging
 import json
 import psycopg2
 import psycopg2.extras
+import re
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from core.db import get_db_connection
 from services.feedback_metrics import count_feedback_metrics
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
-from services.jobdiva import jobdiva_profile_id
+from services.jobdiva import jobdiva_profile_id, jobdiva_application_created_by_pair
 
 logger = logging.getLogger(__name__)
+
+# Grep-able marker: JobDiva lists an application PAIR filed (its Resume Source /
+# recruiter say so) but no local row links to that profile any more. The sync
+# never re-imports such a person as a new applicant; the marker is the audit trail.
+PAIR_APPLICATION_UNLINKED = "PAIR_APPLICATION_UNLINKED"
+
+# Launch PAIR mints this address for phone-only people (routers/engagement.py
+# `_PAIR_SYNTHETIC_EMAIL_DOMAIN`) and writes it through to JobDiva, so an
+# applicant record can come back carrying it while the local row has no email.
+_PAIR_SYNTHETIC_EMAIL_RE = re.compile(r"^pair-(\d{7,})@no-email\.jobdiva\.local$")
+
+
+def _monitored_job_ids(mj_row: Any, fallback: str) -> Tuple[str, str]:
+    """``(jobdiva_id, job_id)`` from a ``SELECT jobdiva_id, job_id FROM monitored_jobs`` row.
+
+    Shape-agnostic on purpose. The applicant sync reads this row through a
+    RealDictCursor, and ``ref_id, num_id = mj_row`` on a dict row binds the
+    column NAMES ('jobdiva_id', 'job_id') instead of the job's ids. The lookup
+    index was then built for a job that does not exist, matched nobody, and
+    every JobDiva applicant -- including each Exa/LinkedIn person Launch PAIR
+    had just provisioned -- was inserted as a brand-new JobDiva-Applicants row
+    (and auto-launched again). Missing values fall back to the requested id.
+    """
+    if not mj_row:
+        return str(fallback), str(fallback)
+    if isinstance(mj_row, dict):
+        ref_id, num_id = mj_row.get("jobdiva_id"), mj_row.get("job_id")
+    else:
+        try:
+            ref_id, num_id = mj_row[0], mj_row[1]
+        except (IndexError, KeyError, TypeError):
+            ref_id, num_id = None, None
+    return str(ref_id or fallback), str(num_id or fallback)
+
+
+def _normalize_profile_url(value: Any) -> str:
+    """Lower-case a profile URL and drop protocol, www., query string and trailing slash."""
+    url = str(value or "").strip().lower()
+    if not url:
+        return ""
+    url = re.sub(r"^https?://", "", url)
+    url = re.sub(r"^www\.", "", url)
+    url = url.split("?", 1)[0].split("#", 1)[0]
+    return url.rstrip("/")
+
+
+def _phone_index_keys(digits: str) -> List[str]:
+    """Digit strings a phone is indexed under: as stored and, when it carries a
+    country code, its national 10 digits -- JobDiva and the sourcing pools do
+    not agree on '1' prefixes.
+
+    A shared or placeholder line (000-000-0000, 555-555-5555: fewer than four
+    distinct digits) yields no key at all. A phone is the only signal that can
+    merge two DIFFERENT people here, and one agency switchboard must never fold
+    a whole agency's applicants into one row -- the same rule the Step-5 dedupe
+    applies (apps/web/app/jobs/new/page.tsx `normalizePhoneValue`).
+    """
+    digits = "".join(ch for ch in str(digits or "") if ch.isdigit())
+    if len(digits) < 7 or len(set(digits)) < 4:
+        return []
+    keys = [digits]
+    if len(digits) > 10:
+        keys.append(digits[-10:])
+    return keys
+
 
 class AutoAssignService:
     def __init__(self, db_url: str = DATABASE_URL):
@@ -51,23 +117,25 @@ class AutoAssignService:
           - by_candidate_id
           - by_jcid   (data->>'jobdiva_candidate_id')
           - by_email  (covers both `email` and `data->>'email'`)
-          - by_phone  (digits-only)
-          - by_url    (profile_url and data->'urls'->>'linkedin')
+          - by_phone  (digits-only, plus the national 10 digits)
+          - by_url    (profile_url and data->'urls'->>'linkedin', normalized)
 
         Within each dict, the highest-priority row wins on collision —
         mirroring the original ORDER BY (applicants source first, then
         most-recent created_at).
+
+        `by_jcid` is what links a JobDiva applicant back to the Exa/LinkedIn
+        row Launch PAIR provisioned them from (the provisioner stamps
+        data.jobdiva_candidate_id). A hit there is an UPDATE of that row --
+        its `source` stays the origin channel -- never a second row.
         """
-        # Resolve both IDs from monitored_jobs first
+        # Resolve both IDs from monitored_jobs first. The row comes back as a
+        # dict on this cursor; see _monitored_job_ids for why that matters.
         cur.execute(
             "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
             (target_job_id, target_job_id)
         )
-        mj_row = cur.fetchone()
-        if mj_row:
-            ref_id, num_id = mj_row
-        else:
-            ref_id, num_id = target_job_id, target_job_id
+        ref_id, num_id = _monitored_job_ids(cur.fetchone(), target_job_id)
 
         cur.execute(
             r"""
@@ -117,18 +185,15 @@ class AutoAssignService:
             data_email_lc = r.get("data_email_lc")
             if data_email_lc:
                 idx["by_email"].setdefault(data_email_lc, r)
-            phone_norm = r.get("phone_norm")
-            if phone_norm:
-                idx["by_phone"].setdefault(phone_norm, r)
-            data_phone_norm = r.get("data_phone_norm")
-            if data_phone_norm:
-                idx["by_phone"].setdefault(data_phone_norm, r)
-            url_norm = r.get("profile_url_norm")
-            if url_norm:
-                idx["by_url"].setdefault(url_norm, r)
-            linkedin_norm = r.get("linkedin_norm")
-            if linkedin_norm:
-                idx["by_url"].setdefault(linkedin_norm, r)
+            for raw_phone in (r.get("phone_norm"), r.get("data_phone_norm")):
+                for phone_key in _phone_index_keys(raw_phone):
+                    idx["by_phone"].setdefault(phone_key, r)
+            for raw_url in (r.get("profile_url_norm"), r.get("linkedin_norm")):
+                if raw_url:
+                    idx["by_url"].setdefault(raw_url, r)
+                    url_norm = _normalize_profile_url(raw_url)
+                    if url_norm:
+                        idx["by_url"].setdefault(url_norm, r)
         return idx
 
     def _find_in_index(
@@ -153,16 +218,32 @@ class AutoAssignService:
             hit = index["by_jcid"].get(str(candidate_id))
             if hit:
                 return hit
+        # The pool emitters stamp the JobDiva profile id on every applicant row
+        # (services/jobdiva.py `jobdiva_profile_stamp`); for an applicant it equals
+        # candidate_id, but a caller-supplied row may carry only the stamp.
+        stamped = self._normalize_text(cand.get("jobdiva_candidate_id"))
+        if stamped and stamped != str(candidate_id or ""):
+            hit = index["by_candidate_id"].get(stamped) or index["by_jcid"].get(stamped)
+            if hit:
+                return hit
 
         email = self._normalize_email(cand.get("email"))
         if email:
             hit = index["by_email"].get(email)
             if hit:
                 return hit
+            # Launch PAIR's synthetic address for a phone-only person: the local
+            # row has no email, so the digits in the address are the join key.
+            synthetic = _PAIR_SYNTHETIC_EMAIL_RE.match(email)
+            if synthetic:
+                for phone_key in _phone_index_keys(synthetic.group(1)):
+                    hit = index["by_phone"].get(phone_key)
+                    if hit:
+                        return hit
 
         phone = self._normalize_phone(cand.get("phone"))
-        if phone:
-            hit = index["by_phone"].get(phone)
+        for phone_key in _phone_index_keys(phone):
+            hit = index["by_phone"].get(phone_key)
             if hit:
                 return hit
 
@@ -171,6 +252,11 @@ class AutoAssignService:
             hit = index["by_url"].get(profile_url)
             if hit:
                 return hit
+            url_norm = _normalize_profile_url(profile_url)
+            if url_norm:
+                hit = index["by_url"].get(url_norm)
+                if hit:
+                    return hit
 
         return None
 
@@ -179,9 +265,28 @@ class AutoAssignService:
         cand: Dict[str, Any],
         candidate_id: str,
         existing_data: Optional[Dict[str, Any]] = None,
+        existing_source: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """The `data` blob to persist for a JobDiva applicant emission.
+
+        ``existing_data`` / ``existing_source`` describe the row the applicant
+        matched (None for a brand-new insert). The applicant sync runs with
+        bypass_screening, so the emission carries a placeholder score of 0 and
+        "Scoring skipped" explainability: those never overwrite a real score the
+        matched row already holds (a Launch PAIR'd Exa row keeps its Step-5 score).
+        """
+        is_new_row = existing_data is None
         existing_data = existing_data if isinstance(existing_data, dict) else {}
         payload = dict(existing_data)
+
+        incoming_score = cand.get("match_score")
+        existing_score = existing_data.get("match_score")
+        if incoming_score is None or (not incoming_score and existing_score):
+            match_score = existing_score if existing_score is not None else (incoming_score or 0)
+        else:
+            match_score = incoming_score
+        keep_existing_explanation = (not incoming_score) and bool(existing_data.get("explainability"))
+
         payload.update({
             "skills": cand.get("skills") or existing_data.get("skills") or [],
             "experience_years": cand.get("experience_years") or existing_data.get("experience_years") or 0,
@@ -190,14 +295,31 @@ class AutoAssignService:
             "company_experience": cand.get("enhanced_info", {}).get("company_experience") or existing_data.get("company_experience") or [],
             "urls": cand.get("enhanced_info", {}).get("urls") or existing_data.get("urls") or {},
             "is_selected": True,
-            "match_score": cand.get("match_score") if cand.get("match_score") is not None else existing_data.get("match_score", 0),
+            "match_score": match_score,
             "missing_skills": cand.get("missing_skills") or existing_data.get("missing_skills") or [],
             "matched_skills": cand.get("matched_skills") or existing_data.get("matched_skills") or [],
-            "explainability": cand.get("explainability") or existing_data.get("explainability") or "",
+            "explainability": (
+                existing_data.get("explainability") if keep_existing_explanation
+                else (cand.get("explainability") or existing_data.get("explainability") or "")
+            ),
             "match_score_details": cand.get("match_score_details") or existing_data.get("match_score_details") or {},
             "enhanced_info": cand.get("enhanced_info") or existing_data.get("enhanced_info"),
             "auto_assigned": True,
         })
+
+        # Provenance of the JobDiva application (see services/jobdiva.py). A row
+        # this sync creates is, by construction, a person who applied in JobDiva
+        # without PAIR's involvement (PAIR-filed applications are recognised and
+        # skipped by the caller). A matched row keeps whatever it already says:
+        # an origin row provisioned by Launch PAIR was stamped "pair" there, and
+        # a legacy row with no stamp stays unknown rather than being guessed --
+        # except a JobDiva-Applicants row, whose application is organic by definition.
+        if is_new_row:
+            payload["jobdiva_application_origin"] = "organic"
+        elif not payload.get("jobdiva_application_origin") and (
+            str(existing_source or "").strip().lower() == "jobdiva-applicants"
+        ):
+            payload["jobdiva_application_origin"] = "organic"
 
         # Contact-gate inputs. JobApplicantsDetail returns all of these
         # (services/jobdiva.py `_get_all_job_applicants`), but they used to be
@@ -714,6 +836,10 @@ class AutoAssignService:
             update_batch: List[tuple] = []
             insert_batch: List[tuple] = []
             profile_batch: List[Dict[str, Any]] = []
+            # Applicants JobDiva attributes to PAIR (Resume Source / recruiter)
+            # that match no local row: PAIR's own application with a lost link.
+            # Never inserted -- see PAIR_APPLICATION_UNLINKED.
+            pair_unlinked = 0
 
             def _flush_batches() -> None:
                 """Flush the accumulated update / insert / profile batches.
@@ -869,13 +995,23 @@ class AutoAssignService:
                     existing_row = self._find_in_index(candidate_index, cand, candidate_id)
 
                     if existing_row:
+                        # Same person already has a row for this job (their
+                        # origin row -- e.g. the LinkedIn-Exa row Launch PAIR
+                        # provisioned into JobDiva). Update THAT row in place:
+                        # the UPDATE below deliberately never touches `source`,
+                        # and the row is not queued for auto-launch.
                         existing_data = existing_row.get("data")
                         if isinstance(existing_data, str):
                             try:
                                 existing_data = json.loads(existing_data)
                             except Exception:
                                 existing_data = {}
-                        merged_data = self._build_candidate_payload(cand, candidate_id, existing_data)
+                        if not isinstance(existing_data, dict):
+                            existing_data = {}
+                        merged_data = self._build_candidate_payload(
+                            cand, candidate_id, existing_data,
+                            existing_source=existing_row.get("source"),
+                        )
                         update_batch.append((
                             existing_row["id"],
                             cand.get("email"),
@@ -889,6 +1025,23 @@ class AutoAssignService:
                         existing_ids.add(candidate_id)
                     else:
                         if candidate_id in existing_ids:
+                            continue
+
+                        # JobDiva says PAIR filed this application (its Resume
+                        # Source / recruiter is ours) but nothing local links to
+                        # the profile: the origin row was removed or never got
+                        # its jobdiva_candidate_id stamp. Re-importing the person
+                        # as a JobDiva applicant would relabel them AND auto-launch
+                        # them again, so skip and leave the marker for the audit.
+                        if jobdiva_application_created_by_pair(cand.get("jobdiva_application_meta")):
+                            pair_unlinked += 1
+                            logger.warning(
+                                "%s job=%s jobdiva_candidate_id=%s meta=%s name=%r",
+                                PAIR_APPLICATION_UNLINKED, target_job_id, candidate_id,
+                                json.dumps(cand.get("jobdiva_application_meta"), default=str),
+                                cand.get("name") or "",
+                            )
+                            existing_ids.add(candidate_id)
                             continue
 
                         candidate_data_json = json.dumps(
@@ -915,8 +1068,14 @@ class AutoAssignService:
                             newly_inserted_ids.append(candidate_id)
                             existing_ids.add(candidate_id)
 
-                    # Populate normalized tables in the same batch
-                    profile_batch.append(cand)
+                    # Populate normalized tables in the same batch -- but only
+                    # for rows this sync owns (new applicants and JobDiva-labelled
+                    # matches). An origin row from another channel already has
+                    # its profile record from its own save path; re-upserting it
+                    # here as "JobDiva-Applicants" is exactly the relabelling
+                    # this sync must never do.
+                    if not existing_row or str(existing_row.get("source") or "").lower().startswith("jobdiva"):
+                        profile_batch.append(cand)
                 except Exception as row_err:
                     logger.warning(f"[AutoAssignService] Failed to stage upsert for {cand.get('candidate_id')}: {row_err}")
 
@@ -932,7 +1091,10 @@ class AutoAssignService:
             # Drain whatever's left after the stream ends.
             _flush_batches()
 
-            logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}")
+            logger.info(
+                f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}"
+                + (f" ({pair_unlinked} PAIR-filed application(s) without a local row skipped)" if pair_unlinked else "")
+            )
 
             # 5. Update performance metrics (Time to First Pass, External Subs, etc.)
             await self.refresh_job_performance_metrics(
@@ -1181,7 +1343,7 @@ class AutoAssignService:
                     mj_row = cur.fetchone()
                     if not mj_row:
                         return zero
-                    ref_id, num_id = mj_row
+                    ref_id, num_id = _monitored_job_ids(mj_row, target_job_id)
 
                     # Match both storage shapes — some rows are keyed by
                     # jobdiva_id (alphanumeric ref), others by job_id::text.

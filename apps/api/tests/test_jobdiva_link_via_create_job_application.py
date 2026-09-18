@@ -285,3 +285,132 @@ def test_link_candidate_to_job_refreshes_token_once_on_401():
     assert ok is True
     assert seen_tokens == ["Bearer stale", "Bearer fresh"]
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Provenance: outcome shape, PAIR Resume Source, id recovery
+# ---------------------------------------------------------------------------
+
+def test_outcome_unpacks_like_the_old_tuple_and_reports_the_path():
+    from services.jobdiva import JobDivaApplicationOutcome
+
+    outcome, _calls = _run(
+        _service(), _dispatch_with(),
+        candidate_id=EXISTING_PROFILE, job_id=str(JOB_ID), email="ada@example.com",
+    )
+    assert isinstance(outcome, JobDivaApplicationOutcome)
+    ok, jd_id = outcome
+    assert (ok, jd_id) == (True, EXISTING_PROFILE)
+    assert outcome == (True, EXISTING_PROFILE)
+    assert outcome.path == "linked" and outcome.found_via_search is False
+
+    created, _calls = _run(
+        _service(), _dispatch_with(create_body="777"),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r", email="new@example.com",
+    )
+    assert created == (True, 777)
+    assert created.path == "created" and created.found_via_search is False
+
+    found, _calls = _run(
+        _service(), _dispatch_with(search_result=[{"id": 4242}]),
+        candidate_id=None, job_id=str(JOB_ID), email="known@example.com",
+    )
+    assert found == (True, "4242")
+    assert found.path == "linked" and found.found_via_search is True
+
+    failed, _calls = _run(
+        _service(), _dispatch_with(link_status=500, link_body="boom"),
+        candidate_id=EXISTING_PROFILE, job_id=str(JOB_ID),
+    )
+    assert failed == (False, None) and failed.path == "failed"
+
+
+def test_configured_pair_resume_source_is_sent_on_link_and_create(monkeypatch):
+    """With a PAIR Resume Source configured, both endpoints file the application
+    under it: JobDiva then knows PAIR made it, whichever path ran."""
+    import services.jobdiva as jd
+
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_ID", 12)
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL", "")
+
+    _outcome, calls = _run(
+        _service(), _dispatch_with(),
+        candidate_id=EXISTING_PROFILE, job_id=str(JOB_ID), origin_source="JobDiva-TalentSearch",
+    )
+    (link,) = _calls_to(calls, "createJobApplication")
+    assert link["json"] == {"candidateid": int(EXISTING_PROFILE), "jobid": JOB_ID, "resumesource": 12}
+
+    _outcome, calls = _run(
+        _service(), _dispatch_with(create_body="777"),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r", origin_source="Dice",
+    )
+    (create,) = _calls_to(calls, "CreateJobApplicationWithResume")
+    assert create["json"]["resumesource"] == 12
+    assert set(create["json"]) == UPLOAD_RESUME_AND_APPLY_JOB_FIELDS
+
+
+def test_per_channel_resume_source_beats_the_default(monkeypatch):
+    import services.jobdiva as jd
+
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_ID", 12)
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL", "LinkedIn:13,Dice:14")
+
+    assert jd.jobdiva_pair_resume_source_id("LinkedIn-Exa") == 13   # family match
+    assert jd.jobdiva_pair_resume_source_id("linkedin") == 13       # case-insensitive
+    assert jd.jobdiva_pair_resume_source_id("Dice") == 14
+    assert jd.jobdiva_pair_resume_source_id("JobDiva-TalentSearch") == 12  # default
+    assert jd.jobdiva_pair_resume_source_id("") == 12
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL", '{"LinkedIn-Exa": 34}')
+    assert jd.jobdiva_pair_resume_source_id("LinkedIn-Exa") == 34
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_ID", 0)
+    assert jd.jobdiva_pair_resume_source_id("Dice") == 0
+
+
+def test_unconfigured_resume_source_keeps_legacy_payloads():
+    import services.jobdiva as jd
+
+    assert jd.jobdiva_pair_resume_source_id("LinkedIn-Exa") == 0
+    _outcome, calls = _run(
+        _service(), _dispatch_with(),
+        candidate_id=EXISTING_PROFILE, job_id=str(JOB_ID), origin_source="LinkedIn-Exa",
+    )
+    (link,) = _calls_to(calls, "createJobApplication")
+    assert link["json"] == {"candidateid": int(EXISTING_PROFILE), "jobid": JOB_ID}
+
+
+def test_create_without_a_returned_id_recovers_the_profile_via_lookup():
+    """JobDiva 200s the create with an empty body. Without an id the row would
+    never be linked and the applicant sync would re-import the person as a new
+    applicant -- so the id is recovered from the profile JobDiva just parsed."""
+    lookups = []
+
+    def dispatch(url, body):
+        if url.endswith("/searchCandidateProfile"):
+            lookups.append(body)
+            return _FakeResponse(200, json_data=[{"id": 4242}] if len(lookups) > 1 else [])
+        if url.endswith("/CreateJobApplicationWithResume"):
+            return _FakeResponse(200, text="")
+        if url.endswith("/updateCandidateProfile"):
+            raise AssertionError("a recovered id may be a pre-existing profile: never rename it")
+        return _FakeResponse(200, text="true")
+
+    outcome, calls = _run(
+        _service(), dispatch,
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email="ada@example.com", phone="5551234567",
+    )
+    # First lookup (pre-create) found nobody -> create ran -> second lookup recovered the id.
+    assert len(lookups) == 2
+    assert len(_calls_to(calls, "CreateJobApplicationWithResume")) == 1
+    assert outcome == (True, 4242)
+    assert outcome.path == "created" and outcome.found_via_search is True
+
+
+def test_create_without_a_returned_id_and_no_match_is_still_a_success_without_id():
+    outcome, calls = _run(
+        _service(), _dispatch_with(create_body=""),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r", email="ada@example.com",
+    )
+    assert outcome == (True, None)
+    assert outcome.path == "created" and outcome.found_via_search is False
+    assert _calls_to(calls, "updateCandidateProfile") == []

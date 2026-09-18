@@ -1532,6 +1532,13 @@ async def get_job_candidates(
             if isinstance(data_blob, dict):
                 if data_blob.get("jobdiva_candidate_id"):
                     cand["jobdiva_candidate_id"] = str(data_blob.get("jobdiva_candidate_id"))
+                # JobDiva linkage provenance (services/jobdiva.py "Provenance"):
+                # `source` is the origin channel; these say how the person got
+                # into JobDiva, so the UI can show "LinkedIn" + "In JobDiva · via
+                # PAIR" instead of relabelling them an applicant.
+                for _prov_key in ("jobdiva_application_origin", "jobdiva_profile_origin", "jobdiva_provisioned_from"):
+                    if data_blob.get(_prov_key):
+                        cand[_prov_key] = str(data_blob.get(_prov_key))
                 if data_blob.get("work_city"):
                     cand["work_city"] = data_blob.get("work_city")
                 if data_blob.get("work_state"):
@@ -1713,8 +1720,13 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
+                # The stored JobDiva profile id rides along: Launch PAIR gives an
+                # Exa/LinkedIn person a JobDiva profile, and the JobDiva pools then
+                # return that same person under the profile id with a JobDiva-*
+                # label. Without the id the Step-5 list cannot recognise that row
+                # as already launched and offers a second launch (a "twin" row).
                 cur.execute("""
-                    SELECT candidate_id, source
+                    SELECT candidate_id, source, data->>'jobdiva_candidate_id'
                     FROM sourced_candidates
                     WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                 """, (str(resolved_jobdiva_id), str(job_id_or_ref)))
@@ -1722,7 +1734,13 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
         finally:
             conn.close()
 
-        launched = [{"candidate_id": r[0], "source": r[1]} for r in rows]
+        launched = []
+        for r in rows:
+            item = {"candidate_id": r[0], "source": r[1]}
+            jd_id = str(r[2] or "").strip() if len(r) > 2 else ""
+            if jd_id:
+                item["jobdiva_candidate_id"] = jd_id
+            launched.append(item)
         return {"status": "success", "launched": launched}
     except Exception as e:
         logger.error(f"Error fetching launched candidate keys for {job_id_or_ref}: {e}")
