@@ -1003,7 +1003,6 @@ def collect_merged_outreach_payloads(
     payloads: List[Dict[str, Any]] = []
     num_resolved = 0
     covered_iids: set = set()
-    covered_cids: set = set()
     for a in audit_rows:
         iid = str(a.get("interview_id") or "").strip()
         if not iid:
@@ -1011,8 +1010,6 @@ def collect_merged_outreach_payloads(
 
         covered_iids.add(iid)
         cid = str(a.get("candidate_id") or "")
-        if cid:
-            covered_cids.add(cid)
         cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
         raw_resp = a.get("response")
         audit_status = a.get("status")
@@ -1042,8 +1039,11 @@ def collect_merged_outreach_payloads(
         cid = str(row.get("candidate_id") or "").strip()
         if not iid:
             continue
-        # Skip if already covered by an audit row (avoid double-counting).
-        if iid in covered_iids or (cid and cid in covered_cids):
+        # One payload represents one launched interview. A candidate may be
+        # launched more than once, so a matching candidate_id must not hide a
+        # different interview ID (for example, a repeat launch after a retry).
+        # The audit walk above already records every audit interview ID.
+        if iid in covered_iids:
             continue
         live_api = outreach_by_interview.get(iid)
         merged_payload = build_merged_outreach_payload(row, None, None, live_api)
@@ -1114,6 +1114,7 @@ def _build_row(
     outreach_by_interview: Dict[str, Dict[str, Any]],
     *,
     sourced_rows: Optional[List[Dict[str, Any]]] = None,
+    phase_candidate_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     cand = _summarise_candidates(sourced_rows if sourced_rows is not None else candidate_rows)
 
@@ -1121,6 +1122,21 @@ def _build_row(
         audit_rows, candidate_rows, outreach_by_interview
     )
     outreach = _summarise_outreach(payloads, shift_phases=True)
+
+    # Keep the existing status buckets intact, but calculate phase columns
+    # from every known interview ID. The sourcing view is candidate-oriented
+    # and can collapse repeat launches for the same person; Pair Bot phases
+    # are interview-oriented. Rankings already follows this per-interview
+    # rule, and the launch report must use it too.
+    if phase_candidate_rows is not None:
+        phase_payloads, _ = collect_merged_outreach_payloads(
+            audit_rows, phase_candidate_rows, outreach_by_interview
+        )
+        outreach["phases"] = _summarise_outreach(
+            phase_payloads,
+            shift_phases=True,
+            include_pending_extra=False,
+        )["phases"]
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -1425,17 +1441,32 @@ async def get_launch_report(
 
         audit_by_job[str(job["job_id"])] = day_rows
         interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
+        interview_ids.extend(
+            str(row.get("engage_interview_id")).strip()
+            for key in _keys_for(job)
+            for row in candidates_by_key.get(key, [])
+            if str(row.get("engage_interview_id") or "").strip()
+        )
 
     outreach_by_interview = await _fetch_all_outreach(sorted(set(interview_ids)))
 
     rows = []
     for job in jobs:
-        candidate_rows = {
-            row["candidate_id"]: row
+        raw_candidate_rows = [
+            row
             for key in _keys_for(job)
             for row in candidates_by_key.get(key, [])
+        ]
+        candidate_rows = {
+            row["candidate_id"]: row
+            for row in raw_candidate_rows
         }
         all_candidate_rows = list(candidate_rows.values())
+        phase_candidate_rows = {
+            str(row.get("engage_interview_id")): row
+            for row in raw_candidate_rows
+            if str(row.get("engage_interview_id") or "").strip()
+        }
         rows.append(
             _build_row(
                 job,
@@ -1443,6 +1474,7 @@ async def get_launch_report(
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
                 sourced_rows=_candidate_rows_as_of_first_launch(all_candidate_rows, job),
+                phase_candidate_rows=list(phase_candidate_rows.values()),
             )
         )
 

@@ -1738,7 +1738,14 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             # rows are not needed for outreach-stats; idx_sourced_candidates_jobdiva_id
             # already bounds this to the job.
             cur.execute("""
-                SELECT DISTINCT ON (candidate_id)
+                -- A person may be launched more than once for the same job.
+                -- Keep one row per interview, not per candidate, so Rankings
+                -- retains the same population as Pair Bot and the launch report.
+                -- Rows without an interview ID (JSONB-only Pass/Fail fallback)
+                -- still deduplicate by candidate.
+                SELECT DISTINCT ON (
+                    COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id)
+                )
                     candidate_id,
                     data->>'engage_interview_id',
                     data->>'engage_status',
@@ -1755,7 +1762,9 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
                     OR COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
                     OR COALESCE(NULLIF(data->>'engage_hard_filter_status', ''), '') <> ''
                   )
-                ORDER BY candidate_id, id DESC
+                ORDER BY
+                    COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id),
+                    id DESC
             """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id)))
             sourced_rows = cur.fetchall()
     finally:

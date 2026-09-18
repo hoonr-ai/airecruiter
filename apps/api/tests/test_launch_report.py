@@ -1188,6 +1188,36 @@ def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys(
     assert row["phase4"] == 1
 
 
+def test_build_row_uses_per_interview_payloads_for_phases_without_changing_buckets():
+    """Repeat launches may add a phase, but must not alter legacy status buckets."""
+    job = _job(1)
+    audit_rows = [{"interview_id": "int_1", "candidate_id": "cand_1", "status": "pending"}]
+    candidate_rows = [{"candidate_id": "cand_1", "engage_interview_id": "int_1", "engage_status": "pending"}]
+    phase_candidate_rows = [
+        *candidate_rows,
+        {"candidate_id": "cand_1", "engage_interview_id": "int_2", "engage_status": "pending"},
+    ]
+    live = {
+        "int_1": {"outreach_status": "pending", "outreach_phase": "phase1"},
+        "int_2": {"outreach_status": "in_progress", "outreach_phase": "phase1_6hr"},
+    }
+
+    baseline = lr._build_row(job, candidate_rows, audit_rows, live)
+    row = lr._build_row(
+        job,
+        candidate_rows,
+        audit_rows,
+        live,
+        phase_candidate_rows=phase_candidate_rows,
+    )
+
+    assert (row["pending"], row["in_progress"], row["completed"]) == (
+        baseline["pending"], baseline["in_progress"], baseline["completed"],
+    )
+    assert row["phase1"] == 1
+    assert row["phase2"] == 1
+
+
 
 
 
@@ -1470,4 +1500,3 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     assert "total_launched" not in sql
     # Outer query filters on l.first_launch_at
     assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
-
