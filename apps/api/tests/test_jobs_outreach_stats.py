@@ -179,6 +179,39 @@ def test_two_interviews_same_candidate_both_count(
     asyncio.run(_test())
 
 
+def test_outreach_stats_selects_sourced_rows_per_interview_not_candidate(
+    mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
+):
+    """A repeat launch for one person must not drop an interview from Rankings."""
+    from routers.jobs import get_job_outreach_stats
+
+    async def _test():
+        cur = _stub_outreach_db(
+            mock_db_connection,
+            [_audit_row("int_1", "pending", cid="c1")],
+            [
+                _sourced_row("c1", "int_1", "pending", "phase1"),
+                _sourced_row("c1", "int_2", "pending", "phase3"),
+            ],
+        )
+        mock_fetch_all_outreach.return_value = {
+            "int_1": {"outreach_status": "pending", "outreach_phase": "phase1"},
+            "int_2": {"outreach_status": "in_progress", "outreach_phase": "phase3"},
+        }
+
+        result = await get_job_outreach_stats("job_123", user=MagicMock())
+
+        assert result["buckets"]["pending"] == 1
+        assert result["buckets"]["in_progress"] == 1
+        assert result["phases"]["phase1"] == 1
+        assert result["phases"]["phase4"] == 1
+
+        sourced_query = " ".join(cur.execute.call_args_list[2].args[0].split())
+        assert "DISTINCT ON ( COALESCE(NULLIF(data->>'engage_interview_id', ''), candidate_id) )" in sourced_query
+
+    asyncio.run(_test())
+
+
 def test_uncovered_jsonb_pass_counts_like_launch_report(
     mock_db_connection, mock_verify_job_access, mock_fetch_all_outreach, mock_get_current_user
 ):
@@ -326,4 +359,3 @@ def test_candidate_with_no_audit_row_uses_live_api_status(
         )
 
     asyncio.run(_test())
-

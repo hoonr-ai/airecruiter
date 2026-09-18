@@ -1003,7 +1003,6 @@ def collect_merged_outreach_payloads(
     payloads: List[Dict[str, Any]] = []
     num_resolved = 0
     covered_iids: set = set()
-    covered_cids: set = set()
     for a in audit_rows:
         iid = str(a.get("interview_id") or "").strip()
         if not iid:
@@ -1011,8 +1010,6 @@ def collect_merged_outreach_payloads(
 
         covered_iids.add(iid)
         cid = str(a.get("candidate_id") or "")
-        if cid:
-            covered_cids.add(cid)
         cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
         raw_resp = a.get("response")
         audit_status = a.get("status")
@@ -1042,8 +1039,11 @@ def collect_merged_outreach_payloads(
         cid = str(row.get("candidate_id") or "").strip()
         if not iid:
             continue
-        # Skip if already covered by an audit row (avoid double-counting).
-        if iid in covered_iids or (cid and cid in covered_cids):
+        # One payload represents one launched interview. A candidate may be
+        # launched more than once, so a matching candidate_id must not hide a
+        # different interview ID (for example, a repeat launch after a retry).
+        # The audit walk above already records every audit interview ID.
+        if iid in covered_iids:
             continue
         live_api = outreach_by_interview.get(iid)
         merged_payload = build_merged_outreach_payload(row, None, None, live_api)
@@ -1430,16 +1430,30 @@ async def get_launch_report(
 
     rows = []
     for job in jobs:
-        candidate_rows = {
-            row["candidate_id"]: row
+        raw_candidate_rows = [
+            row
             for key in _keys_for(job)
             for row in candidates_by_key.get(key, [])
+        ]
+        candidate_rows = {
+            row["candidate_id"]: row
+            for row in raw_candidate_rows
         }
         all_candidate_rows = list(candidate_rows.values())
+        in_scope_interview_ids = {
+            str(row.get("interview_id") or "").strip()
+            for row in audit_by_job[str(job["job_id"])]
+            if str(row.get("interview_id") or "").strip()
+        }
+        report_candidate_rows = {
+            str(row.get("engage_interview_id")): row
+            for row in raw_candidate_rows
+            if str(row.get("engage_interview_id") or "").strip() in in_scope_interview_ids
+        }
         rows.append(
             _build_row(
                 job,
-                all_candidate_rows,
+                list(report_candidate_rows.values()),
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
                 sourced_rows=_candidate_rows_as_of_first_launch(all_candidate_rows, job),
