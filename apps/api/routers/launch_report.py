@@ -625,8 +625,8 @@ def merge_outreach_payloads(
             for k, v in source.items():
                 if v is not None:
                     if k in ("outreach_status", "status"):
-                        existing_st = str(merged_payload.get(k) or "").strip().lower().replace(" ", "_")
-                        new_st = str(v).strip().lower().replace(" ", "_")
+                        existing_st = str(merged_payload.get(k) or "").strip().lower()
+                        new_st = str(v).strip().lower()
                         # If both statuses are recognized in the hierarchy, enforce monotonic progression.
                         # If either is unrecognised, allow the higher-priority layer to win so genuinely
                         # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
@@ -686,8 +686,8 @@ def build_merged_outreach_payload(
             audit_fallback = {}
             
     if audit_status:
-        st_hier = str(audit_status).strip().lower().replace(" ", "_")
-        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower().replace(" ", "_")
+        st_hier = str(audit_status).strip().lower()
+        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
         # Backfill missing keys only; never replace an already-recorded audit
         # response status at equal rank (passed vs completed, fail vs failed).
         if not curr_st:
