@@ -11,6 +11,10 @@ Covers the pieces that are easy to get subtly wrong and expensive to notice:
       jobdiva_id case that would otherwise pool unrelated jobs
   (e) the percentage metric at each of its edges — zero launched, zero
       resolved, and partially resolved outreach
+  (f) the row is the job's RANK LIST summarised: one unit per launched person
+      (their latest interview), over the job's whole lifetime, classified by
+      the same code the Rankings page uses — never per interview, never just
+      the launch day
 
 Real DB connections are blocked by conftest, so the SQL itself is exercised
 through its generated text and its Python-side equivalents rather than a live
@@ -243,15 +247,32 @@ def _job(total_launched):
     }
 
 
+def _launched(iid, cid=None, **fields):
+    """A launched-candidate row as services/launched_candidates returns it.
+
+    `interview_id` is the one the report asks pair-bot about; stored status
+    lives in `audit_status` / `audit_response` and the `engage_*` JSONB fields.
+    """
+    return {"candidate_id": cid or f"c_{iid}", "interview_id": iid, **fields}
+
+
+def _launched_from(candidates):
+    """Turn sourced-shaped candidate dicts into launched rows (one interview each)."""
+    return [
+        {**c, "interview_id": c.get("engage_interview_id") or f"iv_{c['candidate_id']}"}
+        for c in candidates
+    ]
+
+
 def test_percentage_counts_completed_and_partial():
-    audit = [{"interview_id": str(i)} for i in (1, 2, 3, 4)]
+    launched = [_launched(str(i)) for i in (1, 2, 3, 4)]
     by_iid = {
         "1": _outreach("completed"),
         "2": _outreach("outreach_incomplete"),
         "3": _outreach("pending"),
         "4": _outreach("phase2"),
     }
-    row = lr._build_row(_job(4), [], audit, by_iid)
+    row = lr._build_row(_job(4), launched, [], by_iid)
     assert (row["completed"], row["partial_complete"]) == (1, 1)
     assert row["percentage"] == 50.0
 
@@ -262,72 +283,125 @@ def test_percentage_is_none_when_nothing_launched():
 
 def test_percentage_is_none_when_outreach_resolved_nothing():
     """A silent pair-bot must not render as 0% — that reads as a real result."""
-    audit = [{"interview_id": "1"}, {"interview_id": "2"}]
-    row = lr._build_row(_job(2), [], audit, {})
+    launched = [_launched("1"), _launched("2")]
+    row = lr._build_row(_job(2), launched, [], {})
     assert row["percentage"] is None
     assert (row["outreach_detail_resolved"], row["outreach_detail_expected"]) == (0, 2)
 
 
 def test_percentage_uses_full_launched_count_when_partially_resolved():
-    """Numerator counts only answered interviews; denominator stays the full
+    """Numerator counts only answered candidates; denominator stays the full
     launched count, so a partial fetch reads low rather than inventing data.
     The row exposes resolved/expected so the UI can flag it.
     """
-    audit = [{"interview_id": str(i)} for i in (1, 2, 3, 4)]
-    row = lr._build_row(_job(4), [], audit, {"1": _outreach("completed")})
+    launched = [_launched(str(i)) for i in (1, 2, 3, 4)]
+    row = lr._build_row(_job(4), launched, [], {"1": _outreach("completed")})
     assert row["percentage"] == 25.0  # 1 of 4, not 1 of 1
     assert (row["outreach_detail_resolved"], row["outreach_detail_expected"]) == (1, 4)
 
 
-def test_total_candidates_launched_uses_day_scoped_audit_rows_not_sql_lifetime_count():
-    """Range mode must not inherit a lifetime launch count into one day."""
-    audit = [{"interview_id": "1"}, {"interview_id": "2"}, {"interview_id": "2"}]
-    row = lr._build_row(
-        _job(999),
-        [],
-        audit,
-        {"1": _outreach("completed"), "2": _outreach("pending")},
-    )
-    assert row["total_candidates_launched"] == 2
+# ---------------------------------------------------------------------------
+# (f) the row is the rank list: people, latest interview, whole lifetime
+# ---------------------------------------------------------------------------
+def test_launched_is_the_number_of_launched_people_and_buckets_partition_it():
+    """Launched == the rank list's "Candidates Launched"; the four status
+    buckets are computed over exactly that set and always sum to it."""
+    launched = [
+        _launched("1", "c1", engage_status="sent", audit_status="Initiated"),      # just launched → Pending
+        _launched("2", "c2", engage_status="in_progress"),
+        _launched("3", "c3", engage_status="completed", engage_hard_filter_status="pass"),
+        _launched("4", "c4"),                                                       # no status evidence at all
+    ]
+    row = lr._build_row(_job(4), launched, [], {"4": _outreach("outreach_incomplete")})
+    assert row["total_candidates_launched"] == 4
+    assert (row["pending"], row["in_progress"], row["completed"], row["partial_complete"]) == (1, 1, 1, 1)
+    assert row["pending"] + row["in_progress"] + row["completed"] + row["partial_complete"] == 4
+    assert (row["passed_candidates"], row["failed_candidates"]) == (1, 0)
     assert row["percentage"] == 50.0
 
 
-def test_launch_report_filters_audit_rows_to_the_jobs_first_launch_day(monkeypatch):
-    captured = {}
+def test_report_row_equals_the_rankings_header_for_the_same_job():
+    """Both screens are summarise_launched_candidates over the same rows; the
+    report row must expose exactly the header's numbers, key for key."""
+    launched = [
+        _launched("1", "c1", engage_status="in_progress", outreach_phase="phase1_6hr"),
+        _launched("2", "c2", engage_status="passed", engage_score="91", outreach_phase="phase2"),
+        _launched("3", "c3", engage_status="sent", audit_status="Initiated"),
+    ]
+    live = {"3": {"outreach_status": "failed", "candidate_score": 40, "outreach_phase": "phase3"}}
+    header = lr.summarise_launched_candidates(launched, live)
+    row = lr._build_row(_job(3), launched, [], live)
+    assert row["total_candidates_launched"] == header["launched"] == 3
+    for bucket in ("pending", "in_progress", "completed", "partial_complete"):
+        assert row[bucket] == header["buckets"][bucket], bucket
+    assert row["passed_candidates"] == header["buckets"]["passed"] == 1
+    assert row["failed_candidates"] == header["buckets"]["failed"] == 1
+    for phase in ("phase1", "phase2", "phase3", "phase4", "extra", "extra1", "extra2", "extra3"):
+        assert row[phase] == header["phases"][phase], phase
+    assert (row["phase2"], row["phase3"], row["phase4"]) == (1, 1, 1)
 
-    first_launch = datetime.datetime(2026, 8, 28, 2, 2)  # 2026-08-27 in Eastern
-    jobs = [{**_job(999), "job_id": "55", "jobdiva_id": "26-01234", "first_launch_at": first_launch}]
-    audit_by_key = {
-        "26-01234": [
-            {"interview_id": "same-day", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "response": None},
-            {"interview_id": "next-day", "created_at": datetime.datetime(2026, 8, 29, 2, 10), "response": None},
+
+def test_report_asks_pair_bot_once_per_launched_person_over_the_whole_lifetime(monkeypatch):
+    """No launch-day scoping and no per-interview fan-out: a candidate launched
+    a week after the job's first launch is in the row, a re-launched candidate
+    is one row on their latest interview, and pair-bot is asked about exactly
+    those interviews."""
+    captured = {}
+    job = {**_job(0), "job_id": "55", "jobdiva_id": "26-01234",
+           "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}   # 2026-08-27 Eastern
+    launched_by_job = {
+        "55": [
+            # launched on day one
+            _launched("day-one", "c1", engage_status="pending", audit_status="Initiated",
+                      audit_created_at=datetime.datetime(2026, 8, 28, 2, 10)),
+            # launched a week later: still this job's candidate
+            _launched("week-later", "c2", engage_status="in_progress",
+                      audit_created_at=datetime.datetime(2026, 9, 4, 2, 10)),
+            # re-launched: the population already collapsed them onto the newest interview
+            _launched("second-try", "c3", engage_status="pending", audit_interview_id="second-try",
+                      audit_status="Initiated"),
         ]
     }
+    sourced_by_job = {"55": [{"candidate_id": cid, "created_at": datetime.datetime(2026, 8, 26, 12, 0)} for cid in ("c1", "c2", "c3", "never-launched")]}
 
-    def _load_inputs(_start_date, _end_date, _scope_team_id):
-        return jobs, {}, audit_by_key
+    def _load_inputs(_start, _end, _scope):
+        return [job], launched_by_job, sourced_by_job
 
     async def _fake_outreach(interview_ids):
-        captured["ids"] = sorted(interview_ids)
-        return {iid: _outreach("completed") for iid in interview_ids}
+        captured["ids"] = list(interview_ids)
+        return {"day-one": _outreach("completed"), "week-later": _outreach("in_progress")}
 
     monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
     monkeypatch.setattr(lr, "_fetch_all_outreach", _fake_outreach)
 
     response = asyncio.run(
-        lr.get_launch_report(
-            date=None,
-            start_date="2026-08-27",
-            end_date="2026-08-27",
-            team_id=None,
-            user=_admin_user(),
-        )
+        lr.get_launch_report(date=None, start_date="2026-08-27", end_date="2026-08-27",
+                             team_id=None, user=_admin_user())
     )
-
     row = response["data"]["jobs"][0]
-    assert captured["ids"] == ["same-day"]
-    assert row["outreach_detail_expected"] == 1
-    assert row["total_candidates_launched"] == 1
+    assert captured["ids"] == ["day-one", "second-try", "week-later"]   # sorted, one per person
+    assert row["total_candidates_launched"] == 3
+    assert row["outreach_detail_expected"] == 3
+    assert (row["pending"], row["in_progress"], row["completed"]) == (1, 1, 1)
+    assert row["total_candidates_sourced"] == 4                           # lifetime, includes the unlaunched
+    assert response["data"]["totals"]["candidates_launched"] == 3
+
+
+def test_a_candidate_without_any_interview_id_is_not_launched():
+    """A failed launch leaves engage_status='failed' and no interview id. The
+    shared population excludes them at the SQL, and the row builder has no
+    Python side-door that could count a JSONB-only terminal status."""
+    from services.launched_candidates import LAUNCHED_CANDIDATES_SQL
+
+    assert "WHERE la.candidate_id IS NOT NULL OR sc.engage_interview_id IS NOT NULL" in LAUNCHED_CANDIDATES_SQL
+    assert not hasattr(lr, "apply_uncovered_pass_fail")
+    assert not hasattr(lr, "_pass_fail_for_uncovered_candidates")
+    # …and sourced-but-unlaunched rows only ever feed the sourcing columns.
+    sourced = [{"candidate_id": "s1", "engage_status": "passed", "engage_updated_at": "2026-08-26T10:00:00Z"}]
+    row = lr._build_row(_job(0), [], sourced, {})
+    assert row["total_candidates_sourced"] == 1
+    assert row["total_candidates_launched"] == 0
+    assert row["passed_candidates"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -629,14 +703,14 @@ def test_outstanding_feedback_never_goes_negative():
     """More feedback than completions (e.g. a candidate actioned before the
     webhook landed) must clamp at zero, not render as a negative backlog.
     """
-    audit = [{"interview_id": "1"}]
+    launched = [_launched("1", "c1")]
     candidates = [
         {"candidate_id": "c1", "created_at": None, "feedback_type": "Submit",
          "feedback_reason": "ok", "feedback_at": None, "engage_completed_at": None},
         {"candidate_id": "c2", "created_at": None, "feedback_type": "Reject",
          "feedback_reason": "no", "feedback_at": None, "engage_completed_at": None},
     ]
-    row = lr._build_row(_job(1), candidates, audit, {"1": _outreach("completed")})
+    row = lr._build_row(_job(1), launched, candidates, {"1": _outreach("completed")})
     assert row["completed"] == 1
     assert row["outstanding_feedback"] == 0
 
@@ -680,7 +754,7 @@ def test_turn_around_time_is_launch_minus_published():
         "job_created_at_text": "2026-08-27 12:00:00",          # 12:00 UTC
         "first_launch_at": datetime.datetime(2026, 8, 27, 14, 30),  # 14:30 UTC
     }
-    row = lr._build_row(job, [], [{"interview_id": "1"}], {"1": _outreach("completed")})
+    row = lr._build_row(job, [_launched("1")], [], {"1": _outreach("completed")})
     assert row["turn_around_time_minutes"] == 150.0
 
 
@@ -714,7 +788,7 @@ def test_time_to_source_runs_from_pair_published():
         "feedback_type": None, "feedback_reason": None,
         "feedback_at": None, "engage_completed_at": None,
     }]
-    assert lr._build_row(job, candidates, [], {})["time_to_source_minutes"] == 1440.0
+    assert lr._build_row(job, [], candidates, {})["time_to_source_minutes"] == 1440.0
 
 
 def test_first_feedback_at_earliest_wins():
@@ -724,7 +798,7 @@ def test_first_feedback_at_earliest_wins():
         {"candidate_id": "c2", "feedback_at": "2026-08-26T10:00:00Z"},
         {"candidate_id": "c3"},  # no feedback
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, [], candidates, {})
     # EDT offset from UTC is -04:00, so 10:00 UTC = 06:00 EDT
     assert row["first_feedback_at"] == "2026-08-26T06:00:00-04:00"
 
@@ -735,7 +809,7 @@ def test_first_feedback_at_is_none_when_no_feedback():
         {"candidate_id": "c1"},
         {"candidate_id": "c2"},
     ]
-    assert lr._build_row(job, candidates, [], {})["first_feedback_at"] is None
+    assert lr._build_row(job, [], candidates, {})["first_feedback_at"] is None
 
 
 def test_passed_and_failed_candidates_basic():
@@ -750,7 +824,7 @@ def test_passed_and_failed_candidates_basic():
         {"candidate_id": "c6", "engage_status": "rejected", "engage_score": "55.0"},
         {"candidate_id": "c7", "engage_status": "in_progress"},
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["passed_candidates"] == 3  # passed, pass, hired
     assert row["failed_candidates"] == 3  # failed, fail, rejected — all have engage_score
     # 2026-08-26T10:00:00Z is 06:00 EDT — the earliest pass
@@ -768,7 +842,7 @@ def test_failed_without_engage_score_is_not_counted():
         # Has engage_score -> real interview result
         {"candidate_id": "c4", "engage_status": "failed", "engage_score": "65.0"},
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["failed_candidates"] == 1  # only c4 has engage_score
     assert row["passed_candidates"] == 0
 
@@ -784,7 +858,7 @@ def test_completed_status_with_hard_filter_pass_counts_as_passed():
          "engage_hard_filter_status": "",
          "engage_completed_at": "2026-08-27T10:00:00Z"},
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["passed_candidates"] == 2
     assert row["failed_candidates"] == 0
     assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
@@ -797,7 +871,7 @@ def test_completed_status_with_hard_filter_fail_counts_as_failed():
         {"candidate_id": "c1", "engage_status": "completed",
          "engage_hard_filter_status": "hard_filter"},
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["passed_candidates"] == 0
     assert row["failed_candidates"] == 1
     assert row["first_pass_at"] is None
@@ -811,7 +885,7 @@ def test_first_pass_at_is_none_when_no_passes():
          "engage_completed_at": "2026-08-27T10:00:00Z"},
         {"candidate_id": "c2", "engage_status": "in_progress"},
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["passed_candidates"] == 0
     assert row["first_pass_at"] is None
 
@@ -822,7 +896,7 @@ def test_first_pass_at_falls_back_to_engage_updated_at():
         {"candidate_id": "c1", "engage_status": "passed",
          "engage_updated_at": "2026-08-26T10:00:00Z"},
     ]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["passed_candidates"] == 1
     assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
 
@@ -845,8 +919,7 @@ def test_live_completed_status_counts_as_passed_even_if_jsonb_is_stale():
         "engage_updated_at": "2026-08-26T10:07:00Z",
         "created_at": datetime.datetime(2026, 8, 26, 9, 0, tzinfo=datetime.timezone.utc),
     }]
-    audit = [{"interview_id": "1", "candidate_id": "c1"}]
-    row = lr._build_row(job, candidates, audit, {"1": _outreach("completed")})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {"1": _outreach("completed")})
     assert row["completed"] == 1
     assert row["passed_candidates"] == 1
     assert row["failed_candidates"] == 0
@@ -854,19 +927,18 @@ def test_live_completed_status_counts_as_passed_even_if_jsonb_is_stale():
     assert row["time_to_first_pass_minutes"] == 7.0
 
 
-def test_pass_fail_includes_jsonb_terminal_without_audit_row():
-    """Webhook can write engage_status without an audit row; still count it."""
+def test_pass_fail_counts_a_launch_whose_audit_row_was_lost():
+    """A launch stamps the interview id into the JSONB as well as the audit
+    log; if the audit insert was lost the person is still launched (the shared
+    population picks them up off the JSONB) and their stored Pass counts."""
     job = {**_job(1), "job_created_at_text": "2026-08-25 12:00:00"}
-    candidates = [
-        {"candidate_id": "c1", "engage_interview_id": "1", "engage_status": "in_progress"},
-        {
-            "candidate_id": "c2",
-            "engage_status": "passed",
-            "engage_updated_at": "2026-08-26T10:00:00Z",
-        },
+    launched = [
+        _launched("1", "c1", engage_status="in_progress", audit_status="Initiated"),
+        # no audit side: audit_status / audit_response are None
+        _launched("2", "c2", engage_status="passed", engage_updated_at="2026-08-26T10:00:00Z"),
     ]
-    audit = [{"interview_id": "1", "candidate_id": "c1"}]
-    row = lr._build_row(job, candidates, audit, {"1": _outreach("completed")})
+    row = lr._build_row(job, launched, [], {"1": _outreach("completed")})
+    assert row["total_candidates_launched"] == 2
     assert row["passed_candidates"] == 2
     assert row["failed_candidates"] == 0
     assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
@@ -891,7 +963,7 @@ def test_time_to_first_pass_falls_back_when_derived_stamp_is_before_launch():
         "engage_status": "passed",
         "engage_updated_at": "2026-08-26T10:00:00Z",
     }]
-    row = lr._build_row(job, candidates, [], {})
+    row = lr._build_row(job, _launched_from(candidates), candidates, {})
     assert row["first_pass_at"] == "2026-08-26T06:00:00-04:00"
     assert row["time_to_first_pass_minutes"] == 7.0
 
@@ -1019,7 +1091,7 @@ def test_all_emitted_timestamps_carry_an_eastern_offset():
         "job_created_at_text": "2026-08-27 12:00:00",
         "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2),
     }
-    row = lr._build_row(job, [], [{"interview_id": "1"}], {"1": _outreach("completed")})
+    row = lr._build_row(job, [_launched("1")], [], {"1": _outreach("completed")})
     for field in ("pair_published_at", "pair_launch_at"):
         assert row[field].endswith(("-04:00", "-05:00")), (field, row[field])
 
@@ -1059,8 +1131,13 @@ CREATE TEMP TABLE monitored_jobs (
   recruiter_emails TEXT, posted_date TEXT, time_to_first_pass DOUBLE PRECISION,
   parent_job_id TEXT, version INT, created_at TEXT) ON COMMIT DROP;
 CREATE TEMP TABLE engage_interview_audit (
+  id SERIAL PRIMARY KEY,
   candidate_id VARCHAR(255), jobdiva_id VARCHAR(255), interview_id VARCHAR(255),
+  status VARCHAR(50), response JSONB,
   created_at TIMESTAMP) ON COMMIT DROP;
+CREATE TEMP TABLE sourced_candidates (
+  id SERIAL PRIMARY KEY, jobdiva_id TEXT, candidate_id TEXT, email TEXT, phone TEXT,
+  data JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) ON COMMIT DROP;
 
 INSERT INTO monitored_jobs VALUES
   -- v1 arrived via JobDiva import (readable_ist_now string)
@@ -1073,12 +1150,12 @@ INSERT INTO monitored_jobs VALUES
   ('60','','Ghost A',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00'),
   ('61','','Ghost B',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00');
 
-INSERT INTO engage_interview_audit VALUES
-  ('c1','26-06182',   '901','2026-08-28 01:00:00'),   -- keyed by ref
-  ('c2','26-06182',   '902','2026-08-28 01:05:00'),
-  ('c3','26-06182-v2','903','2026-08-28 02:30:00'),   -- v2's own launch
-  ('g1','60',         '960','2026-08-28 02:10:00'),   -- keyed by job_id
-  ('g2','',           '961','2026-08-28 02:20:00');   -- blank key: matches nothing
+INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, status, created_at) VALUES
+  ('c1','26-06182',   '901','Initiated','2026-08-28 01:00:00'),   -- keyed by ref
+  ('c2','26-06182',   '902','Initiated','2026-08-28 01:05:00'),
+  ('c3','26-06182-v2','903','Initiated','2026-08-28 02:30:00'),   -- v2's own launch
+  ('g1','60',         '960','Initiated','2026-08-28 02:10:00'),   -- keyed by job_id
+  ('g2','',           '961','Initiated','2026-08-28 02:20:00');   -- blank key: matches nothing
 """
 
 
@@ -1099,10 +1176,13 @@ def pg_conn():
 
 def test_query_returns_one_row_per_job_version(pg_conn):
     """v1 and v2 must each get their own row with their own launch count."""
+    from services.launched_candidates import count_launched_candidates
+
     jobs = lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)
     by_id = {j["job_id"]: j for j in jobs}
-    assert by_id["26-06182"]["total_launched"] == 2
-    assert by_id["26-06182-v2"]["total_launched"] == 1
+    assert {"26-06182", "26-06182-v2"} <= set(by_id)
+    assert count_launched_candidates(pg_conn, lr._keys_for(by_id["26-06182"])) == 2
+    assert count_launched_candidates(pg_conn, lr._keys_for(by_id["26-06182-v2"])) == 1
 
 
 def test_query_does_not_pool_referenceless_jobs(pg_conn):
@@ -1111,9 +1191,12 @@ def test_query_does_not_pool_referenceless_jobs(pg_conn):
     Without the NULLIF guard it would join every job whose jobdiva_id is also
     '', silently merging Ghost A and Ghost B.
     """
+    from services.launched_candidates import count_launched_candidates
+
     jobs = lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)
     by_id = {j["job_id"]: j for j in jobs}
-    assert by_id["60"]["total_launched"] == 1   # only its own job_id-keyed row
+    assert "60" in by_id
+    assert count_launched_candidates(pg_conn, lr._keys_for(by_id["60"])) == 1   # only its own job_id-keyed row
     assert "61" not in by_id                    # no launches, so absent entirely
 
 
@@ -1167,82 +1250,61 @@ def test_summarise_outreach_mixed_nested_flat_payload():
 def test_build_row_uses_3_layer_database_fallback_when_pairbot_api_missing_keys():
     """When PairBot live API is missing channel/phase or empty, candidate DB fallback populates the report."""
     job = _job(1)
-    cand_rows = [
-        {
-            "engage_interview_id": "10144",
-            "candidate_id": "cand_1",
-            "engage_status": "completed",
-            "outreach_phase": "phase3",
-            "outreach_channel": "web",
-            "first_completed_at": "2026-09-02T14:18:42.509867",
-        }
+    launched = [
+        _launched(
+            "10144", "cand_1",
+            engage_status="completed",
+            outreach_phase="phase3",
+            outreach_channel="web",
+            first_completed_at="2026-09-02T14:18:42.509867",
+            audit_status="Initiated", audit_response=None,
+        )
     ]
-    audit_rows = [{"interview_id": "10144", "response": None}]
     # PairBot live HTTP API returns partial response without channel/phase
     outreach_by_interview = {"10144": {"outreach_status": "completed"}}
 
-    row = lr._build_row(job, cand_rows, audit_rows, outreach_by_interview)
+    row = lr._build_row(job, launched, [], outreach_by_interview)
 
     assert row["completed"] == 1
     assert row["web"] == 1
     assert row["phase4"] == 1
 
 
-def test_launch_report_scopes_phase_fetch_and_buckets_to_day_interviews(monkeypatch):
-    """A historical repeat launch cannot inflate a day-scoped report row."""
-    job = {**_job(1), "job_id": "job_1", "jobdiva_id": "26-01234"}
-    audit_by_key = {
-        "26-01234": [
-            {
-                "interview_id": "in_scope",
-                "candidate_id": "cand_1",
-                "created_at": datetime.datetime(2026, 8, 28, 2, 10),
-                "status": "pending",
-                "response": None,
-            },
-        ]
+def test_launched_row_status_is_the_rank_list_rows_status():
+    """Per launched person the report merges exactly what the rank list merges
+    for that table row — JSONB fields, latest audit row, live answer — so a
+    live in_progress lifts a stored pending, and a live pending never
+    downgrades a stored in_progress."""
+    rows = [
+        _launched("lifted", "c1", engage_status="pending", audit_status="Initiated", outreach_phase="phase1_6hr"),
+        _launched("held", "c2", engage_status="in_progress", audit_status="in_progress", outreach_phase="phase3"),
+    ]
+    live = {
+        "lifted": {"outreach_status": "in_progress", "outreach_phase": "phase1_6hr"},
+        "held": {"outreach_status": "pending", "outreach_phase": "phase3"},
     }
-    candidates_by_key = {
-        "26-01234": [
-            {"candidate_id": "cand_1", "engage_interview_id": "in_scope", "engage_status": "pending"},
-            {"candidate_id": "cand_1", "engage_interview_id": "historical", "engage_status": "in_progress"},
-        ]
-    }
-    fetched = []
-
-    def _load_inputs(_start, _end, _scope):
-        return [job], candidates_by_key, audit_by_key
-
-    async def _fetch_outreach(ids):
-        fetched.extend(ids)
-        return {
-            "in_scope": {"outreach_status": "pending", "outreach_phase": "phase1_6hr"},
-            "historical": {"outreach_status": "in_progress", "outreach_phase": "phase3"},
-        }
-
-    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
-    monkeypatch.setattr(lr, "_fetch_all_outreach", _fetch_outreach)
-
-    response = asyncio.run(
-        lr.get_launch_report(
-            date="2026-08-27",
-            start_date=None,
-            end_date=None,
-            team_id=None,
-            user=_admin_user(),
-        )
-    )
-    row = response["data"]["jobs"][0]
-
-    assert fetched == ["in_scope"]
-    assert row["total_candidates_launched"] == 1
-    assert (row["pending"], row["in_progress"], row["completed"]) == (1, 0, 0)
-    assert (row["phase1"], row["phase2"], row["phase3"], row["phase4"]) == (0, 1, 0, 0)
+    summary = lr.summarise_launched_candidates(rows, live)
+    assert summary["buckets"]["in_progress"] == 2
+    assert summary["buckets"]["pending"] == 0
+    assert (summary["phases"]["phase2"], summary["phases"]["phase4"]) == (1, 1)
+    assert summary["launched"] == summary["resolved"] == 2
 
 
+def test_launched_row_with_no_status_evidence_is_pending_and_unresolved():
+    summary = lr.summarise_launched_candidates([_launched("1", "c1")], {})
+    assert summary["buckets"]["pending"] == 1
+    assert (summary["launched"], summary["resolved"]) == (1, 0)
 
 
-
+def test_candidate_score_fallback_makes_a_stored_fail_count_like_the_rank_list():
+    """The rank list reads engage_candidate_score when engage_score is unset;
+    a Fail without any score is an outreach miss, with one it is a Fail."""
+    rows = [
+        _launched("1", "c1", engage_status="failed"),                                   # no score → Pending
+        _launched("2", "c2", engage_status="failed", engage_candidate_score="42"),      # → Fail
+    ]
+    summary = lr.summarise_launched_candidates(rows, {})
+    assert (summary["buckets"]["pending"], summary["buckets"]["failed"]) == (1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1299,19 +1361,21 @@ def test_bucket_status_extended_mappings():
 def test_status_buckets_sum_to_total_launched_under_all_conditions():
     """Invariant: Pending + In Progress + Completed + Partial Complete == Total Launched."""
     job = _job(4)
-    audit = [{"interview_id": str(i), "candidate_id": f"c_{i}"} for i in range(1, 5)]
-    # Interview 1: Completed from live API
-    # Interview 2: Call in progress from live API
-    # Interview 3: Unresolved from live API, has DB fallback 'initiated'
-    # Interview 4: Completely unresolved (live API None, DB None) -> defaults to 'pending'
-    cand_rows = [
-        {"engage_interview_id": "3", "candidate_id": "c_3", "engage_status": "initiated"}
+    # Candidate 1: Completed from live API
+    # Candidate 2: Call in progress from live API
+    # Candidate 3: Unresolved from live API, has DB fallback 'initiated'
+    # Candidate 4: Completely unresolved (live API None, DB None) -> defaults to 'pending'
+    launched = [
+        _launched("1", "c_1"),
+        _launched("2", "c_2"),
+        _launched("3", "c_3", engage_status="initiated"),
+        _launched("4", "c_4"),
     ]
     live_outreach = {
         "1": {"outreach_status": "completed"},
         "2": {"outreach_status": "call_in_progress"},
     }
-    row = lr._build_row(job, cand_rows, audit, live_outreach)
+    row = lr._build_row(job, launched, [], live_outreach)
     assert row["total_candidates_launched"] == 4
     assert row["completed"] == 1
     assert row["in_progress"] == 1
@@ -1322,42 +1386,58 @@ def test_status_buckets_sum_to_total_launched_under_all_conditions():
     assert row["outreach_detail_resolved"] == 3  # 1, 2 (live) and 3 (DB) resolved
 
 
-def test_deduplication_preserves_earliest_created_at_and_highest_status(monkeypatch):
-    """When an interview has multiple audit events across days, keep earliest launch date and highest status."""
-    jobs = [{**_job(999), "job_id": "55", "jobdiva_id": "26-01234", "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}]
-    audit_by_key = {
-        "26-01234": [
-            # Later stale event on Aug 29 with pending status.
-            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 29, 14, 0), "status": "pending", "response": '{"status": "pending"}'},
-            # Earlier launch event on Aug 27 has Pair Bot's spaced status form.
-            {"interview_id": "inv_1", "created_at": datetime.datetime(2026, 8, 28, 2, 10), "status": "In Progress", "response": None},
-        ]
-    }
-
-    def _load_inputs(_start, _end, _scope):
-        return jobs, {}, audit_by_key
-
-    async def _fake_outreach(_iids):
-        return {}
-
-    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
-    monkeypatch.setattr(lr, "_fetch_all_outreach", _fake_outreach)
-
-    # Query for Aug 27 in Eastern (Aug 28 02:10 UTC)
-    response = asyncio.run(
-        lr.get_launch_report(
-            date=None,
-            start_date="2026-08-27",
-            end_date="2026-08-27",
-            team_id=None,
-            user=_admin_user(),
-        )
+def test_stale_pending_audit_row_cannot_downgrade_a_stored_in_progress():
+    """Pair Bot can write a later, older-looking `pending` audit event after
+    the interview reached In Progress. The person's row keeps the furthest
+    status because every layer is merged monotonically."""
+    row = _launched(
+        "inv_1", "c1",
+        engage_status="In Progress",
+        audit_status="pending", audit_response={"status": "pending"},
     )
-    row = response["data"]["jobs"][0]
-    # Candidate should still belong to Aug 27 report because earliest created_at was preserved
-    assert row["total_candidates_launched"] == 1
-    # Spaced In Progress retained rather than being clobbered by stale Pending.
-    assert row["in_progress"] == 1
+    summary = lr.summarise_launched_candidates([row], {})
+    assert summary["launched"] == 1
+    assert summary["buckets"]["in_progress"] == 1
+    assert summary["buckets"]["pending"] == 0
+
+
+def test_audit_response_carrying_only_status_joins_the_merge():
+    """Webhook write-backs store pair-bot's interview `status`, not
+    `outreach_status`. It must still outrank a launch-time `sent` stamp —
+    otherwise the table (and the header) would call this person Pending."""
+    payload = lr.build_merged_outreach_payload(
+        {"engage_status": "sent"},
+        {"status": "in_progress", "outreach_channel": "sms"},
+        "in_progress",
+        None,
+    )
+    assert payload["outreach_status"] == "in_progress"
+    assert payload["status"] == "in_progress"
+    summary = lr.summarise_launched_candidates(
+        [_launched("1", "c1", engage_status="sent", audit_status="in_progress",
+                   audit_response={"status": "in_progress", "outreach_channel": "sms"})],
+        {},
+    )
+    assert summary["buckets"]["in_progress"] == 1
+    assert summary["channels"]["sms"] == 1
+
+
+def test_launch_time_sent_stamp_is_pending_like_the_rank_list_table():
+    """engage_status='sent' / audit 'Initiated' are written by the launch
+    itself, before pair-bot has contacted anyone. The rank list's table shows
+    them as Pending; the buckets must not call them In Progress."""
+    summary = lr.summarise_launched_candidates(
+        [_launched("1", "c1", engage_status="sent", audit_status="Initiated")], {}
+    )
+    assert summary["buckets"]["pending"] == 1
+    assert summary["buckets"]["in_progress"] == 0
+    # pair-bot's own `pending` cannot regress it either way
+    summary = lr.summarise_launched_candidates(
+        [_launched("1", "c1", engage_status="sent", audit_status="Initiated")],
+        {"1": {"outreach_status": "pending", "outreach_phase": "phase2"}},
+    )
+    assert summary["buckets"]["pending"] == 1
+    assert summary["phases"]["phase3"] == 1
 
 
 def test_merge_outreach_payloads_monotonic_state_progression():
@@ -1404,15 +1484,20 @@ def test_eastern_date_expr_sql():
     assert expr == "((a.created_at AT TIME ZONE %s) AT TIME ZONE %s)::date"
 
 
-def test_candidate_rows_stop_at_the_first_launch_timestamp():
-    """Sourcing metrics are capped to the initial launch timestamp to prevent inflation."""
+def test_sourced_counts_the_whole_rank_list_not_just_rows_before_first_launch():
+    """Sourced is the rank list's candidate total. Capping it at the first
+    launch timestamp made Launched exceed Sourced for a job that kept sourcing
+    after launch — a row that cannot be read."""
     job = {**_job(0), "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2)}
     rows = [
         {"candidate_id": "before", "created_at": datetime.datetime(2026, 8, 28, 2, 1)},
         {"candidate_id": "after", "created_at": datetime.datetime(2026, 8, 28, 2, 3)},
         {"candidate_id": "unknown", "created_at": None},
     ]
-    assert [r["candidate_id"] for r in lr._candidate_rows_as_of_first_launch(rows, job)] == ["before"]
+    row = lr._build_row(job, _launched_from(rows), rows, {})
+    assert row["total_candidates_sourced"] == 3
+    assert row["total_candidates_launched"] == 3
+    assert not hasattr(lr, "_candidate_rows_as_of_first_launch")
 
 
 def test_live_outreach_timestamps_are_exposed_for_the_report_row():
