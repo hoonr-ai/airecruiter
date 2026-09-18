@@ -85,7 +85,8 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
 _PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started", "initiated"}
 _IN_PROGRESS_STATUSES = {
-    "in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent",
+    "in_progress", "in progress",  # pair-bot returns "In Progress" (space) at interview_status level
+    "phase1", "phase2", "phase3", "phase4", "active", "sent",
     "call_in_progress", "screening", "interview_completed", "interview completed",
     "contacted",
 }
