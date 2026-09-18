@@ -625,13 +625,13 @@ def merge_outreach_payloads(
             for k, v in source.items():
                 if v is not None:
                     if k in ("outreach_status", "status"):
-                        existing_st = str(merged_payload.get(k) or "").strip().lower()
-                        new_st = str(v).strip().lower()
+                        existing_rank = _status_rank(merged_payload.get(k))
+                        new_rank = _status_rank(v)
                         # If both statuses are recognized in the hierarchy, enforce monotonic progression.
                         # If either is unrecognised, allow the higher-priority layer to win so genuinely
                         # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
-                        if existing_st in _STATUS_HIERARCHY and new_st in _STATUS_HIERARCHY:
-                            if _STATUS_HIERARCHY[new_st] >= _STATUS_HIERARCHY[existing_st]:
+                        if existing_rank and new_rank:
+                            if new_rank >= existing_rank:
                                 merged_payload[k] = v
                         else:
                             merged_payload[k] = v
@@ -686,15 +686,16 @@ def build_merged_outreach_payload(
             audit_fallback = {}
             
     if audit_status:
-        st_hier = str(audit_status).strip().lower()
-        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
+        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip()
+        audit_status_rank = _status_rank(audit_status)
+        current_status_rank = _status_rank(curr_st)
         # Backfill missing keys only; never replace an already-recorded audit
         # response status at equal rank (passed vs completed, fail vs failed).
         if not curr_st:
             audit_fallback["outreach_status"] = audit_status
             audit_fallback["status"] = audit_status
-        elif st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
-            if _STATUS_HIERARCHY[st_hier] > _STATUS_HIERARCHY[curr_st]:
+        elif audit_status_rank and current_status_rank:
+            if audit_status_rank > current_status_rank:
                 audit_fallback["outreach_status"] = audit_status
                 audit_fallback["status"] = audit_status
         # Unrecognised overlay must not clobber a status the audit response
@@ -1002,7 +1003,6 @@ def collect_merged_outreach_payloads(
     payloads: List[Dict[str, Any]] = []
     num_resolved = 0
     covered_iids: set = set()
-    covered_cids: set = set()
     for a in audit_rows:
         iid = str(a.get("interview_id") or "").strip()
         if not iid:
@@ -1010,8 +1010,6 @@ def collect_merged_outreach_payloads(
 
         covered_iids.add(iid)
         cid = str(a.get("candidate_id") or "")
-        if cid:
-            covered_cids.add(cid)
         cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
         raw_resp = a.get("response")
         audit_status = a.get("status")
@@ -1041,8 +1039,11 @@ def collect_merged_outreach_payloads(
         cid = str(row.get("candidate_id") or "").strip()
         if not iid:
             continue
-        # Skip if already covered by an audit row (avoid double-counting).
-        if iid in covered_iids or (cid and cid in covered_cids):
+        # One payload represents one launched interview. A candidate may be
+        # launched more than once, so a matching candidate_id must not hide a
+        # different interview ID (for example, a repeat launch after a retry).
+        # The audit walk above already records every audit interview ID.
+        if iid in covered_iids:
             continue
         live_api = outreach_by_interview.get(iid)
         merged_payload = build_merged_outreach_payload(row, None, None, live_api)
@@ -1395,10 +1396,12 @@ async def get_launch_report(
                     existing["created_at"] = row["created_at"]
 
                 # 2. Monotonic status hierarchy: favor higher progression state
-                row_st = _extract_audit_status(row).lower()
-                ex_st = _extract_audit_status(existing).lower()
-                if row_st in _STATUS_HIERARCHY and ex_st in _STATUS_HIERARCHY:
-                    if _STATUS_HIERARCHY[row_st] > _STATUS_HIERARCHY[ex_st]:
+                row_st = _extract_audit_status(row).strip().lower()
+                ex_st = _extract_audit_status(existing).strip().lower()
+                row_rank = _status_rank(row_st)
+                existing_rank = _status_rank(ex_st)
+                if row_rank and existing_rank:
+                    if row_rank > existing_rank:
                         existing["status"] = row.get("status") or row_st
                         if row.get("response"):
                             existing["response"] = row.get("response")
@@ -1427,16 +1430,30 @@ async def get_launch_report(
 
     rows = []
     for job in jobs:
-        candidate_rows = {
-            row["candidate_id"]: row
+        raw_candidate_rows = [
+            row
             for key in _keys_for(job)
             for row in candidates_by_key.get(key, [])
+        ]
+        candidate_rows = {
+            row["candidate_id"]: row
+            for row in raw_candidate_rows
         }
         all_candidate_rows = list(candidate_rows.values())
+        in_scope_interview_ids = {
+            str(row.get("interview_id") or "").strip()
+            for row in audit_by_job[str(job["job_id"])]
+            if str(row.get("interview_id") or "").strip()
+        }
+        report_candidate_rows = {
+            str(row.get("engage_interview_id")): row
+            for row in raw_candidate_rows
+            if str(row.get("engage_interview_id") or "").strip() in in_scope_interview_ids
+        }
         rows.append(
             _build_row(
                 job,
-                all_candidate_rows,
+                list(report_candidate_rows.values()),
                 audit_by_job[str(job["job_id"])],
                 outreach_by_interview,
                 sourced_rows=_candidate_rows_as_of_first_launch(all_candidate_rows, job),
