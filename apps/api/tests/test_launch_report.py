@@ -422,6 +422,30 @@ def test_summarise_outreach_default_standard_phases():
     assert summary["phases"]["phase3"] == 1
 
 
+def test_dedupe_audit_rows_monotonic_preserves_highest_status_and_response():
+    rows = [
+        # Newest row is completed but has no response. The older Pending
+        # payload must not backfill its stale phase/channel fields.
+        {"interview_id": "one", "status": "completed", "response": None},
+        {"interview_id": "one", "status": "pending", "response": {"outreach_phase": "phase1"}},
+        # Same-ranked rows may fill a missing response without regressing state.
+        {"interview_id": "two", "status": "in_progress", "response": None},
+        {"interview_id": "two", "status": "in progress", "response": {"outreach_phase": "phase1_6hr"}},
+        # An unknown status is retained when the newer row is empty.
+        {"interview_id": "three", "status": "", "response": None},
+        {"interview_id": "three", "status": "awaiting_review", "response": {"marker": "kept"}},
+    ]
+
+    deduped = {row["interview_id"]: row for row in lr.dedupe_audit_rows_monotonic(rows)}
+
+    assert deduped["one"]["status"] == "completed"
+    assert deduped["one"]["response"] is None
+    assert deduped["two"]["status"] == "in_progress"
+    assert deduped["two"]["response"] == {"outreach_phase": "phase1_6hr"}
+    assert deduped["three"]["status"] == "awaiting_review"
+    assert deduped["three"]["response"] == {"marker": "kept"}
+
+
 def test_summarise_outreach_passed_failed_sub_buckets():
     failed_payload = _outreach("failed")
     failed_payload["score"] = 50  # Candidate engaged and failed
