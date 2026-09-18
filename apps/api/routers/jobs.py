@@ -29,7 +29,9 @@ from models import (
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
 from routers.launch_report import (
+    _extract_audit_status,
     _fetch_all_outreach,
+    _status_rank,
     _summarise_outreach,
     apply_uncovered_pass_fail,
     collect_merged_outreach_payloads,
@@ -1692,6 +1694,34 @@ def _empty_outreach_stats() -> dict:
     }
 
 
+def _dedupe_audit_rows_by_status(audit_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep one audit fallback per interview without allowing a stale update to regress it.
+
+    Pair Bot can write an older-looking ``pending`` event after an interview has
+    already reached ``in_progress``.  Rankings must use the same monotonic
+    status selection as Launch Report instead of trusting the newest audit row.
+    """
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for row in audit_rows:
+        interview_id = str(row.get("interview_id") or "").strip()
+        if not interview_id:
+            continue
+        if interview_id not in deduped:
+            deduped[interview_id] = dict(row)
+            continue
+
+        existing = deduped[interview_id]
+        row_rank = _status_rank(_extract_audit_status(row))
+        existing_rank = _status_rank(_extract_audit_status(existing))
+        if row_rank > existing_rank:
+            existing["status"] = row.get("status") or _extract_audit_status(row)
+            if row.get("response"):
+                existing["response"] = row["response"]
+        elif row.get("response") and not existing.get("response"):
+            existing["response"] = row["response"]
+    return list(deduped.values())
+
+
 @router.get("/jobs/{job_id_or_ref}/outreach-stats")
 async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1720,13 +1750,12 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
             resolved_jobdiva_id = result[0] or result[1]
             resolved_numeric_job_id = result[1] or result[0]
             
-            # One row per launched interview (same grain as launch report),
-            # not per sourced candidate. DISTINCT ON candidate_id dropped a
-            # second interview for the same person; a FULL OUTER JOIN on
-            # engage_status counted unlaunched sourced rows as Pending.
+            # Fetch every audit record for each launched interview. The
+            # Python dedupe below keeps the furthest-progressed status, which
+            # prevents a later stale Pending audit event from overwriting In
+            # Progress (the same rule used by Launch Report).
             cur.execute("""
-                SELECT DISTINCT ON (interview_id)
-                    interview_id, status, response, candidate_id
+                SELECT interview_id, status, response, candidate_id
                 FROM engage_interview_audit
                 WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                   AND COALESCE(NULLIF(interview_id, ''), '') <> ''
@@ -1783,6 +1812,7 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
         for row in launched_rows
         if row and row[0]
     ]
+    audit_rows = _dedupe_audit_rows_by_status(audit_rows)
     candidate_rows = [
         {
             "candidate_id": row[0],
