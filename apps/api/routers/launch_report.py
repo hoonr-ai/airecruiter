@@ -589,6 +589,9 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
 
 
 async def _fetch_pairbot_launches(
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+    deadline: float,
     jobdiva_id: str,
     start_date: datetime.date,
     end_date: datetime.date,
@@ -603,43 +606,46 @@ async def _fetch_pairbot_launches(
     lookup_id = str(jobdiva_id or "").strip()
     if not lookup_id:
         return None
-    headers = {}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    offset = 0
+    matched: List[Dict[str, Any]] = []
     try:
-        async with httpx.AsyncClient(
-            base_url=EXTERNAL_INTERVIEW_API_URL,
-            headers=headers,
-            timeout=_OUTREACH_TIMEOUT_S,
-        ) as client:
-            res = await client.get(
-                "/api/interviews/",
-                params={
-                    "search": lookup_id,
-                    "date_start": start_date.isoformat(),
-                    "date_end": end_date.isoformat(),
-                    "limit": 500,
-                    "paginated": "true",
-                },
+        while True:
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.warning("LAUNCH-REPORT: pair-bot launch lookup timed out for %s", lookup_id)
+                return None
+            async with semaphore:
+                res = await client.get(
+                    "/api/interviews/",
+                    params={
+                        "search": lookup_id,
+                        "date_start": start_date.isoformat(),
+                        "date_end": end_date.isoformat(),
+                        "limit": 500,
+                        "offset": offset,
+                        "paginated": "true",
+                    },
+                )
+                res.raise_for_status()
+                body = res.json()
+
+            data = body.get("data") if isinstance(body, dict) and body.get("success") is True else body
+            items = data.get("items") if isinstance(data, dict) else data
+            if not isinstance(items, list):
+                logger.warning("LAUNCH-REPORT: pair-bot launch lookup returned an unexpected payload for %s", lookup_id)
+                return None
+            # Search is deliberately broad in Pair Bot; never let a partial
+            # JobDiva match leak another job's interviews into this report row.
+            matched.extend(
+                item for item in items
+                if isinstance(item, dict) and str(item.get("jobdiva_id") or "").strip() == lookup_id
             )
-            res.raise_for_status()
-            body = res.json()
+            total = data.get("total") if isinstance(data, dict) else None
+            if not isinstance(total, int) or offset + len(items) >= total or not items:
+                return matched
+            offset += len(items)
     except Exception as exc:
         logger.warning("LAUNCH-REPORT: pair-bot launch lookup failed for %s: %s", lookup_id, exc)
         return None
-
-    data = body.get("data") if isinstance(body, dict) and body.get("success") is True else body
-    items = data.get("items") if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        logger.warning("LAUNCH-REPORT: pair-bot launch lookup returned an unexpected payload for %s", lookup_id)
-        return None
-    # Search is deliberately broad in Pair Bot; never let a partial JobDiva
-    # match leak another job's interviews into this report row.
-    return [
-        item for item in items
-        if isinstance(item, dict) and str(item.get("jobdiva_id") or "").strip() == lookup_id
-    ]
 
 
 def _pairbot_launch_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -651,7 +657,9 @@ def _pairbot_launch_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         rows.append({
             "interview_id": interview_id,
-            "candidate_id": str(item.get("person_email") or item.get("candidate_id") or "").strip(),
+            # PAIR Bot's person_email is not PAIR's sourced_candidates ID.
+            # Leave this empty when the comparable internal ID is unavailable.
+            "candidate_id": str(item.get("candidate_id") or "").strip(),
             "created_at": item.get("created_at"),
             "status": item.get("status") or item.get("outreach_status"),
             "response": {
@@ -663,6 +671,37 @@ def _pairbot_launch_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             },
         })
     return rows
+
+
+def _merge_launch_populations(
+    audit_rows: List[Dict[str, Any]], pairbot_rows: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Union audit and Pair Bot launch rows, preferring Pair Bot fields per ID."""
+    merged = {
+        str(row.get("interview_id") or "").strip(): dict(row)
+        for row in audit_rows
+        if str(row.get("interview_id") or "").strip()
+    }
+    for pairbot_row in pairbot_rows:
+        interview_id = str(pairbot_row.get("interview_id") or "").strip()
+        if not interview_id:
+            continue
+        existing = merged.get(interview_id)
+        if not existing:
+            merged[interview_id] = dict(pairbot_row)
+            continue
+        pairbot_response = pairbot_row.get("response")
+        audit_response = existing.get("response")
+        if isinstance(pairbot_response, dict):
+            combined_response = dict(audit_response) if isinstance(audit_response, dict) else {}
+            combined_response.update({key: value for key, value in pairbot_response.items() if value is not None})
+            existing["response"] = combined_response
+        for field in ("created_at", "status"):
+            if pairbot_row.get(field) is not None:
+                existing[field] = pairbot_row[field]
+        if pairbot_row.get("candidate_id"):
+            existing["candidate_id"] = pairbot_row["candidate_id"]
+    return list(merged.values())
 
 
 def _extract_audit_status(row: Dict[str, Any]) -> str:
@@ -1503,19 +1542,31 @@ async def get_launch_report(
         audit_by_job[str(job["job_id"])] = day_rows
         interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
 
-    # Pair Bot is authoritative for its own creation date. If an audit webhook
-    # was missed, replace the incomplete audit population with PAIR Bot's exact
-    # job/day population so launched, status, and phase totals stay aligned.
-    pairbot_launch_results = await asyncio.gather(*(
-        _fetch_pairbot_launches(
-            str(job.get("jobdiva_id") or ""), report_start_date, report_end_date
-        )
-        for job in jobs
-    ))
+    # Pair Bot can supplement missed audit webhooks, but never remove an
+    # audit-derived launch. Reuse one bounded client for all job lookups.
+    headers = {}
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
+    launch_semaphore = asyncio.Semaphore(_OUTREACH_CONCURRENCY)
+    launch_deadline = asyncio.get_running_loop().time() + _OUTREACH_BUDGET_S
+    async with httpx.AsyncClient(
+        base_url=EXTERNAL_INTERVIEW_API_URL,
+        headers=headers,
+        timeout=_OUTREACH_TIMEOUT_S,
+    ) as launch_client:
+        pairbot_launch_results = await asyncio.gather(*(
+            _fetch_pairbot_launches(
+                launch_client, launch_semaphore, launch_deadline,
+                str(job.get("jobdiva_id") or ""), report_start_date, report_end_date
+            )
+            for job in jobs
+        ))
     for job, pairbot_items in zip(jobs, pairbot_launch_results):
         pairbot_rows = _pairbot_launch_rows(pairbot_items or []) if pairbot_items else []
-        if pairbot_rows:
-            audit_by_job[str(job["job_id"])] = pairbot_rows
+        audit_by_job[str(job["job_id"])] = _merge_launch_populations(
+            audit_by_job[str(job["job_id"])], pairbot_rows
+        )
 
     interview_ids = [
         str(row.get("interview_id"))
