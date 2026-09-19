@@ -21,6 +21,7 @@ from services.gender_logic import normalize_gender_prediction, to_gender_fields,
 from services.location import sanitize_candidate_location
 from services.feedback_metrics import refresh_feedback_metrics_sync
 from services import contact_enrichment
+from services.pair_auth import get_pair_auth_headers
 from utils.phone import normalize_phone
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
@@ -3795,6 +3796,7 @@ async def get_candidate_evaluation_report(
     """
     import os, httpx as _httpx
     PAIR_BASE = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+    pair_headers = get_pair_auth_headers()
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -4036,10 +4038,10 @@ async def get_candidate_evaluation_report(
             try:
                 async with _httpx.AsyncClient(timeout=20.0) as client:
                     interview_res, evaluation_res, transcription_res, outreach_res = await asyncio.gather(
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}"),
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation"),
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions"),
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}", headers=pair_headers),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation", headers=pair_headers),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions", headers=pair_headers),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status", headers=pair_headers),
                         return_exceptions=True,
                     )
 
