@@ -67,6 +67,7 @@ from services.engage_status import (
     score_from_payload,
     select_engage_status,
 )
+from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
     normalize_channel,
     normalize_phase,
@@ -515,10 +516,7 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     if not interview_ids:
         return {}
 
-    headers = {}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers = get_pair_auth_headers()
 
     semaphore = asyncio.Semaphore(_OUTREACH_CONCURRENCY)
     deadline = asyncio.get_running_loop().time() + _OUTREACH_BUDGET_S

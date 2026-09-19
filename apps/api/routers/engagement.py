@@ -23,6 +23,7 @@ import httpx
 import re
 from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
+from services.pair_auth import get_pair_auth_headers
 
 from core.email import (
     notify_pair_launched,
@@ -1242,10 +1243,7 @@ async def _post_to_pairbot(
     """
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
-    headers = {"Content-Type": "application/json"}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers = get_pair_auth_headers(json_content_type=True)
     for attempt in range(max_attempts):
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -1337,10 +1335,7 @@ async def _wait_for_pairbot_creation(
     gaps so a quiet-but-alive stream is not closed before timeout_seconds.
     """
     stream_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
-    headers: Dict[str, str] = {}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers: Dict[str, str] = get_pair_auth_headers()
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
@@ -3436,18 +3431,14 @@ async def get_assessment_data(interview_id: str):
       - Outreach status (communication timeline)
     """
     base_url = EXTERNAL_INTERVIEW_API_URL
-
-    headers = {}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers = get_pair_auth_headers()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Fire all 4 requests in parallel
         interview_task = client.get(f"{base_url}/api/interviews/{interview_id}", headers=headers)
-        evaluation_task = client.get(f"{base_url}/api/interviews/{interview_id}/evaluation")
-        transcription_task = client.get(f"{base_url}/api/interviews/{interview_id}/transcriptions")
-        outreach_task = client.get(f"{base_url}/api/interviews/{interview_id}/outreach-status")
+        evaluation_task = client.get(f"{base_url}/api/interviews/{interview_id}/evaluation", headers=headers)
+        transcription_task = client.get(f"{base_url}/api/interviews/{interview_id}/transcriptions", headers=headers)
+        outreach_task = client.get(f"{base_url}/api/interviews/{interview_id}/outreach-status", headers=headers)
 
         # Await all
         interview_res = await interview_task
@@ -3521,10 +3512,7 @@ async def get_assessment_data(interview_id: str):
 # ---------------------------------------------------------------------------
 async def _proxy_get(path: str, params: dict = None):
     try:
-        headers = {}
-        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-        if pair_api_key:
-            headers["Authorization"] = f"Bearer {pair_api_key}"
+        headers = get_pair_auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params, headers=headers)
             res.raise_for_status()
@@ -3535,10 +3523,7 @@ async def _proxy_get(path: str, params: dict = None):
 
 async def _proxy_post(path: str, json_data: dict = None):
     try:
-        headers = {"Content-Type": "application/json"}
-        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-        if pair_api_key:
-            headers["Authorization"] = f"Bearer {pair_api_key}"
+        headers = get_pair_auth_headers(json_content_type=True)
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data, headers=headers)
             res.raise_for_status()
