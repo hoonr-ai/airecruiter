@@ -3795,6 +3795,10 @@ async def get_candidate_evaluation_report(
     """
     import os, httpx as _httpx
     PAIR_BASE = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+    _pair_headers = {}
+    _pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if _pair_api_key:
+        _pair_headers["Authorization"] = f"Bearer {_pair_api_key}"
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -4036,7 +4040,7 @@ async def get_candidate_evaluation_report(
             try:
                 async with _httpx.AsyncClient(timeout=20.0) as client:
                     interview_res, evaluation_res, transcription_res, outreach_res = await asyncio.gather(
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}", headers=_pair_headers),
                         client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation"),
                         client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions"),
                         client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status"),

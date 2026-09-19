@@ -3437,9 +3437,14 @@ async def get_assessment_data(interview_id: str):
     """
     base_url = EXTERNAL_INTERVIEW_API_URL
 
+    headers = {}
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Fire all 4 requests in parallel
-        interview_task = client.get(f"{base_url}/api/interviews/{interview_id}")
+        interview_task = client.get(f"{base_url}/api/interviews/{interview_id}", headers=headers)
         evaluation_task = client.get(f"{base_url}/api/interviews/{interview_id}/evaluation")
         transcription_task = client.get(f"{base_url}/api/interviews/{interview_id}/transcriptions")
         outreach_task = client.get(f"{base_url}/api/interviews/{interview_id}/outreach-status")
