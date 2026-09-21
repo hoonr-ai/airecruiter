@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Set
+import re
+import time
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -14,6 +16,24 @@ from core.db import get_db_connection
 logger = logging.getLogger("live_report_router")
 
 router = APIRouter(tags=["Live Report"])
+
+_BULK_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.:]+$")
+
+# In-memory cache for accessible jobdiva_ids per user (60s TTL)
+_USER_ACCESSIBLE_CACHE: Dict[str, Tuple[float, Set[str]]] = {}
+_CACHE_TTL_SECONDS = 60.0
+
+
+def _validate_bulk_id(bulk_id: str) -> str:
+    clean = (bulk_id or "").strip()
+    if not clean or not _BULK_ID_REGEX.match(clean):
+        raise HTTPException(status_code=400, detail="Invalid bulk_id format")
+    return clean
+
+
+def _escape_like_pattern(text: str) -> str:
+    """Escape special characters in SQL LIKE pattern to prevent wildcard expansion."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _get_external_interview_api_url() -> str:
@@ -36,12 +56,21 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
     Returns the set of JobDiva IDs that this user is allowed to view.
     If user.is_admin, returns None (unrestricted, view all).
     For recruiters and team leads, queries monitored_jobs scoped by recruiter_emails.
+    Results are cached in-memory for 60 seconds per user.
     """
     if user.is_admin:
         return None
 
+    user_key = (user.email or "").strip().lower()
+    now = time.time()
+    if user_key in _USER_ACCESSIBLE_CACHE:
+        ts, cached_ids = _USER_ACCESSIBLE_CACHE[user_key]
+        if now - ts < _CACHE_TTL_SECONDS:
+            return cached_ids
+
     allowed_emails = {e.lower().strip() for e in get_user_scope_emails(user) if e}
     if not allowed_emails:
+        _USER_ACCESSIBLE_CACHE[user_key] = (now, set())
         return set()
 
     accessible_ids: Set[str] = set()
@@ -66,14 +95,17 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
                             accessible_ids.add(str(jobdiva_id).strip())
                 except Exception:
                     conn.rollback()
-                    conditions = " OR ".join(["lower(recruiter_emails::text) LIKE %s" for _ in email_list])
-                    params = [f"%{e}%" for e in email_list]
-                    cur.execute(f"""
+                    # Parameterized unnest pattern query with escaped wildcards
+                    like_patterns = [f"%{_escape_like_pattern(e)}%" for e in email_list]
+                    cur.execute("""
                         SELECT jobdiva_id, recruiter_emails
                         FROM monitored_jobs
                         WHERE jobdiva_id IS NOT NULL AND jobdiva_id != ''
-                          AND ({conditions})
-                    """, params)
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(%s::text[]) AS pattern
+                              WHERE lower(recruiter_emails::text) LIKE pattern
+                          )
+                    """, (like_patterns,))
                     for jobdiva_id, raw_emails in cur.fetchall():
                         if not raw_emails:
                             continue
@@ -94,6 +126,7 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
     except Exception as e:
         logger.warning(f"Error resolving accessible jobs for {user.email}: {e}")
 
+    _USER_ACCESSIBLE_CACHE[user_key] = (now, accessible_ids)
     return accessible_ids
 
 
@@ -163,7 +196,8 @@ async def get_live_report_snapshot(
     user: UserIdentity = Depends(get_current_user),
 ):
     """Fetch baseline snapshot of a specific launch, scoped to recruiter's jobs."""
-    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/{bulk_id}"
+    validated_bulk_id = _validate_bulk_id(bulk_id)
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/{validated_bulk_id}"
     headers = _get_pair_headers()
     params = {"reveal": "true" if reveal else "false"}
 
@@ -210,17 +244,18 @@ async def stream_live_report(
     user: UserIdentity = Depends(get_current_user),
 ):
     """Proxy the SSE delta event stream from PairBot to the client with RBAC validation."""
+    validated_bulk_id = _validate_bulk_id(bulk_id)
     accessible_ids = _get_user_accessible_jobdiva_ids(user) if not user.is_admin else None
     if accessible_ids is not None and not accessible_ids:
         raise HTTPException(status_code=403, detail="Access denied. You do not have access to this launch stream.")
 
     # Resolve allowed interview IDs for non-admin recruiters (fails closed)
-    allowed_interview_ids: Optional[Set[int]] = set() if accessible_ids is not None else None
+    allowed_interview_ids: Optional[Set[int]] = None
     if accessible_ids is not None:
         try:
             async with httpx.AsyncClient(timeout=10.0) as snap_client:
                 snap_resp = await snap_client.get(
-                    f"{_get_external_interview_api_url()}/api/analytics/live-report/{bulk_id}",
+                    f"{_get_external_interview_api_url()}/api/analytics/live-report/{validated_bulk_id}",
                     headers=_get_pair_headers(),
                 )
                 if snap_resp.status_code == 200:
@@ -232,10 +267,18 @@ async def stream_live_report(
                                 iid = cand.get("interview_id")
                                 if iid:
                                     allowed_interview_ids.add(int(iid))
+                elif snap_resp.status_code == 404:
+                    raise HTTPException(status_code=404, detail="Launch not found")
+                else:
+                    logger.error("Failed to prefetch snapshot for stream RBAC: HTTP %s", snap_resp.status_code)
+                    raise HTTPException(status_code=503, detail="Failed to initialize live stream security context")
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.warning(f"Failed to prefetch snapshot interview IDs for RBAC stream filtering: {e}")
+            logger.error("Exception prefetching snapshot for stream RBAC: %s", e)
+            raise HTTPException(status_code=503, detail="Failed to initialize live stream security context")
 
-    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/{bulk_id}/stream"
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/{validated_bulk_id}/stream"
     headers = _get_pair_headers()
 
     async def event_generator():

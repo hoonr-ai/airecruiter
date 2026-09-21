@@ -35,12 +35,15 @@ export default function LiveReportPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [launchesError, setLaunchesError] = useState<string | null>(null);
+  const feedIdCounterRef = useRef<number>(0);
 
   // Push into feed
   const pushFeed = useCallback((text: string, critical = false) => {
+    feedIdCounterRef.current += 1;
+    const currentId = feedIdCounterRef.current;
     setFeed((prev) => [
       {
-        id: Date.now() + Math.random(),
+        id: currentId,
         ts: new Date().toLocaleTimeString(),
         text,
         critical,
@@ -177,8 +180,9 @@ export default function LiveReportPage() {
             ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
             : "—";
 
+          feedIdCounterRef.current += 1;
           allRecentEvents.push({
-            id: Math.random(),
+            id: feedIdCounterRef.current,
             rawTs: evt.ts || "",
             ts: tsStr,
             text: `${cand.name} (${evt.phase || "outreach"}): ${evt.subtype ?? evt.type} [${evt.status ?? "completed"}]`,
@@ -364,8 +368,8 @@ export default function LiveReportPage() {
             </div>
           )}
 
-          {snapshot?.jobs?.map((job) => (
-            <JobBlock key={job.bulk_jd_id || job.jobdiva_id || Math.random()} job={job} />
+          {snapshot?.jobs?.map((job, idx) => (
+            <JobBlock key={job.bulk_jd_id || job.jobdiva_id || `job-${idx}`} job={job} />
           ))}
 
           {snapshot && (!snapshot.jobs || snapshot.jobs.length === 0) && (

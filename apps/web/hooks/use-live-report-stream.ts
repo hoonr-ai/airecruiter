@@ -37,6 +37,9 @@ export function useLiveReportStream({
   const heartbeatWatchdogRef = useRef<NodeJS.Timeout | null>(null);
   const lastPulseRef = useRef<number>(Date.now());
 
+  const refreshSnapshotRef = useRef<() => void>(() => {});
+  const connectStreamRef = useRef<() => void>(() => {});
+
   // 1. Snapshot fetcher (truth-up)
   const refreshSnapshot = useCallback(async () => {
     if (!bulkId) return;
@@ -52,6 +55,8 @@ export function useLiveReportStream({
       setIsLoading(false);
     }
   }, [bulkId, revealPii]);
+
+  refreshSnapshotRef.current = refreshSnapshot;
 
   // Initial snapshot fetch when bulkId or reveal changes
   useEffect(() => {
@@ -78,10 +83,10 @@ export function useLiveReportStream({
       }
       setIsConnected(false);
       // Trigger snapshot refresh to catch up on any missed data during silence
-      refreshSnapshot();
-      connectStream();
+      refreshSnapshotRef.current();
+      connectStreamRef.current();
     }, 35000);
-  }, [refreshSnapshot]);
+  }, []);
 
   // 2. Stream connector using authFetch streaming reader with jittered exponential backoff
   const connectStream = useCallback(async () => {
@@ -192,13 +197,15 @@ export function useLiveReportStream({
 
       if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
       retryTimeoutRef.current = setTimeout(() => {
-        refreshSnapshot();
-        connectStream();
+        refreshSnapshotRef.current();
+        connectStreamRef.current();
       }, delay);
     }
-  }, [bulkId, resetWatchdog, refreshSnapshot]);
+  }, [bulkId, resetWatchdog]);
 
-  // Manage Stream Lifecycle
+  connectStreamRef.current = connectStream;
+
+  // Manage Stream Lifecycle (strictly keyed to bulkId, not interrupted by revealPii)
   useEffect(() => {
     if (!bulkId) return;
 
@@ -208,7 +215,7 @@ export function useLiveReportStream({
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         console.info("Tab became visible. Refreshing live report snapshot to reconcile state...");
-        refreshSnapshot();
+        refreshSnapshotRef.current();
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -227,7 +234,8 @@ export function useLiveReportStream({
         clearTimeout(heartbeatWatchdogRef.current);
       }
     };
-  }, [bulkId, connectStream, refreshSnapshot]);
+  }, [bulkId, connectStream]);
+
 
   return {
     snapshot,
