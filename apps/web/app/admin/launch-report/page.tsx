@@ -646,13 +646,13 @@ export default function LaunchReportPage() {
           container so the page body never scrolls horizontally, and the job
           column is pinned so a row stays identifiable while scrolling. */}
       <Card className="border-slate-200 bg-white shadow-sm rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[calc(100vh-280px)] min-h-[400px] relative scrollbar-thin scrollbar-thumb-slate-200">
           <table className="w-full border-collapse text-[13px]">
-            <thead>
+            <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
               <tr className="bg-slate-50 border-b border-slate-200">
                 <th
                   rowSpan={2}
-                  className="sticky left-0 z-20 bg-slate-50 text-left px-4 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-500 border-r border-slate-200 min-w-[240px]"
+                  className="sticky left-0 top-0 z-30 bg-slate-50 text-left px-4 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-500 border-r border-slate-200 min-w-[240px]"
                 >
                   Job
                 </th>
