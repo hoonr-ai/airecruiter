@@ -161,11 +161,18 @@ def test_stream_live_report_recruiter_filters_unassigned_events():
         ]
     }
 
-    # 2. Mock upstream stream yielding two events (one for id 100, one for id 200)
+    # 2. Mock upstream stream yielding:
+    # - a comment heartbeat (: ping) -> safe, allowed
+    # - a safe control event (type: connected, no interview_id) -> safe, allowed
+    # - an event with assigned interview_id 100 -> allowed
+    # - an event with unassigned interview_id 200 -> filtered out
+    # - an ambiguous system event without interview_id -> filtered out (fail-closed)
     async def mock_aiter_lines():
         yield ': ping'
+        yield 'data: {"type": "connected"}'
         yield 'data: {"interview_id": 100, "type": "outreach_attempted"}'
         yield 'data: {"interview_id": 200, "type": "outreach_attempted"}'
+        yield 'data: {"type": "worker_broadcast", "data": "secret_fleet_info"}'
 
     upstream_mock = MagicMock()
     upstream_mock.status_code = 200
@@ -191,5 +198,7 @@ def test_stream_live_report_recruiter_filters_unassigned_events():
 
                 stream_content = asyncio.run(read_stream())
                 assert ": ping" in stream_content
+                assert "connected" in stream_content
                 assert "100" in stream_content
                 assert "200" not in stream_content  # 200 should be filtered out!
+                assert "secret_fleet_info" not in stream_content  # ambiguous/system broadcast filtered out!

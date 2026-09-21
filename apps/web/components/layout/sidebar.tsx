@@ -36,7 +36,6 @@ export function Sidebar() {
         { label: "Settings", href: "/settings", icon: Settings, disabled: false },
     ];
 
-
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
             {/* PAIR brand wordmark. Source: apps/web/public/pair-logo.png — 800×242

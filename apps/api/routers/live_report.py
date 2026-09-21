@@ -93,8 +93,12 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
                     for (jobdiva_id,) in cur.fetchall():
                         if jobdiva_id:
                             accessible_ids.add(str(jobdiva_id).strip())
-                except Exception:
+                except Exception as query_err:
                     conn.rollback()
+                    logger.warning(
+                        "monitored_jobs JSONB query failed (schema mismatch or syntax); falling back to LIKE scan: %s",
+                        query_err,
+                    )
                     # Parameterized unnest pattern query with escaped wildcards
                     like_patterns = [f"%{_escape_like_pattern(e)}%" for e in email_list]
                     cur.execute("""
@@ -299,23 +303,37 @@ async def stream_live_report(
                                 break
                             yield chunk
                     else:
-                        # For non-admin, filter by allowed_interview_ids
+                        # For non-admin, filter by allowed_interview_ids (fail-closed)
+                        # Explicit allowlist of non-interview telemetry control events
+                        SAFE_CONTROL_EVENT_TYPES = {"connected", "ping", "heartbeat"}
                         async for line in upstream_response.aiter_lines():
                             if await request.is_disconnected():
                                 break
                             if line.startswith(":"):
-                                # Heartbeat comment, always yield
+                                # Heartbeat SSE comment, always yield
                                 yield f"{line}\n\n".encode("utf-8")
                             elif line.startswith("data:"):
                                 raw_json = line[5:].strip()
                                 try:
                                     data = json.loads(raw_json)
+                                    event_type = str(data.get("type", "")).lower()
                                     iid = data.get("interview_id") or data.get("interviewId")
-                                    # Allow connected/system events or events for candidates in recruiter's jobs
-                                    if not iid or int(iid) in allowed_interview_ids:
+
+                                    # Allow explicit safe control events without interview_id
+                                    if event_type in SAFE_CONTROL_EVENT_TYPES and not iid:
                                         yield f"{line}\n\n".encode("utf-8")
-                                except Exception:
-                                    pass
+                                    elif iid is not None:
+                                        try:
+                                            if int(iid) in allowed_interview_ids:
+                                                yield f"{line}\n\n".encode("utf-8")
+                                            else:
+                                                logger.debug("Filtered unassigned candidate event %s for user %s", iid, user.email)
+                                        except (ValueError, TypeError):
+                                            logger.warning("Malformed interview_id '%s' in live stream event", iid)
+                                    else:
+                                        logger.debug("Dropping unassigned/non-allowlisted event type '%s' for non-admin user %s", event_type, user.email)
+                                except Exception as e:
+                                    logger.debug("Dropped malformed/unparseable SSE event line: %s (err: %s)", raw_json[:80], e)
         except asyncio.CancelledError:
             pass
         except Exception as e:
