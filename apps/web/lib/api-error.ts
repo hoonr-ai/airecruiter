@@ -18,11 +18,16 @@ export function isNotFoundError(err: unknown): boolean {
   if (err instanceof ApiError) {
     return err.status === 404;
   }
-  const status = (err as any)?.status;
-  if (typeof status === "number") {
-    return status === 404;
+  if (err && typeof err === "object") {
+    if ("status" in err && typeof (err as { status: unknown }).status === "number") {
+      return (err as { status: number }).status === 404;
+    }
+    if ("message" in err && typeof (err as { message: unknown }).message === "string") {
+      const msg = (err as { message: string }).message;
+      return msg.includes("404") || msg.includes("Not Found");
+    }
   }
-  const msg = String((err as any)?.message || err || "");
+  const msg = String(err || "");
   return msg.includes("404") || msg.includes("Not Found");
 }
 
@@ -42,7 +47,7 @@ export function isWithinRedirectCooldown(
     }
     storage.setItem(MSAL_REDIRECT_STORAGE_KEY, String(now));
     return false;
-  } catch (e) {
+  } catch {
     // If storage is inaccessible, do not crash or block redirect
     return false;
   }

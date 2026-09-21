@@ -158,7 +158,13 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
 
     if (!res.ok) {
       if (res.status === 401 && typeof window !== "undefined") {
-        const withinCooldown = isWithinRedirectCooldown(Date.now(), window.sessionStorage);
+        let withinCooldown = false;
+        try {
+          withinCooldown = isWithinRedirectCooldown(Date.now(), window.sessionStorage);
+        } catch {
+          withinCooldown = false;
+        }
+
         if (withinCooldown) {
           console.warn("Skipping MSAL loginRedirect: 401 received within cooldown window to prevent redirect loop.");
         } else {
