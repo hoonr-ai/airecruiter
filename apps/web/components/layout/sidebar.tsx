@@ -14,7 +14,8 @@ export function Sidebar() {
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
-        { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
+        // Live Report navigation hidden temporarily during testing (accessible directly via /admin/live-report)
+        // { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
         // Admins get the full analytics + team management; team leads get the
         // same analytics page auto-scoped to their team by the backend.
         ...(isAdmin
