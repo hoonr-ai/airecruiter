@@ -344,6 +344,7 @@ launch_report_router = _safe_import("launch_report")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
 cross_submissions_router = _safe_import("cross_submissions")
+live_report_router = _safe_import("live_report")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -396,6 +397,7 @@ _mount(admin_analytics_router, "admin_analytics")
 _mount(launch_report_router, "launch_report")
 _mount(teams_router, "teams")
 _mount(cross_submissions_router, "cross_submissions")
+_mount(live_report_router, "live_report")
 # Mounted under /api so the existing nginx `location /api/` passthrough routes
 # it to the backend — avoids a collision with the frontend's /campaigns pages
 # (same trick keeps job_criteria under /api/jobs/...). No nginx changes needed.

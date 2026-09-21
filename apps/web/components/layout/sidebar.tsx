@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -14,6 +14,7 @@ export function Sidebar() {
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
+        { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
         // Admins get the full analytics + team management; team leads get the
         // same analytics page auto-scoped to their team by the backend.
         ...(isAdmin
