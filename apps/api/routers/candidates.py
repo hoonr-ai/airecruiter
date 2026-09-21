@@ -3961,6 +3961,21 @@ async def get_candidate_evaluation_report(
         if audit_row and audit_row.get("status"):
             engage_status = str(audit_row["status"])
             
+        if pair_data.get("outreach"):
+            # If we successfully fetched live outreach data, the top-level status or interview_status is more authoritative
+            # than what was in the DB or audit row. We merge them using build_merged_outreach_payload rules.
+            from routers.launch_report import build_merged_outreach_payload
+            from services.engage_status import select_engage_status
+            merged_live = build_merged_outreach_payload(
+                data_blob if isinstance(data_blob, dict) else {},
+                audit_row.get("response") if audit_row else None,
+                audit_row.get("status") if audit_row else None,
+                pair_data["outreach"]
+            )
+            live_status = select_engage_status(merged_live)
+            if live_status:
+                engage_status = live_status
+                
         hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
         if audit_row and audit_row.get("response"):
             resp = audit_row["response"]

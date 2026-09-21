@@ -698,6 +698,15 @@ def _summarise_outreach(
         # block simply fills them in.
         merged = {**outreach_dict, **payload}
 
+        # If the local DB has 'pass'/'fail' as the outreach_phase but the live
+        # API now returns the real canonical phase (e.g. phase1), use the
+        # live phase so we bucket the completed candidate correctly.
+        if payload.get("outreach_phase") in ("pass", "fail", "completed") and outreach_dict.get("outreach_phase") not in ("pass", "fail", "completed", None):
+            merged["outreach_phase"] = outreach_dict["outreach_phase"]
+        elif payload.get("outreach_phase") in ("pass", "fail", "completed") and payload.get("phase") not in ("pass", "fail", "completed", None):
+            # Fallback to pair-bot's raw 'phase' key if available
+            merged["outreach_phase"] = payload["phase"]
+
         # ONE status per candidate, the same selection the rank list table
         # makes for its row (select_engage_status): the merge, lifted by a
         # live interview_status only when that reads further along. Passing
