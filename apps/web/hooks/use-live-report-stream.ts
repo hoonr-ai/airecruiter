@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api } from "@/lib/api";
+import { api, authFetch } from "@/lib/api";
 import type { Snapshot } from "../app/admin/live-report/types";
 
 interface UseLiveReportStreamOptions {
@@ -13,6 +13,7 @@ interface UseLiveReportStreamOptions {
     subtype: string | null;
     phase: string | null;
     status: string | null;
+    terminalReason?: string | null;
   }) => void;
 }
 
@@ -26,7 +27,8 @@ export function useLiveReportStream({
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isManuallyClosedRef = useRef<boolean>(false);
   const eventCallbackRef = useRef(onActivityEvent);
   eventCallbackRef.current = onActivityEvent;
 
@@ -69,10 +71,10 @@ export function useLiveReportStream({
     }
     // If no heartbeat or event seen in 35 seconds, tear down dead socket and reconnect
     heartbeatWatchdogRef.current = setTimeout(() => {
-      console.warn("Live report stream heartbeat watchdog timed out (35s silence). Recycling socket...");
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
+      console.warn("Live report stream heartbeat watchdog timed out (35s silence). Recycling reader...");
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
       setIsConnected(false);
       // Trigger snapshot refresh to catch up on any missed data during silence
@@ -81,56 +83,104 @@ export function useLiveReportStream({
     }, 35000);
   }, [refreshSnapshot]);
 
-  // 2. Stream connector with jittered exponential backoff
-  const connectStream = useCallback(() => {
+  // 2. Stream connector using authFetch streaming reader with jittered exponential backoff
+  const connectStream = useCallback(async () => {
     if (!bulkId || typeof window === "undefined") return;
 
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
 
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    isManuallyClosedRef.current = false;
+
     const streamUrl = api.liveReport.streamUrl(bulkId);
-    const es = new EventSource(streamUrl, { withCredentials: true });
-    eventSourceRef.current = es;
 
-    es.onopen = () => {
-      setIsConnected(true);
-      retryCountRef.current = 0; // reset retry backoff on successful open
-      resetWatchdog();
-    };
+    try {
+      const response = await authFetch(streamUrl, {
+        signal: abortController.signal,
+        headers: {
+          Accept: "text/event-stream",
+        },
+      });
 
-    es.onmessage = (e) => {
-      resetWatchdog();
-      if (!e.data || e.data.startsWith(":")) return; // heartbeat comment
-
-      try {
-        const payload = JSON.parse(e.data);
-        if (payload.type === "connected") {
-          return;
-        }
-        const interviewId = payload.interview_id ?? payload.interviewId;
-        const eventType = payload.event_type ?? payload.type;
-        if (interviewId && eventType && eventType !== "connected") {
-          eventCallbackRef.current?.({
-            interviewId: Number(interviewId),
-            type: eventType,
-            subtype: payload.subtype ?? null,
-            phase: payload.phase ?? null,
-            status: payload.status ?? null,
-          });
-        }
-      } catch (err) {
-        console.debug("Ignored unparseable SSE event:", e.data);
+      if (!response.ok || !response.body) {
+        throw new Error(`Stream request rejected with status ${response.status}`);
       }
-    };
 
-    es.onerror = (err) => {
+      setIsConnected(true);
+      retryCountRef.current = 0;
+      resetWatchdog();
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      const handleRawSSEChunk = (rawEvent: string) => {
+        resetWatchdog();
+        const trimmed = rawEvent.trim();
+        if (!trimmed || trimmed.startsWith(":")) return; // heartbeat / comment
+
+        const lines = trimmed.split("\n");
+        const dataLines = lines
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim());
+
+        if (dataLines.length === 0) return;
+        const jsonStr = dataLines.join("");
+
+        try {
+          const payload = JSON.parse(jsonStr);
+          if (payload.type === "connected") {
+            return;
+          }
+          const interviewId = payload.interview_id ?? payload.interviewId;
+          const eventType = payload.event_type ?? payload.type;
+          if (interviewId && eventType && eventType !== "connected") {
+            eventCallbackRef.current?.({
+              interviewId: Number(interviewId),
+              type: eventType,
+              subtype: payload.subtype ?? null,
+              phase: payload.phase ?? null,
+              status: payload.status ?? null,
+              terminalReason: payload.terminal_reason ?? payload.terminalReason ?? null,
+            });
+          }
+        } catch (err) {
+          console.debug("Ignored unparseable SSE event:", jsonStr);
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        let sepIdx: number;
+        while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + 2);
+          handleRawSSEChunk(rawEvent);
+        }
+      }
+
+      // Trailing chunk if any
+      if (buffer.trim()) {
+        handleRawSSEChunk(buffer);
+      }
+    } catch (err: any) {
+      if (abortController.signal.aborted || isManuallyClosedRef.current) {
+        return;
+      }
       console.warn("Live report SSE connection dropped. Reconnecting with backoff...", err);
-      es.close();
-      eventSourceRef.current = null;
-      setIsConnected(false);
+    } finally {
+      if (abortController.signal.aborted || isManuallyClosedRef.current) {
+        return;
+      }
 
+      setIsConnected(false);
       if (heartbeatWatchdogRef.current) {
         clearTimeout(heartbeatWatchdogRef.current);
       }
@@ -142,11 +192,10 @@ export function useLiveReportStream({
 
       if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
       retryTimeoutRef.current = setTimeout(() => {
-        // Re-fetch snapshot upon reconnect to reconcile any dropped deltas
         refreshSnapshot();
         connectStream();
       }, delay);
-    };
+    }
   }, [bulkId, resetWatchdog, refreshSnapshot]);
 
   // Manage Stream Lifecycle
@@ -165,10 +214,11 @@ export function useLiveReportStream({
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
+      isManuallyClosedRef.current = true;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
       if (retryTimeoutRef.current) {
         clearTimeout(retryTimeoutRef.current);

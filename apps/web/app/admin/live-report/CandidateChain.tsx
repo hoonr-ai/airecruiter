@@ -209,9 +209,6 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
           const hasUpdates = phaseHasEvents(stop.key, i);
           const isCurrentActive = i === reached && !isTerminal;
           const isResultStop = i === CHAIN_STOPS.length - 1;
-          const resultFail = isResultStop && failedTerminal;
-          const resultPass = isResultStop && passed;
-          const resultNoResponse = isResultStop && restedNoResponse;
 
           // Only color nodes that received updates or is active
           const isNodeDone = hasUpdates && i <= reached;
@@ -283,14 +280,17 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
             const isCall = evt.type.includes("call") || evt.subtype === "call";
             const isSms = evt.type.includes("sms") || evt.subtype === "sms";
 
-            let phaseTag = "P1";
-            if (evt.phase === "contact_check") phaseTag = "CC";
+            let phaseTag = "OUT";
+            if (evt.phase === "phase1") phaseTag = "P1";
+            else if (evt.phase === "contact_check") phaseTag = "CC";
             else if (evt.phase === "phase1_6hr") phaseTag = "P2";
             else if (evt.phase === "phase2") phaseTag = "P3";
             else if (evt.phase === "phase3") phaseTag = "P4";
             else if (evt.phase === "phase1_extra") phaseTag = "Ex1";
             else if (evt.phase === "phase1_6hr_extra") phaseTag = "Ex2";
             else if (evt.phase === "phase2_extra") phaseTag = "Ex3";
+            else if (evt.phase === "completed") phaseTag = "END";
+            else if (evt.phase) phaseTag = "EVT";
 
             return (
               <span

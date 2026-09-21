@@ -19,7 +19,8 @@ def test_get_live_report_launches_admin_sees_all():
 
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_resp):
         res = asyncio.run(lr.get_live_report_launches(user=admin))
-        assert len(res) == 2
+        assert len(res["launches"]) == 2
+        assert res["retention_days"] == 14
 
 
 def test_get_live_report_launches_recruiter_scoped_isolation():
@@ -35,8 +36,9 @@ def test_get_live_report_launches_recruiter_scoped_isolation():
     with patch("routers.live_report._get_user_accessible_jobdiva_ids", return_value={"26-11111"}):
         with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_resp):
             res = asyncio.run(lr.get_live_report_launches(user=recruiter))
-            assert len(res) == 1
-            assert res[0]["bulk_id"] == "b1"
+            assert len(res["launches"]) == 1
+            assert res["launches"][0]["bulk_id"] == "b1"
+            assert res["retention_days"] == 14
 
 
 def test_get_live_report_snapshot_admin_sees_all_jobs():
@@ -103,3 +105,13 @@ def test_get_live_report_snapshot_handles_not_found():
         with pytest.raises(HTTPException) as exc:
             asyncio.run(lr.get_live_report_snapshot(bulk_id="missing", reveal=False, user=admin))
         assert exc.value.status_code == 404
+
+
+def test_get_live_report_health_reports_unhealthy_on_network_error():
+    admin = UserIdentity(email="admin@example.com", role="admin")
+    import httpx
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=httpx.RequestError("down")):
+        res = asyncio.run(lr.get_live_report_health(user=admin))
+        assert res["healthy"] is False
+        assert "unavailable" in res["error"]

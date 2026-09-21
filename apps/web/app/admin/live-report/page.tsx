@@ -17,7 +17,7 @@ import { api } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { useLiveReportStream } from "@/hooks/use-live-report-stream";
 import { JobBlock } from "./JobBlock";
-import type { LaunchListItem, HealthData } from "./types";
+import type { LaunchListItem, HealthData, TerminalReason } from "./types";
 
 interface FeedItem {
   id: number;
@@ -34,6 +34,7 @@ export default function LiveReportPage() {
   const [revealPii, setRevealPii] = useState<boolean>(false);
   const [health, setHealth] = useState<HealthData | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [launchesError, setLaunchesError] = useState<string | null>(null);
 
   // Push into feed
   const pushFeed = useCallback((text: string, critical = false) => {
@@ -72,6 +73,7 @@ export default function LiveReportPage() {
       subtype: string | null;
       phase: string | null;
       status: string | null;
+      terminalReason?: string | null;
     }) => {
       pushFeed(
         `#${event.interviewId} ${event.type}${event.subtype ? ` (${event.subtype})` : ""} [${event.phase || "phase"}]`,
@@ -87,12 +89,21 @@ export default function LiveReportPage() {
             if (cand.interview_id === event.interviewId) {
               const updatedPhase = event.phase || cand.phase;
               const isDone = updatedPhase === "completed" || event.type === "evaluation_completed";
+              let terminalReason: TerminalReason | null | undefined = cand.terminal_reason;
+              if (event.terminalReason) {
+                terminalReason = event.terminalReason as TerminalReason;
+              } else if (event.status === "failed") {
+                terminalReason = "outreach_failed";
+              } else if (event.status === "passed") {
+                terminalReason = "passed";
+              }
+
               return {
                 ...cand,
                 phase: updatedPhase,
                 outreach_status: event.status || cand.outreach_status,
                 call_outcome: isDone ? "completed" : cand.call_outcome,
-                terminal_reason: isDone ? "passed" : cand.terminal_reason,
+                terminal_reason: terminalReason,
               };
             }
             return cand;
@@ -115,6 +126,7 @@ export default function LiveReportPage() {
       ]);
 
       if (launchesData.status === "fulfilled") {
+        setLaunchesError(null);
         const list = Array.isArray(launchesData.value)
           ? launchesData.value
           : launchesData.value?.launches || [];
@@ -122,6 +134,9 @@ export default function LiveReportPage() {
         if (list.length > 0 && !selectedBulkId) {
           setSelectedBulkId(list[0].bulk_id);
         }
+      } else {
+        console.error("Failed to load live report launches:", launchesData.reason);
+        setLaunchesError("Unable to load launches. Please check API connection and retry.");
       }
 
       if (healthData.status === "fulfilled") {
@@ -129,6 +144,7 @@ export default function LiveReportPage() {
       }
     } catch (err) {
       console.error("Failed to load live report initial data:", err);
+      setLaunchesError("Failed to communicate with the analytics service.");
     }
   }, [selectedBulkId]);
 
@@ -197,6 +213,23 @@ export default function LiveReportPage() {
 
   return (
     <div className="p-6 w-full max-w-[1600px] mx-auto space-y-6">
+      {/* Launch Load Error Alert */}
+      {launchesError && (
+        <div className="flex items-center justify-between gap-2 p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-800">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold">Launch Load Error:</span>
+            <span>{launchesError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => fetchLaunchesAndHealth()}
+            className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-700 text-white font-medium transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Top Header & Launch Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
@@ -235,7 +268,9 @@ export default function LiveReportPage() {
                 {l.state.toUpperCase()} • {l.titles?.[0] || l.jobdiva_ids?.[0] || l.bulk_id.slice(0, 8)} ({l.total_candidates} cand)
               </option>
             ))}
-            {launches.length === 0 && <option value="">No launches found</option>}
+            {launches.length === 0 && (
+              <option value="">{launchesError ? "Error loading campaigns" : "No launches found"}</option>
+            )}
           </select>
 
           {/* Reveal PII Button */}
