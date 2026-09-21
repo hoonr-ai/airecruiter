@@ -148,10 +148,18 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
 
     if (!res.ok) {
       if (res.status === 401 && typeof window !== "undefined") {
-        const activeAccount =
-          msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
-        if (activeAccount) {
-          msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+        const lastRedirect = Number(sessionStorage.getItem("last_msal_login_redirect") || "0");
+        const now = Date.now();
+        // Prevent continuous reload/redirect loops if 401 persists (enforce 15s cooldown)
+        if (now - lastRedirect > 15000) {
+          sessionStorage.setItem("last_msal_login_redirect", String(now));
+          const activeAccount =
+            msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
+          if (activeAccount) {
+            msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+          }
+        } else {
+          console.warn("Skipping MSAL loginRedirect: 401 received within cooldown window to prevent redirect loop.");
         }
       }
       const text = await res.text().catch(() => "");

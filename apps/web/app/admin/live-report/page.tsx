@@ -134,22 +134,32 @@ export default function LiveReportPage() {
           ? launchesData.value
           : launchesData.value?.launches || [];
         setLaunches(list);
-        if (list.length > 0 && !selectedBulkId) {
-          setSelectedBulkId(list[0].bulk_id);
+        if (list.length > 0) {
+          setSelectedBulkId((prev) => prev || list[0].bulk_id);
         }
       } else {
-        console.error("Failed to load live report launches:", launchesData.reason);
-        setLaunchesError("Unable to load launches. Please check API connection and retry.");
+        const reasonMsg = String(launchesData.reason?.message || launchesData.reason || "");
+        console.error("Failed to load live report launches:", reasonMsg);
+        if (reasonMsg.includes("404") || reasonMsg.includes("Not Found")) {
+          setLaunchesError("Live Launch Monitor is available in Production only.");
+        } else {
+          setLaunchesError("Unable to load launches. Please check API connection and retry.");
+        }
       }
 
       if (healthData.status === "fulfilled") {
         setHealth(healthData.value);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to load live report initial data:", err);
-      setLaunchesError("Failed to communicate with the analytics service.");
+      const errStr = String(err?.message || err || "");
+      if (errStr.includes("404") || errStr.includes("Not Found")) {
+        setLaunchesError("Live Launch Monitor is available in Production only.");
+      } else {
+        setLaunchesError("Failed to communicate with the analytics service.");
+      }
     }
-  }, [selectedBulkId]);
+  }, []);
 
   useEffect(() => {
     fetchLaunchesAndHealth();

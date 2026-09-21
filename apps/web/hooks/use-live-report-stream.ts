@@ -50,7 +50,12 @@ export function useLiveReportStream({
       setError(null);
     } catch (err: any) {
       console.error("Failed to fetch live report snapshot:", err);
-      setError(err?.message || "Failed to load launch snapshot");
+      const msg = String(err?.message || err || "");
+      if (msg.includes("404") || msg.includes("Not Found")) {
+        setError("Live Launch Monitor is available in Production only.");
+      } else {
+        setError(err?.message || "Failed to load launch snapshot");
+      }
     } finally {
       setIsLoading(false);
     }
