@@ -17,7 +17,8 @@ router = APIRouter(tags=["Live Report"])
 
 
 def _get_external_interview_api_url() -> str:
-    return os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
+    default_url = "https://pairbot.hoonr.ai" if os.getenv("ENVIRONMENT", "").lower() in {"production", "prod"} else "https://pairbotqa.hoonr.ai"
+    return os.getenv("EXTERNAL_INTERVIEW_API_URL", default_url).rstrip("/")
 
 
 def _get_pair_headers() -> Dict[str, str]:
@@ -213,8 +214,8 @@ async def stream_live_report(
     if accessible_ids is not None and not accessible_ids:
         raise HTTPException(status_code=403, detail="Access denied. You do not have access to this launch stream.")
 
-    # Resolve allowed interview IDs for non-admin recruiters
-    allowed_interview_ids: Optional[Set[int]] = None
+    # Resolve allowed interview IDs for non-admin recruiters (fails closed)
+    allowed_interview_ids: Optional[Set[int]] = set() if accessible_ids is not None else None
     if accessible_ids is not None:
         try:
             async with httpx.AsyncClient(timeout=10.0) as snap_client:
