@@ -19,7 +19,7 @@
 // a row that did not fully resolve is marked rather than silently showing
 // zeros — see the "partial" badge on the job cell.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
@@ -471,6 +471,23 @@ export default function LaunchReportPage() {
     [rows],
   );
 
+  const tableWrapperRef = useRef<HTMLDivElement>(null);
+  const [tableMaxHeight, setTableMaxHeight] = useState<string>("calc(100vh - 320px)");
+
+  useEffect(() => {
+    const updateHeight = () => {
+      if (!tableWrapperRef.current) return;
+      const top = tableWrapperRef.current.getBoundingClientRect().top;
+      const available = window.innerHeight - top - 32;
+      const calculatedHeight = Math.max(350, Math.floor(available));
+      setTableMaxHeight(`${calculatedHeight}px`);
+    };
+
+    updateHeight();
+    window.addEventListener("resize", updateHeight);
+    return () => window.removeEventListener("resize", updateHeight);
+  }, [data, error, partialRows, isRange, rows.length]);
+
   if (isRoleLoading) {
     return (
       <div className="flex h-[80vh] w-full items-center justify-center">
@@ -646,13 +663,17 @@ export default function LaunchReportPage() {
           container so the page body never scrolls horizontally, and the job
           column is pinned so a row stays identifiable while scrolling. */}
       <Card className="border-slate-200 bg-white shadow-sm rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
+        <div
+          ref={tableWrapperRef}
+          style={{ maxHeight: tableMaxHeight }}
+          className="overflow-auto min-h-[350px] relative scrollbar-thin scrollbar-thumb-slate-200"
+        >
           <table className="w-full border-collapse text-[13px]">
-            <thead>
+            <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
               <tr className="bg-slate-50 border-b border-slate-200">
                 <th
                   rowSpan={2}
-                  className="sticky left-0 z-20 bg-slate-50 text-left px-4 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-500 border-r border-slate-200 min-w-[240px]"
+                  className="sticky left-0 top-0 z-30 bg-slate-50 text-left px-4 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-500 border-r border-slate-200 min-w-[240px]"
                 >
                   Job
                 </th>
