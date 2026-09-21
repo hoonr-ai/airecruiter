@@ -701,9 +701,10 @@ def _summarise_outreach(
         # If the local DB has 'pass'/'fail' as the outreach_phase but the live
         # API now returns the real canonical phase (e.g. phase1), use the
         # live phase so we bucket the completed candidate correctly.
-        if payload.get("outreach_phase") in ("pass", "fail", "completed") and outreach_dict.get("outreach_phase") not in ("pass", "fail", "completed", None):
+        terminal_phases = ("pass", "fail", "completed")
+        if payload.get("outreach_phase") in terminal_phases and outreach_dict.get("outreach_phase") not in terminal_phases + (None,):
             merged["outreach_phase"] = outreach_dict["outreach_phase"]
-        elif payload.get("outreach_phase") in ("pass", "fail", "completed") and payload.get("phase") not in ("pass", "fail", "completed", None):
+        elif payload.get("outreach_phase") in terminal_phases and payload.get("phase") not in terminal_phases + (None,):
             # Fallback to pair-bot's raw 'phase' key if available
             merged["outreach_phase"] = payload["phase"]
 
