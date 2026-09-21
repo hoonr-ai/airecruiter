@@ -38,17 +38,24 @@ export const MSAL_REDIRECT_STORAGE_KEY = "last_msal_login_redirect";
 
 export function isWithinRedirectCooldown(
   now: number,
-  storage: { getItem(key: string): string | null; setItem(key: string, value: string): void }
+  storage: { getItem(key: string): string | null }
 ): boolean {
   try {
     const lastRedirect = Number(storage.getItem(MSAL_REDIRECT_STORAGE_KEY) || "0");
-    if (now - lastRedirect <= MSAL_REDIRECT_COOLDOWN_MS) {
-      return true;
-    }
-    storage.setItem(MSAL_REDIRECT_STORAGE_KEY, String(now));
-    return false;
+    return now - lastRedirect <= MSAL_REDIRECT_COOLDOWN_MS;
   } catch {
-    // If storage is inaccessible, do not crash or block redirect
+    // If storage is inaccessible, do not block redirect
     return false;
+  }
+}
+
+export function recordRedirectTimestamp(
+  now: number,
+  storage: { setItem(key: string, value: string): void }
+): void {
+  try {
+    storage.setItem(MSAL_REDIRECT_STORAGE_KEY, String(now));
+  } catch {
+    // Ignore storage write failures
   }
 }

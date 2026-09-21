@@ -6,6 +6,7 @@ import {
   isNotFoundError,
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
+  recordRedirectTimestamp,
 } from "./api-error.ts";
 
 test("ApiError stores status and path correctly", () => {
@@ -39,7 +40,7 @@ test("LIVE_REPORT_PROD_ONLY_MESSAGE constant is defined", () => {
   assert.equal(LIVE_REPORT_PROD_ONLY_MESSAGE, "Live Launch Monitor is available in Production only.");
 });
 
-test("isWithinRedirectCooldown respects 15s window and handles storage failures", () => {
+test("isWithinRedirectCooldown and recordRedirectTimestamp work together cleanly", () => {
   const store: Record<string, string> = {};
   const mockStorage = {
     getItem: (k: string) => store[k] ?? null,
@@ -49,18 +50,21 @@ test("isWithinRedirectCooldown respects 15s window and handles storage failures"
   };
 
   const t0 = 100000;
-  // First call: not within cooldown, records timestamp
+  // Initially no redirect has happened
   assert.equal(isWithinRedirectCooldown(t0, mockStorage), false);
+  assert.equal(store["last_msal_login_redirect"], undefined);
+
+  // Record redirect timestamp
+  recordRedirectTimestamp(t0, mockStorage);
   assert.equal(store["last_msal_login_redirect"], String(t0));
 
   // Call after 5s (< 15s): within cooldown
   assert.equal(isWithinRedirectCooldown(t0 + 5000, mockStorage), true);
 
-  // Call after 16s (> 15s): cooldown expired, records new timestamp
+  // Call after 16s (> 15s): cooldown expired
   assert.equal(isWithinRedirectCooldown(t0 + 16000, mockStorage), false);
-  assert.equal(store["last_msal_login_redirect"], String(t0 + 16000));
 
-  // Storage failure (e.g. sandboxed iframe or disabled cookies): does not throw, allows redirect
+  // Storage failure (e.g. sandboxed iframe or disabled cookies): does not throw
   const throwingStorage = {
     getItem: () => {
       throw new Error("SecurityError: storage disabled");
@@ -70,5 +74,6 @@ test("isWithinRedirectCooldown respects 15s window and handles storage failures"
     },
   };
   assert.equal(isWithinRedirectCooldown(t0, throwingStorage), false);
+  assert.doesNotThrow(() => recordRedirectTimestamp(t0, throwingStorage));
 });
 

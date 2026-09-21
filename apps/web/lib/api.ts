@@ -94,10 +94,11 @@ export {
   isNotFoundError,
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
+  recordRedirectTimestamp,
   MSAL_REDIRECT_COOLDOWN_MS,
   MSAL_REDIRECT_STORAGE_KEY,
 } from "./api-error";
-import { ApiError, isWithinRedirectCooldown } from "./api-error";
+import { ApiError, isWithinRedirectCooldown, recordRedirectTimestamp } from "./api-error";
 
 // fetch() network failures surface as a TypeError in all major browsers
 // (Chrome "Failed to fetch", Safari "Load failed", Firefox "NetworkError when
@@ -171,6 +172,11 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
           const activeAccount =
             msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
           if (activeAccount) {
+            try {
+              recordRedirectTimestamp(Date.now(), window.sessionStorage);
+            } catch {
+              // Ignore storage write failure
+            }
             msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
           }
         }

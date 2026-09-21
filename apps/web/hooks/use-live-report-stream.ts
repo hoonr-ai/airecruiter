@@ -106,6 +106,7 @@ export function useLiveReportStream({
     isManuallyClosedRef.current = false;
 
     const streamUrl = api.liveReport.streamUrl(bulkId);
+    let isNonRetriable = false;
 
     try {
       const response = await authFetch(streamUrl, {
@@ -116,6 +117,11 @@ export function useLiveReportStream({
       });
 
       if (!response.ok || !response.body) {
+        if (response.status === 404 || response.status === 403) {
+          console.warn(`Live report stream non-retriable status (${response.status}). Suppressing SSE reconnect.`);
+          isNonRetriable = true;
+          return;
+        }
         throw new Error(`Stream request rejected with status ${response.status}`);
       }
 
@@ -185,7 +191,11 @@ export function useLiveReportStream({
       }
       console.warn("Live report SSE connection dropped. Reconnecting with backoff...", err);
     } finally {
-      if (abortController.signal.aborted || isManuallyClosedRef.current) {
+      if (abortController.signal.aborted || isManuallyClosedRef.current || isNonRetriable) {
+        setIsConnected(false);
+        if (heartbeatWatchdogRef.current) {
+          clearTimeout(heartbeatWatchdogRef.current);
+        }
         return;
       }
 
