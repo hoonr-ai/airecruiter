@@ -13,7 +13,7 @@ import {
   Server,
   Users,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, isNotFoundError, LIVE_REPORT_PROD_ONLY_MESSAGE } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { useLiveReportStream } from "@/hooks/use-live-report-stream";
 import { JobBlock } from "./JobBlock";
@@ -138,10 +138,9 @@ export default function LiveReportPage() {
           setSelectedBulkId((prev) => prev || list[0].bulk_id);
         }
       } else {
-        const reasonMsg = String(launchesData.reason?.message || launchesData.reason || "");
-        console.error("Failed to load live report launches:", reasonMsg);
-        if (reasonMsg.includes("404") || reasonMsg.includes("Not Found")) {
-          setLaunchesError("Live Launch Monitor is available in Production only.");
+        console.error("Failed to load live report launches:", launchesData.reason);
+        if (isNotFoundError(launchesData.reason)) {
+          setLaunchesError(LIVE_REPORT_PROD_ONLY_MESSAGE);
         } else {
           setLaunchesError("Unable to load launches. Please check API connection and retry.");
         }
@@ -152,9 +151,8 @@ export default function LiveReportPage() {
       }
     } catch (err: any) {
       console.error("Failed to load live report initial data:", err);
-      const errStr = String(err?.message || err || "");
-      if (errStr.includes("404") || errStr.includes("Not Found")) {
-        setLaunchesError("Live Launch Monitor is available in Production only.");
+      if (isNotFoundError(err)) {
+        setLaunchesError(LIVE_REPORT_PROD_ONLY_MESSAGE);
       } else {
         setLaunchesError("Failed to communicate with the analytics service.");
       }

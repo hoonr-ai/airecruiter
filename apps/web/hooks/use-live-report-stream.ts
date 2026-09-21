@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api, authFetch } from "@/lib/api";
+import { api, authFetch, isNotFoundError, LIVE_REPORT_PROD_ONLY_MESSAGE } from "@/lib/api";
 import type { Snapshot } from "../app/admin/live-report/types";
 
 interface UseLiveReportStreamOptions {
@@ -50,9 +50,8 @@ export function useLiveReportStream({
       setError(null);
     } catch (err: any) {
       console.error("Failed to fetch live report snapshot:", err);
-      const msg = String(err?.message || err || "");
-      if (msg.includes("404") || msg.includes("Not Found")) {
-        setError("Live Launch Monitor is available in Production only.");
+      if (isNotFoundError(err)) {
+        setError(LIVE_REPORT_PROD_ONLY_MESSAGE);
       } else {
         setError(err?.message || "Failed to load launch snapshot");
       }
