@@ -3961,6 +3961,7 @@ async def get_candidate_evaluation_report(
         if audit_row and audit_row.get("status"):
             engage_status = str(audit_row["status"])
             
+
         hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
         if audit_row and audit_row.get("response"):
             resp = audit_row["response"]
@@ -4101,6 +4102,19 @@ async def get_candidate_evaluation_report(
                 # Scores should be picked from data_blob/audit_row for consistency with rankings
             except Exception as pair_err:
                 logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
+
+        if pair_data.get("outreach"):
+            # If we successfully fetched live outreach data, the top-level status or interview_status is more authoritative
+            # than what was in the DB or audit row. We merge them using build_merged_outreach_payload rules.
+            merged_live = build_merged_outreach_payload(
+                data_blob if isinstance(data_blob, dict) else {},
+                audit_row.get("response") if audit_row else None,
+                audit_row.get("status") if audit_row else None,
+                pair_data["outreach"]
+            )
+            live_status = select_engage_status(merged_live)
+            if live_status:
+                engage_status = live_status
 
         # Inject audit data if available
         if audit_row:
