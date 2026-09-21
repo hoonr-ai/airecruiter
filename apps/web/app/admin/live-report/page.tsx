@@ -261,46 +261,48 @@ export default function LiveReportPage() {
         </div>
       </div>
 
-      {/* System Health Strip */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
-          <Database className="h-5 w-5 text-indigo-600" />
-          <div>
-            <div className="text-[11px] text-slate-400 font-medium">DB Connection Pool</div>
-            <div className="text-sm font-semibold text-slate-800">
-              {health?.db_pool ? `${health.db_pool.used} / ${health.db_pool.max} (${health.db_pool.percent}%)` : "Healthy"}
+      {/* System Health Strip (Restricted to Admins only; hidden from recruiters) */}
+      {isAdmin && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
+            <Database className="h-5 w-5 text-indigo-600" />
+            <div>
+              <div className="text-[11px] text-slate-400 font-medium">DB Connection Pool</div>
+              <div className="text-sm font-semibold text-slate-800">
+                {health?.db_pool ? `${health.db_pool.used} / ${health.db_pool.max} (${health.db_pool.percent}%)` : "Healthy"}
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
+            <Server className="h-5 w-5 text-emerald-600" />
+            <div>
+              <div className="text-[11px] text-slate-400 font-medium">Agent Workers Fleet</div>
+              <div className="text-sm font-semibold text-slate-800">
+                {health?.agent_fleet ? `${health.agent_fleet.active_workers} Active • ${health.agent_fleet.idle_workers} Idle` : "12 Active"}
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
+            <Activity className="h-5 w-5 text-blue-600" />
+            <div>
+              <div className="text-[11px] text-slate-400 font-medium">Queue Processing</div>
+              <div className="text-sm font-semibold text-slate-800">
+                {health?.outreach_queue ? `${health.outreach_queue.pending} Pending / ${health.outreach_queue.processing} In-flight` : "Nominal"}
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
+            <CheckCircle2 className="h-5 w-5 text-indigo-600" />
+            <div>
+              <div className="text-[11px] text-slate-400 font-medium">Telemetry Protocol</div>
+              <div className="text-sm font-semibold text-slate-800">SSE Stream + Claim-Check</div>
             </div>
           </div>
         </div>
-
-        <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
-          <Server className="h-5 w-5 text-emerald-600" />
-          <div>
-            <div className="text-[11px] text-slate-400 font-medium">Agent Workers Fleet</div>
-            <div className="text-sm font-semibold text-slate-800">
-              {health?.agent_fleet ? `${health.agent_fleet.active_workers} Active • ${health.agent_fleet.idle_workers} Idle` : "12 Active"}
-            </div>
-          </div>
-        </div>
-
-        <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
-          <Activity className="h-5 w-5 text-blue-600" />
-          <div>
-            <div className="text-[11px] text-slate-400 font-medium">Queue Processing</div>
-            <div className="text-sm font-semibold text-slate-800">
-              {health?.outreach_queue ? `${health.outreach_queue.pending} Pending / ${health.outreach_queue.processing} In-flight` : "Nominal"}
-            </div>
-          </div>
-        </div>
-
-        <div className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-xs flex items-center gap-3">
-          <CheckCircle2 className="h-5 w-5 text-indigo-600" />
-          <div>
-            <div className="text-[11px] text-slate-400 font-medium">Telemetry Protocol</div>
-            <div className="text-sm font-semibold text-slate-800">SSE Stream + Claim-Check</div>
-          </div>
-        </div>
-      </div>
+      )}
 
       {/* Main Grid: Job Blocks on Left, Event Feed on Right */}
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">

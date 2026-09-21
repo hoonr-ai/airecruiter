@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
-import { Briefcase, ChevronDown } from "lucide-react";
+import { Briefcase, ChevronDown, Search, X } from "lucide-react";
 import type { JobBlockData } from "./types";
 import { TERMINAL_PHASES } from "./types";
 import { CandidateChain } from "./CandidateChain";
@@ -25,6 +25,19 @@ interface JobBlockProps {
 
 export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = false }) => {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const filteredCandidates = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return job.candidates;
+    return job.candidates.filter((c) => {
+      const nameMatch = (c.name || "").toLowerCase().includes(q);
+      const idMatch = String(c.interview_id || "").includes(q);
+      const phaseMatch = (c.phase || "").toLowerCase().includes(q);
+      const statusMatch = (c.outreach_status || "").toLowerCase().includes(q);
+      return nameMatch || idMatch || phaseMatch || statusMatch;
+    });
+  }, [job.candidates, searchQuery]);
 
   const { segments, allPhases, terminal, total } = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -140,7 +153,37 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
 
       {/* Candidate Chains Container */}
       {!collapsed && (
-        <div className="lr-scroll max-h-[400px] overflow-y-auto border-t border-slate-100">
+        <div className="lr-scroll max-h-[440px] overflow-y-auto border-t border-slate-100">
+          {/* Subheader Toolbar: Search Box & Candidate Count */}
+          <div className="flex items-center justify-between gap-3 bg-slate-50/50 px-4 py-2 border-b border-slate-100">
+            <div className="relative flex-1 max-w-xs">
+              <Search
+                size={13}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+              />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search candidates by name, ID, or phase..."
+                className="w-full h-7 pl-8 pr-7 text-xs bg-white border border-slate-200 rounded-md placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-shadow"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded"
+                  title="Clear search"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+            <div className="text-[11px] text-slate-400 font-medium">
+              Showing {filteredCandidates.length} of {job.candidates.length} candidates
+            </div>
+          </div>
+
           {/* Table Header with explicit 4 Columns matching layout */}
           <div className="grid grid-cols-[150px_1fr_170px_150px] items-center gap-3 bg-slate-50/80 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <div>PROFILE</div>
@@ -149,12 +192,14 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
             <div className="text-right pr-2">ACTION / CTA</div>
           </div>
           <div className="divide-y divide-slate-100 px-1 py-1">
-            {job.candidates.map((c) => (
+            {filteredCandidates.map((c) => (
               <CandidateChain key={c.interview_id} candidate={c} />
             ))}
-            {job.candidates.length === 0 && (
-              <div className="py-6 text-center text-xs text-slate-400">
-                No candidates found in this job.
+            {filteredCandidates.length === 0 && (
+              <div className="py-8 text-center text-xs text-slate-400">
+                {searchQuery
+                  ? `No candidates match "${searchQuery}" in this job.`
+                  : "No candidates found in this job."}
               </div>
             )}
           </div>
