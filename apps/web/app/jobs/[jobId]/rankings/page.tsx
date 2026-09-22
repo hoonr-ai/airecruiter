@@ -338,7 +338,7 @@ interface Candidate {
 }
 
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
-type ToastState = { type: "info" | "error" | "success"; message: string } | null;
+type ToastState = { type: "info" | "error" | "success" | "warning"; message: string } | null;
 
 function ResumeScreeningHoverCard({
   candidate,
@@ -559,7 +559,7 @@ export default function CandidateRankingsPage() {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
       try {
-        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+        const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Submit',
           submission_type: submissionData.submission_type,
           manager_email: submissionData.manager_email,
@@ -567,6 +567,11 @@ export default function CandidateRankingsPage() {
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
+        if (res?.jobdiva_sync === 'error') {
+          setToast({ message: `Submission saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
+        } else {
+          setToast({ message: "Submission saved and synchronized successfully", type: "success" });
+        }
       } catch (error) {
         console.error('Error syncing submission:', error);
         setToast({ message: "Failed to save submission", type: "error" });
@@ -584,13 +589,18 @@ export default function CandidateRankingsPage() {
       setSyncingCandidateId(actionCandidateId);
       const rejectedAt = new Date().toISOString();
       try {
-        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+        const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
           reason: trimmedReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
         setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
+        if (res?.jobdiva_sync === 'error') {
+          setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
+        } else {
+          setToast({ message: "Rejection saved successfully", type: "success" });
+        }
       } catch (error) {
         console.error('Error syncing rejection:', error);
         setToast({ message: "Failed to save rejection reason", type: "error" });
@@ -980,9 +990,15 @@ export default function CandidateRankingsPage() {
   const [hoveredResumeScoreKey, setHoveredResumeScoreKey] = useState<string | null>(null);
   const [hoveredEngageScoreKey, setHoveredEngageScoreKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
-  const pushToast = (message: string, type: "info" | "error" | "success" = "info") => {
+  const pushToast = (message: string, type: "info" | "error" | "success" | "warning" = "info") => {
     setToast({ message, type });
   };
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
   const [refreshingResumeMatchIds, setRefreshingResumeMatchIds] = useState<Set<string>>(new Set());
   const [candidateProfileUrls, setCandidateProfileUrls] = useState<Record<string, string>>({});
 
@@ -3117,7 +3133,9 @@ export default function CandidateRankingsPage() {
               ? "border-emerald-200 bg-emerald-50 text-emerald-700"
               : toast.type === "error"
                 ? "border-rose-200 bg-rose-50 text-rose-700"
-                : "border-slate-200 bg-white text-slate-700"
+                : toast.type === "warning"
+                  ? "border-amber-200 bg-amber-50 text-amber-700"
+                  : "border-slate-200 bg-white text-slate-700"
               }`}
           >
             {toast.message}

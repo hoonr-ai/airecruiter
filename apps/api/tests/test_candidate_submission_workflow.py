@@ -323,3 +323,54 @@ async def test_save_candidate_feedback_db_error_raises_500(monkeypatch):
     assert exc_info.value.detail == "Failed to persist candidate feedback in database. Please try again."
     # Verify that because DB failed first, no JobDiva note was created
     assert len(jobdiva_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypatch):
+    from routers import candidates as cand_module
+    from services.jobdiva import jobdiva_service
+
+    monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
+
+    fake_cand_row = (
+        123, "21574563071254", "26-12137", {}, "32163479",
+        "Srinivasan Subramanian", "Dummy - Java Developer", "Pyramid"
+    )
+    fake_conn = _FakeConnection(select_row=fake_cand_row)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
+
+    jobdiva_calls = []
+    async def fake_create_note(**kwargs):
+        jobdiva_calls.append(kwargs)
+        return {"status": "success"}
+
+    monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
+    monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
+
+    user = UserIdentity(
+        email="recruiter@pyramidci.com",
+        role="recruiter"
+    )
+
+    request = CandidateFeedbackRequest(
+        feedback_type="Submit",
+        submission_type="external"
+    )
+
+    # Calling with JobDiva numeric candidate_id string (from report page)
+    res = await cand_module.save_candidate_feedback(
+        job_id_or_ref="32163479",
+        candidate_id="21574563071254",
+        request=request,
+        user=user
+    )
+
+    assert res["status"] == "success"
+    assert res["action_string"] == "PAIR External Submission"
+    assert res["jobdiva_candidate_id"] == "21574563071254"
+    assert res["jobdiva_job_ref"] == "32163479"
+    assert len(jobdiva_calls) == 1
+    assert jobdiva_calls[0]["candidate_id"] == "21574563071254"
+    assert jobdiva_calls[0]["job_id"] == "32163479"
+    assert jobdiva_calls[0]["action"] == "PAIR External Submission"
+
