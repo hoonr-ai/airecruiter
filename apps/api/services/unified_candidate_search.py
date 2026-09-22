@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional, Sequence, Tuple
 from pydantic import BaseModel
 
 from services.jobdiva import JobDivaService
-from utils.email_utils import is_placeholder_email
+from utils.email_utils import is_placeholder_email, is_work_email
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
@@ -566,19 +566,22 @@ class UnifiedCandidateSearch:
             return
 
         if overwrite:
-            new_email = enrich.get("workEmail") or enrich.get("personalEmail") or ""
+            new_email = enrich.get("personalEmail") or ""
+            if is_work_email(new_email):
+                new_email = ""
             new_phone = enrich.get("mobilePhone") or enrich.get("workPhone") or ""
             if new_email:
                 cand["email"] = new_email
             if new_phone:
                 cand["phone"] = new_phone
         else:
-            cand["email"] = (
-                cand.get("email")
-                or enrich.get("workEmail")
-                or enrich.get("personalEmail")
-                or ""
-            )
+            cand_email = cand.get("email") or ""
+            if is_work_email(cand_email):
+                cand_email = ""
+            new_email = cand_email or enrich.get("personalEmail") or ""
+            if is_work_email(new_email):
+                new_email = ""
+            cand["email"] = new_email
             cand["phone"] = (
                 cand.get("phone")
                 or enrich.get("mobilePhone")

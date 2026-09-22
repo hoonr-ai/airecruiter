@@ -45,3 +45,38 @@ def is_placeholder_email(email: str) -> bool:
     if domain == "jobdiva.com":
         return True
     return False
+
+_FREE_EMAIL_DOMAINS = {
+    "gmail.com",
+    "yahoo.com",
+    "hotmail.com",
+    "outlook.com",
+    "aol.com",
+    "icloud.com",
+    "mail.com",
+    "protonmail.com",
+    "yandex.com",
+    "zoho.com",
+    "gmx.com",
+    "live.com",
+    "msn.com",
+    "me.com",
+    "mac.com",
+}
+
+def is_work_email(email: str) -> bool:
+    """Determine if an email is likely a work email based on its domain.
+    Returns True if the domain is NOT in the list of known free email providers.
+    """
+    if not email or "@" not in email:
+        return False
+    
+    normalized = email.strip().lower()
+    _, domain = normalized.rsplit("@", 1)
+    
+    # If it's a known placeholder, we don't classify it as a valid work email either
+    if is_placeholder_email(normalized):
+        return False
+        
+    return domain not in _FREE_EMAIL_DOMAINS
+
