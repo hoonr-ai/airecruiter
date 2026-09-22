@@ -13,7 +13,7 @@ import {
   Server,
   Users,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, isNotFoundError, LIVE_REPORT_PROD_ONLY_MESSAGE } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { useLiveReportStream } from "@/hooks/use-live-report-stream";
 import { JobBlock } from "./JobBlock";
@@ -134,22 +134,30 @@ export default function LiveReportPage() {
           ? launchesData.value
           : launchesData.value?.launches || [];
         setLaunches(list);
-        if (list.length > 0 && !selectedBulkId) {
-          setSelectedBulkId(list[0].bulk_id);
+        if (list.length > 0) {
+          setSelectedBulkId((prev) => prev || list[0].bulk_id);
         }
       } else {
         console.error("Failed to load live report launches:", launchesData.reason);
-        setLaunchesError("Unable to load launches. Please check API connection and retry.");
+        if (isNotFoundError(launchesData.reason)) {
+          setLaunchesError(LIVE_REPORT_PROD_ONLY_MESSAGE);
+        } else {
+          setLaunchesError("Unable to load launches. Please check API connection and retry.");
+        }
       }
 
       if (healthData.status === "fulfilled") {
         setHealth(healthData.value);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to load live report initial data:", err);
-      setLaunchesError("Failed to communicate with the analytics service.");
+      if (isNotFoundError(err)) {
+        setLaunchesError(LIVE_REPORT_PROD_ONLY_MESSAGE);
+      } else {
+        setLaunchesError("Failed to communicate with the analytics service.");
+      }
     }
-  }, [selectedBulkId]);
+  }, []);
 
   useEffect(() => {
     fetchLaunchesAndHealth();

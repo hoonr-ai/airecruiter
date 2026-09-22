@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api, authFetch } from "@/lib/api";
+import { api, authFetch, isNotFoundError, LIVE_REPORT_PROD_ONLY_MESSAGE } from "@/lib/api";
 import type { Snapshot } from "../app/admin/live-report/types";
 
 interface UseLiveReportStreamOptions {
@@ -50,7 +50,11 @@ export function useLiveReportStream({
       setError(null);
     } catch (err: any) {
       console.error("Failed to fetch live report snapshot:", err);
-      setError(err?.message || "Failed to load launch snapshot");
+      if (isNotFoundError(err)) {
+        setError(LIVE_REPORT_PROD_ONLY_MESSAGE);
+      } else {
+        setError(err?.message || "Failed to load launch snapshot");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -102,6 +106,7 @@ export function useLiveReportStream({
     isManuallyClosedRef.current = false;
 
     const streamUrl = api.liveReport.streamUrl(bulkId);
+    let isNonRetriable = false;
 
     try {
       const response = await authFetch(streamUrl, {
@@ -112,6 +117,11 @@ export function useLiveReportStream({
       });
 
       if (!response.ok || !response.body) {
+        if (response.status === 404 || response.status === 403) {
+          console.warn(`Live report stream non-retriable status (${response.status}). Suppressing SSE reconnect.`);
+          isNonRetriable = true;
+          return;
+        }
         throw new Error(`Stream request rejected with status ${response.status}`);
       }
 
@@ -181,7 +191,11 @@ export function useLiveReportStream({
       }
       console.warn("Live report SSE connection dropped. Reconnecting with backoff...", err);
     } finally {
-      if (abortController.signal.aborted || isManuallyClosedRef.current) {
+      if (abortController.signal.aborted || isManuallyClosedRef.current || isNonRetriable) {
+        setIsConnected(false);
+        if (heartbeatWatchdogRef.current) {
+          clearTimeout(heartbeatWatchdogRef.current);
+        }
         return;
       }
 
