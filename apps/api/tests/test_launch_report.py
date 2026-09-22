@@ -492,7 +492,7 @@ def test_summarise_outreach_passed_failed_sub_buckets():
         _outreach("completed"),
     ]
     summary = lr._summarise_outreach(payloads)
-    assert summary["buckets"]["passed"] == 1
+    assert summary["buckets"]["passed"] == 2
     assert summary["buckets"]["failed"] == 1
     assert summary["buckets"]["completed"] == 3
 

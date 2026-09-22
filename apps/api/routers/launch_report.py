@@ -629,7 +629,7 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
+def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False, include_pending_extra: bool = True) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -735,7 +735,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         elif normalized_status in ("failed", "fail"):
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged, shift_phases=shift_phases)
+        phase = _extract_phase(merged, shift_phases=shift_phases, include_pending_extra=include_pending_extra)
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
