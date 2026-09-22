@@ -4,6 +4,7 @@ Used across routers (e.g. launch_report, voice_agent) to map PairBot status,
 phase, and channel variants onto canonical values (contact_check, phase1/phase1_6hr/phase2/phase3,
 extra outreach phases, and call/sms/web).
 """
+import json
 import logging
 from typing import Any, Dict, Optional, Iterable
 
