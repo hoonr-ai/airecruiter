@@ -4,8 +4,9 @@ Used across routers (e.g. launch_report, voice_agent) to map PairBot status,
 phase, and channel variants onto canonical values (contact_check, phase1/phase1_6hr/phase2/phase3,
 extra outreach phases, and call/sms/web).
 """
+import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -116,3 +117,161 @@ def normalize_channel(raw: Optional[str]) -> Optional[str]:
         return mapped
     logger.warning(f"OUTREACH-NORMALIZATION: unrecognised communication channel/source {value!r} — not counted")
     return None
+
+
+def _parse_job_payload(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _truthy_flag(value: Any) -> bool:
+    if value is True or value == 1:
+        return True
+    if value is False or value == 0:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return False
+
+
+def _is_high_score_extra_job(job: Dict[str, Any], job_payload: Optional[Dict[str, Any]] = None) -> bool:
+    payload = job_payload if job_payload is not None else _parse_job_payload(job.get("payload"))
+    if _truthy_flag(payload.get("is_high_score_extra")):
+        return True
+    reminder = str(payload.get("reminder_type") or job.get("reminder_type") or "").strip().lower()
+    return reminder == "high_score_extra"
+
+
+def _job_dedupe_key(job: Dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "job_type": job.get("job_type"),
+            "scheduled_at": str(job.get("scheduled_at") or ""),
+            "status": job.get("status"),
+            "payload": _parse_job_payload(job.get("payload")),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _iter_outreach_jobs(payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    seen = set()
+    nested = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+    for source in (payload, nested):
+        for key in ("scheduled_jobs", "jobs", "outreach_jobs"):
+            items = source.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                marker = _job_dedupe_key(item)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                yield item
+
+
+def promote_high_score_extra_phase(
+    payload: Optional[Dict[str, Any]],
+    raw_phase: Optional[str],
+    *,
+    include_pending_extra: bool = True,
+) -> Optional[str]:
+    """Promote to Extra 1/2/3 from high-score extra jobs and extra comms.
+
+    Pair Bot analytics only advances Extra from completed/processing extra jobs.
+    A still-pending extra stays Phase 1. Rankings and the launch report both
+    call this with include_pending_extra=False (via
+    summarise_launched_candidates); the default (True) is kept for callers that
+    want a queued Extra job to show up as Extra already.
+
+    Extra tokens are chosen by rank (_phase_rank): a later Extra (or P2+)
+    never loses to an older Extra 1 job. Already-stored extra tokens win
+    immediately.
+    """
+    phase = (raw_phase or "").strip().lower()
+    if not phase:
+        return raw_phase
+    if phase in {"pass", "fail", "completed", "passed", "failed"}:
+        return phase
+    # Already-persisted extra tokens win immediately.
+    if "extra" in phase:
+        return phase
+    if not isinstance(payload, dict):
+        return phase
+
+    canonical = normalize_phase(phase) or phase
+    stored_rank = _phase_rank(canonical)
+    best_extra: Optional[str] = None
+    best_rank = stored_rank
+
+    def _consider(token: Optional[str]) -> None:
+        nonlocal best_extra, best_rank
+        if not token:
+            return
+        rank = _phase_rank(token)
+        if rank > best_rank:
+            best_extra = token
+            best_rank = rank
+
+    nested = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+    for source in (payload, nested):
+        for bucket_key in ("communications", "events"):
+            for item in source.get(bucket_key) or []:
+                if not isinstance(item, dict):
+                    continue
+                item_phase = str(item.get("phase") or "").strip().lower()
+                if "extra" not in item_phase:
+                    continue
+                # Prefer canonical extra tokens; ignore unknown labels.
+                if item_phase in _OUTREACH_PHASE_RANK:
+                    _consider(item_phase)
+                else:
+                    aliased = normalize_phase(item_phase)
+                    if aliased and "extra" in aliased:
+                        _consider(aliased)
+
+    pending_extra: Optional[str] = None
+    # Completed/processing extra jobs compete by rank so Extra 1 cannot
+    # overwrite Extra 2/3. Pending extra is opt-in (launch report only).
+    for job in _iter_outreach_jobs(payload):
+        job_payload = _parse_job_payload(job.get("payload"))
+        if not _is_high_score_extra_job(job, job_payload):
+            continue
+        status = str(job.get("status") or "").strip().lower()
+        if status not in {"completed", "processing", "pending"}:
+            continue
+        high = str(job_payload.get("high_score_phase") or "").strip().lower()
+        if not high:
+            logger.warning(
+                "OUTREACH-NORMALIZATION: high-score extra job missing high_score_phase "
+                "— not promoting stored phase %r",
+                phase,
+            )
+            continue
+        high_canonical = normalize_phase(high) or high
+        target = _extra_token_for_base(high_canonical)
+        if not target:
+            continue
+        if status in {"completed", "processing"}:
+            _consider(target)
+        elif include_pending_extra and _phase_rank(target) > stored_rank:
+            if pending_extra is None or _phase_rank(target) > _phase_rank(pending_extra):
+                pending_extra = target
+
+    if pending_extra and _phase_rank(pending_extra) > best_rank:
+        return pending_extra
+    if best_extra:
+        return best_extra
+    if pending_extra:
+        return pending_extra
+    return canonical if canonical in _OUTREACH_PHASE_RANK else phase

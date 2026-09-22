@@ -4,21 +4,37 @@ One row per job whose FIRST PAIR launch landed on the requested calendar
 date, evaluated in America/New_York (EDT/EST) — not UTC — so a job launched
 at 21:00 EDT belongs to that day and not the next.
 
+Each row is that job's rank list, summarised. The Rankings page is the
+source of truth for a job's candidates, and this report must agree with it:
+
+  * one unit per launched PERSON, never per interview — a candidate who was
+    re-launched is one launched candidate whose status is read from their
+    latest interview, exactly as the rank list's table shows them;
+  * the job's whole lifetime, not just the launch day — the row is indexed
+    by the day the job first launched, but its numbers are the job's
+    current numbers, the same ones the Rankings header shows;
+  * the same population and the same classification code as the Rankings
+    header (`services/launched_candidates.py` + `summarise_launched_candidates`),
+    so "Launched" here equals "Candidates Launched" there and the four
+    status buckets always sum to it.
+
 Data comes from two places:
 
   * pair's own Postgres (`monitored_jobs`, `sourced_candidates`,
-    `engage_interview_audit`) for sourcing/launch/feedback columns;
+    `engage_interview_audit`) for sourcing/launch/feedback columns and the
+    stored status fallbacks;
   * pair-bot, live, via `GET /api/interviews/{id}/outreach-status` for the
-    outreach columns pair never stores — per-candidate status buckets,
-    channel counts (call/sms/web), phase distribution, and response times.
+    outreach columns pair never stores — per-candidate status, channel counts
+    (call/sms/web), phase distribution, and response times.
 
-The cross-service half is one call per launched interview, not per job. The
-cheaper `/api/dashboard/pair-outreach` endpoint filters on `pair_tag = 'pair'`
-and pair launches with `source: "Curate"` and no pair_tag (engagement.py:819),
-so it returns nothing for our candidates. The per-interview endpoint carries
-no such filter. Fan-out is bounded by a semaphore and a whole-report deadline;
-anything that times out degrades that job's outreach columns to null rather
-than failing the report.
+The cross-service half is one call per launched candidate (their latest
+interview), not per job. The cheaper `/api/dashboard/pair-outreach` endpoint
+filters on `pair_tag = 'pair'` and pair launches with `source: "Curate"` and no
+pair_tag (engagement.py:819), so it returns nothing for our candidates. The
+per-interview endpoint carries no such filter. Fan-out is bounded by a
+semaphore and a whole-report deadline; anything that times out degrades that
+candidate's outreach columns to the stored fallback rather than failing the
+report.
 """
 import asyncio
 import datetime
@@ -39,7 +55,23 @@ from routers._helpers import (
     _parse_posted_date,
     _parse_recruiter_emails,
 )
-from services.outreach_normalization import normalize_channel, normalize_phase
+from services.launched_candidates import (
+    fetch_launched_candidates,
+    fetch_sourced_candidates,
+    interview_id_of,
+)
+from services.engage_status import (
+    format_engage_status,
+    hf_display_from_payload,
+    parse_engage_score,
+    score_from_payload,
+    select_engage_status,
+)
+from services.outreach_normalization import (
+    normalize_channel,
+    normalize_phase,
+    promote_high_score_extra_phase,
+)
 
 
 router = APIRouter(prefix="/api/v1", tags=["Launch Report"])
@@ -199,15 +231,29 @@ def _midnight_eastern(day: Optional[datetime.date]) -> Optional[datetime.datetim
     return datetime.datetime.combine(day, datetime.time.min, tzinfo=REPORT_TIMEZONE)
 
 
-def _eastern_date(dt: Optional[datetime.datetime]) -> Optional[datetime.date]:
-    """Calendar date of a timestamp in report timezone."""
-    if dt is None:
-        return None
-    return dt.astimezone(REPORT_TIMEZONE).date()
-
-
 def _mean(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 1) if values else None
+
+
+def _status_rank(raw: Optional[str]) -> int:
+    return _STATUS_HIERARCHY.get((raw or "").strip().lower().replace(" ", "_"), 0)
+
+
+def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -> Optional[str]:
+    """Status for Pending / In Progress / Completed buckets.
+
+    The rule lives in ``services.engage_status.select_engage_status`` (shared
+    with the rank list table): a live ``interview_status`` replaces
+    ``outreach_status`` only when it reads further along on the display
+    ladder (Pending < In Progress < Pass/Fail), never on the raw pair-bot rank
+    alone — so ``active`` or ``phase2`` cannot displace a status the rank list
+    calls Pending, and nothing is ever downgraded. Handles the case where
+    ``GET /api/interviews/{id}/outreach-status`` returns ``interview_status:
+    in_progress`` while ``outreach_status`` is still ``pending`` (the reminder
+    sequence has not finished).
+    """
+    chosen = select_engage_status({**merged, "outreach_status": outreach_status})
+    return chosen if chosen is not None else outreach_status
 
 
 def _bucket_status(raw: Optional[str]) -> str:
@@ -238,8 +284,12 @@ def _normalize_phase(
 ) -> Optional[str]:
     """Map phase variants onto phase1/phase2/phase3/phase4/extra.
 
-    When shift_phases=True (Launch Report mode), PairBot retry phases are shifted
-    into Launch Report column indices:
+    Caller matrix (single source of truth for phase shifts):
+      - Launch Report and Rankings (summarise_launched_candidates):
+        shift_phases=True, include_pending_extra=False
+      - Raw PairBot (tests/other callers): shift_phases=False
+
+    When shift_phases=True (Launch Report and rankings outreach-stats):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase2
       phase2                 -> phase3
@@ -289,8 +339,20 @@ def _normalize_phase(
     return None
 
 
-def _extract_phase(outreach: Dict[str, Any], *, shift_phases: bool = True) -> Optional[str]:
-    """Pick phase from known keys, then fall back to status-shaped phase values."""
+def _extract_phase(
+    outreach: Dict[str, Any],
+    *,
+    shift_phases: bool = True,
+    promote_extra: bool = True,
+    include_pending_extra: bool = True,
+) -> Optional[str]:
+    """Pick phase from known keys, then fall back to status-shaped phase values.
+
+    Rankings and the launch report keep promotion on but set
+    include_pending_extra=False so a queued Extra job cannot bump P1→Extra 1.
+    Completed/processing Extra jobs and confirmed Extra comms still promote
+    when Pair Bot's raw column lags.
+    """
     raw = (
         outreach.get("outreach_phase")
         or outreach.get("phase")
@@ -402,67 +464,6 @@ def _fetch_jobs_launched_on(
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _fetch_candidate_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-    """Per-job candidate rows, keyed by the job key the row was written under.
-
-    Only the JSONB fields the report needs are pulled out in SQL; the
-    timestamp strings inside them are parsed in Python rather than cast in
-    SQL, because `->>` values are written by two services and a single
-    malformed one would abort the whole statement on a ::timestamptz cast.
-    """
-    if not job_keys:
-        return {}
-    sql = """
-        SELECT
-            jobdiva_id,
-            candidate_id,
-            created_at,
-            data->>'feedback_type'        AS feedback_type,
-            data->>'feedback_reason'      AS feedback_reason,
-            data->>'feedback_at'          AS feedback_at,
-            data->>'first_attempted_at'   AS first_attempted_at,
-            data->>'first_completed_at'   AS first_completed_at,
-            data->>'engage_completed_at'  AS engage_completed_at,
-            data->>'engage_status'        AS engage_status,
-            data->>'engage_interview_id'  AS engage_interview_id,
-            data->>'phase'                AS phase,
-            data->>'outreach_phase'       AS outreach_phase,
-            data->>'channel'              AS channel,
-            data->>'outreach_channel'     AS outreach_channel
-        FROM sourced_candidates
-        WHERE jobdiva_id = ANY(%s)
-    """
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    with conn.cursor() as cur:
-        cur.execute(sql, (job_keys,))
-        cols = [d[0] for d in cur.description]
-        for row in cur.fetchall():
-            record = dict(zip(cols, row))
-            out.setdefault(str(record["jobdiva_id"]), []).append(record)
-    return out
-
-
-def _fetch_audit_rows(conn, job_keys: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-    """Per-job launched-interview rows (interview_id + launch time)."""
-    if not job_keys:
-        return {}
-    sql = """
-        SELECT jobdiva_id, interview_id, candidate_id, created_at, status, response
-        FROM engage_interview_audit
-        WHERE jobdiva_id = ANY(%s)
-          AND NULLIF(interview_id, '') IS NOT NULL
-        ORDER BY created_at DESC, id DESC
-    """
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    with conn.cursor() as cur:
-        cur.execute(sql, (job_keys,))
-        cols = [d[0] for d in cur.description]
-        for row in cur.fetchall():
-            record = dict(zip(cols, row))
-            out.setdefault(str(record["jobdiva_id"]), []).append(record)
-    return out
-
-
 # ---------------------------------------------------------------------------
 # pair-bot side
 # ---------------------------------------------------------------------------
@@ -525,24 +526,6 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     return fetched
 
 
-def _extract_audit_status(row: Dict[str, Any]) -> str:
-    """Extract outreach or audit status from row dict or its response payload."""
-    st = str(row.get("status") or "").strip()
-    if st:
-        return st
-    resp = row.get("response")
-    if isinstance(resp, dict):
-        return str(resp.get("outreach_status") or resp.get("status") or "").strip()
-    if isinstance(resp, str) and resp.strip():
-        try:
-            parsed = json.loads(resp)
-            if isinstance(parsed, dict):
-                return str(parsed.get("outreach_status") or parsed.get("status") or "").strip()
-        except Exception:
-            pass
-    return ""
-
-
 def merge_outreach_payloads(
     cand_fallback: Dict[str, Any],
     audit_fallback: Dict[str, Any],
@@ -562,8 +545,10 @@ def merge_outreach_payloads(
             for k, v in source.items():
                 if v is not None:
                     if k in ("outreach_status", "status"):
-                        existing_st = str(merged_payload.get(k) or "").strip().lower()
-                        new_st = str(v).strip().lower()
+                        # Normalise spaces → underscores so "In Progress" and
+                        # "in_progress" both resolve to the same hierarchy key.
+                        existing_st = str(merged_payload.get(k) or "").strip().lower().replace(" ", "_")
+                        new_st = str(v).strip().lower().replace(" ", "_")
                         # If both statuses are recognized in the hierarchy, enforce monotonic progression.
                         # If either is unrecognised, allow the higher-priority layer to win so genuinely
                         # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
@@ -602,6 +587,18 @@ def build_merged_outreach_payload(
     raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
     if raw_comp:
         cand_fallback["first_completed_at"] = raw_comp
+    # Score and hard-filter status must travel with the candidate so that
+    # select_engage_status / format_engage_status can correctly classify
+    # fail-with-score vs outreach-miss and completed-pass vs completed-fail.
+    raw_score = cand_data.get("engage_score")
+    if raw_score not in (None, ""):
+        cand_fallback["engage_score"] = raw_score
+    raw_hf = cand_data.get("engage_hard_filter_status")
+    if raw_hf not in (None, ""):
+        cand_fallback["engage_hard_filter_status"] = raw_hf
+    raw_upd = cand_data.get("engage_updated_at")
+    if raw_upd not in (None, ""):
+        cand_fallback["engage_updated_at"] = raw_upd
 
     # Layer 2: Local DB Audit Row Response
     audit_fallback = {}
@@ -614,6 +611,16 @@ def build_merged_outreach_payload(
             logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
             audit_fallback = {}
             
+    # Webhook write-backs store pair-bot's interview `status`; older launch
+    # responses store `outreach_status`. The merge below ranks each key on
+    # its own, so a layer carrying only one of them would leave the other
+    # untouched — and a launch-time `sent` stamp in the JSONB would then hide
+    # a stored `in_progress`. Mirror the two keys so both take part.
+    if audit_fallback.get("status") and not audit_fallback.get("outreach_status"):
+        audit_fallback["outreach_status"] = audit_fallback["status"]
+    elif audit_fallback.get("outreach_status") and not audit_fallback.get("status"):
+        audit_fallback["status"] = audit_fallback["outreach_status"]
+
     if audit_status:
         st_hier = str(audit_status).strip().lower()
         curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
@@ -636,7 +643,7 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False) -> Dict[str, Any]:
+def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False, include_pending_extra: bool = True) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -660,18 +667,26 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
     first_contact_timestamps: List[datetime.datetime] = []
     first_attempted_timestamps: List[datetime.datetime] = []
     first_completed_timestamps: List[datetime.datetime] = []
+    first_pass_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
-        merged = {**payload, **outreach_dict}
+        # Top-level keys win. For a payload that came through
+        # build_merged_outreach_payload they hold the stored → audit → live
+        # monotonic merge and `outreach` is only a copy of pair-bot's live
+        # block; re-applying that block on top used to let its still-`pending`
+        # outreach-sequence state wipe a stored `in_progress` — the rank list
+        # table never did that, so header and table disagreed on one person.
+        # For a raw pair-bot body the top level has no status keys and the
+        # block simply fills them in.
+        merged = {**outreach_dict, **payload}
 
-        # If the payload came wrapped with an "outreach" dict (like from the UI or candidates API),
-        # we strictly avoid falling back to the top-level `payload["status"]` (which is the candidate's
-        # resume-screening status). If it's a flat payload, `payload["status"]` IS the outreach status.
-        if "outreach" in payload:
-            status_raw = merged.get("outreach_status") or outreach_dict.get("status")
-        else:
-            status_raw = merged.get("outreach_status") or merged.get("status")
+        # ONE status per candidate, the same selection the rank list table
+        # makes for its row (select_engage_status): the merge, lifted by a
+        # live interview_status only when that reads further along. Passing
+        # the original payload keeps a raw UI body's top-level `status` (the
+        # candidate's sourcing status) out of the running.
+        status_raw = select_engage_status(payload)
         normalized_status = (status_raw or "").strip().lower()
 
         # Candidates marked as failed/rejected who never actually engaged/attended
@@ -698,18 +713,54 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
                 status_raw = "pending"
                 normalized_status = "pending"
 
-        buckets[_bucket_status(status_raw)] += 1
+        funnel_raw = status_raw
 
-        # Passed/Failed are sub-buckets within "completed".
-        # _bucket_status already maps pass/fail → "completed", so we
-        # read the raw status directly to classify the sub-bucket without
-        # double-incrementing the completed counter.
-        if normalized_status in ("passed", "pass"):
+        # Classify exactly like the rank list's table (`format_engage_status`
+        # is what candidates.py stamps on each row), then bucket:
+        #   Pass / Fail            -> completed (+ passed / failed)
+        #   In Progress            -> in_progress
+        #   partial vocabulary     -> partial_complete (the table has no such
+        #                             label and shows these as Pending)
+        #   anything else          -> pending — including `sent` / `Initiated`
+        #                             (stamped at launch, before any contact),
+        #                             reminder phases reported as a status, and
+        #                             a terminal token without the score or
+        #                             hard-filter verdict the table needs to
+        #                             call it Pass or Fail.
+        # Bucketing off the raw pair-bot vocabulary instead used to count a
+        # just-launched `sent` candidate as In Progress while the table said
+        # Pending — the two screens must never disagree on one candidate.
+        display = format_engage_status(
+            normalized_status,
+            score_from_payload(merged),
+            hf_display_from_payload(merged),
+        )
+        if _bucket_status(funnel_raw) == "partial_complete":
+            bucket = "partial_complete"
+        elif display in ("Pass", "Fail"):
+            bucket = "completed"
+        elif display == "In Progress":
+            bucket = "in_progress"
+        else:
+            bucket = "pending"
+        buckets[bucket] += 1
+
+        if display == "Pass":
             buckets["passed"] += 1
-        elif normalized_status in ("failed", "fail"):
+            pass_at_raw = (
+                merged.get("first_pass_at")
+                or merged.get("first_completed_at")
+                or merged.get("engage_completed_at")
+                or merged.get("completed_at")
+                or merged.get("engage_updated_at")
+            )
+            pass_dt = _parse_iso(pass_at_raw)
+            if pass_dt:
+                first_pass_timestamps.append(pass_dt)
+        elif display == "Fail":
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged, shift_phases=shift_phases)
+        phase = _extract_phase(merged, shift_phases=shift_phases, include_pending_extra=include_pending_extra)
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
@@ -782,6 +833,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         "first_contact_at": min(first_contact_timestamps) if first_contact_timestamps else None,
         "first_attempted_at": min(first_attempted_timestamps) if first_attempted_timestamps else None,
         "first_completed_at": min(first_completed_timestamps) if first_completed_timestamps else None,
+        "first_pass_at": min(first_pass_timestamps) if first_pass_timestamps else None,
     }
 
 
@@ -795,6 +847,7 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     sourced_at: List[datetime.datetime] = []
     first_attempted_at: List[datetime.datetime] = []
     first_completed_at: List[datetime.datetime] = []
+    first_pass_timestamps: List[datetime.datetime] = []
 
     for row in rows:
         feedback_type = (row.get("feedback_type") or "").strip().lower()
@@ -816,6 +869,22 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if completed:
             first_completed_at.append(completed)
 
+        display = format_engage_status(
+            (row.get("engage_status") or "").strip().lower(),
+            parse_engage_score(row.get("engage_score")),
+            (row.get("engage_hard_filter_status") or "").strip().lower(),
+        )
+        if display == "Pass":
+            pass_at_raw = (
+                row.get("first_pass_at")
+                or row.get("first_completed_at")
+                or row.get("engage_completed_at")
+                or row.get("engage_updated_at")
+            )
+            pass_dt = _parse_iso(pass_at_raw)
+            if pass_dt:
+                first_pass_timestamps.append(pass_dt)
+
         if feedback_type and has_reason:
             elapsed = _minutes_between(
                 _parse_iso(row.get("engage_completed_at")),
@@ -836,58 +905,111 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
             default=None,
         ),
+        "first_pass_at": min(first_pass_timestamps) if first_pass_timestamps else None,
     }
 
 
+# ---------------------------------------------------------------------------
+# Launched candidates → outreach columns
+# ---------------------------------------------------------------------------
+# JSONB engage fields a launched-candidate row carries (services/launched_candidates.py).
+_CANDIDATE_PAYLOAD_FIELDS = (
+    "engage_status",
+    "engage_score",
+    "engage_hard_filter_status",
+    "engage_completed_at",
+    "engage_updated_at",
+    "first_attempted_at",
+    "first_completed_at",
+    "phase",
+    "outreach_phase",
+    "channel",
+    "outreach_channel",
+)
+
+
+def candidate_outreach_payload(
+    row: Dict[str, Any], live_api: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Merged outreach payload for ONE launched candidate.
+
+    Same three layers, in the same order, as the rank list builds for each of
+    its table rows (candidates.py get_job_candidates): the candidate's JSONB
+    engage fields, then their latest audit row, then pair-bot's live answer for
+    the interview the row points at. A candidate we know nothing about beyond
+    "launched" is pending, so the four buckets always sum to launched.
+    """
+    cand_data = {
+        key: row.get(key)
+        for key in _CANDIDATE_PAYLOAD_FIELDS
+        if row.get(key) not in (None, "")
+    }
+    # The rank list falls back to engage_candidate_score when engage_score is
+    # unset — and a Fail only counts as Fail with a score (format_engage_status).
+    if cand_data.get("engage_score") is None and row.get("engage_candidate_score") not in (None, ""):
+        cand_data["engage_score"] = row["engage_candidate_score"]
+    merged = build_merged_outreach_payload(
+        cand_data, row.get("audit_response"), row.get("audit_status"), live_api
+    )
+    if not (merged.get("outreach_status") or merged.get("status")):
+        merged = {**merged, "outreach_status": "pending"}
+    return merged
+
+
+def summarise_launched_candidates(
+    launched_rows: List[Dict[str, Any]],
+    live_by_interview: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Outreach columns for one job over its launched candidates.
+
+    The launch report row and the rank list's header stats both call this, so
+    Pending / In Progress / Completed / Partial Complete / Passed / Failed, the
+    phase and channel columns and the lifecycle timestamps are one computation
+    over one population (one unit per launched person, latest interview,
+    lifetime of the job). Phases follow the rank list rule: a still-pending
+    Extra job stays Phase 1.
+
+    ``resolved`` counts candidates with any status evidence (live pair-bot
+    answer or a stored audit / JSONB status); ``launched`` is the population.
+    """
+    payloads: List[Dict[str, Any]] = []
+    resolved = 0
+    for row in launched_rows:
+        iid = interview_id_of(row)
+        live_api = live_by_interview.get(iid) if iid else None
+        if (
+            live_api is not None
+            or row.get("audit_status")
+            or row.get("audit_response")
+            or row.get("engage_status")
+        ):
+            resolved += 1
+        payloads.append(candidate_outreach_payload(row, live_api))
+
+    summary = _summarise_outreach(payloads, shift_phases=True, include_pending_extra=False)
+    summary["launched"] = len(launched_rows)
+    summary["resolved"] = resolved
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Row assembly
+# ---------------------------------------------------------------------------
 def _build_row(
     job: Dict[str, Any],
-    candidate_rows: List[Dict[str, Any]],
-    audit_rows: List[Dict[str, Any]],
-    outreach_by_interview: Dict[str, Dict[str, Any]],
+    launched_rows: List[Dict[str, Any]],
+    sourced_rows: List[Dict[str, Any]],
+    live_by_interview: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    cand = _summarise_candidates(candidate_rows)
+    """One report row: the job's rank list, summarised.
 
-    cand_by_interview = {
-        str(c["engage_interview_id"]): c
-        for c in candidate_rows
-        if c.get("engage_interview_id")
-    }
-    cand_by_id = {
-        str(c["candidate_id"]): c
-        for c in candidate_rows
-        if c.get("candidate_id")
-    }
-
-    payloads = []
-    num_resolved = 0
-    for a in audit_rows:
-        iid = str(a.get("interview_id") or "")
-        if not iid:
-            continue
-
-        cid = str(a.get("candidate_id") or "")
-        cand_data = cand_by_interview.get(iid) or (cand_by_id.get(cid) if cid else {}) or {}
-        raw_resp = a.get("response")
-        audit_status = a.get("status")
-        live_api = outreach_by_interview.get(iid)
-
-        if live_api is not None or cand_data or raw_resp or audit_status:
-            num_resolved += 1
-
-        merged_payload = build_merged_outreach_payload(
-            cand_data,
-            raw_resp,
-            audit_status,
-            live_api
-        )
-
-        # Enforce total fallback contract: an unresolved or empty payload must
-        # never be dropped. Default to pending so sum(buckets) == total_launched.
-        if not merged_payload or not (merged_payload.get("outreach_status") or merged_payload.get("status")):
-            merged_payload = {**merged_payload, "outreach_status": "pending"}
-        payloads.append(merged_payload)
-
-    outreach = _summarise_outreach(payloads, shift_phases=True)
+    ``launched_rows`` / ``sourced_rows`` are the rank list's populations for
+    this job (services/launched_candidates.py) over its whole lifetime — the
+    row is indexed by the day the job first launched, but its numbers are the
+    job's current numbers, the same ones the Rankings page shows.
+    """
+    cand = _summarise_candidates(sourced_rows)
+    outreach = summarise_launched_candidates(launched_rows, live_by_interview)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -895,21 +1017,17 @@ def _build_row(
     pair_published_at = _parse_monitored_jobs_timestamp(job.get("job_created_at_text"))
     launch_at = _parse_iso(job.get("first_launch_at"))
     jobdiva_published = _parse_posted_date(job.get("posted_date"))
-    # Day-scoped truth: one unique launched interview per audit row on that
-    # launch day. Using this avoids lifetime-count inflation in range mode.
-    total_launched = len(
-        {
-            str(a.get("interview_id") or "").strip()
-            for a in audit_rows
-            if str(a.get("interview_id") or "").strip()
-        }
-    )
+    total_launched = outreach["launched"]
+    num_resolved = outreach["resolved"]
 
     buckets = outreach["buckets"]
+    pass_times = [t for t in (outreach.get("first_pass_at"), cand.get("first_pass_at")) if t]
+    merged_first_pass = min(pass_times) if pass_times else None
+    live_ttp = _minutes_between(launch_at, merged_first_pass)
     # Percentage = (Completed + Partial Complete) / Total Launched * 100.
     #
-    # Undefined rather than 0 when nothing launched, and undefined when the
-    # outreach fan-out resolved nothing — a 0% that only means "pair-bot did
+    # Undefined rather than 0 when nothing launched, and undefined when no
+    # candidate has any status evidence — a 0% that only means "pair-bot did
     # not answer" would read as a real result.
     percentage = (
         round((buckets["completed"] + buckets["partial_complete"]) / total_launched * 100, 1)
@@ -933,8 +1051,10 @@ def _build_row(
         "jobdiva_published_date": jobdiva_published.isoformat() if jobdiva_published else None,
         "pair_published_at": _edt(pair_published_at),
         "time_to_source_minutes": _minutes_between(pair_published_at, cand["first_sourced_at"]),
+        # The rank list's candidate total for this job.
         "total_candidates_sourced": cand["total_sourced"],
         "pair_launch_at": _edt(launch_at),
+        # The rank list's "Candidates Launched": people, not interviews.
         "total_candidates_launched": total_launched,
         # Time to Launch spans the whole pipeline: JobDiva posting → PAIR
         # launch. Anchored on posted_date (day granularity — JobDiva gives no
@@ -945,6 +1065,7 @@ def _build_row(
         # in pair before going out.
         "turn_around_time_minutes": _minutes_between(pair_published_at, launch_at),
 
+        # Pending + In Progress + Completed + Partial Complete == Launched.
         "pending": buckets["pending"],
         "in_progress": buckets["in_progress"],
         "completed": buckets["completed"],
@@ -961,6 +1082,10 @@ def _build_row(
 
         "submitted_candidates": cand["submitted_candidates"],
         "rejected_candidates": cand["rejected_candidates"],
+        # Pass / Fail per launched candidate, classified exactly like the rank
+        # list's table (format_engage_status over the merged payload).
+        "passed_candidates": buckets["passed"],
+        "failed_candidates": buckets["failed"],
         # Completed candidates the recruiter has not yet actioned either way.
         "outstanding_feedback": max(
             buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
@@ -986,31 +1111,17 @@ def _build_row(
         "extra3": outreach["phases"]["extra3"],
         "percentage": percentage,
 
+        # Earliest timestamp at which any launched candidate reached Pass.
+        # Merges the outreach (launched) path and the sourced-candidate path
+        # to handle stale JSONB (live pair-bot may show Pass before the JSONB
+        # is updated) and audit-row loss (stored JSONB is the only record).
+        "first_pass_at": _edt(merged_first_pass),
+
         # Lets the UI mark a row whose outreach columns are partial rather
         # than showing dashes that look like real zeros.
         "outreach_detail_resolved": num_resolved,
-        "outreach_detail_expected": len(audit_rows),
+        "outreach_detail_expected": total_launched,
     }
-
-
-def _load_report_inputs(
-    start_date: datetime.date, end_date: datetime.date, scope_team_id: Optional[str]
-) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
-    """All Postgres reads for the report, on a worker thread (psycopg2 is sync)."""
-    conn = get_db_connection()
-    try:
-        scope = _load_team_scope(conn, scope_team_id) if scope_team_id else None
-        jobs = _fetch_jobs_launched_on(conn, start_date, scope, end_date)
-        if not jobs:
-            return [], {}, {}
-
-        # sourced_candidates / engage_interview_audit rows were written under
-        # either key, so look up both and merge (mirrors _compute_candidate_counters).
-        keys = sorted({key for job in jobs for key in _keys_for(job)})
-
-        return jobs, _fetch_candidate_rows(conn, keys), _fetch_audit_rows(conn, keys)
-    finally:
-        conn.close()
 
 
 def _keys_for(job: Dict[str, Any]) -> List[str]:
@@ -1022,25 +1133,31 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
     return keys
 
 
-def _candidate_rows_as_of_first_launch(
-    candidate_rows: List[Dict[str, Any]], job: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-    """Keep sourcing metrics historical to the job's initial launch.
+def _load_report_inputs(
+    start_date: datetime.date, end_date: datetime.date, scope_team_id: Optional[str]
+) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+    """All Postgres reads for the report, on a worker thread (psycopg2 is sync).
 
-    The report has one row for that launch event. Including candidates sourced
-    days or weeks later makes the row grow every time a historical report is
-    regenerated. Rows without a usable source timestamp are excluded: there
-    is no defensible way to assign them to an as-of report.
+    Returns (jobs, launched_by_job, sourced_by_job), the last two keyed by
+    str(job_id). Both populations are the rank list's, for the job's whole
+    lifetime — see services/launched_candidates.py.
     """
-    first_launch_at = _parse_iso(job.get("first_launch_at"))
-    if first_launch_at is None:
-        return []
-    return [
-        row
-        for row in candidate_rows
-        if (created_at := _parse_iso(row.get("created_at"))) is not None
-        and created_at <= first_launch_at
-    ]
+    conn = get_db_connection()
+    try:
+        scope = _load_team_scope(conn, scope_team_id) if scope_team_id else None
+        jobs = _fetch_jobs_launched_on(conn, start_date, scope, end_date)
+        launched_by_job: Dict[str, List[Dict[str, Any]]] = {}
+        sourced_by_job: Dict[str, List[Dict[str, Any]]] = {}
+        for job in jobs:
+            # sourced_candidates / engage_interview_audit rows were written
+            # under either key, so every lookup takes both.
+            keys = _keys_for(job)
+            job_key = str(job["job_id"])
+            launched_by_job[job_key] = fetch_launched_candidates(conn, keys) if keys else []
+            sourced_by_job[job_key] = fetch_sourced_candidates(conn, keys) if keys else []
+        return jobs, launched_by_job, sourced_by_job
+    finally:
+        conn.close()
 
 
 @router.get("/launch-report")
@@ -1105,7 +1222,7 @@ async def get_launch_report(
         report_start_date = report_end_date = yesterday
 
     try:
-        jobs, candidates_by_key, audit_by_key = await asyncio.to_thread(
+        jobs, launched_by_job, sourced_by_job = await asyncio.to_thread(
             _load_report_inputs, report_start_date, report_end_date, scope_team_id
         )
     except LookupError as e:
@@ -1116,85 +1233,26 @@ async def get_launch_report(
         logger.error(f"LAUNCH-REPORT: failed to load {report_start_date}..{report_end_date}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to build the launch report.")
 
-    # Fan out over every launched interview across every job in one pass, so
-    # the concurrency cap applies to the whole report rather than per job.
-    audit_by_job: Dict[str, List[Dict[str, Any]]] = {}
-    interview_ids: List[str] = []
-    for job in jobs:
-        rows = [row for key in _keys_for(job) for row in audit_by_key.get(key, [])]
-        # Deduplicate audit rows per interview_id.
-        # Two distinct concerns are decoupled:
-        # 1. Scope: An interview belongs to a report window based strictly on its
-        #    INITIAL launch timestamp (earliest created_at).
-        # 2. Status: Once in scope, it is bucketed using its latest known status
-        #    and monotonic state hierarchy (completed > partial > in_progress > pending).
-        deduped: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            iid = str(row.get("interview_id") or "").strip()
-            if not iid:
-                continue
-            if iid not in deduped:
-                deduped[iid] = dict(row)
-                deduped[iid]["first_launched_at"] = row.get("created_at")
-            else:
-                existing = deduped[iid]
-                # 1. Track earliest created_at for launch-window scoping
-                ex_dt = _parse_iso(existing.get("first_launched_at") or existing.get("created_at"))
-                row_dt = _parse_iso(row.get("created_at"))
-                if ex_dt and row_dt:
-                    if row_dt < ex_dt:
-                        existing["first_launched_at"] = row["created_at"]
-                        existing["created_at"] = row["created_at"]
-                elif row_dt and not ex_dt:
-                    existing["first_launched_at"] = row["created_at"]
-                    existing["created_at"] = row["created_at"]
+    # One live pair-bot call per launched candidate (their latest interview),
+    # fanned out across every job in one pass so the concurrency cap applies
+    # to the whole report rather than per job.
+    interview_ids = sorted({
+        iid
+        for launched_rows in launched_by_job.values()
+        for row in launched_rows
+        if (iid := interview_id_of(row))
+    })
+    live_by_interview = await _fetch_all_outreach(interview_ids)
 
-                # 2. Monotonic status hierarchy: favor higher progression state
-                row_st = _extract_audit_status(row).lower()
-                ex_st = _extract_audit_status(existing).lower()
-                if row_st in _STATUS_HIERARCHY and ex_st in _STATUS_HIERARCHY:
-                    if _STATUS_HIERARCHY[row_st] > _STATUS_HIERARCHY[ex_st]:
-                        existing["status"] = row.get("status") or row_st
-                        if row.get("response"):
-                            existing["response"] = row.get("response")
-                    elif row.get("response") and not existing.get("response"):
-                        existing["response"] = row.get("response")
-                elif row_st and not ex_st:
-                    existing["status"] = row.get("status") or row_st
-                    if row.get("response"):
-                        existing["response"] = row.get("response")
-                elif row.get("response") and not existing.get("response"):
-                    existing["response"] = row.get("response")
-
-        # Report scoping: decides which interviews are in scope based strictly on
-        # initial launch date, never dropping candidates due to subsequent status updates.
-        day_rows = [
-            row
-            for row in deduped.values()
-            if (launch_date := _eastern_date(_parse_iso(row.get("first_launched_at") or row.get("created_at")))) is not None
-            and report_start_date <= launch_date <= report_end_date
-        ]
-
-        audit_by_job[str(job["job_id"])] = day_rows
-        interview_ids.extend(str(r.get("interview_id")) for r in day_rows if r.get("interview_id"))
-
-    outreach_by_interview = await _fetch_all_outreach(sorted(set(interview_ids)))
-
-    rows = []
-    for job in jobs:
-        candidate_rows = {
-            row["candidate_id"]: row
-            for key in _keys_for(job)
-            for row in candidates_by_key.get(key, [])
-        }
-        rows.append(
-            _build_row(
-                job,
-                _candidate_rows_as_of_first_launch(list(candidate_rows.values()), job),
-                audit_by_job[str(job["job_id"])],
-                outreach_by_interview,
-            )
+    rows = [
+        _build_row(
+            job,
+            launched_by_job.get(str(job["job_id"]), []),
+            sourced_by_job.get(str(job["job_id"]), []),
+            live_by_interview,
         )
+        for job in jobs
+    ]
 
     return {
         "status": "success",

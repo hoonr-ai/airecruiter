@@ -28,7 +28,8 @@ from models import (
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
-from routers.launch_report import _fetch_all_outreach, _summarise_outreach, merge_outreach_payloads
+from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
+from services.launched_candidates import fetch_launched_candidates, interview_id_of
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1660,15 +1661,48 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
         logger.error(f"Save Requirements Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save requirements: {str(e)}")
 
+
+def _empty_outreach_stats() -> dict:
+    """Fresh nested zeros so empty-job responses never share mutable dicts."""
+    return {
+        "buckets": {
+            "pending": 0,
+            "in_progress": 0,
+            "completed": 0,
+            "partial_complete": 0,
+            "passed": 0,
+            "failed": 0,
+        },
+        "phases": {
+            "phase1": 0,
+            "phase2": 0,
+            "phase3": 0,
+            "phase4": 0,
+            "extra": 0,
+            "extra1": 0,
+            "extra2": 0,
+            "extra3": 0,
+        },
+        "channels": {"call": 0, "sms": 0, "web": 0},
+        "launched": 0,
+        "resolved": 0,
+    }
+
+
 @router.get("/jobs/{job_id_or_ref}/outreach-stats")
 async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
-    """
-    Fetches live outreach statistics from pair-bot for all candidates launched on a specific job.
+    """Live outreach statistics for the candidates launched on one job.
+
+    Exactly the computation behind this job's launch-report row
+    (`summarise_launched_candidates` over `fetch_launched_candidates`), so the
+    Rankings header, its "Candidates Launched" figure and the launch report
+    always agree: one unit per launched PERSON (their latest interview), over
+    the job's whole lifetime. A re-launched candidate is one candidate, and
+    Pending + In Progress + Completed + Partial Complete == Candidates Launched.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
     
 
-    
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -1678,99 +1712,27 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
                 LIMIT 1
             """, (job_id_or_ref, job_id_or_ref))
             result = cur.fetchone()
-            if not result:
-                return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
-            
-            # Note: We rely on Python's 'or' treating an empty string as falsy here.
-            # This ensures that if jobdiva_id is '', we fall back to job_id instead
-            # of querying engage_interview_audit with jobdiva_id='' (which would pool
-            # candidates from all jobs missing a JobDiva reference).
-            resolved_jobdiva_id = result[0] or result[1]
-            resolved_numeric_job_id = result[1] or result[0]
-            
-            cur.execute("""
-                SELECT
-                    COALESCE(NULLIF(ea.interview_id, ''), sc.data->>'engage_interview_id') AS interview_id,
-                    COALESCE(NULLIF(ea.status, ''), sc.data->>'engage_status') AS status,
-                    ea.response,
-                    sc.data->>'engage_status' AS sc_status,
-                    sc.data->>'outreach_phase' AS sc_phase
-                FROM (
-                    SELECT DISTINCT ON (candidate_id)
-                        candidate_id, interview_id, status, response
-                    FROM engage_interview_audit
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                    ORDER BY candidate_id, id DESC
-                ) ea
-                FULL OUTER JOIN (
-                    SELECT DISTINCT ON (candidate_id)
-                        candidate_id, data
-                    FROM sourced_candidates
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                      AND (
-                          COALESCE(NULLIF(data->>'engage_interview_id', ''), '') <> ''
-                          OR COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
-                      )
-                    ORDER BY candidate_id, id DESC
-                ) sc ON sc.candidate_id = ea.candidate_id
-            """, (
-                str(resolved_jobdiva_id), str(resolved_numeric_job_id),
-                str(resolved_jobdiva_id), str(resolved_numeric_job_id),
-            ))
-            launched_rows = cur.fetchall()
+        if not result:
+            return _empty_outreach_stats()
+
+        # Note: We rely on Python's 'or' treating an empty string as falsy here.
+        # This ensures that if jobdiva_id is '', we fall back to job_id instead
+        # of querying engage_interview_audit with jobdiva_id='' (which would pool
+        # candidates from all jobs missing a JobDiva reference).
+        resolved_jobdiva_id = result[0] or result[1]
+        resolved_numeric_job_id = result[1] or result[0]
+        launched_rows = fetch_launched_candidates(
+            conn, [str(resolved_jobdiva_id), str(resolved_numeric_job_id)]
+        )
     finally:
         conn.close()
 
     if not launched_rows:
-        return {"buckets": {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}, "phases": {"phase1": 0, "phase2": 0, "phase3": 0}}
+        return _empty_outreach_stats()
 
-    interview_ids = sorted({
-        str(row[0]) for row in launched_rows
-        if row[0] and str(row[0]).strip()
-    })
-    payloads_dict = await _fetch_all_outreach(interview_ids) if interview_ids else {}
-
-    # Merge live pair-bot HTTP response with local database fallback (matching launch_report.py
-    # fallback order, though here we collapse to one row per candidate before merging).
-    # If live API returns data for an interview, live API is authoritative.
-    # If live API fails, 404s, or times out, local audit/candidate fallback prevents data loss.
-    merged_payloads = []
-    for row in launched_rows:
-        iid = str(row[0] or "").strip()
-        status_val = row[1]
-        raw_resp = row[2]
-        sc_phase = row[4]
-
-        cand_fallback = {}
-        if status_val:
-            cand_fallback["outreach_status"] = status_val
-        if sc_phase:
-            cand_fallback["outreach_phase"] = sc_phase
-
-        audit_fallback = {}
-        if isinstance(raw_resp, dict):
-            audit_fallback = dict(raw_resp)
-        elif isinstance(raw_resp, str) and raw_resp.strip():
-            try:
-                audit_fallback = json.loads(raw_resp)
-            except Exception as e:
-                logger.warning(f"Failed to decode audit response JSON for candidate: {e}")
-                audit_fallback = {}
-
-        if status_val:
-            if "outreach_status" not in audit_fallback:
-                audit_fallback["outreach_status"] = status_val
-            if "status" not in audit_fallback:
-                audit_fallback["status"] = status_val
-
-        live_api = payloads_dict.get(iid) if iid else None
-
-        merged = merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
-
-        if merged:
-            merged_payloads.append(merged)
-
-    return _summarise_outreach(merged_payloads)
+    interview_ids = sorted({iid for row in launched_rows if (iid := interview_id_of(row))})
+    live_by_interview = await _fetch_all_outreach(interview_ids) if interview_ids else {}
+    return summarise_launched_candidates(launched_rows, live_by_interview)
 
 @router.get("/jobs/{job_id}/monitored-data")
 async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):
