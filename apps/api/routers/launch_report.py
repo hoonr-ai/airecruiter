@@ -545,8 +545,10 @@ def merge_outreach_payloads(
             for k, v in source.items():
                 if v is not None:
                     if k in ("outreach_status", "status"):
-                        existing_st = str(merged_payload.get(k) or "").strip().lower()
-                        new_st = str(v).strip().lower()
+                        # Normalise spaces → underscores so "In Progress" and
+                        # "in_progress" both resolve to the same hierarchy key.
+                        existing_st = str(merged_payload.get(k) or "").strip().lower().replace(" ", "_")
+                        new_st = str(v).strip().lower().replace(" ", "_")
                         # If both statuses are recognized in the hierarchy, enforce monotonic progression.
                         # If either is unrecognised, allow the higher-priority layer to win so genuinely
                         # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
@@ -585,6 +587,18 @@ def build_merged_outreach_payload(
     raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
     if raw_comp:
         cand_fallback["first_completed_at"] = raw_comp
+    # Score and hard-filter status must travel with the candidate so that
+    # select_engage_status / format_engage_status can correctly classify
+    # fail-with-score vs outreach-miss and completed-pass vs completed-fail.
+    raw_score = cand_data.get("engage_score")
+    if raw_score not in (None, ""):
+        cand_fallback["engage_score"] = raw_score
+    raw_hf = cand_data.get("engage_hard_filter_status")
+    if raw_hf not in (None, ""):
+        cand_fallback["engage_hard_filter_status"] = raw_hf
+    raw_upd = cand_data.get("engage_updated_at")
+    if raw_upd not in (None, ""):
+        cand_fallback["engage_updated_at"] = raw_upd
 
     # Layer 2: Local DB Audit Row Response
     audit_fallback = {}
@@ -743,7 +757,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
             pass_dt = _parse_iso(pass_at_raw)
             if pass_dt:
                 first_pass_timestamps.append(pass_dt)
-        elif normalized_status in ("failed", "fail"):
+        elif display == "Fail":
             buckets["failed"] += 1
 
         phase = _extract_phase(merged, shift_phases=shift_phases, include_pending_extra=include_pending_extra)
@@ -1096,6 +1110,12 @@ def _build_row(
         "extra2": outreach["phases"]["extra2"],
         "extra3": outreach["phases"]["extra3"],
         "percentage": percentage,
+
+        # Earliest timestamp at which any launched candidate reached Pass.
+        # Merges the outreach (launched) path and the sourced-candidate path
+        # to handle stale JSONB (live pair-bot may show Pass before the JSONB
+        # is updated) and audit-row loss (stored JSONB is the only record).
+        "first_pass_at": _edt(merged_first_pass),
 
         # Lets the UI mark a row whose outreach columns are partial rather
         # than showing dashes that look like real zeros.
