@@ -653,6 +653,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
     first_contact_timestamps: List[datetime.datetime] = []
     first_attempted_timestamps: List[datetime.datetime] = []
     first_completed_timestamps: List[datetime.datetime] = []
+    first_pass_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
         outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
@@ -732,6 +733,16 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
 
         if display == "Pass":
             buckets["passed"] += 1
+            pass_at_raw = (
+                merged.get("first_pass_at")
+                or merged.get("first_completed_at")
+                or merged.get("engage_completed_at")
+                or merged.get("completed_at")
+                or merged.get("engage_updated_at")
+            )
+            pass_dt = _parse_iso(pass_at_raw)
+            if pass_dt:
+                first_pass_timestamps.append(pass_dt)
         elif normalized_status in ("failed", "fail"):
             buckets["failed"] += 1
 
@@ -808,6 +819,7 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         "first_contact_at": min(first_contact_timestamps) if first_contact_timestamps else None,
         "first_attempted_at": min(first_attempted_timestamps) if first_attempted_timestamps else None,
         "first_completed_at": min(first_completed_timestamps) if first_completed_timestamps else None,
+        "first_pass_at": min(first_pass_timestamps) if first_pass_timestamps else None,
     }
 
 
@@ -821,6 +833,7 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     sourced_at: List[datetime.datetime] = []
     first_attempted_at: List[datetime.datetime] = []
     first_completed_at: List[datetime.datetime] = []
+    first_pass_timestamps: List[datetime.datetime] = []
 
     for row in rows:
         feedback_type = (row.get("feedback_type") or "").strip().lower()
@@ -842,6 +855,22 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if completed:
             first_completed_at.append(completed)
 
+        display = format_engage_status(
+            (row.get("engage_status") or "").strip().lower(),
+            parse_engage_score(row.get("engage_score")),
+            (row.get("engage_hard_filter_status") or "").strip().lower(),
+        )
+        if display == "Pass":
+            pass_at_raw = (
+                row.get("first_pass_at")
+                or row.get("first_completed_at")
+                or row.get("engage_completed_at")
+                or row.get("engage_updated_at")
+            )
+            pass_dt = _parse_iso(pass_at_raw)
+            if pass_dt:
+                first_pass_timestamps.append(pass_dt)
+
         if feedback_type and has_reason:
             elapsed = _minutes_between(
                 _parse_iso(row.get("engage_completed_at")),
@@ -862,6 +891,7 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
             default=None,
         ),
+        "first_pass_at": min(first_pass_timestamps) if first_pass_timestamps else None,
     }
 
 
