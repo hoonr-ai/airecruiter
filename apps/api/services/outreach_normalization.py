@@ -5,7 +5,7 @@ phase, and channel variants onto canonical values (contact_check, phase1/phase1_
 extra outreach phases, and call/sms/web).
 """
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Iterable
 
 logger = logging.getLogger(__name__)
 
