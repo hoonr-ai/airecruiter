@@ -58,7 +58,7 @@ def test_expected_answer_is_moderated_and_part_of_the_cache_key(monkeypatch):
     assert result["results"][0]["flags"] == ["unsafe", "grammatical_error"]
     make_key.assert_called_once_with(
         "q_moderation",
-        3,
+        4,
         "gpt-4o-mini",
         "Software Engineer",
         "What is your favorite color?",
@@ -88,7 +88,7 @@ def test_cache_hit_uses_expected_answer_key_and_skips_the_llm(monkeypatch):
     assert result["results"][0]["flags"] == ["nsfw"]
     make_key.assert_called_once_with(
         "q_moderation",
-        3,
+        4,
         "gpt-4o-mini",
         "Software Engineer",
         "What is your favorite color?",
