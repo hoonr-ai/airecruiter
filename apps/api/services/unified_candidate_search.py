@@ -565,23 +565,24 @@ class UnifiedCandidateSearch:
         if not enrich:
             return
 
+        def _pick_valid_email(*emails: str) -> str:
+            for e in emails:
+                if e and not is_work_email(e):
+                    return e
+            return ""
+
         if overwrite:
-            new_email = enrich.get("personalEmail") or ""
-            if is_work_email(new_email):
-                new_email = ""
+            new_email = _pick_valid_email(enrich.get("personalEmail") or "")
             new_phone = enrich.get("mobilePhone") or enrich.get("workPhone") or ""
             if new_email:
                 cand["email"] = new_email
             if new_phone:
                 cand["phone"] = new_phone
         else:
-            cand_email = cand.get("email") or ""
-            if is_work_email(cand_email):
-                cand_email = ""
-            new_email = cand_email or enrich.get("personalEmail") or ""
-            if is_work_email(new_email):
-                new_email = ""
-            cand["email"] = new_email
+            cand["email"] = _pick_valid_email(
+                cand.get("email") or "",
+                enrich.get("personalEmail") or ""
+            )
             cand["phone"] = (
                 cand.get("phone")
                 or enrich.get("mobilePhone")

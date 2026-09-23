@@ -2634,17 +2634,18 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         _is_work = False
         if existing_rows and isinstance(existing_rows[0], dict):
             _d = _json_load_safe(existing_rows[0].get("data"), {})
+            _enhanced = _d.get("enhanced_info")
+            _zoominfo = _d.get("zoominfo_contact_enrichment")
             _known_work = {
                 str(_d.get("workEmail") or "").strip().lower(),
-                str((_d.get("enhanced_info") or {}).get("workEmail") or "").strip().lower(),
-                str((_d.get("zoominfo_contact_enrichment") or {}).get("workEmail") or "").strip().lower()
+                str(_enhanced.get("workEmail") or "").strip().lower() if isinstance(_enhanced, dict) else "",
+                str(_zoominfo.get("workEmail") or "").strip().lower() if isinstance(_zoominfo, dict) else "",
             }
-            if seed_email.lower() in _known_work and seed_email.lower() != "":
+            if seed_email.lower() in _known_work:
                 _is_work = True
-        
+
         if not _is_work and is_work_email(seed_email):
             _is_work = True
-            
         if _is_work:
             logger.info("enrich_contact: ignoring known work email %s for %s", seed_email, candidate_id)
             seed_email = ""

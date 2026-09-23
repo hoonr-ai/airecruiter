@@ -11,7 +11,7 @@ import {
   restoreSavedSearchSources,
   type SearchSources,
 } from "@/lib/search-sources";
-import { isWorkEmail } from "../../../utils/emailUtils";
+import { isWorkEmail } from "@/utils/emailUtils";
 import {
   History,
   Plus,
@@ -171,12 +171,12 @@ function getCandidateLaunchEmail(candidate: any): string {
   );
 
   const fallbackEmails = [
+    candidate?.email,
     candidate?.personalEmail,
     candidate?.enhanced_info?.personalEmail,
     candidate?.data?.personalEmail,
     candidate?.data?.enhanced_info?.personalEmail,
     candidate?.data?.zoominfo_contact_enrichment?.personalEmail,
-    candidate?.email,
     candidate?.enhanced_info?.email,
     candidate?.data?.email,
     candidate?.data?.enhanced_info?.email

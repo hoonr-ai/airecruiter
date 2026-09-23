@@ -167,6 +167,21 @@ def test_schema_descriptions() -> int:
     return f
 
 
+def test_is_work_email() -> None:
+    from utils.email_utils import is_work_email
+    assert is_work_email("john@gmail.com") is False
+    assert is_work_email("jane@proton.me") is False
+    assert is_work_email("jane.doe@163.com") is False
+    assert is_work_email("test@outlook.com") is False
+    
+    assert is_work_email("john@acme.com") is True
+    assert is_work_email("jane.doe@startup.io") is True
+    
+    assert is_work_email("Auto_john@jobdiva.com") is False  # placeholder
+    assert is_work_email("not-an-email") is False
+    assert is_work_email("") is False
+
+
 def run() -> int:
     failures = 0
     print("[test] extract_exa_contact_fields")
