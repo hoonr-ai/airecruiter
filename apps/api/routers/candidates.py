@@ -23,6 +23,7 @@ from services.feedback_metrics import HAS_DECISION_SQL, feedback_label, refresh_
 from services.job_attribution import stamp_job_launched_by
 from services import contact_enrichment
 from services.pair_auth import get_pair_auth_headers
+from utils.email_utils import is_placeholder_email, is_work_email
 from utils.phone import normalize_phone
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
@@ -2637,7 +2638,6 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
     # contact info — treating one as a seed short-circuits the chain before
     # Apollo/Exa ever look for a genuine address, and it can't be messaged.
-    from utils.email_utils import is_placeholder_email
     if seed_email and is_placeholder_email(seed_email):
         logger.info(
             "enrich_contact: ignoring synthetic seed email %s for %s",
@@ -2645,8 +2645,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         )
         seed_email = ""
 
+    if seed_email:
+        _is_work = False
+        if existing_rows and isinstance(existing_rows[0], dict):
+            _d = _json_load_safe(existing_rows[0].get("data"), {})
+            _enhanced = _d.get("enhanced_info")
+            _zoominfo = _d.get("zoominfo_contact_enrichment")
+            _known_work = {
+                str(_d.get("workEmail") or "").strip().lower(),
+                str(_enhanced.get("workEmail") or "").strip().lower() if isinstance(_enhanced, dict) else "",
+                str(_zoominfo.get("workEmail") or "").strip().lower() if isinstance(_zoominfo, dict) else "",
+            }
+            if seed_email.lower() in _known_work:
+                _is_work = True
+
+        if not _is_work and is_work_email(seed_email):
+            _is_work = True
+        if _is_work:
+            logger.info("enrich_contact: ignoring known work email %s for %s", seed_email, candidate_id)
+            seed_email = ""
+
     def _have_email_and_phone() -> bool:
-        have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
+        have_email = bool(seed_email) or bool(str(extracted.get("personalEmail") or "").strip())
         _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or extracted.get("workPhone") or "")
         return have_email and sum(1 for ch in _p if ch.isdigit()) >= 7
 
@@ -2782,11 +2802,9 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
         enriched_phone = ""
 
-    enriched_email = (
-        raw_work_email
-        or raw_personal_email
-        or ""
-    ).strip().lower()
+    enriched_email = ""
+    if raw_personal_email and not is_work_email(raw_personal_email):
+        enriched_email = raw_personal_email.strip().lower()
 
     final_outcome = "enriched" if (enriched_phone or enriched_email) else "empty"
 
