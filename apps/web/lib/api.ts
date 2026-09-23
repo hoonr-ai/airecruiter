@@ -284,6 +284,20 @@ export const api = {
         `/jobs/${jobId}/cross-submissions/${csId}/add`,
         { method: "POST" },
       ),
+    // Wizard step active time, sent by hooks/use-step-active-time.ts
+    // (routers/job_step_time.py). It sits under /api/ so nginx passes it
+    // through without a /jobs/{id}/<subpath> allowlist entry. keepalive lets
+    // the last flush outlive the page when the tab closes.
+    stepTime: (
+      jobRef: string,
+      body: { step: number; active_ms: number },
+      opts: { keepalive?: boolean } = {},
+    ) =>
+      req<{ status?: string }>(`/api/v1/jobs/${encodeURIComponent(jobRef)}/step-time`, {
+        method: "POST",
+        body,
+        keepalive: opts.keepalive,
+      }),
   },
   candidates: {
     save: (body: unknown) =>
@@ -349,6 +363,34 @@ export const api = {
       if (teamId) qs.set("team_id", teamId);
       const suffix = qs.toString();
       return req<any>(`/api/v1/launch-report${suffix ? `?${suffix}` : ""}`);
+    },
+  },
+  recruiterAnalytics: {
+    // Per-recruiter rollup (routers/recruiter_analytics.py). startDate+endDate
+    // are Eastern calendar dates, both or neither; neither = all time. Team
+    // leads are pinned to their own team server-side, so teamId only matters
+    // for admins. refresh skips the backend's 60s per-worker cache.
+    get: (opts?: {
+      startDate?: string | null;
+      endDate?: string | null;
+      teamId?: string | null;
+      recruiter?: string | null;
+      refresh?: boolean;
+    }) => {
+      const { startDate, endDate, teamId, recruiter, refresh } = opts ?? {};
+      const qs = new URLSearchParams();
+      if (startDate && endDate) {
+        qs.set("start_date", startDate);
+        qs.set("end_date", endDate);
+      }
+      if (teamId) qs.set("team_id", teamId);
+      if (recruiter) qs.set("recruiter", recruiter);
+      if (refresh) qs.set("refresh", "true");
+      const suffix = qs.toString();
+      // The page owns the payload type (app/admin/recruiter-analytics).
+      return req<{ status?: string; data?: unknown; detail?: string }>(
+        `/api/v1/admin/recruiter-analytics${suffix ? `?${suffix}` : ""}`,
+      );
     },
   },
   noContact: {

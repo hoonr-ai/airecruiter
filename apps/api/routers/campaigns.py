@@ -31,6 +31,7 @@ from models import CampaignData, CampaignAddJobRequest, CampaignBulkAddRequest
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from routers.jobs import invalidate_monitored_jobs_cache
 from services.jobdiva import jobdiva_service
+from services.job_attribution import stamp_job_posted_by
 from core.auth import get_current_user, UserIdentity, verify_job_access
 
 # Cap on ids accepted by the bulk-add endpoint (each id is a synchronous
@@ -868,6 +869,7 @@ async def _create_campaign_job(
     description: Optional[str] = None,
     screening_level: Optional[str] = None,
     selected_job_boards: Optional[List[str]] = None,
+    posted_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create one child job under a campaign. When a jobdiva_id is given, first
     pull the real requirement details from JobDiva; on failure (or for external
@@ -998,6 +1000,7 @@ async def _create_campaign_job(
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
     if ok:
+        stamp_job_posted_by(data["job_id"], posted_by)
         # Seed once. _seed_job_rubric internally resolves to the canonical
         # jobdiva_id (via monitored_jobs jobdiva_id/job_id lookup) and persists
         # under that single key, and reads accept either key — so a second call
@@ -1038,6 +1041,7 @@ async def add_job_to_campaign(
             campaign, campaign_id,
             jobdiva_id=req.jobdiva_id, title=req.title, description=req.description,
             screening_level=req.screening_level, selected_job_boards=req.selected_job_boards,
+            posted_by=user.email,
         )
         if not result["ok"]:
             raise HTTPException(status_code=500, detail="Failed to create job under campaign")
@@ -1088,7 +1092,9 @@ async def bulk_add_jobs_to_campaign(
         results = []
         for jid in ids:
             try:
-                results.append(await _create_campaign_job(campaign, campaign_id, jobdiva_id=jid))
+                results.append(await _create_campaign_job(
+                    campaign, campaign_id, jobdiva_id=jid, posted_by=user.email,
+                ))
             except Exception as e:
                 logger.error(f"bulk add failed for {jid}: {e}", exc_info=True)
                 results.append({"jobdiva_id": jid, "ok": False, "error": str(e)})

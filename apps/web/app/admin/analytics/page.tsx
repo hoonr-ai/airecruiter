@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactNode } from "react";
 import {
   Briefcase,
   Archive,
@@ -33,7 +33,16 @@ import { api } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { normalizeToUtcDate } from "@/lib/date";
+import {
+  EMPTY_DATE,
+  formatDuration,
+  formatEasternDate,
+  formatEasternDateTime,
+  normalizeToUtcDate,
+  todayEastern,
+  withEasternLabel,
+} from "@/lib/date";
+import { escapeCSV, toCsv, UTF8_BOM } from "@/lib/csv";
 interface AnalyticsOverview {
   total_monitored_jobs: number;
   total_archived_jobs: number;
@@ -78,6 +87,37 @@ interface JobTimelineEntry {
   campaign_id: string | null;
   recruiter_emails?: string[];
   first_feedback_at: string | null;
+  // The fields below are optional so a page served during a deploy, ahead of
+  // the backend that sends them, renders "—" instead of crashing. The
+  // candidate counts are null when the backend couldn't compute them this
+  // time (jobs_timeline_metrics_available=false) — "—", never a fake 0.
+  /** Who first saved / first launched the job in PAIR. null = not recorded
+   *  (every job created before 09/23/2026, when stamping started). */
+  posted_by?: string | null;
+  launched_by?: string | null;
+  /** Candidates whose PAIR interview reads Pass / Fail on the rank list. */
+  pass_candidates?: number | null;
+  fail_candidates?: number | null;
+  /** Candidates with a recorded recruiter decision, split by kind. */
+  feedback_total?: number | null;
+  feedback_submits?: number | null;
+  feedback_rejects?: number | null;
+  feedback_unreachable?: number | null;
+  /** PAIR-recorded Submits: internal = to a hiring manager for review,
+   *  external = to the client. */
+  pair_internal_submits?: number | null;
+  pair_external_submits?: number | null;
+  /** JobDiva-verified: a JobDiva submittal to the job contact for a
+   *  PAIR-passed candidate (monitored_jobs.pair_external_subs). */
+  jobdiva_confirmed_subs?: number;
+  /** Earliest current external Submit recorded in PAIR. */
+  first_pair_external_submit_at?: string | null;
+  /** Step 5 ("Source") time in minutes: active time summed over every visit
+   *  and recruiter, and first Step 5 entry → first SUCCESSFUL launch. null =
+   *  not tracked (every job worked before 09/23/2026), not launched yet, or
+   *  unavailable this time (jobs_timeline_step_time_available=false). */
+  step5_active_minutes?: number | null;
+  step5_to_launch_minutes?: number | null;
 }
 
 interface LaunchSpeed {
@@ -113,8 +153,12 @@ interface SubmissionMetrics {
   jobdiva_submittals_last_30_days?: number;
   complete_submissions?: number;
   pass_submissions?: number;
+  /** JobDiva-confirmed PAIR submittals (shown as "JobDiva-Confirmed PAIR Subs"). */
   pair_external_subs?: number;
   pair_submits?: number;
+  /** Split of PAIR Submits over every scoped job; null when unavailable. */
+  pair_internal_submits?: number | null;
+  pair_external_submits?: number | null;
   top_jobs_by_submittals?: SubmissionTopJob[];
 }
 
@@ -154,6 +198,12 @@ interface AnalyticsData {
   candidates_by_source?: CandidateSource[];
   jobs_timeline?: JobTimelineEntry[];
   jobs_timeline_total?: number;
+  /** false: the timeline's candidate columns (pass, feedback, PAIR
+   *  submittals, first-feedback / first-external times) are null this time. */
+  jobs_timeline_metrics_available?: boolean;
+  /** false: the Step 5 time columns are null because the read failed, not
+   *  because the jobs predate the tracking. */
+  jobs_timeline_step_time_available?: boolean;
   launch_speed?: LaunchSpeed;
   weekly_trends?: WeeklyTrends;
   submission_metrics?: SubmissionMetrics;
@@ -170,51 +220,18 @@ const PAIR_STATUS_FILTERS = [
 ] as const;
 type PairStatusFilter = (typeof PAIR_STATUS_FILTERS)[number];
 
-/** ISO date/datetime → "02/24/2026"; null/invalid → "—". */
-const formatDate = (iso: string | null | undefined): string => {
-  if (!iso) return "—";
-  const d = /^\d{4}-\d{2}-\d{2}$/.test(iso)
-    ? new Date(`${iso}T00:00:00`)
-    : new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    month: "2-digit",
-    day: "2-digit",
-    year: "numeric",
-  });
-  const parts = formatter.formatToParts(d);
-  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
-  return `${p.month}/${p.day}/${p.year}`;
-};
+// Dates and times use the shared report formatters in lib/date.ts:
+// "MM/DD/YYYY HH:MM:SS" in US Eastern with no zone suffix in the cell or CSV
+// value; the zone is stated once, in the column header (withEasternLabel).
 
-/** ISO date/datetime → "02/24/2026 10:30:05 EST"; null/invalid → "—". */
-const formatDateTime = (iso: string | null | undefined): string => {
-  const date = normalizeToUtcDate(iso);
-  if (!date) return "—";
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    month: "2-digit",
-    day: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-    timeZoneName: "short",
-  });
-  const parts = formatter.formatToParts(date);
-  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
-  const hr = p.hour === "24" ? "00" : p.hour;
-  return `${p.month}/${p.day}/${p.year} ${hr}:${p.minute}:${p.second} ${p.timeZoneName}`;
-};
-
-/** ISO Monday date → "Jun 1". */
+/** ISO Monday date (YYYY-MM-DD) → "Jun 1". A calendar date, rendered as
+ *  written: parsing it as local midnight and converting to Eastern moved it
+ *  back a day for viewers east of New York (India). */
 const formatWeekLabel = (iso: string): string => {
-  const d = new Date(`${iso}T00:00:00`);
+  const d = new Date(`${iso}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-US", {
-    timeZone: "America/New_York",
+    timeZone: "UTC",
     month: "short",
     day: "numeric",
   });
@@ -222,9 +239,9 @@ const formatWeekLabel = (iso: string): string => {
 
 /** ISO datetime → relative "2h ago" / "3d ago"; null → "—". */
 const formatRelativeTime = (iso: string | null | undefined): string => {
-  if (!iso) return "—";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "—";
+  const date = normalizeToUtcDate(iso);
+  if (!date) return "—";
+  const t = date.getTime();
   const diffMins = Math.floor((Date.now() - t) / 60000);
   if (diffMins < 1) return "just now";
   if (diffMins < 60) return `${diffMins}m ago`;
@@ -239,14 +256,237 @@ const formatRelativeTime = (iso: string | null | undefined): string => {
 const formatLagValue = (lag: number): string =>
   Number.isInteger(lag) ? `${lag}` : lag.toFixed(1);
 
-const renderDateCell = (iso: string | null) => {
-  const formatted = formatDateTime(iso);
-  return formatted === "—" ? (
-    <span className="text-slate-300">—</span>
+const renderDateCell = (iso: string | null | undefined) => {
+  const formatted = formatEasternDateTime(iso);
+  return formatted === EMPTY_DATE ? (
+    <span className="text-slate-300">{EMPTY_DATE}</span>
   ) : (
     <span className="text-slate-700">{formatted}</span>
   );
 };
+
+/** Header label with an explanatory tooltip (dotted underline = hover me). */
+const HeaderHint = ({ hint, children }: { hint: string; children: ReactNode }) => (
+  <span title={hint} className="cursor-help border-b border-dotted border-slate-400">
+    {children}
+  </span>
+);
+
+/** Posted By / Launched By: the email, or "—" when not recorded — every job
+ *  created before 09/23/2026, when PAIR started stamping these. */
+const renderPersonCell = (email: string | null | undefined) =>
+  email ? (
+    <div className="text-slate-600 text-[13px] break-words max-w-[220px]" title={email}>
+      {email}
+    </div>
+  ) : (
+    <span className="text-slate-300">—</span>
+  );
+
+/** A candidate count, or "—" when it is null (not computed this time) or
+ *  missing (an older backend) — never a 0 that reads as real data. */
+const renderCountCell = (value: number | null | undefined, className: string) =>
+  value === null || value === undefined ? (
+    <span className="text-slate-300 font-normal">{EMPTY_DATE}</span>
+  ) : (
+    <span className={className}>{value.toLocaleString()}</span>
+  );
+
+/** PAIR Submits headline. When the internal/external split is available the
+ *  headline is their sum, so the card can never read "0 — 1 internal ·
+ *  3 external": the split is computed live, while the `pair_submits` counter
+ *  is refreshed on each feedback click and by the 15-minute sync. Both count
+ *  people with a Submit; they can differ only for someone stored under both
+ *  job keys with different decisions on the two rows (the split reads the
+ *  newest one — services/job_candidate_metrics.py). Without the split the
+ *  counter is the only number there is. */
+const pairSubmitsTotal = (sm: SubmissionMetrics): number =>
+  sm.pair_internal_submits != null && sm.pair_external_submits != null
+    ? sm.pair_internal_submits + sm.pair_external_submits
+    : sm.pair_submits ?? 0;
+
+/** Step 5 time: "1h 22m", or "—" when null — not tracked (jobs worked
+ *  before 09/23/2026), not launched yet, or unavailable. A job nobody timed
+ *  must never read "0m". The CSV uses formatDuration directly. */
+const renderDurationCell = (minutes: number | null | undefined) => {
+  const formatted = formatDuration(minutes);
+  return formatted === EMPTY_DATE ? (
+    <span className="text-slate-300">{EMPTY_DATE}</span>
+  ) : (
+    <span className="font-semibold text-slate-700">{formatted}</span>
+  );
+};
+
+/** CSV twin of renderCountCell. No locale grouping: "1,234" would split the cell. */
+const countCsvValue = (value: number | null | undefined): string =>
+  value === null || value === undefined ? EMPTY_DATE : String(value);
+
+/** Top Jobs "Last Submittal": jobdiva_submittals.submit_date is a naive
+ *  TIMESTAMP copied from JobDiva's SUBMITDATE, whose zone is unverified (a US
+ *  ATS, so plausibly an Eastern wall clock). Converting it as a UTC instant
+ *  moved 00:00–04:00 submittals to the previous day, and it would disagree
+ *  with the weekly trend, which buckets the value as written. So show the
+ *  calendar date as stored; a value that does carry an offset is a real
+ *  instant and is converted normally. */
+const formatStoredSubmitDate = (value: string | null | undefined): string => {
+  if (!value) return EMPTY_DATE;
+  const hasOffset = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(value.trim());
+  return formatEasternDate(hasOffset ? value : value.trim().slice(0, 10));
+};
+
+const feedbackBreakdownTitle = (job: JobTimelineEntry): string =>
+  `${job.feedback_submits ?? 0} Submit · ${job.feedback_rejects ?? 0} Reject · ${job.feedback_unreachable ?? 0} Unreachable`;
+
+/** Feedback total, with the non-zero kinds underneath ("2 submit · 1 reject"). */
+const renderFeedbackCell = (job: JobTimelineEntry) => {
+  if (job.feedback_total === null || job.feedback_total === undefined) {
+    return renderCountCell(job.feedback_total, "");
+  }
+  const total = job.feedback_total;
+  const kinds: Array<[number, string]> = [
+    [job.feedback_submits ?? 0, "submit"],
+    [job.feedback_rejects ?? 0, "reject"],
+    [job.feedback_unreachable ?? 0, "unreachable"],
+  ];
+  const breakdown = kinds
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${count.toLocaleString()} ${label}`)
+    .join(" · ");
+  return (
+    <div title={feedbackBreakdownTitle(job)}>
+      <div className="font-bold text-slate-800">{total.toLocaleString()}</div>
+      {breakdown && (
+        <div className="mt-0.5 text-[11px] font-medium text-slate-400 whitespace-nowrap">
+          {breakdown}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Loading-skeleton bars for the timeline's non-sticky columns, in header
+// order. Its length plus the 3 sticky columns (#, JobDiva ID, Job Title) is
+// the table's column count, which the empty-state colSpan also uses — add a
+// bar here whenever a column is added to the header.
+const TIMELINE_SKELETON_BARS: Array<{ center?: boolean; bar: string }> = [
+  { bar: "h-4 w-24 rounded" }, // Client
+  { bar: "h-4 w-24 rounded" }, // Recruiter Emails
+  { bar: "h-4 w-24 rounded" }, // Posted By
+  { bar: "h-4 w-24 rounded" }, // Launched By
+  { bar: "h-4 w-20 rounded" }, // Posted (JobDiva)
+  { bar: "h-4 w-20 rounded" }, // Added (PAIR)
+  { bar: "h-4 w-20 rounded" }, // Launched (PAIR)
+  { center: true, bar: "h-5 w-10 rounded-full" }, // Lag
+  { center: true, bar: "h-4 w-12 rounded" }, // Step 5 Active Time
+  { center: true, bar: "h-4 w-12 rounded" }, // Step 5 → Launch
+  { center: true, bar: "h-5 w-16 rounded-full" }, // Active / Archived
+  { center: true, bar: "h-5 w-16 rounded-full" }, // PAIR Status
+  { center: true, bar: "h-4 w-8 rounded" }, // Sourced
+  { center: true, bar: "h-4 w-8 rounded" }, // Launched
+  { center: true, bar: "h-4 w-8 rounded" }, // Pass Candidates
+  { center: true, bar: "h-4 w-8 rounded" }, // Feedback
+  { bar: "h-4 w-28 rounded" }, // First Feedback Submitted At
+  { center: true, bar: "h-4 w-8 rounded" }, // PAIR Submittals: Internal
+  { center: true, bar: "h-4 w-8 rounded" }, // PAIR Submittals: External
+  { center: true, bar: "h-4 w-8 rounded" }, // JobDiva-Confirmed
+  { center: true, bar: "h-4 w-8 rounded" }, // JobDiva Submittals
+  { bar: "h-4 w-28 rounded" }, // First PAIR External Submittal
+];
+const TIMELINE_COLUMN_COUNT = 3 + TIMELINE_SKELETON_BARS.length;
+
+/** A file travels without the page's notice, so say it in the file too. */
+const timelineCsvNote = (
+  metricsUnavailable: boolean,
+  stepTimeUnavailable: boolean,
+): string[] => [
+  ...(metricsUnavailable
+    ? [
+        escapeCSV(
+          "Note: candidate outcome columns (pass / feedback / PAIR submittals / first feedback / first PAIR external submittal) were unavailable for this export and show —",
+        ),
+      ]
+    : []),
+  // Without this, a failed read would be indistinguishable in the file from
+  // jobs that predate the Step 5 tracking, which show — too.
+  ...(stepTimeUnavailable
+    ? [
+        escapeCSV(
+          "Note: Step 5 time columns (Step 5 Active Time / Step 5 → Launch) were unavailable for this export and show —",
+        ),
+      ]
+    : []),
+];
+
+const lagCsvValue = (lag: number | null | undefined): string =>
+  // Mirror the UI's lag chip: negative = unreliable posted date
+  lag === null || lag === undefined ? "" : lag < 0 ? "n/a" : String(lag);
+
+/** Timeline CSV columns, shared by both exports. Values go through the same
+ *  formatters as the screen; the zone is stated once, in the header. */
+const timelineCsvHeaders = (withRecruiters: boolean): string[] => [
+  "Job Title",
+  "JobDiva Ref",
+  "Client",
+  ...(withRecruiters ? ["Recruiter Emails"] : []),
+  "Posted By",
+  "Launched By",
+  "Posted on JobDiva",
+  withEasternLabel("Added to PAIR"),
+  withEasternLabel("Launched on PAIR"),
+  "Lag (days)",
+  // Durations as on screen ("1h 22m"), like the Launch Report's CSV; no zone.
+  "Step 5 Active Time",
+  "Step 5 → Launch",
+  "Active / Archived Jobs",
+  "Archive Reason",
+  "PAIR Status",
+  "Candidates Sourced",
+  "Candidates Launched",
+  "Pass Candidates",
+  "Feedback Total",
+  "Feedback Submits",
+  "Feedback Rejects",
+  "Feedback Unreachable",
+  withEasternLabel("First Feedback Submitted At"),
+  "PAIR Submittals - Internal",
+  "PAIR Submittals - External",
+  "PAIR Submittals - JobDiva-Confirmed",
+  "JobDiva Submittals",
+  withEasternLabel("First PAIR External Submittal"),
+];
+
+const timelineCsvRow = (job: JobTimelineEntry, withRecruiters: boolean): string[] => [
+  job.title,
+  job.jobdiva_id,
+  job.customer_name,
+  ...(withRecruiters ? [job.recruiter_emails?.join(", ") || ""] : []),
+  job.posted_by || "—",
+  job.launched_by || "—",
+  job.jobdiva_posted_on
+    ? formatEasternDate(job.jobdiva_posted_on)
+    : job.posted_date_raw || EMPTY_DATE,
+  formatEasternDateTime(job.added_to_curate_at),
+  formatEasternDateTime(job.curate_launched_at),
+  lagCsvValue(job.posted_to_launch_days),
+  formatDuration(job.step5_active_minutes),
+  formatDuration(job.step5_to_launch_minutes),
+  job.is_archived ? "Archived" : "Active",
+  job.archive_reason || "",
+  job.pair_status,
+  String(job.candidates_sourced),
+  String(job.candidates_launched),
+  countCsvValue(job.pass_candidates),
+  countCsvValue(job.feedback_total),
+  countCsvValue(job.feedback_submits),
+  countCsvValue(job.feedback_rejects),
+  countCsvValue(job.feedback_unreachable),
+  formatEasternDateTime(job.first_feedback_at),
+  countCsvValue(job.pair_internal_submits),
+  countCsvValue(job.pair_external_submits),
+  String(job.jobdiva_confirmed_subs ?? 0),
+  String(job.jobdiva_submittals ?? 0),
+  formatEasternDateTime(job.first_pair_external_submit_at),
+];
 
 const renderLagChip = (lag: number | null) => {
   if (lag === null || lag === undefined)
@@ -529,6 +769,9 @@ export default function AdminAnalyticsPage() {
   const submissionTopJobs = submissionMetrics.top_jobs_by_submittals || [];
 
   const timelineRows = data?.jobs_timeline || [];
+  // Absent (an older backend) is not "unavailable"; only an explicit false is.
+  const timelineMetricsUnavailable = data?.jobs_timeline_metrics_available === false;
+  const timelineStepTimeUnavailable = data?.jobs_timeline_step_time_available === false;
   // jobs_timeline_total counts every matching job server-side (no LIMIT);
   // timelineRows is capped, so a larger total means older jobs aren't loaded
   // and any date-range filter below is only searching the loaded window.
@@ -540,8 +783,10 @@ export default function AdminAnalyticsPage() {
       return false;
 
     if (timelineStartDate || timelineEndDate) {
-      const jobDateIso = job.curate_launched_at || job.added_to_curate_at;
-      if (!jobDateIso) return false;
+      const jobDate = normalizeToUtcDate(
+        job.curate_launched_at || job.added_to_curate_at,
+      );
+      if (!jobDate) return false;
 
       // Ensure start is not strictly after end
       if (
@@ -552,14 +797,9 @@ export default function AdminAnalyticsPage() {
         return false;
       }
 
-      const d = new Date(jobDateIso);
-      const formatter = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/New_York",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      });
-      const jobDateET = formatter.format(d);
+      // The job's Eastern calendar date (YYYY-MM-DD), matching the ET
+      // timestamps shown in the table.
+      const jobDateET = todayEastern(jobDate);
 
       if (timelineStartDate && jobDateET < timelineStartDate) return false;
       if (timelineEndDate && jobDateET > timelineEndDate) return false;
@@ -568,11 +808,15 @@ export default function AdminAnalyticsPage() {
     if (!timelineQuery) return true;
     const recruiterMatch =
       job.recruiter_emails?.some((e) => e.toLowerCase().includes(timelineQuery)) ?? false;
+    const actorMatch = [job.posted_by, job.launched_by].some(
+      (e) => !!e && e.toLowerCase().includes(timelineQuery),
+    );
     return (
       job.title.toLowerCase().includes(timelineQuery) ||
       job.jobdiva_id.toLowerCase().includes(timelineQuery) ||
       job.customer_name.toLowerCase().includes(timelineQuery) ||
-      recruiterMatch
+      recruiterMatch ||
+      actorMatch
     );
   });
   const visibleTimeline = showAllTimeline
@@ -672,15 +916,25 @@ export default function AdminAnalyticsPage() {
     );
   };
 
+  // Shared CSV escaping (lib/csv.ts): formula-injection guard plus quoting.
   const escapeCsvField = (
     value: string | number | null | undefined,
-  ): string => {
-    if (value === null || value === undefined) return '""';
-    let str = String(value);
-    if (/^[=+\-@]/.test(str)) {
-      str = `'${str}`;
-    }
-    return `"${str.replace(/"/g, '""')}"`;
+  ): string =>
+    escapeCSV(value === null || value === undefined ? "" : String(value));
+
+  const downloadCsv = (lines: string[], filename: string) => {
+    // BOM so Excel reads the file as UTF-8 — the "—" placeholders turn into
+    // mojibake otherwise.
+    const blob = new Blob([UTF8_BOM + lines.join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const exportToCSV = () => {
@@ -728,7 +982,7 @@ export default function AdminAnalyticsPage() {
     const sm = data.submission_metrics || {};
     const lines = [
       "PAIR - Executive Analytics Report",
-      `Generated: ${new Date().toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,
+      `${withEasternLabel("Generated")}: ${formatEasternDateTime(new Date().toISOString())}`,
       `Scope: ${data.team_scope ? `Team - ${data.team_scope.team_name}` : "All Teams (System-wide)"}`,
       "",
       "--- SYSTEM KPI OVERVIEW ---",
@@ -741,8 +995,11 @@ export default function AdminAnalyticsPage() {
       `JobDiva Submittals (all time),${sm.jobdiva_total_submittals ?? 0}`,
       `JobDiva Submittals (last 30 days),${sm.jobdiva_submittals_last_30_days ?? 0}`,
       `Distinct Candidates Submitted (JobDiva),${sm.jobdiva_distinct_candidates ?? 0}`,
-      `PAIR Submits,${sm.pair_submits ?? 0}`,
-      `PAIR External Submittals,${sm.pair_external_subs ?? 0}`,
+      `PAIR Submits,${pairSubmitsTotal(sm)}`,
+      // null = the backend couldn't compute the split this time.
+      `PAIR Submits - Internal,${countCsvValue(sm.pair_internal_submits)}`,
+      `PAIR Submits - External,${countCsvValue(sm.pair_external_submits)}`,
+      `JobDiva-Confirmed PAIR Submittals,${sm.pair_external_subs ?? 0}`,
       `Complete Submissions (PAIR),${sm.complete_submissions ?? 0}`,
       `Pass Submissions (PAIR),${sm.pass_submissions ?? 0}`,
       "",
@@ -754,7 +1011,7 @@ export default function AdminAnalyticsPage() {
           escapeCsvField(j.jobdiva_id),
           escapeCsvField(j.customer_name),
           j.submittals,
-          escapeCsvField(j.last_submit_date),
+          escapeCsvField(formatStoredSubmitDate(j.last_submit_date)),
         ].join(","),
       ),
       "",
@@ -795,32 +1052,10 @@ export default function AdminAnalyticsPage() {
       ),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback Submitted At",
-      ...(data.jobs_timeline || []).map((job) =>
-        [
-          escapeCsvField(job.title),
-          escapeCsvField(job.jobdiva_id),
-          escapeCsvField(job.customer_name),
-          escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
-          escapeCsvField(formatDateTime(job.added_to_curate_at)),
-          escapeCsvField(formatDateTime(job.curate_launched_at)),
-          // Mirror the UI's lag chip: negative = unreliable posted date
-          escapeCsvField(
-            job.posted_to_launch_days === null ||
-              job.posted_to_launch_days === undefined
-              ? ""
-              : job.posted_to_launch_days < 0
-                ? "n/a"
-                : String(job.posted_to_launch_days),
-          ),
-          escapeCsvField(job.is_archived ? "Archived" : "Active"),
-          escapeCsvField(job.archive_reason || ""),
-          escapeCsvField(job.pair_status),
-          job.candidates_sourced,
-          job.candidates_launched,
-          job.jobdiva_submittals ?? 0,
-          escapeCsvField(formatDateTime(job.first_feedback_at)),
-        ].join(","),
+      ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable),
+      toCsv(
+        timelineCsvHeaders(false),
+        (data.jobs_timeline || []).map((job) => timelineCsvRow(job, false)),
       ),
       // LinkedIn accounts are global infrastructure — only exported on the
       // unscoped (all-teams) view.
@@ -829,81 +1064,37 @@ export default function AdminAnalyticsPage() {
         : [
             "",
             "--- LINKEDIN ACCOUNTS ---",
-            "Account,Account ID,Searches,Last Used,Cooling Down Until,Last Error",
+            `Account,Account ID,Searches,${withEasternLabel("Last Used")},${withEasternLabel("Cooling Down Until")},Last Error`,
             ...(liveAccounts ?? data.linkedin_accounts ?? []).map((acc) =>
               [
                 escapeCsvField(acc.account_name || "Unnamed account"),
                 escapeCsvField(acc.account_id),
                 acc.use_count,
-                escapeCsvField(formatDateTime(acc.last_used_at)),
-                escapeCsvField(formatDateTime(acc.cooldown_until)),
+                escapeCsvField(formatEasternDateTime(acc.last_used_at)),
+                escapeCsvField(formatEasternDateTime(acc.cooldown_until)),
                 escapeCsvField(acc.last_error),
               ].join(","),
             ),
           ]),
     ];
 
-    const blob = new Blob([lines.join("\n")], {
-      type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute(
-      "download",
-      `PAIR_Analytics_${new Date().toISOString().split("T")[0]}.csv`,
-    );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsv(lines, `PAIR_Analytics_${todayEastern()}.csv`);
   };
 
   const exportTimelineToCSV = () => {
     if (!filteredTimeline || filteredTimeline.length === 0) return;
 
-    const lines = [
-      "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Recruiter Emails,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),Active / Archived Jobs,Archive Reason,PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals,First Feedback Submitted At",
-      ...filteredTimeline.map((job) =>
-        [
-          escapeCsvField(job.title),
-          escapeCsvField(job.jobdiva_id),
-          escapeCsvField(job.customer_name),
-          escapeCsvField(job.recruiter_emails?.join(", ") || ""),
-          escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
-          escapeCsvField(formatDateTime(job.added_to_curate_at)),
-          escapeCsvField(formatDateTime(job.curate_launched_at)),
-          escapeCsvField(
-            job.posted_to_launch_days === null ||
-              job.posted_to_launch_days === undefined
-              ? ""
-              : job.posted_to_launch_days < 0
-                ? "n/a"
-                : String(job.posted_to_launch_days),
-          ),
-          escapeCsvField(job.is_archived ? "Archived" : "Active"),
-          escapeCsvField(job.archive_reason || ""),
-          escapeCsvField(job.pair_status),
-          job.candidates_sourced,
-          job.candidates_launched,
-          job.jobdiva_submittals ?? 0,
-          escapeCsvField(formatDateTime(job.first_feedback_at)),
-        ].join(","),
-      ),
-    ];
-
-    const csvContent = lines.join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute(
-      "download",
-      `PAIR_Job_Timeline_${new Date().toISOString().split("T")[0]}.csv`,
+    downloadCsv(
+      [
+        "--- JOB LAUNCH TIMELINE ---",
+        ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable),
+        toCsv(
+          timelineCsvHeaders(true),
+          filteredTimeline.map((job) => timelineCsvRow(job, true)),
+        ),
+      ],
+      `PAIR_Job_Timeline_${todayEastern()}.csv`,
     );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   return (
@@ -1314,7 +1505,9 @@ export default function AdminAnalyticsPage() {
             <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
               <div className="flex items-center justify-between">
                 <span className="text-[13px] font-semibold text-slate-500">
-                  PAIR Submits
+                  <HeaderHint hint="A recruiter pressed Submit in PAIR. Internal = submitted to a hiring manager for review; External = submitted to the client. Submits recorded before the split existed count as External.">
+                    PAIR Submits
+                  </HeaderHint>
                 </span>
                 <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
                   <BadgeCheck className="w-4 h-4" />
@@ -1325,9 +1518,21 @@ export default function AdminAnalyticsPage() {
                   <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
                 ) : (
                   <div className="text-[26px] font-bold text-slate-900 leading-none">
-                    {(submissionMetrics.pair_submits ?? 0).toLocaleString()}
+                    {pairSubmitsTotal(submissionMetrics).toLocaleString()}
                   </div>
                 )}
+                {/* null split = the backend couldn't compute it this time;
+                    hide the line rather than show a misleading 0 · 0. */}
+                {!isLoading &&
+                  submissionMetrics.pair_internal_submits != null &&
+                  submissionMetrics.pair_external_submits != null && (
+                    <div className="text-[12px] font-semibold text-slate-600 mt-1.5 whitespace-nowrap">
+                      {submissionMetrics.pair_internal_submits.toLocaleString()}{" "}
+                      internal ·{" "}
+                      {submissionMetrics.pair_external_submits.toLocaleString()}{" "}
+                      external
+                    </div>
+                  )}
                 <div className="text-[12px] text-slate-400 mt-1.5 font-medium">
                   recruiter pressed Submit in PAIR
                 </div>
@@ -1337,7 +1542,11 @@ export default function AdminAnalyticsPage() {
             <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
               <div className="flex items-center justify-between">
                 <span className="text-[13px] font-semibold text-slate-500">
-                  PAIR External Subs
+                  {/* Same number as the old "PAIR External Subs" card: what
+                      JobDiva confirms, next to what PAIR recorded. */}
+                  <HeaderHint hint="Formerly “PAIR External Subs”. JobDiva submittals to the job's contact for a candidate carrying the PAIR Candidates = Pass qualification (set within 60 days of the submittal), as verified from JobDiva on each sync. v1 and v2 of one JobDiva job count once.">
+                    JobDiva-Confirmed PAIR Subs
+                  </HeaderHint>
                 </span>
                 <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
                   <BadgeCheck className="w-4 h-4" />
@@ -1435,7 +1644,7 @@ export default function AdminAnalyticsPage() {
                         {job.submittals.toLocaleString()}
                       </td>
                       <td className="py-2.5 px-4 text-right text-slate-600 whitespace-nowrap">
-                        {formatDate(job.last_submit_date)}
+                        {formatStoredSubmitDate(job.last_submit_date)}
                       </td>
                     </tr>
                   ))}
@@ -2137,37 +2346,138 @@ export default function AdminAnalyticsPage() {
           </div>
         </div>
 
+        {!isLoading && timelineMetricsUnavailable && timelineRows.length > 0 && (
+          <div
+            role="status"
+            className="flex items-start gap-2 px-6 py-2.5 border-b border-amber-200 bg-amber-50 text-[12.5px] font-medium text-amber-800"
+          >
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+            <span>
+              Candidate outcome columns (Pass Candidates, Feedback, PAIR
+              Submittals, First Feedback and First PAIR External Submittal)
+              couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Job
+              columns are current. Reload to try again.
+            </span>
+          </div>
+        )}
+
+        {/* Separate from the candidate notice: either read can fail alone, and
+            without it a failed read looks like jobs that predate the tracking. */}
+        {!isLoading && timelineStepTimeUnavailable && timelineRows.length > 0 && (
+          <div
+            role="status"
+            className="flex items-start gap-2 px-6 py-2.5 border-b border-amber-200 bg-amber-50 text-[12.5px] font-medium text-amber-800"
+          >
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+            <span>
+              Step 5 time columns (Step 5 Active Time and Step 5 &rarr; Launch)
+              couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Reload
+              to try again.
+            </span>
+          </div>
+        )}
+
         <div className="overflow-auto max-h-[700px] relative">
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
+              {/* Two header rows: only "PAIR Submittals" spans a second
+                  (Internal / External) row; every other column spans both. */}
               <tr className="font-bold text-slate-500 text-[12.5px]">
                 <th
                   scope="col"
+                  rowSpan={2}
                   aria-label="Row Number"
                   className="py-3 px-4 w-[50px] min-w-[50px] max-w-[50px] text-center sticky left-0 z-30 bg-slate-50"
                 >
                   #
                 </th>
-                <th className="py-3 px-6 w-[130px] min-w-[130px] max-w-[130px] sticky left-[50px] z-30 bg-slate-50">
+                <th rowSpan={2} className="py-3 px-6 w-[130px] min-w-[130px] max-w-[130px] sticky left-[50px] z-30 bg-slate-50">
                   JobDiva ID
                 </th>
-                <th className="py-3 px-6 w-[280px] min-w-[280px] max-w-[280px] sticky left-[180px] z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">
+                <th rowSpan={2} className="py-3 px-6 w-[280px] min-w-[280px] max-w-[280px] sticky left-[180px] z-30 bg-slate-50 shadow-[1px_0_0_0_#e2e8f0]">
                   Job Title
                 </th>
-                <th className="py-3 px-6">Client</th>
-                <th className="py-3 px-6">Recruiter Emails</th>
-                <th className="py-3 px-6">Posted (JobDiva)</th>
-                <th className="py-3 px-6">Added (PAIR)</th>
-                <th className="py-3 px-6">Launched (PAIR)</th>
-                <th className="py-3 px-6 text-center">Lag</th>
-                <th className="py-3 px-6 text-center">
+                <th rowSpan={2} className="py-3 px-6">Client</th>
+                <th rowSpan={2} className="py-3 px-6">Recruiter Emails</th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  <HeaderHint hint="Who first saved this job in PAIR. Recorded since 09/23/2026; older jobs show —.">
+                    Posted By
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  <HeaderHint hint="Who first launched PAIR on this job. Recorded since 09/23/2026; older launches show —.">
+                    Launched By
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">Posted (JobDiva)</th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  {withEasternLabel("Added (PAIR)")}
+                </th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  {withEasternLabel("Launched (PAIR)")}
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center">Lag</th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Time recruiters had Step 5 (Source) open and in use on this job, summed across every visit and every recruiter. It pauses while the tab is hidden or after 5 minutes with no activity. Tracked since 09/23/2026; jobs worked earlier show —.">
+                    Step 5 Active Time
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Wall-clock time from the first time anyone opened Step 5 (Source) on this job to its first SUCCESSFUL launch: the first time a candidate was actually launched to PAIR (the Launch Report's PAIR Launch). That can be later than Launched (PAIR), which is the first launch click. Shows — until the job has launched successfully, and for jobs worked before tracking started on 09/23/2026.">
+                    Step 5 &rarr; Launch
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center">
                   Active / Archived Jobs
                 </th>
-                <th className="py-3 px-6 text-center">PAIR Status</th>
-                <th className="py-3 px-6 text-center">Sourced</th>
-                <th className="py-3 px-6 text-center">Launched</th>
-                <th className="py-3 px-6 text-center">Submittals</th>
-                <th className="py-3 px-6 whitespace-nowrap">First Feedback Submitted At</th>
+                <th rowSpan={2} className="py-3 px-6 text-center">PAIR Status</th>
+                <th rowSpan={2} className="py-3 px-6 text-center">Sourced</th>
+                <th rowSpan={2} className="py-3 px-6 text-center">Launched</th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Candidates whose PAIR interview result is Pass, by the same rule as the rank list.">
+                    Pass Candidates
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center">
+                  <HeaderHint hint="Candidates with a recorded recruiter decision: Submit, Reject or Unreachable.">
+                    Feedback
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  {withEasternLabel("First Feedback Submitted At")}
+                </th>
+                <th colSpan={2} className="pt-3 pb-1 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Submits recorded in PAIR. Internal = submitted to a hiring manager for review; External = submitted to the client.">
+                    PAIR Submittals
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="JobDiva submittal to the job contact for a PAIR-passed candidate, as verified from JobDiva.">
+                    JobDiva-Confirmed
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Every JobDiva submittal on this job, whether or not it came through PAIR.">
+                    JobDiva Submittals
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  <HeaderHint hint="Earliest external Submit recorded in PAIR for this job. PAIR keeps only each candidate's latest decision, so a Submit later changed to Reject no longer counts.">
+                    {withEasternLabel("First PAIR External Submittal")}
+                  </HeaderHint>
+                </th>
+              </tr>
+              <tr className="font-bold text-slate-500 text-[12px]">
+                <th className="pt-1 pb-3 px-4 text-center">
+                  <HeaderHint hint="Submitted to a hiring manager for review.">
+                    Internal
+                  </HeaderHint>
+                </th>
+                <th className="pt-1 pb-3 px-4 text-center">
+                  <HeaderHint hint="Submitted to the client. Submits recorded before the internal/external split count here.">
+                    External
+                  </HeaderHint>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-[13px]">
@@ -2183,48 +2493,22 @@ export default function AdminAnalyticsPage() {
                     <td className="py-4 px-6 w-[280px] min-w-[280px] max-w-[280px] sticky left-[180px] z-10 bg-white shadow-[1px_0_0_0_#e2e8f0]">
                       <div className="h-4 w-44 bg-slate-100 animate-pulse rounded" />
                     </td>
-                    <td className="py-4 px-6">
-                      <div className="h-4 w-24 bg-slate-100 animate-pulse rounded" />
-                    </td>
-                    <td className="py-4 px-6">
-                      <div className="h-4 w-24 bg-slate-100 animate-pulse rounded" />
-                    </td>
-                    <td className="py-4 px-6">
-                      <div className="h-4 w-20 bg-slate-100 animate-pulse rounded" />
-                    </td>
-                    <td className="py-4 px-6">
-                      <div className="h-4 w-20 bg-slate-100 animate-pulse rounded" />
-                    </td>
-                    <td className="py-4 px-6">
-                      <div className="h-4 w-20 bg-slate-100 animate-pulse rounded" />
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      <div className="h-5 w-10 bg-slate-100 animate-pulse rounded-full mx-auto" />
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      <div className="h-5 w-16 bg-slate-100 animate-pulse rounded-full mx-auto" />
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      <div className="h-5 w-16 bg-slate-100 animate-pulse rounded-full mx-auto" />
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      <div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" />
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      <div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" />
-                    </td>
-                    <td className="py-4 px-6 text-center">
-                      <div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" />
-                    </td>
-                    <td className="py-4 px-6">
-                      <div className="h-4 w-28 bg-slate-100 animate-pulse rounded" />
-                    </td>
+                    {TIMELINE_SKELETON_BARS.map((cell, idx) => (
+                      <td
+                        key={idx}
+                        className={`py-4 px-6${cell.center ? " text-center" : ""}`}
+                      >
+                        <div
+                          className={`${cell.bar} bg-slate-100 animate-pulse${cell.center ? " mx-auto" : ""}`}
+                        />
+                      </td>
+                    ))}
                   </tr>
                 ))
               ) : filteredTimeline.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={15}
+                    colSpan={TIMELINE_COLUMN_COUNT}
                     className="py-12 text-center text-slate-400 text-[13px]"
                   >
                     {timelineRows.length === 0
@@ -2295,10 +2579,16 @@ export default function AdminAnalyticsPage() {
                           <div className="text-slate-600">—</div>
                         )}
                       </td>
+                      <td className="py-3.5 px-6">
+                        {renderPersonCell(job.posted_by)}
+                      </td>
+                      <td className="py-3.5 px-6">
+                        {renderPersonCell(job.launched_by)}
+                      </td>
                       <td className="py-3.5 px-6 whitespace-nowrap">
                         {job.jobdiva_posted_on ? (
                           <span className="text-slate-700">
-                            {formatDate(job.jobdiva_posted_on)}
+                            {formatEasternDate(job.jobdiva_posted_on)}
                           </span>
                         ) : job.posted_date_raw ? (
                           <span className="text-slate-500">
@@ -2317,6 +2607,12 @@ export default function AdminAnalyticsPage() {
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderLagChip(job.posted_to_launch_days)}
                       </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderDurationCell(job.step5_active_minutes)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderDurationCell(job.step5_to_launch_minutes)}
+                      </td>
                       <td className="py-3.5 px-6 text-center">
                         {renderArchivedBadge(job)}
                       </td>
@@ -2329,11 +2625,29 @@ export default function AdminAnalyticsPage() {
                       <td className="py-3.5 px-6 text-center font-bold text-primary">
                         {job.candidates_launched.toLocaleString()}
                       </td>
+                      <td className="py-3.5 px-6 text-center font-bold text-emerald-600">
+                        {renderCountCell(job.pass_candidates, "")}
+                      </td>
+                      <td className="py-3.5 px-6 text-center">
+                        {renderFeedbackCell(job)}
+                      </td>
+                      <td className="py-3.5 px-6 whitespace-nowrap">
+                        {renderDateCell(job.first_feedback_at)}
+                      </td>
+                      <td className="py-3.5 px-4 text-center font-bold text-slate-800">
+                        {renderCountCell(job.pair_internal_submits, "")}
+                      </td>
+                      <td className="py-3.5 px-4 text-center font-bold text-slate-800">
+                        {renderCountCell(job.pair_external_submits, "")}
+                      </td>
+                      <td className="py-3.5 px-6 text-center font-bold text-emerald-700">
+                        {(job.jobdiva_confirmed_subs ?? 0).toLocaleString()}
+                      </td>
                       <td className="py-3.5 px-6 text-center font-bold text-amber-600">
                         {(job.jobdiva_submittals ?? 0).toLocaleString()}
                       </td>
                       <td className="py-3.5 px-6 whitespace-nowrap">
-                        {renderDateCell(job.first_feedback_at)}
+                        {renderDateCell(job.first_pair_external_submit_at)}
                       </td>
                     </tr>
                   );
@@ -2467,7 +2781,7 @@ export default function AdminAnalyticsPage() {
                       chipText = "Cooling down";
                       chipClass =
                         "bg-amber-50 text-amber-700 border border-amber-200";
-                      chipTitle = `Benched after a transient error until ${formatDate(acc.cooldown_until)}`;
+                      chipTitle = `Benched after a transient error until ${formatEasternDateTime(acc.cooldown_until)} (ET)`;
                     } else if (acc.status && acc.status !== "OK") {
                       chipText = acc.status;
                       chipClass =
