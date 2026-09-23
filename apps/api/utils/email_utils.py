@@ -62,6 +62,17 @@ _FREE_EMAIL_DOMAINS = {
     "msn.com",
     "me.com",
     "mac.com",
+    "proton.me",
+    "gmx.net",
+    "fastmail.com",
+    "qq.com",
+    "163.com",
+    "rediffmail.com",
+    "ymail.com",
+    "yahoo.co.uk",
+    "hotmail.co.uk",
+    "live.co.uk",
+    "googlemail.com",
 }
 
 def is_work_email(email: str) -> bool:

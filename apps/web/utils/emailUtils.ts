@@ -14,6 +14,17 @@ const FREE_EMAIL_DOMAINS = new Set([
   "msn.com",
   "me.com",
   "mac.com",
+  "proton.me",
+  "gmx.net",
+  "fastmail.com",
+  "qq.com",
+  "163.com",
+  "rediffmail.com",
+  "ymail.com",
+  "yahoo.co.uk",
+  "hotmail.co.uk",
+  "live.co.uk",
+  "googlemail.com",
 ]);
 
 export function isWorkEmail(email: string | null | undefined): boolean {
