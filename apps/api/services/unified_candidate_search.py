@@ -64,6 +64,24 @@ from services.role_family import detect_role_family
 
 _TITLE_BOOST_BY_RELEVANCE = {"exact": 30, "similar": 20, "related": 10}
 
+# Names that Unipile (or LinkedIn's API) returns for privacy-restricted /
+# out-of-network profiles at full-profile fetch time.  When the full-profile
+# payload itself carries one of these strings we must NOT use it to overwrite
+# the name the search row produced, because the search row may already have a
+# better derived value (e.g. slug → "Julia Rogers").
+# Kept as a module-level frozenset so it is created once and can be reused in
+# tests without touching private class state.
+_UNIPILE_GENERIC_PROFILE_NAMES: frozenset = frozenset({
+    "linkedin member",
+    "linkedin user",
+    "linkedin profile",
+    "linkedin candidate",
+    "professional candidate",
+    "unknown candidate",
+    "candidate",
+    "unknown",
+})
+
 # First explainability line under the scoring matrix, keyed by band tier
 # (core.config.score_band). The high-level JobAgent branch in
 # finalize_candidate strips these (it withholds the % they describe).
@@ -1934,31 +1952,39 @@ class UnifiedCandidateSearch:
                                         # connections omit the candidate name; _resolve_candidate_name
                                         # falls back to the headline (e.g. "Supply Chain Analyst | …")
                                         # or fallback strings (e.g. "Professional at Company").
-                                        # The full profile payload reliably has the real name. We should
-                                        # always prefer it over the search row's name, unless the full
-                                        # profile name is an out-of-network generic placeholder.
+                                        # The full profile payload always contains the real name.
+                                        # We overwrite only when the current stored name is recognisably
+                                        # a search-time fallback artifact — empty, shaped like a
+                                        # headline (contains "|"), or matches the known generic
+                                        # last-resort patterns from _resolve_candidate_name.
                                         _profile_name = str(profile_data.get("_profile_name") or "").strip()
-                                        if _profile_name:
-                                            _current_name = str(cand.get("name") or "")
-                                            _is_generic = _profile_name.lower() in (
-                                                "linkedin member",
-                                                "linkedin user",
-                                                "linkedin profile",
-                                            )
-                                            if not _is_generic and _profile_name != _current_name:
-                                                logger.info(
-                                                    "unipile_name_corrected provider_id=%s old=%r new=%r",
-                                                    provider_id,
-                                                    _current_name[:60],
-                                                    _profile_name,
+                                        try:
+                                            if _profile_name:
+                                                _current_name = str(cand.get("name") or "")
+                                                _is_generic_profile = _profile_name.lower() in _UNIPILE_GENERIC_PROFILE_NAMES
+                                                _is_fallback_name = (
+                                                    not _current_name
+                                                    or "|" in _current_name
+                                                    or _current_name.lower().startswith("linkedin professional ")
+                                                    or _current_name.lower().startswith("linkedin candidate")
+                                                    or _current_name.lower() in _UNIPILE_GENERIC_PROFILE_NAMES
                                                 )
-                                                cand["name"] = _profile_name
-                                                cand["firstName"] = str(profile_data.get("_profile_first_name") or "").strip()
-                                                cand["lastName"] = str(profile_data.get("_profile_last_name") or "").strip()
-                                        # Clean up internal helper keys — not needed downstream.
-                                        cand.pop("_profile_name", None)
-                                        cand.pop("_profile_first_name", None)
-                                        cand.pop("_profile_last_name", None)
+                                                if not _is_generic_profile and _is_fallback_name:
+                                                    logger.info(
+                                                        "unipile_name_corrected provider_id=%s old=%r new=%r",
+                                                        provider_id,
+                                                        _current_name[:60],
+                                                        _profile_name[:60],
+                                                    )
+                                                    cand["name"] = _profile_name
+                                                    cand["firstName"] = str(profile_data.get("_profile_first_name") or "").strip()
+                                                    cand["lastName"] = str(profile_data.get("_profile_last_name") or "").strip()
+                                        finally:
+                                            # Always clean up internal helper keys — not needed
+                                            # downstream, even if an exception occurs above.
+                                            cand.pop("_profile_name", None)
+                                            cand.pop("_profile_first_name", None)
+                                            cand.pop("_profile_last_name", None)
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
                             # After enrichment, run the same role-anchor check.
