@@ -1,8 +1,10 @@
 """Daily PAIR launch report.
 
-One row per job whose FIRST PAIR launch landed on the requested calendar
-date, evaluated in America/New_York (EDT/EST) — not UTC — so a job launched
-at 21:00 EDT belongs to that day and not the next.
+One row per job whose FIRST SUCCESSFUL PAIR launch landed on the requested
+calendar date, evaluated in America/New_York (EDT/EST) — not UTC — so a job
+launched at 21:00 EDT belongs to that day and not the next. Today is a valid
+date: the page re-requests it on a timer while the range includes today, and
+every request recomputes from live data (nothing is cached).
 
 Each row is that job's rank list, summarised. The Rankings page is the
 source of truth for a job's candidates, and this report must agree with it:
@@ -16,7 +18,14 @@ source of truth for a job's candidates, and this report must agree with it:
   * the same population and the same classification code as the Rankings
     header (`services/launched_candidates.py` + `summarise_launched_candidates`),
     so "Launched" here equals "Candidates Launched" there and the four
-    status buckets always sum to it.
+    status buckets always sum to it;
+  * every Interview Status, Response and Feedback column is computed over
+    that LAUNCHED population, so none of them can exceed Launched. Only
+    Sourced and Time to Source read the wider sourced population. (Job
+    26-29267, 2026-09-21: Submitted used to be counted over every sourced
+    row, including candidates submitted without ever being launched, and a
+    job whose launch attempts had all failed was listed with Launched 0 —
+    the row showed submissions next to a zero launch count.)
 
 Data comes from two places:
 
@@ -54,6 +63,7 @@ from routers._helpers import (
     _mj_filter,
     _parse_posted_date,
     _parse_recruiter_emails,
+    optional_monitored_jobs_columns,
 )
 from services.launched_candidates import (
     fetch_launched_candidates,
@@ -63,10 +73,15 @@ from services.launched_candidates import (
 from services.engage_status import (
     format_engage_status,
     hf_display_from_payload,
-    parse_engage_score,
     score_from_payload,
     select_engage_status,
 )
+from services.feedback_metrics import (
+    has_recorded_feedback,
+    is_pair_reject,
+    submission_kind,
+)
+from services.job_attribution import attribution_fields
 from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
     normalize_channel,
@@ -413,9 +428,10 @@ def _fetch_jobs_launched_on(
     scope: Optional[Dict[str, Any]] = None,
     end_date: Optional[datetime.date] = None,
 ) -> List[Dict[str, Any]]:
-    """Jobs whose FIRST launch (MIN of engage_interview_audit.created_at) falls
-    between `start_date` and `end_date` (inclusive) in Eastern time. A single
-    day is just the range where start_date == end_date.
+    """Jobs whose FIRST SUCCESSFUL launch (MIN of engage_interview_audit.created_at
+    over rows that got an interview id) falls between `start_date` and
+    `end_date` (inclusive) in Eastern time. A single day is just the range
+    where start_date == end_date.
 
     Keyed on true first launch rather than "any launch or audit activity that day" so a job appears
     exactly once, on the day it went live, however long it keeps launching or receiving updates.
@@ -427,6 +443,9 @@ def _fetch_jobs_launched_on(
     mj_cond, mj_params = _mj_filter(scope, "mj")
     launch_date_expr = _eastern_date_expr('l.first_launch_at')
     launch_date_filter = f"{launch_date_expr} = %s" if single_day_query else f"{launch_date_expr} BETWEEN %s AND %s"
+    with conn.cursor() as cur:
+        # NULL for an attribution column the startup ALTER has not added yet.
+        optional = optional_monitored_jobs_columns(cur, "mj.")
     sql = f"""
         WITH launches AS (
             SELECT
@@ -441,6 +460,14 @@ def _fetch_jobs_launched_on(
               ON NULLIF(a.jobdiva_id, '') IS NOT NULL
              AND (a.jobdiva_id = NULLIF(mj.jobdiva_id, '') OR a.jobdiva_id = mj.job_id::text)
             WHERE {mj_cond}
+              -- Successful launches only — the same rule the launched
+              -- population uses (services/launched_candidates.py). A failed
+              -- attempt writes an audit row with an empty or NULL
+              -- interview_id; counting it listed a job whose attempts had all
+              -- failed with Launched 0, and filed a job whose first attempt
+              -- failed under the failed attempt's day and PAIR Launch time.
+              AND COALESCE(NULLIF(a.interview_id, ''), '') <> ''
+              AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''
             GROUP BY mj.job_id
         )
         SELECT
@@ -464,6 +491,11 @@ def _fetch_jobs_launched_on(
             -- parsed in Python because some rows carry an "… IST" suffix that a
             -- ::timestamp cast silently reads as if it were the DB's own zone.
             mj.created_at::text          AS job_created_at_text,
+            -- Who posted / first launched the job in PAIR
+            -- (services/job_attribution.py). Blank ('' or NULL) = not
+            -- recorded, which the page renders as a dash.
+            {optional["pair_posted_by"]} AS pair_posted_by,
+            {optional["pair_launched_by"]} AS pair_launched_by,
             l.first_launch_at
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
@@ -654,18 +686,119 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
+def _classify_outreach(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str]:
+    """(merged, display, bucket) for ONE candidate's outreach payload.
+
+    ``display`` is the rank list table's label (Pass / Fail / In Progress /
+    Pending) and ``bucket`` the report bucket it lands in. Called once per
+    candidate, from ``_summarise_outreach``; the launch report's per-person
+    Outstanding count reuses the labels it produced there (``displays_out``),
+    so "Outstanding" can only ever count people the Pass / Fail columns also
+    count.
+    """
+    outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
+    # Top-level keys win. For a payload that came through
+    # build_merged_outreach_payload they hold the stored → audit → live
+    # monotonic merge and `outreach` is only a copy of pair-bot's live
+    # block; re-applying that block on top used to let its still-`pending`
+    # outreach-sequence state wipe a stored `in_progress` — the rank list
+    # table never did that, so header and table disagreed on one person.
+    # For a raw pair-bot body the top level has no status keys and the
+    # block simply fills them in.
+    merged = {**outreach_dict, **payload}
+
+    # If the local DB has 'pass'/'fail' as the outreach_phase but the live
+    # API now returns the real canonical phase (e.g. phase1), use the
+    # live phase so we bucket the completed candidate correctly.
+    terminal_phases = ("pass", "fail", "completed")
+    if payload.get("outreach_phase") in terminal_phases and outreach_dict.get("outreach_phase") not in terminal_phases + (None,):
+        merged["outreach_phase"] = outreach_dict["outreach_phase"]
+    elif payload.get("outreach_phase") in terminal_phases and payload.get("phase") not in terminal_phases + (None,):
+        # Fallback to pair-bot's raw 'phase' key if available
+        merged["outreach_phase"] = payload["phase"]
+
+    # ONE status per candidate, the same selection the rank list table
+    # makes for its row (select_engage_status): the merge, lifted by a
+    # live interview_status only when that reads further along. Passing
+    # the original payload keeps a raw UI body's top-level `status` (the
+    # candidate's sourcing status) out of the running.
+    status_raw = select_engage_status(payload)
+    normalized_status = (status_raw or "").strip().lower()
+
+    # Candidates marked as failed/rejected who never actually engaged/attended
+    # the interview across phases should be classified as pending.
+    # Engagement signals: any recorded score, completion timestamp, a comms
+    # response, OR a known phase beyond the initial dispatch (outreach_phase
+    # being set means pair-bot already routed this candidate to a call/SMS phase).
+    if normalized_status in ("failed", "fail", "rejected"):
+        comms = payload.get("communications") or merged.get("communications") or []
+        phase_raw = (
+            merged.get("outreach_phase")
+            or merged.get("phase")
+            or merged.get("current_phase")
+        )
+        has_engaged = (
+            merged.get("candidate_score") is not None
+            or merged.get("score") is not None
+            or merged.get("engage_score") is not None
+            or merged.get("first_completed_at") is not None
+            or bool(phase_raw)  # phase2/phase3 implies contact was made
+            or any(comm.get("response_at") for comm in comms if isinstance(comm, dict))
+        )
+        if not has_engaged:
+            status_raw = "pending"
+            normalized_status = "pending"
+
+    funnel_raw = status_raw
+
+    # Classify exactly like the rank list's table (`format_engage_status`
+    # is what candidates.py stamps on each row), then bucket:
+    #   Pass / Fail            -> completed (+ passed / failed)
+    #   In Progress            -> in_progress
+    #   partial vocabulary     -> partial_complete (the table has no such
+    #                             label and shows these as Pending)
+    #   anything else          -> pending — including `sent` / `Initiated`
+    #                             (stamped at launch, before any contact),
+    #                             reminder phases reported as a status, and
+    #                             a terminal token without the score or
+    #                             hard-filter verdict the table needs to
+    #                             call it Pass or Fail.
+    # Bucketing off the raw pair-bot vocabulary instead used to count a
+    # just-launched `sent` candidate as In Progress while the table said
+    # Pending — the two screens must never disagree on one candidate.
+    display = format_engage_status(
+        normalized_status,
+        score_from_payload(merged),
+        hf_display_from_payload(merged),
+    )
+    if _bucket_status(funnel_raw) == "partial_complete":
+        bucket = "partial_complete"
+    elif display in ("Pass", "Fail"):
+        bucket = "completed"
+    elif display == "In Progress":
+        bucket = "in_progress"
+    else:
+        bucket = "pending"
+    return merged, display, bucket
+
+
 def _summarise_outreach(
     payloads: List[Dict[str, Any]],
     *,
     shift_phases: bool = False,
     promote_extra: bool = True,
     include_pending_extra: bool = True,
+    displays_out: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
     sent — a candidate SMS'd three times counts once, which is what a recruiter
     reading "SMS: 12" expects.
+
+    ``displays_out``, when given, receives each payload's rank-list label in
+    payload order — the very labels the buckets were counted from, so a
+    caller never has to classify (and re-log unknown statuses) a second time.
     """
     buckets = {"pending": 0, "in_progress": 0, "completed": 0, "partial_complete": 0, "passed": 0, "failed": 0}
     phases = {
@@ -687,90 +820,10 @@ def _summarise_outreach(
     first_pass_timestamps: List[datetime.datetime] = []
 
     for payload in payloads:
-        outreach_dict = payload.get("outreach") if isinstance(payload.get("outreach"), dict) else {}
-        # Top-level keys win. For a payload that came through
-        # build_merged_outreach_payload they hold the stored → audit → live
-        # monotonic merge and `outreach` is only a copy of pair-bot's live
-        # block; re-applying that block on top used to let its still-`pending`
-        # outreach-sequence state wipe a stored `in_progress` — the rank list
-        # table never did that, so header and table disagreed on one person.
-        # For a raw pair-bot body the top level has no status keys and the
-        # block simply fills them in.
-        merged = {**outreach_dict, **payload}
-
-        # If the local DB has 'pass'/'fail' as the outreach_phase but the live
-        # API now returns the real canonical phase (e.g. phase1), use the
-        # live phase so we bucket the completed candidate correctly.
-        terminal_phases = ("pass", "fail", "completed")
-        if payload.get("outreach_phase") in terminal_phases and outreach_dict.get("outreach_phase") not in terminal_phases + (None,):
-            merged["outreach_phase"] = outreach_dict["outreach_phase"]
-        elif payload.get("outreach_phase") in terminal_phases and payload.get("phase") not in terminal_phases + (None,):
-            # Fallback to pair-bot's raw 'phase' key if available
-            merged["outreach_phase"] = payload["phase"]
-
-        # ONE status per candidate, the same selection the rank list table
-        # makes for its row (select_engage_status): the merge, lifted by a
-        # live interview_status only when that reads further along. Passing
-        # the original payload keeps a raw UI body's top-level `status` (the
-        # candidate's sourcing status) out of the running.
-        status_raw = select_engage_status(payload)
-        normalized_status = (status_raw or "").strip().lower()
-
-        # Candidates marked as failed/rejected who never actually engaged/attended
-        # the interview across phases should be classified as pending.
-        # Engagement signals: any recorded score, completion timestamp, a comms
-        # response, OR a known phase beyond the initial dispatch (outreach_phase
-        # being set means pair-bot already routed this candidate to a call/SMS phase).
-        if normalized_status in ("failed", "fail", "rejected"):
-            comms = payload.get("communications") or merged.get("communications") or []
-            phase_raw = (
-                merged.get("outreach_phase")
-                or merged.get("phase")
-                or merged.get("current_phase")
-            )
-            has_engaged = (
-                merged.get("candidate_score") is not None
-                or merged.get("score") is not None
-                or merged.get("engage_score") is not None
-                or merged.get("first_completed_at") is not None
-                or bool(phase_raw)  # phase2/phase3 implies contact was made
-                or any(comm.get("response_at") for comm in comms if isinstance(comm, dict))
-            )
-            if not has_engaged:
-                status_raw = "pending"
-                normalized_status = "pending"
-
-        funnel_raw = status_raw
-
-        # Classify exactly like the rank list's table (`format_engage_status`
-        # is what candidates.py stamps on each row), then bucket:
-        #   Pass / Fail            -> completed (+ passed / failed)
-        #   In Progress            -> in_progress
-        #   partial vocabulary     -> partial_complete (the table has no such
-        #                             label and shows these as Pending)
-        #   anything else          -> pending — including `sent` / `Initiated`
-        #                             (stamped at launch, before any contact),
-        #                             reminder phases reported as a status, and
-        #                             a terminal token without the score or
-        #                             hard-filter verdict the table needs to
-        #                             call it Pass or Fail.
-        # Bucketing off the raw pair-bot vocabulary instead used to count a
-        # just-launched `sent` candidate as In Progress while the table said
-        # Pending — the two screens must never disagree on one candidate.
-        display = format_engage_status(
-            normalized_status,
-            score_from_payload(merged),
-            hf_display_from_payload(merged),
-        )
-        if _bucket_status(funnel_raw) == "partial_complete":
-            bucket = "partial_complete"
-        elif display in ("Pass", "Fail"):
-            bucket = "completed"
-        elif display == "In Progress":
-            bucket = "in_progress"
-        else:
-            bucket = "pending"
+        merged, display, bucket = _classify_outreach(payload)
         buckets[bucket] += 1
+        if displays_out is not None:
+            displays_out.append(display)
 
         if display == "Pass":
             buckets["passed"] += 1
@@ -873,74 +926,90 @@ def _summarise_outreach(
 # Row assembly
 # ---------------------------------------------------------------------------
 def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Sourcing + recruiter-feedback columns, all from pair's own tables."""
-    submitted = rejected = 0
-    passed = failed = 0
-    time_to_feedback: List[float] = []
-    sourced_at: List[datetime.datetime] = []
-    first_attempted_at: List[datetime.datetime] = []
-    first_completed_at: List[datetime.datetime] = []
-    first_pass_at: List[datetime.datetime] = []
+    """Sourcing columns (Sourced, Time to Source) over the SOURCED population.
 
-    for row in rows:
-        feedback_type = (row.get("feedback_type") or "").strip().lower()
-        has_reason = bool((row.get("feedback_reason") or "").strip())
-        if feedback_type == "submit":
+    These are the only columns the sourced population feeds. It includes
+    people who were never launched — JobDiva applicants, manual adds,
+    cross-submission adds, anyone actioned before launch — so reading pass,
+    feedback or lifecycle timestamps off it is how a row came to show
+    submissions and a First Pass time next to Launched 0. Those columns come
+    from ``_summarise_feedback`` / ``summarise_launched_candidates`` instead.
+    """
+    sourced_at = [created for r in rows if (created := _parse_iso(r.get("created_at")))]
+    return {
+        "total_sourced": len({r["candidate_id"] for r in rows}),
+        "first_sourced_at": min(sourced_at) if sourced_at else None,
+    }
+
+
+def _summarise_feedback(
+    launched_rows: List[Dict[str, Any]],
+    displays: List[str],
+) -> Dict[str, Any]:
+    """Recruiter-feedback columns over the LAUNCHED population.
+
+    ``displays`` is each launched person's rank-list label (Pass / Fail / In
+    Progress / Pending), in ``launched_rows`` order — the labels
+    ``_summarise_outreach`` assigned while counting the status buckets. Definitions
+    are the shared ones in services/feedback_metrics.py:
+
+      * Submitted = a current PAIR Submit, split Internal (manager review) /
+        External (to the client; a Submit with no submission_type predates the
+        split and was external). This is what PAIR recorded — distinct from
+        monitored_jobs.pair_external_subs, the JobDiva-confirmed count.
+      * Outstanding = interview decided (Pass or Fail) and no recruiter
+        decision of any kind recorded. Counted per person, so it can no longer
+        go negative or absorb decisions on people who were never launched.
+      * Time to Feedback = mean interview completion → decision, over every
+        Submit and Reject. It used to require a feedback_reason, which only a
+        Reject carries, so Submits were never measured.
+    """
+    submitted = internal = external = rejected = outstanding = 0
+    time_to_feedback: List[float] = []
+    feedback_times: List[datetime.datetime] = []
+    external_submit_times: List[datetime.datetime] = []
+
+    for row, display in zip(launched_rows, displays):
+        kind = submission_kind(row)
+        rejected_row = is_pair_reject(row)
+        if kind is not None:
             submitted += 1
-        elif feedback_type == "reject":
+            if kind == "internal":
+                internal += 1
+            else:
+                external += 1
+        elif rejected_row:
             rejected += 1
 
-        engage_status = (row.get("engage_status") or "").strip().lower()
-        engage_score = parse_engage_score(row.get("engage_score"))
-        hf_status = (row.get("engage_hard_filter_status") or "").strip().lower()
-        display = format_engage_status(engage_status, engage_score, hf_status)
-        if display == "Pass":
-            passed += 1
-            completed_time = (
-                _parse_iso(row.get("first_completed_at"))
-                or _parse_iso(row.get("engage_completed_at"))
-                or _parse_iso(row.get("engage_updated_at"))
-            )
-            if completed_time:
-                first_pass_at.append(completed_time)
-        elif display == "Fail":
-            failed += 1
+        decided = has_recorded_feedback(row)
+        if display in ("Pass", "Fail") and not decided:
+            outstanding += 1
+        if not decided:
+            continue
 
-        created = _parse_iso(row.get("created_at"))
-        if created:
-            sourced_at.append(created)
-
-        attempted = _parse_iso(row.get("first_attempted_at"))
-        if attempted:
-            first_attempted_at.append(attempted)
-
-        completed = _parse_iso(row.get("first_completed_at")) or _parse_iso(row.get("engage_completed_at"))
-        if completed:
-            first_completed_at.append(completed)
-
-        if feedback_type and has_reason:
-            elapsed = _minutes_between(
-                _parse_iso(row.get("engage_completed_at")),
-                _parse_iso(row.get("feedback_at")),
-            )
+        feedback_at = _parse_iso(row.get("feedback_at"))
+        if feedback_at is None:
+            continue
+        feedback_times.append(feedback_at)
+        if kind == "external":
+            external_submit_times.append(feedback_at)
+        if kind is not None or rejected_row:
+            elapsed = _minutes_between(_parse_iso(row.get("engage_completed_at")), feedback_at)
             if elapsed is not None:
                 time_to_feedback.append(elapsed)
 
     return {
-        "total_sourced": len({r["candidate_id"] for r in rows}),
-        "first_sourced_at": min(sourced_at) if sourced_at else None,
-        "first_attempted_at": min(first_attempted_at) if first_attempted_at else None,
-        "first_completed_at": min(first_completed_at) if first_completed_at else None,
         "submitted_candidates": submitted,
+        "internal_submitted_candidates": internal,
+        "external_submitted_candidates": external,
         "rejected_candidates": rejected,
-        "passed_candidates": passed,
-        "failed_candidates": failed,
-        "first_pass_at": min(first_pass_at) if first_pass_at else None,
+        "outstanding_feedback": outstanding,
         "time_to_feedback_minutes": _mean(time_to_feedback),
-        "first_feedback_at": min(
-            (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
-            default=None,
-        ),
+        # Any recorded decision, Unreachable included.
+        "first_feedback_at": min(feedback_times) if feedback_times else None,
+        # Earliest CURRENT external submit: the feedback write merges into
+        # the blob, so a submit later changed to a reject is gone.
+        "first_external_submit_at": min(external_submit_times) if external_submit_times else None,
     }
 
 
@@ -1007,7 +1076,22 @@ def summarise_launched_candidates(
     ``resolved`` counts candidates with any status evidence (live pair-bot
     answer or a stored audit / JSONB status); ``launched`` is the population.
     """
+    return _summarise_launched(launched_rows, live_by_interview)[0]
+
+
+def _summarise_launched(
+    launched_rows: List[Dict[str, Any]],
+    live_by_interview: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[str]]:
+    """``summarise_launched_candidates`` plus each row's rank-list label (Pass /
+    Fail / In Progress / Pending), in row order — the labels the status
+    buckets were counted from, so the report's feedback columns classify
+    people exactly as the Pass / Fail columns did. Kept separate so the
+    Rankings header response (routers/jobs.get_job_outreach_stats) keeps its
+    shape.
+    """
     payloads: List[Dict[str, Any]] = []
+    displays: List[str] = []
     resolved = 0
     for row in launched_rows:
         iid = interview_id_of(row)
@@ -1021,10 +1105,12 @@ def summarise_launched_candidates(
             resolved += 1
         payloads.append(candidate_outreach_payload(row, live_api))
 
-    summary = _summarise_outreach(payloads, shift_phases=True, include_pending_extra=False)
+    summary = _summarise_outreach(
+        payloads, shift_phases=True, include_pending_extra=False, displays_out=displays
+    )
     summary["launched"] = len(launched_rows)
     summary["resolved"] = resolved
-    return summary
+    return summary, displays
 
 
 # ---------------------------------------------------------------------------
@@ -1042,9 +1128,14 @@ def _build_row(
     this job (services/launched_candidates.py) over its whole lifetime — the
     row is indexed by the day the job first launched, but its numbers are the
     job's current numbers, the same ones the Rankings page shows.
+
+    Invariant: only Sourced and Time to Source read ``sourced_rows``. Every
+    count in the Interview Status and Feedback groups is a subset of
+    Launched, and every lifecycle timestamp comes from a launched person.
     """
     cand = _summarise_candidates(sourced_rows)
-    outreach = summarise_launched_candidates(launched_rows, live_by_interview)
+    outreach, displays = _summarise_launched(launched_rows, live_by_interview)
+    feedback = _summarise_feedback(launched_rows, displays)
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -1056,9 +1147,18 @@ def _build_row(
     num_resolved = outreach["resolved"]
 
     buckets = outreach["buckets"]
-    pass_times = [t for t in (outreach.get("first_pass_at"), cand.get("first_pass_at")) if t]
-    merged_first_pass = min(pass_times) if pass_times else None
-    live_ttp = _minutes_between(launch_at, merged_first_pass)
+    first_pass_at = outreach["first_pass_at"]
+    live_ttp = _minutes_between(launch_at, first_pass_at)
+    # monitored_jobs.time_to_first_pass is the auto-sync's own figure, taken
+    # over EVERY sourced row with a hard-filter pass — launched or not. It
+    # stays the fallback for a pass stamp that reads before the launch, but
+    # only when a launched person actually passed; otherwise "To First Pass"
+    # would show a duration next to Pass Candidates 0.
+    stored_ttp = (
+        round(float(job["time_to_first_pass"]), 1)
+        if job.get("time_to_first_pass") is not None and buckets["passed"]
+        else None
+    )
     # Percentage = (Completed + Partial Complete) / Total Launched * 100.
     #
     # Undefined rather than 0 when nothing launched, and undefined when no
@@ -1074,6 +1174,9 @@ def _build_row(
         "job_id": str(job.get("job_id") or ""),
         "jobdiva_id": (job.get("jobdiva_id") or "").strip(),
         "recruiter_emails": _parse_recruiter_emails(job.get("recruiter_emails")),
+        # posted_by / launched_by: who acted in PAIR, as opposed to the
+        # assigned recruiters above. None = not recorded (pre-2026-09-23).
+        **attribution_fields(job.get("pair_posted_by"), job.get("pair_launched_by")),
         "job_title": (job.get("enhanced_title") or job.get("title") or "").strip(),
         "customer_name": (job.get("customer_name") or "").strip(),
         # Eastern calendar day of first launch — only meaningful once a
@@ -1106,37 +1209,35 @@ def _build_row(
         "completed": buckets["completed"],
         "partial_complete": buckets["partial_complete"],
 
-        # Prefer Pair-bot's live lifecycle timestamps.  `sourced_candidates`
-        # is only a fallback when the live response does not expose a stamp.
-        "first_attempted_at": _edt(outreach["first_attempted_at"] or cand["first_attempted_at"]),
-        "first_completed_at": _edt(outreach["first_completed_at"] or cand["first_completed_at"]),
+        # Launched people only: the merged stored → audit → live payload of
+        # each. There is deliberately no sourced-row fallback — a candidate
+        # who was never launched must not put a timestamp on this row.
+        "first_attempted_at": _edt(outreach["first_attempted_at"]),
+        "first_completed_at": _edt(outreach["first_completed_at"]),
 
         "time_to_first_response_minutes": outreach["time_to_first_response_minutes"],
         "launch_to_response_minutes": _minutes_between(launch_at, outreach["earliest_response_at"]),
         "overall_response_time_minutes": outreach["overall_response_time_minutes"],
 
-        "submitted_candidates": cand["submitted_candidates"],
-        "rejected_candidates": cand["rejected_candidates"],
+        # Submitted == Internal + External; Submitted + Rejected + Outstanding
+        # never exceeds Launched (all three count launched people).
+        "submitted_candidates": feedback["submitted_candidates"],
+        "internal_submitted_candidates": feedback["internal_submitted_candidates"],
+        "external_submitted_candidates": feedback["external_submitted_candidates"],
+        "rejected_candidates": feedback["rejected_candidates"],
         # Pass / Fail per launched candidate, classified exactly like the rank
         # list's table (format_engage_status over the merged payload).
         "passed_candidates": buckets["passed"],
         "failed_candidates": buckets["failed"],
-        # Completed candidates the recruiter has not yet actioned either way.
-        "outstanding_feedback": max(
-            buckets["completed"] - cand["submitted_candidates"] - cand["rejected_candidates"], 0
-        ),
-        "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
-        "first_feedback_at": _edt(cand["first_feedback_at"]),
-        "first_pass_at": _edt(merged_first_pass),
-        "time_to_first_pass_minutes": (
-            live_ttp
-            if live_ttp is not None
-            else (
-                round(float(job["time_to_first_pass"]), 1)
-                if job.get("time_to_first_pass") is not None
-                else None
-            )
-        ),
+        # Decided interviews (Pass or Fail) the recruiter has not actioned.
+        "outstanding_feedback": feedback["outstanding_feedback"],
+        "time_to_feedback_minutes": feedback["time_to_feedback_minutes"],
+        "first_feedback_at": _edt(feedback["first_feedback_at"]),
+        # "First PAIR External Submittal": the earliest current external
+        # Submit a recruiter recorded in PAIR — not a JobDiva-confirmed one.
+        "first_external_submit_at": _edt(feedback["first_external_submit_at"]),
+        "first_pass_at": _edt(first_pass_at),
+        "time_to_first_pass_minutes": live_ttp if live_ttp is not None else stored_ttp,
 
         "call": outreach["channels"]["call"],
         "sms": outreach["channels"]["sms"],
@@ -1187,7 +1288,11 @@ def _load_report_inputs(
             # under either key, so every lookup takes both.
             keys = _keys_for(job)
             job_key = str(job["job_id"])
-            launched_by_job[job_key] = fetch_launched_candidates(conn, keys) if keys else []
+            # include_feedback: the Feedback columns are computed over the
+            # launched people's own recorded decisions (_summarise_feedback).
+            launched_by_job[job_key] = (
+                fetch_launched_candidates(conn, keys, include_feedback=True) if keys else []
+            )
             sourced_by_job[job_key] = fetch_sourced_candidates(conn, keys) if keys else []
         return jobs, launched_by_job, sourced_by_job
     finally:
@@ -1227,7 +1332,12 @@ async def get_launch_report(
             detail="Access denied. Admin or team lead access required to view the launch report.",
         )
 
-    yesterday = datetime.datetime.now(REPORT_TIMEZONE).date() - datetime.timedelta(days=1)
+    # Today (Eastern) is requestable: its row set is simply the jobs whose first
+    # successful launch has happened so far today, and every number is read
+    # live, so the page polls it for a real-time view. The no-parameter
+    # default stays yesterday — the last complete day.
+    today = datetime.datetime.now(REPORT_TIMEZONE).date()
+    yesterday = today - datetime.timedelta(days=1)
 
     if start_date or end_date:
         if not (start_date and end_date):
@@ -1239,8 +1349,11 @@ async def get_launch_report(
             raise HTTPException(status_code=400, detail="Invalid start_date/end_date — expected YYYY-MM-DD.")
         if report_start_date > report_end_date:
             raise HTTPException(status_code=400, detail="start_date must not be after end_date.")
-        if report_end_date > yesterday:
-            raise HTTPException(status_code=400, detail="Today's report is not available yet — end_date must be yesterday or earlier.")
+        if report_end_date > today:
+            raise HTTPException(
+                status_code=400,
+                detail="end_date cannot be in the future — the latest report available is today's (Eastern time).",
+            )
         range_days = (report_end_date - report_start_date).days + 1
         if range_days > MAX_LAUNCH_REPORT_RANGE_DAYS:
             raise HTTPException(

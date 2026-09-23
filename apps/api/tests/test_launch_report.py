@@ -699,20 +699,94 @@ def test_summarise_outreach_promotes_phase2_to_extra3_from_communications():
     assert phases["extra"] == 1
 
 
-def test_outstanding_feedback_never_goes_negative():
-    """More feedback than completions (e.g. a candidate actioned before the
-    webhook landed) must clamp at zero, not render as a negative backlog.
-    """
-    launched = [_launched("1", "c1")]
-    candidates = [
-        {"candidate_id": "c1", "created_at": None, "feedback_type": "Submit",
-         "feedback_reason": "ok", "feedback_at": None, "engage_completed_at": None},
-        {"candidate_id": "c2", "created_at": None, "feedback_type": "Reject",
-         "feedback_reason": "no", "feedback_at": None, "engage_completed_at": None},
+def test_outstanding_is_decided_launched_people_with_no_recorded_decision():
+    """Outstanding is a per-person count — Pass or Fail, and no recruiter
+    decision of any kind (Unreachable included) — not Completed minus the
+    feedback totals, which went negative and was clamped to hide it."""
+    launched = [
+        _launched("1", "c1", engage_status="passed"),                                   # outstanding
+        _launched("2", "c2", engage_status="failed", engage_score="40"),                # outstanding
+        _launched("3", "c3", engage_status="passed", feedback_type="Submit"),           # actioned
+        _launched("4", "c4", engage_status="failed", engage_score="30", feedback_type="Reject"),
+        _launched("5", "c5", engage_status="passed", feedback_type="Unreachable"),      # actioned
+        _launched("6", "c6", engage_status="in_progress"),                              # not decided yet
+        _launched("7", "c7", engage_status="sent", feedback_type="Submit"),             # submitted pre-interview
     ]
-    row = lr._build_row(_job(1), launched, candidates, {"1": _outreach("completed")})
-    assert row["completed"] == 1
-    assert row["outstanding_feedback"] == 0
+    row = lr._build_row(_job(7), launched, [], {})
+    assert (row["passed_candidates"], row["failed_candidates"]) == (3, 2)
+    assert row["outstanding_feedback"] == 2
+    assert row["submitted_candidates"] == 2
+    assert row["rejected_candidates"] == 1
+    assert row["outstanding_feedback"] <= row["completed"]
+
+
+def test_outstanding_classifies_people_exactly_like_the_pass_fail_buckets():
+    """A stale stored in_progress lifted to completed by live pair-bot is a
+    Pass in the buckets — and therefore outstanding until actioned."""
+    live = {"1": _outreach("completed")}
+    row = lr._build_row(_job(1), [_launched("1", "c1", engage_status="in_progress")], [], live)
+    assert (row["passed_candidates"], row["outstanding_feedback"]) == (1, 1)
+    actioned = [_launched("1", "c1", engage_status="in_progress", feedback_type="Submit")]
+    assert lr._build_row(_job(1), actioned, [], live)["outstanding_feedback"] == 0
+
+
+def test_rankings_header_response_keeps_its_shape():
+    """GET /jobs/{id}/outreach-stats returns summarise_launched_candidates
+    as-is; the report's feedback columns must not leak into it."""
+    summary = lr.summarise_launched_candidates(
+        [_launched("1", "c1", engage_status="passed", feedback_type="Submit")], {}
+    )
+    assert set(summary) == {
+        "buckets", "phases", "channels", "time_to_first_response_minutes",
+        "overall_response_time_minutes", "earliest_response_at", "responded_count",
+        "first_contact_at", "first_attempted_at", "first_completed_at", "first_pass_at",
+        "launched", "resolved",
+    }
+
+
+def test_feedback_on_never_launched_candidates_is_not_counted():
+    """Job 26-29267 (2026-09-21): a submitted-but-never-launched candidate made
+    the row show submissions next to Launched 0. Submitted / Rejected /
+    Outstanding and every feedback timestamp count LAUNCHED people only; the
+    sourced population feeds Sourced and Time to Source and nothing else."""
+    sourced = [
+        {"candidate_id": "s1", "created_at": None, "feedback_type": "Submit",
+         "feedback_at": "2026-08-27T10:00:00Z", "engage_status": "passed",
+         "engage_completed_at": "2026-08-27T09:00:00Z", "first_attempted_at": "2026-08-27T08:00:00Z"},
+        {"candidate_id": "s2", "created_at": None, "feedback_type": "Reject",
+         "feedback_reason": "no", "feedback_at": "2026-08-27T11:00:00Z"},
+    ]
+    row = lr._build_row(_job(0), [], sourced, {})
+    assert row["total_candidates_sourced"] == 2
+    assert row["total_candidates_launched"] == 0
+    for field in ("submitted_candidates", "internal_submitted_candidates", "external_submitted_candidates",
+                  "rejected_candidates", "outstanding_feedback", "passed_candidates", "failed_candidates"):
+        assert row[field] == 0, field
+    for field in ("first_feedback_at", "first_external_submit_at", "first_pass_at",
+                  "first_attempted_at", "first_completed_at", "time_to_feedback_minutes"):
+        assert row[field] is None, field
+
+
+def test_every_feedback_count_is_a_subset_of_launched():
+    """The invariant the 26-29267 fix pins, over a mixed job: launched people
+    with every kind of decision plus sourced-only people with decisions."""
+    launched = [
+        _launched("1", "c1", engage_status="passed", feedback_type="Submit", submission_type="external"),
+        _launched("2", "c2", engage_status="passed", feedback_type="Submit", submission_type="internal"),
+        _launched("3", "c3", engage_status="failed", engage_score="20", feedback_type="Reject"),
+        _launched("4", "c4", engage_status="passed"),
+        _launched("5", "c5", engage_status="sent"),
+    ]
+    sourced = [{"candidate_id": c["candidate_id"], "created_at": None} for c in launched] + [
+        {"candidate_id": f"x{i}", "created_at": None, "feedback_type": "Submit"} for i in range(10)
+    ]
+    row = lr._build_row(_job(5), launched, sourced, {})
+    launched_n = row["total_candidates_launched"]
+    assert launched_n == 5 and row["total_candidates_sourced"] == 15
+    assert row["submitted_candidates"] == row["internal_submitted_candidates"] + row["external_submitted_candidates"] == 2
+    assert row["submitted_candidates"] + row["rejected_candidates"] + row["outstanding_feedback"] <= launched_n
+    assert row["passed_candidates"] + row["failed_candidates"] == row["completed"] <= launched_n
+    assert row["outstanding_feedback"] == 1   # c4
 
 
 # ---------------------------------------------------------------------------
@@ -792,24 +866,103 @@ def test_time_to_source_runs_from_pair_published():
 
 
 def test_first_feedback_at_earliest_wins():
-    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
-    candidates = [
-        {"candidate_id": "c1", "feedback_at": "2026-08-27T10:00:00Z"},
-        {"candidate_id": "c2", "feedback_at": "2026-08-26T10:00:00Z"},
-        {"candidate_id": "c3"},  # no feedback
+    job = {**_job(3), "job_created_at_text": "2026-08-25 12:00:00"}
+    launched = [
+        _launched("1", "c1", feedback_type="Submit", feedback_at="2026-08-27T10:00:00Z"),
+        _launched("2", "c2", feedback_type="Unreachable", feedback_at="2026-08-26T10:00:00Z"),
+        _launched("3", "c3"),  # no feedback
+        # a stamp with no decision behind it is not feedback
+        _launched("4", "c4", feedback_at="2026-08-20T10:00:00Z"),
     ]
-    row = lr._build_row(job, [], candidates, {})
+    row = lr._build_row(job, launched, [], {})
     # EDT offset from UTC is -04:00, so 10:00 UTC = 06:00 EDT
     assert row["first_feedback_at"] == "2026-08-26T06:00:00-04:00"
 
 
 def test_first_feedback_at_is_none_when_no_feedback():
-    job = {**_job(0), "job_created_at_text": "2026-08-25 12:00:00"}
-    candidates = [
-        {"candidate_id": "c1"},
-        {"candidate_id": "c2"},
+    job = {**_job(2), "job_created_at_text": "2026-08-25 12:00:00"}
+    launched = [_launched("1", "c1"), _launched("2", "c2")]
+    assert lr._build_row(job, launched, [], {})["first_feedback_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# PAIR submittals: internal / external split and the first external one
+# ---------------------------------------------------------------------------
+def test_submitted_splits_internal_and_external():
+    """A Submit with no submission_type predates the 2026-09-11 split and was
+    an external submit (the endpoint's default). A later Reject leaves the old
+    submission_type in the blob; it is a Reject, not a submit."""
+    launched = [
+        _launched("1", "c1", feedback_type="Submit", submission_type="external"),
+        _launched("2", "c2", feedback_type="Submit", submission_type="internal"),
+        _launched("3", "c3", feedback_type="Submit"),                                  # legacy → external
+        _launched("4", "c4", feedback_type="submit", submission_type="Internal"),
+        _launched("5", "c5", feedback_type="Reject", submission_type="internal"),      # not a submit
+        _launched("6", "c6", feedback_type="Rejected - Skills"),                       # reject variant
     ]
-    assert lr._build_row(job, [], candidates, {})["first_feedback_at"] is None
+    row = lr._build_row(_job(6), launched, [], {})
+    assert row["submitted_candidates"] == 4
+    assert row["internal_submitted_candidates"] == 2
+    assert row["external_submitted_candidates"] == 2
+    assert row["rejected_candidates"] == 2
+
+
+def test_first_external_submit_is_the_earliest_current_external_submit():
+    launched = [
+        _launched("1", "c1", feedback_type="Submit", submission_type="internal", feedback_at="2026-08-26T10:00:00Z"),
+        _launched("2", "c2", feedback_type="Submit", submission_type="external", feedback_at="2026-08-28T10:00:00Z"),
+        _launched("3", "c3", feedback_type="Submit", feedback_at="2026-08-27T14:30:00Z"),          # legacy external
+        _launched("4", "c4", feedback_type="Reject", submission_type="external", feedback_at="2026-08-25T10:00:00Z"),
+        _launched("5", "c5", feedback_type="Submit", submission_type="external", feedback_at="garbage"),
+    ]
+    row = lr._build_row(_job(5), launched, [], {})
+    assert row["first_external_submit_at"] == "2026-08-27T10:30:00-04:00"
+    # First Feedback still counts any decision, the internal submit and the reject included.
+    assert row["first_feedback_at"] == "2026-08-25T06:00:00-04:00"
+
+
+def test_first_external_submit_is_none_without_one():
+    launched = [_launched("1", "c1", feedback_type="Submit", submission_type="internal",
+                          feedback_at="2026-08-26T10:00:00Z")]
+    row = lr._build_row(_job(1), launched, [], {})
+    assert row["first_external_submit_at"] is None
+    assert (row["internal_submitted_candidates"], row["external_submitted_candidates"]) == (1, 0)
+
+
+def test_time_to_feedback_measures_submits_as_well_as_rejects():
+    """A Submit carries no feedback_reason (the UI only asks on Reject); the
+    old reason-gated mean silently measured Rejects only."""
+    launched = [
+        _launched("1", "c1", engage_status="passed", feedback_type="Submit",
+                  engage_completed_at="2026-08-27T10:00:00Z", feedback_at="2026-08-27T11:00:00Z"),   # 60m
+        _launched("2", "c2", engage_status="failed", engage_score="20", feedback_type="Reject",
+                  feedback_reason="Skills", engage_completed_at="2026-08-27T10:00:00Z",
+                  feedback_at="2026-08-27T13:00:00Z"),                                                # 180m
+        # Unreachable is a decision but not a Submit/Reject: not measured
+        _launched("3", "c3", engage_status="passed", feedback_type="Unreachable",
+                  engage_completed_at="2026-08-27T10:00:00Z", feedback_at="2026-08-28T10:00:00Z"),
+        # no completion stamp → nothing to measure from
+        _launched("4", "c4", feedback_type="Submit", feedback_at="2026-08-27T12:00:00Z"),
+    ]
+    assert lr._build_row(_job(4), launched, [], {})["time_to_feedback_minutes"] == 120.0
+
+
+# ---------------------------------------------------------------------------
+# Posted By / Launched By
+# ---------------------------------------------------------------------------
+def test_posted_and_launched_by_are_emitted_normalised():
+    job = {**_job(0), "pair_posted_by": " Jane.Doe@Pyramid.com ", "pair_launched_by": "sam@pyramid.com"}
+    row = lr._build_row(job, [], [], {})
+    assert (row["posted_by"], row["launched_by"]) == ("jane.doe@pyramid.com", "sam@pyramid.com")
+
+
+def test_posted_and_launched_by_are_none_for_jobs_that_predate_the_columns():
+    """Jobs created before 2026-09-23 have NULL; that is "not recorded", which
+    the page renders as a dash — never an error and never a guessed person."""
+    row = lr._build_row(_job(0), [], [], {})
+    assert row["posted_by"] is None and row["launched_by"] is None
+    row = lr._build_row({**_job(0), "pair_posted_by": "", "pair_launched_by": None}, [], [], {})
+    assert row["posted_by"] is None and row["launched_by"] is None
 
 
 def test_passed_and_failed_candidates_basic():
@@ -1081,6 +1234,83 @@ def test_launch_report_accepts_range_at_the_server_cap(monkeypatch):
     assert captured["scope_team_id"] is None
 
 
+def _capture_dates(monkeypatch):
+    captured = {}
+
+    def _load_inputs(start_date, end_date, scope_team_id):
+        captured["dates"] = (start_date, end_date)
+        return [], {}, {}
+
+    async def _no_outreach(_interview_ids):
+        return {}
+
+    monkeypatch.setattr(lr, "_load_report_inputs", _load_inputs)
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _no_outreach)
+    return captured
+
+
+def _eastern_today() -> datetime.date:
+    return datetime.datetime.now(lr.REPORT_TIMEZONE).date()
+
+
+def test_launch_report_accepts_today_for_the_live_view(monkeypatch):
+    """Real-time: today (Eastern) is requestable, alone or as a range end."""
+    captured = _capture_dates(monkeypatch)
+    today = _eastern_today()
+    for start in (today, today - datetime.timedelta(days=6)):
+        response = asyncio.run(lr.get_launch_report(
+            date=None, start_date=start.isoformat(), end_date=today.isoformat(),
+            team_id=None, user=_admin_user(),
+        ))
+        assert response["status"] == "success"
+        assert captured["dates"] == (start, today)
+        assert response["data"]["end_date"] == today.isoformat()
+        assert response["data"]["generated_at"].endswith(("-04:00", "-05:00"))
+
+
+def test_launch_report_rejects_a_future_end_date_before_db(monkeypatch):
+    captured = _capture_dates(monkeypatch)
+    tomorrow = _eastern_today() + datetime.timedelta(days=1)
+    with pytest.raises(lr.HTTPException) as exc:
+        asyncio.run(lr.get_launch_report(
+            date=None, start_date=_eastern_today().isoformat(), end_date=tomorrow.isoformat(),
+            team_id=None, user=_admin_user(),
+        ))
+    assert exc.value.status_code == 400
+    assert "future" in exc.value.detail
+    assert "dates" not in captured
+
+
+def test_launch_report_default_is_still_yesterday(monkeypatch):
+    captured = _capture_dates(monkeypatch)
+    asyncio.run(lr.get_launch_report(date=None, start_date=None, end_date=None, team_id=None, user=_admin_user()))
+    yesterday = _eastern_today() - datetime.timedelta(days=1)
+    assert captured["dates"] == (yesterday, yesterday)
+
+
+def test_launch_report_range_ending_today_still_honours_the_cap(monkeypatch):
+    _capture_dates(monkeypatch)
+    today = _eastern_today()
+    start = today - datetime.timedelta(days=lr.MAX_LAUNCH_REPORT_RANGE_DAYS)
+    with pytest.raises(lr.HTTPException) as exc:
+        asyncio.run(lr.get_launch_report(
+            date=None, start_date=start.isoformat(), end_date=today.isoformat(),
+            team_id=None, user=_admin_user(),
+        ))
+    assert exc.value.status_code == 400
+    assert str(lr.MAX_LAUNCH_REPORT_RANGE_DAYS) in exc.value.detail
+
+
+def test_launch_report_still_forbids_recruiters(monkeypatch):
+    _capture_dates(monkeypatch)
+    with pytest.raises(lr.HTTPException) as exc:
+        asyncio.run(lr.get_launch_report(
+            date=None, start_date=None, end_date=None, team_id=None,
+            user=UserIdentity(email="rec@example.com", role="recruiter"),
+        ))
+    assert exc.value.status_code == 403
+
+
 # ---------------------------------------------------------------------------
 # Every emitted timestamp is Eastern
 # ---------------------------------------------------------------------------
@@ -1091,8 +1321,14 @@ def test_all_emitted_timestamps_carry_an_eastern_offset():
         "job_created_at_text": "2026-08-27 12:00:00",
         "first_launch_at": datetime.datetime(2026, 8, 28, 2, 2),
     }
-    row = lr._build_row(job, [_launched("1")], [], {"1": _outreach("completed")})
-    for field in ("pair_published_at", "pair_launch_at"):
+    launched = [_launched(
+        "1", "c1", engage_status="passed",
+        first_attempted_at="2026-08-28T03:00:00Z", engage_completed_at="2026-08-28T04:00:00Z",
+        feedback_type="Submit", feedback_at="2026-08-28T05:00:00Z",
+    )]
+    row = lr._build_row(job, launched, [], {"1": _outreach("completed")})
+    for field in ("pair_published_at", "pair_launch_at", "first_attempted_at", "first_completed_at",
+                  "first_pass_at", "first_feedback_at", "first_external_submit_at"):
         assert row[field].endswith(("-04:00", "-05:00")), (field, row[field])
 
 
@@ -1129,7 +1365,8 @@ _FIXTURE_SQL = """
 CREATE TEMP TABLE monitored_jobs (
   job_id TEXT, jobdiva_id TEXT, title TEXT, enhanced_title TEXT, customer_name TEXT,
   recruiter_emails TEXT, posted_date TEXT, time_to_first_pass DOUBLE PRECISION,
-  parent_job_id TEXT, version INT, created_at TEXT) ON COMMIT DROP;
+  parent_job_id TEXT, version INT, created_at TEXT,
+  pair_posted_by TEXT, pair_launched_by TEXT) ON COMMIT DROP;
 CREATE TEMP TABLE engage_interview_audit (
   id SERIAL PRIMARY KEY,
   candidate_id VARCHAR(255), jobdiva_id VARCHAR(255), interview_id VARCHAR(255),
@@ -1142,20 +1379,29 @@ CREATE TEMP TABLE sourced_candidates (
 INSERT INTO monitored_jobs VALUES
   -- v1 arrived via JobDiva import (readable_ist_now string)
   ('26-06182','26-06182','Data Engineer',NULL,'Acme','["r@x.com"]','Aug 20, 2026',NULL,NULL,1,
-   '2026-08-20 17:30:00 IST'),
-  -- v2 cloned by Edit Job Setup (NOW(), plain timestamp)
+   '2026-08-20 17:30:00 IST','poster@x.com','launcher@x.com'),
+  -- v2 cloned by Edit Job Setup (NOW(), plain timestamp); predates attribution
   ('26-06182-v2','26-06182-v2','Data Engineer',NULL,'Acme','["r@x.com"]','Aug 20, 2026',NULL,
-   '26-06182',2,'2026-08-27 18:00:00'),
+   '26-06182',2,'2026-08-27 18:00:00',NULL,NULL),
   -- two referenceless jobs: jobdiva_id is '' rather than NULL
-  ('60','','Ghost A',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00'),
-  ('61','','Ghost B',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00');
+  ('60','','Ghost A',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00',NULL,NULL),
+  ('61','','Ghost B',NULL,'Beta','[]','',NULL,NULL,1,'2026-08-27 09:00:00',NULL,NULL),
+  -- every launch attempt failed: never launched, never listed
+  ('26-07000','26-07000','Failed Only',NULL,'Gamma','[]','',NULL,NULL,1,'2026-08-27 09:00:00',NULL,NULL),
+  -- first attempt failed on Aug 27 (Eastern); first SUCCESS on Aug 29
+  ('26-07100','26-07100','Retried',NULL,'Gamma','[]','',NULL,NULL,1,'2026-08-27 09:00:00',NULL,NULL);
 
 INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, status, created_at) VALUES
   ('c1','26-06182',   '901','Initiated','2026-08-28 01:00:00'),   -- keyed by ref
   ('c2','26-06182',   '902','Initiated','2026-08-28 01:05:00'),
   ('c3','26-06182-v2','903','Initiated','2026-08-28 02:30:00'),   -- v2's own launch
   ('g1','60',         '960','Initiated','2026-08-28 02:10:00'),   -- keyed by job_id
-  ('g2','',           '961','Initiated','2026-08-28 02:20:00');   -- blank key: matches nothing
+  ('g2','',           '961','Initiated','2026-08-28 02:20:00'),   -- blank key: matches nothing
+  -- failed attempts write '' (no interview match) or NULL (whole batch failed)
+  ('f1','26-07000',   '',   'failed',   '2026-08-28 01:30:00'),
+  ('f2','26-07000',   NULL, 'failed',   '2026-08-28 01:31:00'),
+  ('r1','26-07100',   '',   'failed',   '2026-08-28 01:40:00'),
+  ('r1','26-07100',   '971','Initiated','2026-08-30 01:40:00');   -- Aug 29 21:40 EDT
 """
 
 
@@ -1167,6 +1413,9 @@ def pg_conn():
         pytest.skip(f"no Postgres reachable at {_TEST_DSN!r}: {exc}")
     try:
         with conn.cursor() as cur:
+            # Managed PROD runs UTC; a dev machine's default zone must not
+            # change how the naive TIMESTAMP columns read back.
+            cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(_FIXTURE_SQL)
         yield conn
     finally:
@@ -1214,6 +1463,115 @@ def test_query_rows_render_both_timestamp_shapes_in_eastern(pg_conn):
     assert v1["pair_published_at"] == "2026-08-20T08:00:00-04:00"   # IST string
     assert v2["pair_published_at"] == "2026-08-27T14:00:00-04:00"   # NOW() timestamp
     assert v2["version"] == 2
+
+
+def test_query_never_lists_a_job_whose_launch_attempts_all_failed(pg_conn):
+    """Failed attempts write audit rows with an empty or NULL interview id.
+    Counting them listed the job with Launched 0 (the 26-29267 symptom)."""
+    for day in (datetime.date(2026, 8, 27), datetime.date(2026, 8, 28)):
+        assert "26-07000" not in {j["job_id"] for j in lr._fetch_jobs_launched_on(pg_conn, day, None)}
+    ranged = lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 1), None, datetime.date(2026, 8, 31))
+    assert "26-07000" not in {j["job_id"] for j in ranged}
+
+
+def test_query_files_a_retried_job_under_its_first_successful_launch(pg_conn):
+    """The failed attempt on Aug 27 must not decide the report day or the
+    PAIR Launch time; the first attempt that got an interview id does."""
+    assert "26-07100" not in {j["job_id"] for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)}
+    jobs = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 29), None)}
+    assert jobs["26-07100"]["first_launch_at"] == datetime.datetime(2026, 8, 30, 1, 40)
+    row = lr._build_row(jobs["26-07100"], [], [], {})
+    assert row["pair_launch_at"] == "2026-08-29T21:40:00-04:00"
+    assert row["launch_date"] == "2026-08-29"
+
+
+def test_query_carries_posted_and_launched_by(pg_conn):
+    jobs = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)}
+    v1 = lr._build_row(jobs["26-06182"], [], [], {})
+    v2 = lr._build_row(jobs["26-06182-v2"], [], [], {})
+    assert (v1["posted_by"], v1["launched_by"]) == ("poster@x.com", "launcher@x.com")
+    assert (v2["posted_by"], v2["launched_by"]) == (None, None)
+
+
+def test_query_survives_missing_attribution_columns(pg_conn):
+    """A boot whose ALTER never landed: the report still lists every job, with
+    Posted By / Launched By blank. Dropping (rather than never creating) the
+    columns also proves a dropped column is not mistaken for a present one."""
+    with pg_conn.cursor() as cur:
+        cur.execute("ALTER TABLE monitored_jobs DROP COLUMN pair_posted_by, DROP COLUMN pair_launched_by")
+    jobs = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)}
+    assert {"26-06182", "26-06182-v2", "60"} <= set(jobs)
+    row = lr._build_row(jobs["26-06182"], [], [], {})
+    assert (row["posted_by"], row["launched_by"]) == (None, None)
+
+
+class _SharedConn:
+    """The fixture's connection, handed to code that closes what it opens."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return self._conn.cursor()
+
+    def close(self):
+        pass
+
+
+def test_report_end_to_end_counts_only_launched_people(pg_conn, monkeypatch):
+    """The whole endpoint over real SQL: a candidate submitted without ever
+    being launched is Sourced but never Submitted, and cannot move First
+    Feedback / First External Submittal; a failed-only job has no row."""
+    import json as _json
+
+    def _sc(cid, data, email=None):
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sourced_candidates (jobdiva_id, candidate_id, email, phone, data, created_at)"
+                " VALUES ('26-06182', %s, %s, '5551234567', %s, '2026-08-27 20:00:00')",
+                (cid, email or f"{cid}@x.com", _json.dumps(data)),
+            )
+
+    _sc("c1", {"engage_interview_id": "901", "engage_status": "passed",
+               "engage_completed_at": "2026-08-28T03:00:00+00:00",
+               "feedback_type": "Submit", "submission_type": "external",
+               "feedback_at": "2026-08-28T04:00:00+00:00"})
+    _sc("c2", {"engage_interview_id": "902", "engage_status": "completed",
+               "engage_hard_filter_status": "pass"})                               # decided, not actioned
+    _sc("c9", {"feedback_type": "Submit", "feedback_at": "2026-08-27T21:00:00+00:00",
+               "engage_status": "passed"})                                          # NEVER launched
+    # a failed-only job with a sourced, submitted candidate of its own
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO sourced_candidates (jobdiva_id, candidate_id, email, phone, data)"
+            " VALUES ('26-07000', 'f1', 'f1@x.com', '5550000000', %s)",
+            (_json.dumps({"feedback_type": "Submit", "engage_interview_id": ""}),),
+        )
+
+    async def _no_outreach(_ids):
+        return {}
+
+    monkeypatch.setattr(lr, "get_db_connection", lambda: _SharedConn(pg_conn))
+    monkeypatch.setattr(lr, "_fetch_all_outreach", _no_outreach)
+    response = asyncio.run(lr.get_launch_report(
+        date=None, start_date="2026-08-27", end_date="2026-08-27", team_id=None, user=_admin_user(),
+    ))
+    rows = {r["job_id"]: r for r in response["data"]["jobs"]}
+    assert "26-07000" not in rows
+
+    row = rows["26-06182"]
+    assert row["total_candidates_sourced"] == 3                 # c1, c2, c9
+    assert row["total_candidates_launched"] == 2                # c1, c2
+    assert (row["passed_candidates"], row["failed_candidates"], row["completed"]) == (2, 0, 2)
+    assert row["submitted_candidates"] == row["external_submitted_candidates"] == 1   # c1 only
+    assert row["internal_submitted_candidates"] == 0
+    assert row["outstanding_feedback"] == 1                     # c2
+    assert row["first_external_submit_at"] == "2026-08-28T00:00:00-04:00"   # c1, not c9's earlier stamp
+    assert row["first_feedback_at"] == "2026-08-28T00:00:00-04:00"
+    assert row["time_to_feedback_minutes"] == 60.0
+    assert (row["posted_by"], row["launched_by"]) == ("poster@x.com", "launcher@x.com")
+    for r in rows.values():
+        assert r["submitted_candidates"] + r["rejected_candidates"] + r["outstanding_feedback"] <= r["total_candidates_launched"]
 
 
 def test_summarise_outreach_flat_payload_with_outreach_channel():
@@ -1644,6 +2002,9 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
             self.last_params = params
 
         def fetchall(self):
+            # The optional-column catalog check: both attribution columns exist.
+            if "pg_attribute" in self.last_sql:
+                return [("job_id",), ("pair_posted_by",), ("pair_launched_by",)]
             return []
 
     class FakeConn:
@@ -1666,12 +2027,140 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     lr._fetch_jobs_launched_on(fake_conn, start, None, end)
 
     sql = fake_conn.cursor_obj.last_sql
+    squashed = " ".join(sql.split())
     # CTE must NOT filter a.created_at
     assert "AND {audit_date_filter}" not in sql
     assert "WHERE mj_cond" not in sql  # was replaced by actual mj_cond
-    # CTE computes MIN(a.created_at) without date restrictions
-    assert "MIN(a.created_at)                             AS first_launch_at" in sql
+    # CTE computes MIN(a.created_at) without date restrictions…
+    assert "MIN(a.created_at) AS first_launch_at" in squashed
+    # …but over SUCCESSFUL launches only: the launched population's own rule
+    # (services/launched_candidates.py), so a job whose attempts all failed
+    # never gets a row and a failed first attempt cannot set the day.
+    cte = squashed.split("GROUP BY mj.job_id")[0]
+    assert "AND COALESCE(NULLIF(a.interview_id, ''), '') <> ''" in cte
+    assert "AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''" in cte
     # Unused total_launched removed from CTE and outer query
     assert "total_launched" not in sql
     # Outer query filters on l.first_launch_at
     assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
+    # Posted By / Launched By come straight off the job row.
+    assert "mj.pair_posted_by AS pair_posted_by," in squashed
+    assert "mj.pair_launched_by AS pair_launched_by," in squashed
+    assert sql.count("%s") == 4
+
+
+def test_jobs_query_success_rule_matches_the_launched_population():
+    """The report's day/PAIR Launch and its Launched column must agree on what
+    a launch is. Same predicate text, aliased, in both statements."""
+    from services.launched_candidates import LAUNCHED_CANDIDATES_SQL
+
+    for col in ("interview_id", "candidate_id"):
+        assert f"COALESCE(NULLIF({col}, ''), '') <> ''" in LAUNCHED_CANDIDATES_SQL
+    captured = {}
+
+    class _Cur:
+        description = []
+
+        def execute(self, sql, params):
+            captured["sql"] = sql
+
+        def fetchall(self):
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    lr._fetch_jobs_launched_on(_Conn(), datetime.date(2026, 8, 27), None)
+    for col in ("interview_id", "candidate_id"):
+        assert f"COALESCE(NULLIF(a.{col}, ''), '') <> ''" in captured["sql"]
+
+
+def test_jobs_query_selects_null_when_attribution_columns_are_missing():
+    """pair_posted_by / pair_launched_by are added by a startup ALTER that can
+    time out on a locked table. Selecting a missing column would 500 the whole
+    report; it must select NULL and render a dash instead."""
+    statements = []
+
+    class _Cur:
+        description = []
+
+        def execute(self, sql, params):
+            statements.append((sql, params))
+
+        def fetchall(self):
+            # Catalog answer from a DB whose ALTER has not landed yet.
+            return [("job_id",), ("jobdiva_id",)] if "pg_attribute" in statements[-1][0] else []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    lr._fetch_jobs_launched_on(_Conn(), datetime.date(2026, 8, 27), None)
+    catalog_sql, catalog_params = statements[0]
+    assert "pg_attribute" in catalog_sql and "NOT attisdropped" in catalog_sql
+    assert "to_regclass('monitored_jobs')" in catalog_sql and catalog_params == ()
+    jobs_sql = " ".join(statements[-1][0].split())
+    assert "NULL::text AS pair_posted_by," in jobs_sql
+    assert "NULL::text AS pair_launched_by," in jobs_sql
+    assert "mj.pair_posted_by" not in jobs_sql and "mj.pair_launched_by" not in jobs_sql
+    # The catalog lookup must not shift the jobs query's positional params.
+    assert statements[-1][1] == [lr.REPORT_DB_TIMEZONE, str(lr.REPORT_TIMEZONE), datetime.date(2026, 8, 27)]
+
+
+def test_report_loads_launched_rows_with_their_feedback(monkeypatch):
+    """The Feedback columns read each launched person's decision, so the
+    report (and only the report — the Rankings header fetches without it)
+    asks the shared population for the feedback fields."""
+    import inspect
+    import routers.jobs as jobs_module
+    from services import launched_candidates as lc
+
+    calls = []
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(lr, "get_db_connection", lambda: _Conn())
+    monkeypatch.setattr(lr, "_fetch_jobs_launched_on", lambda *a, **k: [{"job_id": 55, "jobdiva_id": "26-01234"}])
+    monkeypatch.setattr(
+        lr, "fetch_launched_candidates",
+        lambda conn, keys, **kwargs: calls.append((keys, kwargs)) or [],
+    )
+    monkeypatch.setattr(lr, "fetch_sourced_candidates", lambda conn, keys: [])
+
+    lr._load_report_inputs(datetime.date(2026, 8, 27), datetime.date(2026, 8, 27), None)
+    assert calls == [(["26-01234", "55"], {"include_feedback": True})]
+    assert inspect.signature(lc.fetch_launched_candidates).parameters["include_feedback"].default is False
+    assert "include_feedback" not in inspect.getsource(jobs_module.get_job_outreach_stats)
+
+
+def test_build_row_classifies_each_launched_candidate_once(monkeypatch):
+    """The feedback columns reuse the labels the status buckets were counted
+    from instead of classifying every candidate a second time (which also
+    logged each unrecognised pair-bot status twice per report)."""
+    calls = []
+    real = lr._classify_outreach
+
+    def _counting(payload):
+        calls.append(payload)
+        return real(payload)
+
+    monkeypatch.setattr(lr, "_classify_outreach", _counting)
+    launched = [_launched(str(i)) for i in (1, 2, 3)]
+    by_iid = {"1": _outreach("completed"), "2": _outreach("pending"), "3": _outreach("in_progress")}
+    lr._build_row(_job(3), launched, [], by_iid)
+    assert len(calls) == 3

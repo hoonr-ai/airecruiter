@@ -19,7 +19,8 @@ from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, title_relevance_gate, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
-from services.feedback_metrics import refresh_feedback_metrics_sync
+from services.feedback_metrics import HAS_DECISION_SQL, feedback_label, refresh_feedback_metrics_sync, submission_kind
+from services.job_attribution import stamp_job_launched_by
 from services import contact_enrichment
 from services.pair_auth import get_pair_auth_headers
 from utils.phone import normalize_phone
@@ -111,7 +112,7 @@ from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_ro
 
 
 from services.engage_status import format_engage_status as _format_engage_status
-from services.engage_status import select_engage_status
+from services.engage_status import engage_display_sql, select_engage_status
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
@@ -148,16 +149,23 @@ def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]
 
     Action filters constrain the selected ``sourced_candidates`` row directly;
     No Feedback remains a job-scoped absence check across a candidate's rows.
+    The fragments are spliced into _launched_candidates_sql, whose ``mj``
+    (monitored_jobs_lookup) row the No Feedback check reads.
     """
     if not feedback:
         return "", ""
 
     f_lower = feedback.strip().lower()
     if f_lower in ("no feedback", "none", "no_feedback"):
+        # Any of the person's rows on this job, under either of its keys (the
+        # JobDiva ref or the numeric job_id): the feedback endpoint writes the
+        # decision to exactly one of them, so a raw-key check would call a
+        # person stored under both keys undecided. An unmonitored key (no mj)
+        # has only itself.
         correlation_scaffold = (
             "SELECT 1 FROM sourced_candidates sc2 "
             "WHERE sc2.candidate_id = sc.candidate_id "
-            "AND COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')"
+            "AND sc2.jobdiva_id IN (sc.jobdiva_id, mj.numeric_job_id, mj.job_ref)"
         )
         return f"""
             AND NOT EXISTS (
@@ -1954,6 +1962,13 @@ async def save_candidates(
         except Exception as _stop_check_err:
             print(f"⚠️ Could not check outreach_stopped_at: {_stop_check_err}")
 
+        # Record who is launching: follows each attempt until the job has a
+        # successful launch (services/job_attribution.py). Its own best-effort
+        # statement, so a missing pair_launched_by column (the startup ALTER
+        # can be skipped for a boot) costs only the attribution, never the
+        # launch-time stamp below.
+        stamp_job_launched_by(request.jobdiva_id, user.email)
+
         # Update pair_launched_at if it's not set yet. This marks the moment
         # PAIR was first "launched" for this job, which serves as the start
         # baseline for the 'Time to First Pass' metric.
@@ -3096,6 +3111,418 @@ async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest, user
         logger.error(f"update_candidate_contacts_bulk failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ---------------------------------------------------------------------------
+# GET /candidates/launched — the Master Candidate Pool (admin Candidates report)
+# ---------------------------------------------------------------------------
+
+# Status filter value → the Pass Status label it selects. The labels are the
+# rank list's (format_engage_status), so a "Pass" filter returns exactly the
+# rows a recruiter sees reading Pass.
+_LAUNCHED_STATUS_FILTER_LABELS = {
+    "pass": "Pass",
+    "passed": "Pass",
+    "fail": "Fail",
+    "failed": "Fail",
+    "in progress": "In Progress",
+    "in_progress": "In Progress",
+    "pending": "Pending",
+    # Pre-label filter values: a launch-time Waiting / Initiated stamp reads
+    # Pending under the display rules.
+    "waiting": "Pending",
+    "initiated": "Pending",
+}
+
+# The inputs a row's Pass Status is computed from, rebuilt as one small JSONB
+# value for engage_display_sql: the row's stored engage_status, falling back to
+# its job-scoped audit status exactly as the post-processing does (a blank
+# stored status defers to the audit row), plus the score and hard-filter keys
+# that format_engage_status reads. Only `engage_hard_filter_status`: the
+# display call in get_launched_candidates never looks at the legacy key.
+#
+# Built once per row in a fenced LATERAL (`st`, see _launched_candidates_sql).
+# engage_display_sql repeats its data expression about ten times, and inlined
+# here each repeat re-read the TOASTed sc.data blob (it carries resume_text).
+# Measured on 100k sourced / 60k audit rows with 6 KB blobs, against the old
+# raw-status filter: ~2.7x inlined, ~1.6x fenced (~1.2x with no filter).
+_LAUNCHED_STATUS_INPUTS_SQL = (
+    "jsonb_build_object("
+    "'engage_status', COALESCE(NULLIF(sc.data->>'engage_status', ''), la.status), "
+    "'engage_score', sc.data->'engage_score', "
+    "'engage_hard_filter_status', sc.data->'engage_hard_filter_status')"
+)
+LAUNCHED_PASS_STATUS_SQL = engage_display_sql("st.status_inputs")
+# The row carries a recruiter decision (services/feedback_metrics).
+_HAS_DECISION_SC = HAS_DECISION_SQL.format(alias="sc.")
+
+
+def _launched_status_filter(status: Optional[str]) -> Tuple[str, List[Any]]:
+    """WHERE fragment + params for the Master Candidate Pool's status filter.
+
+    Filters on the Pass Status label itself (the SQL twin of the rank list's
+    rule), not on the raw audit status: `completed` is the raw status of both a
+    hard-filter Pass and a hard-filter Fail, so the old raw-status "pass"
+    filter returned rows that displayed Fail, and missed hired / qualified /
+    blob-only passes.
+
+    Accepted drift: each row's label is finalised after this filter, and the
+    audit response body or a live pair-bot read (select_engage_status) can
+    still move it — lift In Progress to Pass, or turn a scoreless `failed`
+    (Pending here) into Fail once a score turns up there. So a filtered page
+    can hold the odd row whose label reads further along than the filter; the
+    webhook write-back into sourced_candidates.data closes the gap.
+    """
+    if not status or not status.strip():
+        return "", []
+    label = _LAUNCHED_STATUS_FILTER_LABELS.get(status.strip().lower())
+    if label:
+        return f" AND {LAUNCHED_PASS_STATUS_SQL} = %s", [label]
+    # An unrecognised value keeps its old meaning: an exact raw audit status.
+    return " AND la.status = %s", [status]
+
+
+def _launched_filter_conditions(
+    search: Optional[str],
+    status: Optional[str],
+    feedback: Optional[str],
+    source: Optional[str],
+    min_score: Optional[int],
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Tuple[str, List[Any], str, str]:
+    """(search_condition, params, feedback_exists_condition, feedback_order_by).
+
+    ``params`` are in placeholder order for ``search_condition``; the feedback
+    fragments take none. Raises 400 on a malformed date.
+    """
+    search_condition = ""
+    params: List[Any] = []
+    if search:
+        search_condition += """
+            AND (
+                sc.name ILIKE %s OR
+                sc.email ILIKE %s OR
+                sc.phone ILIKE %s OR
+                sc.jobdiva_id ILIKE %s OR
+                sc.candidate_id::text ILIKE %s OR
+                mj.title ILIKE %s
+            )
+        """
+        like_term = f"%{search.strip()}%"
+        params.extend([like_term] * 6)
+
+    status_condition, status_params = _launched_status_filter(status)
+    search_condition += status_condition
+    params.extend(status_params)
+
+    # Feedback filter: action filters constrain the selected row; No Feedback
+    # is a job-scoped absence check. When one is active, the DISTINCT ON
+    # tiebreak prefers the row carrying the matching feedback.
+    feedback_exists_condition, matching_pred = _build_feedback_filter_condition(feedback)
+    # Those fragments are plain SQL (LIKE 'reject%'), but both statements they
+    # are spliced into run with a params tuple, where psycopg2 reads a bare '%'
+    # as a placeholder: the Rejected filter used to 500 the page with an
+    # IndexError. Escape at the splice.
+    feedback_exists_condition = feedback_exists_condition.replace("%", "%%")
+    matching_pred = matching_pred.replace("%", "%%")
+    feedback_order_by = (
+        f"{matching_pred} DESC, (sc.data->>'feedback_at') DESC NULLS LAST, (sc.data->>'feedback_type' IS NOT NULL) DESC, "
+        if matching_pred else ""
+    )
+
+    if source:
+        search_condition += " AND sc.source = %s"
+        params.append(source)
+
+    if min_score is not None:
+        search_condition += " AND sc.resume_match_percentage >= %s"
+        params.append(min_score)
+
+    # Convert input NY dates to UTC before querying the DB. This safely avoids
+    # the Postgres 'AT TIME ZONE' cast flipping based on whether the column is
+    # naive or timestamptz.
+    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if start_date or end_date:
+        from zoneinfo import ZoneInfo
+        ny_tz = ZoneInfo("America/New_York")
+    if start_date:
+        if not date_pattern.match(start_date):
+            raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
+        dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
+        search_condition += " AND la.created_at >= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
+    if end_date:
+        if not date_pattern.match(end_date):
+            raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
+        dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
+        search_condition += " AND la.created_at <= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
+
+    return search_condition, params, feedback_exists_condition, feedback_order_by
+
+
+def _launched_candidates_sql(
+    search_condition: str,
+    feedback_exists_condition: str,
+    feedback_order_by: str,
+) -> Tuple[str, str]:
+    """(rows_sql, count_sql) for the Master Candidate Pool.
+
+    Both statements share one CTE body, so a page and its total can never
+    disagree. rows_sql takes the filter params plus LIMIT / OFFSET; count_sql
+    takes the filter params alone.
+
+    Row selection:
+    - Feedback is recorded per sourced-candidate row and job. Keeping only one
+      row per candidate across every job can surface feedback from a different
+      job (or hide the row that actually matched the filter), so rows are
+      DISTINCT ON (job_key, sc.candidate_id): one row per job and person, also
+      when the person is stored under both of the job's keys.
+    - When a feedback filter is active, feedback_order_by prefers the row that
+      carries the matching feedback, so the UI column matches the filter.
+      Otherwise a person with rows under both keys shows the one carrying the
+      recruiter's decision; everyone else keeps the newest source row.
+    - The audit row is job-scoped too (2026-09-23). It used to be the newest
+      audit row per candidate across ALL jobs, so a person launched on jobs A
+      and B showed B's Pass/Fail, interview and launch date on A's row — and
+      was listed under A even if never launched there. An audit row belongs to
+      a sourced row when it is the same candidate on one of that job's keys
+      (the JobDiva ref or the numeric job_id). job_key is the canonical key
+      both sides map to, so the audit table is still read in one DISTINCT ON
+      pass, and a job whose rows are split across the two key variants still
+      meets its own audit rows.
+    - Launched = the job has an audit row with an interview id for the
+      person, and the newest such row is the one used — the Launch Report and
+      Rankings rule (services/launched_candidates.py). A failed re-launch (no
+      interview id; a Fail is retryable) no longer hides an earlier launch.
+    """
+    cte = f"""
+        monitored_jobs_lookup AS (
+            SELECT DISTINCT ON (lookup_id)
+                lookup_id, job_key, numeric_job_id, job_ref, title, screening_level,
+                recruiter_emails, customer_name
+            FROM (
+                SELECT mj.jobdiva_id::text AS lookup_id,
+                       COALESCE(NULLIF(mj.job_id::text, ''), mj.jobdiva_id::text) AS job_key,
+                       NULLIF(mj.job_id::text, '') AS numeric_job_id,
+                       mj.jobdiva_id::text AS job_ref,
+                       mj.title, mj.screening_level, mj.recruiter_emails, mj.customer_name
+                FROM monitored_jobs mj
+                WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
+                UNION ALL
+                SELECT mj.job_id::text AS lookup_id,
+                       mj.job_id::text AS job_key,
+                       mj.job_id::text AS numeric_job_id,
+                       NULLIF(mj.jobdiva_id::text, '') AS job_ref,
+                       mj.title, mj.screening_level, mj.recruiter_emails, mj.customer_name
+                FROM monitored_jobs mj
+                WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
+            ) x
+            WHERE lookup_id IS NOT NULL AND lookup_id <> ''
+            -- job_key makes the pick deterministic if two monitored rows share
+            -- a key, so the page and count statements resolve it alike.
+            ORDER BY lookup_id, job_key
+        ),
+        latest_audit AS (
+            SELECT DISTINCT ON (a.job_key, a.candidate_id)
+                a.job_key,
+                a.candidate_id,
+                a.interview_id,
+                a.status,
+                a.created_at,
+                a.payload,
+                a.response
+            FROM (
+                SELECT eia.id, eia.candidate_id, eia.interview_id, eia.status,
+                       eia.created_at, eia.payload, eia.response,
+                       COALESCE(k.job_key, eia.jobdiva_id) AS job_key
+                FROM engage_interview_audit eia
+                LEFT JOIN monitored_jobs_lookup k ON k.lookup_id = eia.jobdiva_id
+                WHERE eia.jobdiva_id IS NOT NULL AND eia.jobdiva_id <> ''
+                  -- Rows without an interview id are failed launch attempts
+                  -- (services/launched_candidates.py drops them the same way).
+                  AND COALESCE(NULLIF(eia.interview_id, ''), '') <> ''
+                  AND COALESCE(NULLIF(eia.candidate_id, ''), '') <> ''
+            ) a
+            ORDER BY a.job_key, a.candidate_id, a.id DESC
+        ),
+        launched_candidates AS (
+            SELECT DISTINCT ON (COALESCE(mj.job_key, sc.jobdiva_id), sc.candidate_id)
+                sc.id,
+                sc.jobdiva_id,
+                sc.candidate_id,
+                sc.name,
+                sc.email,
+                sc.phone,
+                sc.source,
+                sc.resume_match_percentage as match_score,
+                sc.data,
+                la.status as engage_status,
+                la.interview_id as engage_interview_id,
+                la.created_at as engage_created_at,
+                la.payload as audit_payload,
+                la.response as audit_response,
+                mj.title as job_title,
+                mj.screening_level,
+                mj.recruiter_emails,
+                mj.numeric_job_id as job_id,
+                mj.customer_name
+            FROM sourced_candidates sc
+            LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
+            JOIN latest_audit la
+              ON la.candidate_id = sc.candidate_id
+             AND la.job_key = COALESCE(mj.job_key, sc.jobdiva_id)
+            -- OFFSET 0 keeps the planner from inlining status_inputs into every
+            -- reference the status filter makes; unreferenced (no status
+            -- filter), the column is pruned and costs nothing.
+            CROSS JOIN LATERAL (
+                SELECT {_LAUNCHED_STATUS_INPUTS_SQL} AS status_inputs OFFSET 0
+            ) st
+            WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
+              {search_condition}
+              {feedback_exists_condition}
+            -- A person stored under both of the job's keys has a row under
+            -- each, and the feedback endpoint writes the decision to only one:
+            -- keep that one (newest decision first, as latest_feedback in
+            -- services/launched_candidates.py does). Gated on there being a
+            -- second row so the TOASTed blob is only read for those people.
+            WINDOW job_person AS (PARTITION BY COALESCE(mj.job_key, sc.jobdiva_id), sc.candidate_id)
+            ORDER BY COALESCE(mj.job_key, sc.jobdiva_id), sc.candidate_id, {feedback_order_by}
+                     CASE WHEN COUNT(*) OVER job_person > 1 THEN {_HAS_DECISION_SC} END DESC NULLS LAST,
+                     CASE WHEN COUNT(*) OVER job_person > 1 THEN sc.data->>'feedback_at' END DESC NULLS LAST,
+                     sc.created_at DESC
+        )
+    """
+    # id breaks launch-time ties so LIMIT/OFFSET pages never overlap or skip.
+    rows_sql = f"""
+        WITH {cte}
+        SELECT * FROM launched_candidates
+        ORDER BY engage_created_at DESC NULLS LAST, id DESC
+        LIMIT %s OFFSET %s
+    """
+    count_sql = f"""
+        WITH {cte}
+        SELECT COUNT(*) AS total FROM launched_candidates
+    """
+    return rows_sql, count_sql
+
+
+# Per page row: that job's JobDiva submittals for that person, from the BI
+# JobSubmittalsDetail feed the 15-minute auto-sync mirrors into
+# jobdiva_submittals. JobDiva keys a submittal by the numeric job_id and its
+# own CANDIDATEID — the row's candidate_id for JobDiva-sourced rows,
+# data.jobdiva_candidate_id for the rest. One statement for the whole page
+# (no N+1), served by idx_jobdiva_submittals_job_candidate. submit_date is
+# JobDiva's naive wall-clock in an unknown zone, so only its calendar date is
+# reported.
+_PAGE_SUBMITTALS_SQL = """
+    SELECT p.row_id,
+           COUNT(*) AS submittal_count,
+           to_char(MIN(s.submit_date), 'YYYY-MM-DD') AS first_submit_date
+    FROM unnest(%s::bigint[], %s::text[], %s::text[], %s::text[])
+         AS p(row_id, job_id, candidate_id, jobdiva_candidate_id)
+    JOIN jobdiva_submittals s
+      ON s.job_id = p.job_id
+     AND s.candidate_id <> ''
+     AND s.candidate_id IN (p.candidate_id, p.jobdiva_candidate_id)
+    GROUP BY p.row_id
+"""
+
+
+def _fetch_page_submittals(conn, rows: List[Dict[str, Any]]) -> Optional[Dict[int, Dict[str, Any]]]:
+    """{sourced row id: {"count", "first_date"}} for the page rows JobDiva has
+    a submittal for; rows without one are absent.
+
+    Returns None when the lookup failed. JobDiva confirmation is secondary on
+    this report, so a bad lookup is logged and the caller labels by PAIR data
+    alone instead of failing the page. The page's SELECTs have already been
+    fetched, so rolling the aborted transaction back loses nothing.
+    """
+    keyed = []
+    for row in rows:
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        job_id = str(row.get("job_id") or "").strip()
+        cid = str(row.get("candidate_id") or "").strip()
+        jd_cid = str(data.get("jobdiva_candidate_id") or "").strip()
+        if row.get("id") is None or not job_id or not (cid or jd_cid):
+            continue  # not a monitored job, or nothing JobDiva could key on
+        keyed.append((int(row["id"]), job_id, cid or None, jd_cid or None))
+    if not keyed:
+        return {}
+    try:
+        from psycopg2.extensions import cursor as _TupleCursor
+
+        with conn.cursor(cursor_factory=_TupleCursor) as cur:
+            cur.execute(_PAGE_SUBMITTALS_SQL, tuple(list(col) for col in zip(*keyed)))
+            fetched = cur.fetchall()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"CANDIDATES: JobDiva submittal lookup failed; labelling by PAIR data alone: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    return {
+        int(row_id): {"count": int(count or 0), "first_date": first_date}
+        for row_id, count, first_date in fetched
+    }
+
+
+# Submittal Status vocabulary. A PAIR Submit is the recruiter's decision in
+# PAIR (external = to the client, internal = to a hiring manager for review);
+# "JobDiva confirmed" means JobDiva's own submittal feed has this person on
+# this job. Reject / Unreachable are feedback, not submittal states.
+SUBMITTAL_EXTERNAL = "Submitted – External"
+SUBMITTAL_EXTERNAL_CONFIRMED = "Submitted – External (JobDiva confirmed)"
+SUBMITTAL_INTERNAL = "Submitted – Internal"
+SUBMITTAL_INTERNAL_CONFIRMED = "Submitted – Internal (JobDiva confirmed)"
+SUBMITTAL_IN_JOBDIVA = "Submitted in JobDiva"
+SUBMITTAL_NONE = "Not Submitted"
+
+
+def _submittal_status(data: Optional[dict], jobdiva_submittal_count: Optional[int]) -> str:
+    """Submittal Status label for one row.
+
+    ``jobdiva_submittal_count`` is None when the JobDiva lookup failed; the
+    label then rests on PAIR data alone. submission_kind is gated on the row
+    currently being a Submit, because a later Reject / Unreachable leaves the
+    old submission_type behind in the blob.
+    """
+    in_jobdiva = bool(jobdiva_submittal_count)
+    kind = submission_kind(data)
+    if kind == "external":
+        return SUBMITTAL_EXTERNAL_CONFIRMED if in_jobdiva else SUBMITTAL_EXTERNAL
+    if kind == "internal":
+        return SUBMITTAL_INTERNAL_CONFIRMED if in_jobdiva else SUBMITTAL_INTERNAL
+    return SUBMITTAL_IN_JOBDIVA if in_jobdiva else SUBMITTAL_NONE
+
+
+def _launched_feedback_fields(data: Optional[dict]) -> Dict[str, Any]:
+    """The row's recruiter decision, read through the same mirrors as the
+    dashboard counters (services/feedback_metrics).
+
+    reason / at / by are only reported alongside a current decision: a
+    candidate added to a new job through cross-submissions inherits the prior
+    job's submitted_by (ENGAGE_KEYS_NOT_COPIED drops only the feedback_* keys).
+    """
+    blob = data if isinstance(data, dict) else {}
+    label = feedback_label(blob)
+
+    def _text(key: str) -> Optional[str]:
+        value = blob.get(key)
+        text = str(value).strip() if value is not None else ""
+        return text or None
+
+    return {
+        "feedback": label,
+        "feedback_reason": _text("feedback_reason") if label else None,
+        "feedback_at": _text("feedback_at") if label else None,
+        # submitted_by is written on every decision type — it is the actor.
+        "feedback_by": _text("submitted_by") if label else None,
+        "submission_type": submission_kind(blob),
+    }
+
+
 @router.get("/candidates/launched")
 async def get_launched_candidates(
     user: UserIdentity = Depends(get_current_user),
@@ -3110,8 +3537,10 @@ async def get_launched_candidates(
     end_date: Optional[str] = Query(None),
 ):
     """
-    Fetches all launched candidates across all jobs.
-    Returns data formatted for the Master Candidate Pool page.
+    Fetches all launched candidates across all jobs, one row per (job,
+    candidate). Returns data formatted for the Master Candidate Pool page and
+    its CSV export: Pass Status (`engage_status` / `pass_status`), the
+    recruiter's feedback, and the Submittal Status.
     """
     # The sidebar is only a convenience layer. Enforce the same admin-only
     # policy here so a recruiter cannot retrieve the global candidate pool
@@ -3121,196 +3550,40 @@ async def get_launched_candidates(
 
     try:
         from psycopg2.extras import RealDictCursor
+
+        search_condition, params, feedback_exists_condition, feedback_order_by = _launched_filter_conditions(
+            search, status, feedback, source, min_score, start_date, end_date,
+        )
+        rows_sql, count_sql = _launched_candidates_sql(
+            search_condition, feedback_exists_condition, feedback_order_by,
+        )
+
         conn = get_db_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Build search condition
-                search_condition = ""
-                params = []
-                if search:
-                    search_condition += """
-                        AND (
-                            sc.name ILIKE %s OR
-                            sc.email ILIKE %s OR
-                            sc.phone ILIKE %s OR
-                            sc.jobdiva_id ILIKE %s OR
-                            sc.candidate_id::text ILIKE %s OR
-                            mj.title ILIKE %s
-                        )
-                    """
-                    like_term = f"%{search.strip()}%"
-                    params.extend([like_term] * 6)
-
-                if status:
-                    if status.lower() == "waiting" or status.lower() == "initiated":
-                        search_condition += " AND (la.status IS NULL OR la.status = 'Waiting' OR la.status = 'Initiated')"
-                    elif status.lower() == "pending":
-                        search_condition += " AND LOWER(la.status) IN ('pending', 'sent', 'created', 'queued', 'scheduled', 'started')"
-                    elif status.lower() == "in progress":
-                        search_condition += " AND LOWER(la.status) IN ('in_progress', 'in-progress', 'inprogress', 'in progress')"
-                    elif status.lower() == "pass":
-                        # Keep this list aligned with the UI's terminal Pass
-                        # states. A substring match on "complete" incorrectly
-                        # includes "incomplete" interviews in Pass results.
-                        search_condition += " AND LOWER(la.status) IN ('complete', 'completed', 'passed', 'pass')"
-                    elif status.lower() == "fail":
-                        search_condition += " AND LOWER(la.status) IN ('failed', 'fail', 'rejected')"
-                    else:
-                        search_condition += " AND la.status = %s"
-                        params.append(status)
-
-                # Feedback filter: use an EXISTS subquery checked against ALL rows for a
-                # candidate, so DISTINCT ON still picks the true latest row (by created_at DESC)
-                # and we only include candidates who match the feedback requirement on ANY row.
-                feedback_exists_condition, matching_pred = _build_feedback_filter_condition(feedback)
-                feedback_order_by = (
-                    f"{matching_pred} DESC, (sc.data->>'feedback_at') DESC NULLS LAST, (sc.data->>'feedback_type' IS NOT NULL) DESC, "
-                    if matching_pred else ""
-                )
-
-                if source:
-                    search_condition += " AND sc.source = %s"
-                    params.append(source)
-
-                if min_score is not None:
-                    search_condition += " AND sc.resume_match_percentage >= %s"
-                    params.append(min_score)
-                    
-                import re
-                date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-                # Convert input NY dates to UTC before querying the DB.
-                # This safely avoids the Postgres 'AT TIME ZONE' cast flipping based on whether the column is naive or timestamptz.
-                if start_date or end_date:
-                    from zoneinfo import ZoneInfo
-                    from datetime import datetime
-                    ny_tz = ZoneInfo("America/New_York")
-                    utc_tz = ZoneInfo("UTC")
-
-                if start_date:
-                    if not date_pattern.match(start_date):
-                        raise HTTPException(status_code=400, detail="Invalid start_date format, expected YYYY-MM-DD")
-                    dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
-                    utc_start = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
-                    search_condition += " AND la.created_at >= %s"
-                    params.append(utc_start)
-                if end_date:
-                    if not date_pattern.match(end_date):
-                        raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
-                    dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
-                    utc_end = dt.astimezone(utc_tz).strftime("%Y-%m-%d %H:%M:%S+00")
-                    search_condition += " AND la.created_at <= %s"
-                    params.append(utc_end)
-
-                params.extend([limit, offset])
-
-                # CTE_BODY defines the shared CTEs without a leading 'WITH'.
-                # This makes the downstream queries cleaner to construct.
-                #
-                # SQL Notes for launched_candidates:
-                # - Feedback is recorded per sourced-candidate row and job.
-                #   Keeping only one row per candidate across every job can surface feedback 
-                #   from a different job (or hide the row that actually matched the filter).
-                #   Therefore, we DISTINCT ON (sc.jobdiva_id, sc.candidate_id).
-                # - When a feedback filter is active, we ORDER BY {feedback_order_by} to prefer 
-                #   the row that carries matching feedback data so the UI column matches the filter. 
-                #   Without a filter, we retain pure created_at DESC so the newest source row wins.
-                CTE_BODY = f"""
-                    latest_audit AS (
-                        SELECT DISTINCT ON (candidate_id)
-                            candidate_id,
-                            interview_id,
-                            status,
-                            created_at,
-                            payload,
-                            response
-                        FROM engage_interview_audit
-                        ORDER BY candidate_id, id DESC
-                    ),
-                    monitored_jobs_lookup AS (
-                        SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level, recruiter_emails
-                        FROM (
-                            SELECT mj.jobdiva_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
-                            FROM monitored_jobs mj
-                            WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
-                            UNION ALL
-                            SELECT mj.job_id::text AS lookup_id, mj.title, mj.screening_level, mj.recruiter_emails
-                            FROM monitored_jobs mj
-                            WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
-                        ) x
-                        WHERE lookup_id IS NOT NULL AND lookup_id <> ''
-                        ORDER BY lookup_id
-                    ),
-                    launched_candidates AS (
-                        SELECT DISTINCT ON (sc.jobdiva_id, sc.candidate_id)
-                            sc.id,
-                            sc.jobdiva_id,
-                            sc.candidate_id,
-                            sc.name,
-                            sc.email,
-                            sc.phone,
-                            sc.source,
-                            sc.resume_match_percentage as match_score,
-                            sc.data,
-                            la.status as engage_status,
-                            la.interview_id as engage_interview_id,
-                            la.created_at as engage_created_at,
-                            la.payload as audit_payload,
-                            la.response as audit_response,
-                            mj.title as job_title,
-                            mj.screening_level,
-                            mj.recruiter_emails
-                        FROM sourced_candidates sc
-                        JOIN latest_audit la ON la.candidate_id = sc.candidate_id
-                        LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
-                        WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
-                          {search_condition}
-                          {feedback_exists_condition}
-                        ORDER BY sc.jobdiva_id, sc.candidate_id, {feedback_order_by}sc.created_at DESC
-                    )
-                """
-
-                query = f"""
-                    WITH {CTE_BODY}
-                    SELECT * FROM launched_candidates
-                    ORDER BY engage_created_at DESC NULLS LAST
-                    LIMIT %s OFFSET %s;
-                """
-                cur.execute(query, tuple(params))
+                cur.execute(rows_sql, tuple(params + [limit, offset]))
                 candidates = cur.fetchall()
 
-                # Count query reuses the same CTE — no duplication, guaranteed sync with results.
-                count_query = f"""
-                    WITH {CTE_BODY}
-                    SELECT COUNT(*) as total FROM launched_candidates
-                """
-                cur.execute(count_query, tuple(params[:-2]))
+                # Same CTE as the page — guaranteed in sync with the results.
+                cur.execute(count_sql, tuple(params))
                 total_row = cur.fetchone()
                 total = total_row["total"] if total_row else 0
 
+            for cand in candidates:
+                if cand.get("data") and isinstance(cand["data"], str):
+                    try:
+                        cand["data"] = json.loads(cand["data"])
+                    except json.JSONDecodeError:
+                        pass
+
+            # After pagination, so it costs one statement per page.
+            submittals = _fetch_page_submittals(conn, candidates)
         finally:
             conn.close()
 
-        # Helper to pick first non-None score value (preventing 0 scores from being treated as falsy)
-        def _pick_first_not_none(*vals):
-            for v in vals:
-                if v is not None:
-                    return v
-            return None
-
-        # Handle data blob unpacking and fetch live outreach if needed
-        # Collect interview IDs for live fallback.
-        import json
-        import asyncio
-
+        # Collect interview IDs for the live outreach fallback.
         interview_ids = []
         for cand in candidates:
-            if cand.get("data") and isinstance(cand["data"], str):
-                try:
-                    cand["data"] = json.loads(cand["data"])
-                except json.JSONDecodeError:
-                    pass
-            data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
             iid = cand.get("engage_interview_id")
             if iid and str(iid).strip():
                 interview_ids.append(str(iid).strip())
@@ -3420,6 +3693,9 @@ async def get_launched_candidates(
             # Format engage_status
             status_display = _format_engage_status(cand.get("engage_status"), cand.get("engage_score"), hf_display)
             cand["engage_status"] = status_display
+            # The report's "Pass Status" column. Same value as engage_status,
+            # named for what it is.
+            cand["pass_status"] = status_display
 
             r_score = cand.get("match_score") or 0
             is_engage_done = _is_engage_done(cand.get("engage_status"), cand.get("engage_score"), is_boolean_job)
@@ -3448,12 +3724,9 @@ async def get_launched_candidates(
             # Parse outreach method before replacing audit_payload
             cand["attended_via"] = "SMS" if original_payload.get("outreach_method") == "sms" else "Phone"
 
-            import datetime
-            dt_val = cand.get("engage_created_at")
-            if isinstance(dt_val, datetime.datetime):
-                cand["engage_created_at"] = dt_val.isoformat() + "Z"
-            elif isinstance(dt_val, str) and dt_val and not dt_val.endswith("Z"):
-                cand["engage_created_at"] = dt_val.replace(" ", "T") + "Z"
+            # engage_interview_audit.created_at is a naive UTC TIMESTAMP.
+            if cand.get("engage_created_at") is not None:
+                cand["engage_created_at"] = _to_iso_z(cand["engage_created_at"])
 
             # Format audit_payload for frontend hover card
             hf_details = _extract_rankings_hard_filter_details(
@@ -3465,11 +3738,31 @@ async def get_launched_candidates(
                 "hard_filter_details": hf_details
             }
 
+            # Candidate Feedback + Submittal Status columns.
+            cand.update(_launched_feedback_fields(data_blob))
+            if submittals is None:
+                count, first_date = None, None  # JobDiva lookup failed: unknown
+            else:
+                hit = submittals.get(cand.get("id"))
+                count = hit["count"] if hit else 0
+                first_date = hit["first_date"] if hit else None
+            cand["jobdiva_submittal_count"] = count
+            cand["jobdiva_submittal_date"] = first_date
+            cand["submittal_status"] = _submittal_status(data_blob, count)
+
+            # The raw webhook body is only an input to the merge above. Nothing
+            # on the page reads it, and it can carry full transcripts, so it
+            # only bloated the 500-row CSV export pages (the rank list drops
+            # it the same way).
+            cand.pop("audit_response", None)
+
         return {
             "status": "success",
             "candidates": candidates,
             "total": total
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching launched candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))

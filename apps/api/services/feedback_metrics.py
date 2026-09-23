@@ -56,6 +56,39 @@ _HAS_DECISION = "NULLIF(TRIM({alias}data->>'feedback_type'), '') IS NOT NULL"
 _IS_SUBMIT = "LOWER(TRIM({alias}data->>'feedback_type')) = 'submit'"
 
 
+# Submit split by where it went (the SubmissionModal's choice, stored as
+# `submission_type` since 2026-09-11). Internal = sent to a hiring manager for
+# review ("PAIR Internal Submission" note); external = sent to the client
+# ("PAIR External Submission"). A Submit with no `submission_type` predates
+# the split and was an external submit — the endpoint's default — so it counts
+# as external. `submission_type` is merged into the blob and never cleared by
+# a later Reject/Unreachable, so every split predicate is gated on the row
+# currently being a Submit.
+_IS_INTERNAL_SUBMIT = (
+    _IS_SUBMIT
+    + " AND LOWER(TRIM(COALESCE({alias}data->>'submission_type', ''))) = 'internal'"
+)
+_IS_EXTERNAL_SUBMIT = (
+    _IS_SUBMIT
+    + " AND LOWER(TRIM(COALESCE({alias}data->>'submission_type', ''))) <> 'internal'"
+)
+# Reject variants ('Reject', 'Rejected', 'Reject - …') all start with
+# "reject". LEFT() instead of LIKE 'reject%' keeps the fragment free of '%',
+# so it can be spliced into a parameterised psycopg2 statement as-is.
+_IS_REJECT = "LEFT(LOWER(TRIM({alias}data->>'feedback_type')), 6) = 'reject'"
+_IS_UNREACHABLE = "LOWER(TRIM({alias}data->>'feedback_type')) = 'unreachable'"
+
+# Public, alias-parameterised forms for report queries (admin analytics,
+# recruiter analytics). Call .format(alias="sc.") — or alias="" for an
+# unaliased sourced_candidates.
+HAS_DECISION_SQL = _HAS_DECISION
+IS_SUBMIT_SQL = _IS_SUBMIT
+IS_INTERNAL_SUBMIT_SQL = _IS_INTERNAL_SUBMIT
+IS_EXTERNAL_SUBMIT_SQL = _IS_EXTERNAL_SUBMIT
+IS_REJECT_SQL = _IS_REJECT
+IS_UNREACHABLE_SQL = _IS_UNREACHABLE
+
+
 def _agg(predicate: str) -> str:
     return (
         "COUNT(DISTINCT CASE WHEN "
@@ -91,6 +124,52 @@ def is_pair_submit(data: Optional[dict]) -> bool:
     if not isinstance(data, dict):
         return False
     return str(data.get("feedback_type") or "").strip().lower() == "submit"
+
+
+def _feedback_type(data: Optional[dict]) -> str:
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("feedback_type") or "").strip().lower()
+
+
+def submission_kind(data: Optional[dict]) -> Optional[str]:
+    """'internal' | 'external' for a current Submit, else None.
+
+    Python mirror of IS_INTERNAL_SUBMIT_SQL / IS_EXTERNAL_SUBMIT_SQL: a Submit
+    without `submission_type` (pre-2026-09-11) is external.
+    """
+    if not is_pair_submit(data):
+        return None
+    kind = str(data.get("submission_type") or "").strip().lower()
+    return "internal" if kind == "internal" else "external"
+
+
+def is_pair_reject(data: Optional[dict]) -> bool:
+    """Python mirror of IS_REJECT_SQL."""
+    return _feedback_type(data).startswith("reject")
+
+
+def is_pair_unreachable(data: Optional[dict]) -> bool:
+    """Python mirror of IS_UNREACHABLE_SQL."""
+    return _feedback_type(data) == "unreachable"
+
+
+def feedback_label(data: Optional[dict]) -> Optional[str]:
+    """The recruiter decision as the rank list shows it: 'Submit' | 'Reject' |
+    'Unreachable', or None when there is no decision. Unknown non-empty values
+    are returned as stored so nothing is silently hidden."""
+    raw = str((data or {}).get("feedback_type") or "").strip() if isinstance(data, dict) else ""
+    if not raw:
+        return None
+    # Same predicates as the counters, so a row labelled Submit is always a
+    # row counted in PAIR SUBMITS.
+    if is_pair_submit(data):
+        return "Submit"
+    if is_pair_reject(data):
+        return "Reject"
+    if is_pair_unreachable(data):
+        return "Unreachable"
+    return raw
 
 
 def count_feedback_metrics(cur, ref_id, num_id) -> Dict[str, int]:

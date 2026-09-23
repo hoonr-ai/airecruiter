@@ -351,6 +351,34 @@ export const api = {
       return req<any>(`/api/v1/launch-report${suffix ? `?${suffix}` : ""}`);
     },
   },
+  recruiterAnalytics: {
+    // Per-recruiter rollup (routers/recruiter_analytics.py). startDate+endDate
+    // are Eastern calendar dates, both or neither; neither = all time. Team
+    // leads are pinned to their own team server-side, so teamId only matters
+    // for admins. refresh skips the backend's 60s per-worker cache.
+    get: (opts?: {
+      startDate?: string | null;
+      endDate?: string | null;
+      teamId?: string | null;
+      recruiter?: string | null;
+      refresh?: boolean;
+    }) => {
+      const { startDate, endDate, teamId, recruiter, refresh } = opts ?? {};
+      const qs = new URLSearchParams();
+      if (startDate && endDate) {
+        qs.set("start_date", startDate);
+        qs.set("end_date", endDate);
+      }
+      if (teamId) qs.set("team_id", teamId);
+      if (recruiter) qs.set("recruiter", recruiter);
+      if (refresh) qs.set("refresh", "true");
+      const suffix = qs.toString();
+      // The page owns the payload type (app/admin/recruiter-analytics).
+      return req<{ status?: string; data?: unknown; detail?: string }>(
+        `/api/v1/admin/recruiter-analytics${suffix ? `?${suffix}` : ""}`,
+      );
+    },
+  },
   noContact: {
     // Read-only: the list is code-managed (core/sourcing_config.py); admins
     // can view it but edits happen through code for now.

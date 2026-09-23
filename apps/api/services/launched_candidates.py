@@ -24,7 +24,10 @@ population they now share:
 The row shape mirrors what the rank list's candidate query joins together for
 each table row (latest audit row + the candidate's JSONB engage fields), so
 callers can hand it to ``build_merged_outreach_payload`` and get the same
-Pass / Fail / In Progress / Pending the table shows.
+Pass / Fail / In Progress / Pending the table shows. For the launch report
+(``include_feedback=True``) each row also carries the person's recorded
+recruiter decision (``_FEEDBACK_FIELDS``), so its Submitted / Rejected /
+Outstanding columns count launched people only and can never exceed Launched.
 
 Keys: ``sourced_candidates`` / ``engage_interview_audit`` rows were written
 under either the JobDiva ref (``26-01234``) or the numeric ``job_id`` text, so
@@ -32,6 +35,8 @@ every query here takes both keys (``jobdiva_id = %s OR jobdiva_id = %s``) and
 callers pass the same value twice when a job only has one.
 """
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from services.feedback_metrics import HAS_DECISION_SQL
 
 
 def key_pair(keys: Sequence[str]) -> Tuple[str, str]:
@@ -165,6 +170,49 @@ LAUNCHED_CANDIDATES_SQL = _LAUNCHED_CTE_SQL + """
         SELECT * FROM launched ORDER BY candidate_id
 """
 
+# The recruiter's decision on a launched person (the rank list's Submit /
+# Reject / Unreachable menu, POST /jobs/{job}/candidates/{cid}/feedback), so
+# the launch report's Feedback columns can be computed over the SAME people
+# as its Launched column. Exactly the fields launch_report._summarise_feedback
+# reads. Only the launch report asks for them
+# (``fetch_launched_candidates(..., include_feedback=True)``); the Rankings
+# header (jobs.get_job_outreach_stats) runs LAUNCHED_CANDIDATES_SQL and
+# "Candidates Launched" the count SQL, so neither pays for the extra scan.
+_FEEDBACK_FIELDS = (
+    "feedback_type",
+    "feedback_at",
+    "submission_type",
+)
+
+LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL = _LAUNCHED_CTE_SQL + """        ,
+        latest_feedback AS (
+            -- The person's CURRENT decision, from whichever of their rows
+            -- holds it. The feedback endpoint merges it into exactly one
+            -- sourced_candidates row, picked by a tie-break that is arbitrary
+            -- when the person is stored under both job keys — so reading it
+            -- off latest_sourced (the newest row) would silently drop a Submit
+            -- written on the other key's row. feedback_at is always
+            -- datetime.now(timezone.utc).isoformat(), so its text sorts in
+            -- time order.
+            SELECT DISTINCT ON (candidate_id)
+                candidate_id,
+                """ + ",\n                ".join(f"data->>'{f}' AS {f}" for f in _FEEDBACK_FIELDS) + """
+            FROM sourced_candidates
+            WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+              AND COALESCE(NULLIF(candidate_id, ''), '') <> ''
+              AND """ + HAS_DECISION_SQL.format(alias="") + """
+            ORDER BY candidate_id, data->>'feedback_at' DESC NULLS LAST, id DESC
+        )
+        SELECT
+            l.*,
+            """ + ",\n            ".join(f"lf.{f}" for f in _FEEDBACK_FIELDS) + """
+        FROM launched l
+        -- LEFT JOIN on a one-row-per-person CTE: never adds or drops a
+        -- launched person, so len(rows) == count_launched_candidates().
+        LEFT JOIN latest_feedback lf ON lf.candidate_id = l.candidate_id
+        ORDER BY l.candidate_id
+"""
+
 LAUNCHED_CANDIDATE_COUNT_SQL = _LAUNCHED_CTE_SQL + """
         SELECT COUNT(*) FROM launched
 """
@@ -175,15 +223,29 @@ def _launched_params(keys: Sequence[str]) -> Tuple[str, str, str, str]:
     return (k1, k2, k1, k2)
 
 
-def fetch_launched_candidates(conn, keys: Sequence[str]) -> List[Dict[str, Any]]:
+def _launched_feedback_params(keys: Sequence[str]) -> Tuple[str, ...]:
+    """The population's four params, then the feedback CTE's key pair."""
+    k1, k2 = key_pair(keys)
+    return _launched_params(keys) + (k1, k2)
+
+
+def fetch_launched_candidates(
+    conn, keys: Sequence[str], *, include_feedback: bool = False
+) -> List[Dict[str, Any]]:
     """One dict per launched candidate for the job identified by ``keys``.
 
     Dict keys: candidate_id, interview_id (the one to ask pair-bot about),
-    audit_interview_id, audit_status, audit_response, audit_created_at, and
-    every name in ``_ENGAGE_FIELDS`` (raw JSONB text, possibly None).
+    audit_interview_id, audit_status, audit_response, audit_created_at and
+    every name in ``_ENGAGE_FIELDS`` (raw JSONB text, possibly None). With
+    ``include_feedback`` (the launch report) each row also carries every name
+    in ``_FEEDBACK_FIELDS``; the population is the same either way.
     """
+    if include_feedback:
+        sql, params = LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL, _launched_feedback_params(keys)
+    else:
+        sql, params = LAUNCHED_CANDIDATES_SQL, _launched_params(keys)
     with conn.cursor() as cur:
-        cur.execute(LAUNCHED_CANDIDATES_SQL, _launched_params(keys))
+        cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -208,19 +270,11 @@ SOURCED_CANDIDATES_SQL = """
         SELECT DISTINCT ON (sc.candidate_id)
             sc.candidate_id,
             -- Earliest sourcing of this person on the job, whichever key it was
-            -- stored under; the DISTINCT ON keeps the newest row's JSONB.
-            MIN(sc.created_at) OVER (PARTITION BY sc.candidate_id) AS created_at,
-            sc.data->>'feedback_type'                AS feedback_type,
-            sc.data->>'feedback_reason'              AS feedback_reason,
-            sc.data->>'feedback_at'                  AS feedback_at,
-            sc.data->>'first_attempted_at'           AS first_attempted_at,
-            sc.data->>'first_completed_at'           AS first_completed_at,
-            sc.data->>'engage_completed_at'          AS engage_completed_at,
-            sc.data->>'engage_updated_at'            AS engage_updated_at,
-            sc.data->>'engage_status'                AS engage_status,
-            sc.data->>'engage_score'                 AS engage_score,
-            sc.data->>'engage_hard_filter_status'    AS engage_hard_filter_status,
-            sc.data->>'engage_interview_id'          AS engage_interview_id
+            -- stored under; the DISTINCT ON makes it one row per person.
+            MIN(sc.created_at) OVER (PARTITION BY sc.candidate_id) AS created_at
+            -- Nothing else: the sourced population feeds only Sourced and
+            -- Time to Source (launch_report._summarise_candidates). Pass,
+            -- feedback and lifecycle columns come from the LAUNCHED rows.
         FROM sourced_candidates sc
         WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
           AND COALESCE(NULLIF(sc.candidate_id, ''), '') <> ''
@@ -233,7 +287,8 @@ def fetch_sourced_candidates(conn, keys: Sequence[str]) -> List[Dict[str, Any]]:
     """One dict per sourced candidate the rank list would list for the job.
 
     Applies the same visibility rules as the rank list so "Sourced" on the
-    launch report equals the rank list's candidate total.
+    launch report equals the rank list's candidate total. Each dict carries
+    only candidate_id and created_at (earliest sourcing across both keys).
     """
     k1, k2 = key_pair(keys)
     with conn.cursor() as cur:

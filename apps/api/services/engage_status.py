@@ -21,6 +21,22 @@ def parse_engage_score(raw: Any) -> Optional[float]:
         return None
 
 
+# The status vocabularies behind format_engage_status. Module-level so the SQL
+# twin (engage_display_sql) is generated from the very same tuples and cannot
+# drift from the Python rules.
+PASS_STATUSES = ("passed", "hired", "pass", "qualified", "shortlisted", "selected")
+FAIL_STATUSES = ("failed", "rejected", "fail", "disqualified", "declined")
+IN_PROGRESS_STATUSES = (
+    "in_progress", "in progress", "screening", "interview_completed",
+    "interview completed", "contacted",
+    # pair-bot: the screening call is happening right now.
+    "call_in_progress",
+)
+COMPLETED_STATUSES = ("completed", "complete")
+# Hard-filter values that let a bare "completed" read as Pass.
+HF_PASS_VALUES = ("", "pass", "passed", "not_hard_filter")
+
+
 def format_engage_status(
     engage_status: Optional[str],
     engage_score: Optional[float],
@@ -29,28 +45,61 @@ def format_engage_status(
     if not engage_status:
         return "Pending"
     s = engage_status.lower()
-    if s in ("passed", "hired", "pass", "qualified", "shortlisted", "selected"):
+    if s in PASS_STATUSES:
         return "Pass"
-    if s in ("failed", "rejected", "fail", "disqualified", "declined"):
+    if s in FAIL_STATUSES:
         if engage_score is None:
             return "Pending"
         return "Fail"
-    if s in (
-        "in_progress", "in progress", "screening", "interview_completed",
-        "interview completed", "contacted",
-        # pair-bot: the screening call is happening right now.
-        "call_in_progress",
-    ):
+    if s in IN_PROGRESS_STATUSES:
         return "In Progress"
-    if s in ("completed", "complete"):
-        hf_passed = (hf_display or "").strip().lower() in (
-            "",
-            "pass",
-            "passed",
-            "not_hard_filter",
-        )
+    if s in COMPLETED_STATUSES:
+        hf_passed = (hf_display or "").strip().lower() in HF_PASS_VALUES
         return "Pass" if hf_passed else "Fail"
     return "Pending"
+
+
+def _sql_list(values) -> str:
+    return ", ".join("'" + v.replace("'", "''") + "'" for v in values)
+
+
+# A JSON text value that float() would accept, restricted to plain decimals —
+# the only shape pair-bot and the webhook write. Anything else is "no score",
+# exactly as parse_engage_score returns None for it.
+_NUMERIC_TEXT_RE = r"^\s*[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?\s*$"
+
+
+def engage_display_sql(data_expr: str = "sc.data") -> str:
+    """SQL twin of ``format_engage_status`` over a stored candidate blob.
+
+    ``data_expr`` is a ``sourced_candidates.data``-shaped JSONB expression.
+    Yields 'Pass' | 'Fail' | 'In Progress' | 'Pending' from the stored
+    ``engage_status`` / ``engage_score`` / hard-filter keys — the same inputs
+    and rules the rank list uses for a candidate whose status is not being
+    lifted by a live pair-bot read. Use it wherever a report has to classify
+    candidates in SQL (per-job / per-recruiter counts) so every report's Pass
+    matches the rank list's Pass. Drift-tested against the Python rules on a
+    real Postgres (tests/test_engage_status_sql.py).
+
+    Contains no ``%`` and no placeholders, so it is safe to splice into a
+    psycopg2 statement that also takes parameters.
+    """
+    status = f"LOWER(TRIM(COALESCE({data_expr}->>'engage_status', '')))"
+    score = f"COALESCE({data_expr}->>'engage_score', '')"
+    hf = (
+        f"LOWER(TRIM(COALESCE(NULLIF(TRIM({data_expr}->>'engage_hard_filter_status'), ''), "
+        f"NULLIF(TRIM({data_expr}->>'hard_filter_status'), ''), '')))"
+    )
+    return (
+        "(CASE"
+        f" WHEN {status} IN ({_sql_list(PASS_STATUSES)}) THEN 'Pass'"
+        f" WHEN {status} IN ({_sql_list(FAIL_STATUSES)}) THEN"
+        f" (CASE WHEN {score} ~ '{_NUMERIC_TEXT_RE}' THEN 'Fail' ELSE 'Pending' END)"
+        f" WHEN {status} IN ({_sql_list(IN_PROGRESS_STATUSES)}) THEN 'In Progress'"
+        f" WHEN {status} IN ({_sql_list(COMPLETED_STATUSES)}) THEN"
+        f" (CASE WHEN {hf} IN ({_sql_list(HF_PASS_VALUES)}) THEN 'Pass' ELSE 'Fail' END)"
+        " ELSE 'Pending' END)"
+    )
 
 
 def hf_display_from_payload(payload: Dict[str, Any]) -> str:

@@ -7,9 +7,11 @@ requiring a live DB connection.  They verify:
 
 1. Action filters constrain the selected source row; No Feedback uses a
    job-scoped NOT EXISTS clause.
-2. DISTINCT ON row selection: without a feedback filter, ORDER BY uses only
-   created_at DESC (index-friendly); with a filter, a feedback-preference
-   tiebreaker is injected so the displayed row matches the filter.
+2. DISTINCT ON row selection, one row per (job, candidate) across both of the
+   job's keys: without a feedback filter, ORDER BY prefers a person's row that
+   carries the decision only when they have a second row under the job's
+   other key, then created_at DESC; with a filter, a feedback-preference
+   tiebreaker is injected first so the displayed row matches the filter.
 3. The feedback condition is placed in WHERE, not ORDER BY.
 4. The shared FULL_CTE is used for both results and count (single source of truth).
 5. Cross-job data isolation: feedback tiebreaker only activates when a filter
@@ -23,11 +25,17 @@ job-scoped NOT EXISTS check.
 """
 import re
 import pytest
-from routers.candidates import _build_feedback_filter_condition
+from routers.candidates import (
+    _build_feedback_filter_condition,
+    _launched_candidates_sql,
+    _launched_filter_conditions,
+)
 
 
 # ---------------------------------------------------------------------------
-# Helpers — use the shipped filter-condition builder.
+# Helpers — use the shipped filter-condition and statement builders, so these
+# tests check the SQL the endpoint actually runs (this file used to keep its
+# own copy of the CTE, which silently kept the old cross-job audit lookup).
 # ---------------------------------------------------------------------------
 
 def _build_feedback_exists_condition(feedback: str) -> str:
@@ -35,40 +43,23 @@ def _build_feedback_exists_condition(feedback: str) -> str:
     return cond
 
 
-def _build_full_cte(search_condition: str, feedback_exists_condition: str, matching_feedback_pred: str = "") -> str:
-    """Minimal replica of FULL_CTE construction used in production code."""
-    feedback_tiebreaker = (
-        f"{matching_feedback_pred} DESC, "
-        "(sc.data->>'feedback_at') DESC NULLS LAST, "
-        "(sc.data->>'feedback_type' IS NOT NULL) DESC, "
-        if matching_feedback_pred
-        else ""
+def _shipped_statements(feedback: str = ""):
+    """(rows_sql, count_sql) exactly as get_launched_candidates builds them."""
+    search, _params, exists_cond, order_by = _launched_filter_conditions(
+        None, None, feedback or None, None, None, None, None
     )
-    return f"""
-        WITH latest_audit AS (
-            SELECT DISTINCT ON (candidate_id) candidate_id, interview_id, status,
-                   created_at, payload, response
-            FROM engage_interview_audit
-            ORDER BY candidate_id, id DESC
-        ),
-        monitored_jobs_lookup AS (
-            SELECT DISTINCT ON (lookup_id) lookup_id, title, screening_level, recruiter_emails
-            FROM (SELECT 'dummy'::text AS lookup_id, NULL AS title, NULL AS screening_level, NULL AS recruiter_emails) x
-            WHERE lookup_id IS NOT NULL AND lookup_id <> ''
-            ORDER BY lookup_id
-        ),
-        launched_candidates AS (
-            SELECT DISTINCT ON (sc.jobdiva_id, sc.candidate_id)
-                sc.id, sc.candidate_id, sc.data, sc.created_at as engage_created_at
-            FROM sourced_candidates sc
-            JOIN latest_audit la ON la.candidate_id = sc.candidate_id
-            LEFT JOIN monitored_jobs_lookup mj ON mj.lookup_id = sc.jobdiva_id
-            WHERE (la.interview_id IS NOT NULL AND la.interview_id <> '')
-              {search_condition}
-              {feedback_exists_condition}
-            ORDER BY sc.jobdiva_id, sc.candidate_id, {feedback_tiebreaker}sc.created_at DESC
-        )
-    """
+    return _launched_candidates_sql(search, exists_cond, order_by)
+
+
+def _build_full_cte(feedback: str = "") -> str:
+    """The shipped rows statement for a feedback filter (no other filters)."""
+    return _shipped_statements(feedback)[0]
+
+
+def _as_spliced(fragment: str) -> str:
+    """A filter fragment as it appears in the statement: '%' is escaped at the
+    splice because the statement runs with a params tuple."""
+    return fragment.replace("%", "%%")
 
 
 # ---------------------------------------------------------------------------
@@ -119,37 +110,45 @@ class TestFeedbackExistsConditionGeneration:
     def test_no_feedback_references_sc2(self):
         cond = _build_feedback_exists_condition("No Feedback")
         assert "sc2.candidate_id = sc.candidate_id" in cond
-        assert "COALESCE(sc2.jobdiva_id, '') = COALESCE(sc.jobdiva_id, '')" in cond
+        # Either of the job's keys, not just the row's own raw key.
+        assert "sc2.jobdiva_id IN (sc.jobdiva_id, mj.numeric_job_id, mj.job_ref)" in cond
 
 
 # ---------------------------------------------------------------------------
 # Tests: DISTINCT ON ordering — conditional feedback tiebreaker
 # ---------------------------------------------------------------------------
 
+ORDER_BY = "ORDER BY COALESCE(mj.job_key, sc.jobdiva_id), sc.candidate_id"
+TWIN_GATE = "CASE WHEN COUNT(*) OVER job_person > 1 THEN"
+
+
 class TestDistinctOnOrdering:
 
     def test_order_by_uses_created_at_desc(self):
-        cte = _build_full_cte("", "")
+        cte = _build_full_cte()
         assert "sc.created_at DESC" in cte
 
     def test_no_filter_omits_feedback_tiebreaker(self):
-        """Without a feedback filter, ORDER BY should be pure created_at DESC
-        to use the existing index and avoid cross-job data mismatch."""
-        cte = _build_full_cte("", "")
-        order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
-        # The only thing between candidate_id and created_at should be a comma
+        """Without a feedback filter, the only decision preference is the one
+        gated on the person having a second row under the job's other key."""
+        cte = _build_full_cte()
+        order_section = cte[cte.find(ORDER_BY):]
         between = order_section.split("sc.candidate_id,")[1].split("sc.created_at")[0]
-        assert "feedback_type" not in between, (
-            "ORDER BY must NOT include feedback_type tiebreaker when no filter is active"
+        # Every feedback_type reference sits behind the twin-row gate.
+        assert between.count("feedback_type") == 1
+        assert between.count(TWIN_GATE) == 2
+        assert between.index(TWIN_GATE) < between.index("feedback_type")
+        assert between.strip().startswith(TWIN_GATE), (
+            "ORDER BY must NOT include the filter tiebreaker when no filter is active"
         )
 
     def test_with_filter_includes_feedback_tiebreaker(self):
         """When a feedback filter IS active, ORDER BY should prefer rows with
         feedback so the displayed row matches the filter result."""
         for feedback in ["Submit", "Reject", "Unreachable"]:
-            cond, matching_pred = _build_feedback_filter_condition(feedback)
-            cte = _build_full_cte("", cond, matching_pred)
-            order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
+            cond, _ = _build_feedback_filter_condition(feedback)
+            cte = _build_full_cte(feedback)
+            order_section = cte[cte.find(ORDER_BY):]
             assert "feedback_type" in order_section, (
                 f"ORDER BY must include feedback_type tiebreaker when '{feedback}' filter is active"
             )
@@ -163,15 +162,15 @@ class TestDistinctOnOrdering:
     def test_feedback_condition_placed_in_where_before_order_by(self):
         """The feedback condition must be in WHERE, before ORDER BY."""
         for feedback in ["Submit", "Reject", "Unreachable", "No Feedback"]:
-            cond, matching_pred = _build_feedback_filter_condition(feedback)
-            cte = _build_full_cte("", cond, matching_pred)
+            cond, _ = _build_feedback_filter_condition(feedback)
+            cte = _build_full_cte(feedback)
             where_pos = cte.find("WHERE")
-            order_pos = cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id")
+            order_pos = cte.find(ORDER_BY)
             assert where_pos != -1, f"WHERE clause must exist for '{feedback}'"
             assert where_pos < order_pos, (
                 f"WHERE must come before ORDER BY for '{feedback}'"
             )
-            condition_pos = cte.find(cond.strip())
+            condition_pos = cte.find(_as_spliced(cond.strip()))
             assert where_pos < condition_pos < order_pos, (
                 f"Feedback condition for '{feedback}' must be between WHERE and ORDER BY"
             )
@@ -184,29 +183,32 @@ class TestDistinctOnOrdering:
 class TestCrossJobIsolation:
 
     def test_distinct_rows_are_scoped_to_job_and_candidate(self):
-        """The same candidate can be launched for multiple jobs with different feedback."""
-        cte = _build_full_cte("", "")
-        assert "DISTINCT ON (sc.jobdiva_id, sc.candidate_id)" in cte
-        assert "ORDER BY sc.jobdiva_id, sc.candidate_id, sc.created_at DESC" in cte
+        """The same candidate can be launched for multiple jobs with different
+        feedback; the job is its canonical key, so a person stored under both
+        the ref and the numeric job_id is still one row."""
+        cte = _build_full_cte()
+        assert "DISTINCT ON (COALESCE(mj.job_key, sc.jobdiva_id), sc.candidate_id)" in cte
+        assert ORDER_BY + ", " in cte
 
-    def test_no_filter_uses_index_friendly_order(self):
-        """Without a filter, the ORDER BY matches the composite row identity."""
-        cte = _build_full_cte("", "")
+    def test_no_filter_order_ends_with_newest_source_row(self):
+        """Without a filter: job, candidate, the twin-gated decision
+        preference, then the newest source row."""
+        cte = _build_full_cte()
         order_match = re.search(
-            r"ORDER BY sc\.jobdiva_id,\s*sc\.candidate_id,\s*sc\.created_at DESC",
+            r"ORDER BY COALESCE\(mj\.job_key, sc\.jobdiva_id\),\s*sc\.candidate_id,\s*"
+            r"CASE WHEN COUNT\(\*\) OVER job_person > 1 THEN [^\n]+ END DESC NULLS LAST,\s*"
+            r"CASE WHEN COUNT\(\*\) OVER job_person > 1 THEN [^\n]+ END DESC NULLS LAST,\s*"
+            r"sc\.created_at DESC",
             cte,
         )
-        assert order_match is not None, (
-            "Without a filter, ORDER BY must be 'sc.jobdiva_id, sc.candidate_id, sc.created_at DESC' "
-            "to use the composite source-row index"
-        )
+        assert order_match is not None
 
     def test_filtered_order_scopes_tiebreaker(self):
         """The tiebreaker must use the current row, never a cross-table lookup."""
         for feedback in ["Submit", "Reject"]:
-            cond, matching_pred = _build_feedback_filter_condition(feedback)
-            cte = _build_full_cte("", cond, matching_pred)
-            order_section = cte[cte.find("ORDER BY sc.jobdiva_id, sc.candidate_id"):]
+            cond, _ = _build_feedback_filter_condition(feedback)
+            cte = _build_full_cte(feedback)
+            order_section = cte[cte.find(ORDER_BY):]
             # The tiebreaker must reference sc.data (same row), not sc2
             assert "sc.data" in order_section, (
                 f"Tiebreaker for '{feedback}' must reference sc.data, not a cross-table join"
@@ -223,23 +225,29 @@ class TestCrossJobIsolation:
 class TestSharedCTE:
 
     def test_full_cte_contains_launched_candidates(self):
-        cte = _build_full_cte("", "")
+        cte = _build_full_cte()
         assert "launched_candidates AS" in cte
 
     def test_results_and_count_share_same_cte_body(self):
-        cte = _build_full_cte("", "")
-        cte_body = cte.split("WITH", 1)[1]
-        results_query = f"WITH {cte_body} SELECT * FROM launched_candidates ORDER BY engage_created_at DESC NULLS LAST LIMIT %s OFFSET %s;"
-        count_query = f"WITH {cte_body} SELECT COUNT(*) as total FROM launched_candidates"
-        assert cte_body in results_query
-        assert cte_body in count_query
-        assert "launched_candidates_for_count" not in count_query
+        for feedback in ["", "Submit", "Reject", "Unreachable", "No Feedback"]:
+            rows_sql, count_sql = _shipped_statements(feedback)
+            body = rows_sql.split("SELECT * FROM launched_candidates", 1)[0]
+            assert count_sql.startswith(body), feedback
+            assert "launched_candidates_for_count" not in count_sql
 
     def test_count_query_uses_shared_launched_candidates(self):
-        cte = _build_full_cte("", "")
-        count_query = f"WITH {cte.split('WITH', 1)[1]} SELECT COUNT(*) as total FROM launched_candidates"
-        assert "launched_candidates_for_count" not in count_query
-        assert "FROM launched_candidates" in count_query
+        _, count_sql = _shipped_statements()
+        assert "launched_candidates_for_count" not in count_sql
+        assert "FROM launched_candidates" in count_sql
+
+    def test_spliced_fragments_leave_no_bare_percent(self):
+        """A bare '%' in a statement run with params is read as a placeholder —
+        the Rejected filter used to 500 the page with an IndexError."""
+        for feedback in ["Submit", "Reject", "Rejected", "Unreachable", "No Feedback"]:
+            rows_sql, count_sql = _shipped_statements(feedback)
+            for sql in (rows_sql, count_sql):
+                stripped = sql.replace("%%", "").replace("%s", "")
+                assert "%" not in stripped, feedback
 
 
 # ---------------------------------------------------------------------------

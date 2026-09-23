@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import os
 import statistics
 from typing import Dict, Any, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -16,7 +17,11 @@ from routers._helpers import (
     _parse_recruiter_emails,
     _sc_filter,
     _ts,
+    _ts_utc,
+    optional_monitored_jobs_columns,
 )
+from services.job_attribution import attribution_fields
+from services.job_candidate_metrics import empty_metrics, fetch_job_candidate_metrics
 
 router = APIRouter(prefix="/api/v1", tags=["Admin Analytics"])
 logger = logging.getLogger(__name__)
@@ -25,87 +30,201 @@ def _iso(value) -> Any:
     return value.isoformat() if hasattr(value, "isoformat") else (value or None)
 
 
-def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Per-job lifecycle: when it was posted on JobDiva vs launched on Curate.
+def _utc(col: str) -> str:
+    """timestamptz for a real TIMESTAMP column written with NOW() (UTC).
 
-    Timestamps are declared UTC (AT TIME ZONE 'UTC') so the serialized values
-    carry an explicit offset — otherwise browsers parse the naive strings in
-    the viewer's local timezone and dates can shift by a day.
+    pair_launched_at / outreach_stopped_at are only ever written by the DB
+    clock, so declaring them UTC is exact. The TEXT-ish columns that
+    readable_ist_now() writes (created_at) go through `_ts_utc` instead —
+    `_ts(created_at) AT TIME ZONE 'UTC'` read every " IST" row 5h30m late,
+    the "Added on PAIR is +5:30" bug.
+    """
+    return f"({_ts(col)}) AT TIME ZONE 'UTC'"
+
+
+# Output columns of `_jobs_timeline_sql`, in SELECT order. The SQL aliases
+# every column with exactly these names, and a real-Postgres test compares
+# them with cursor.description, so the two can't drift apart silently.
+_TIMELINE_COLUMNS = (
+    "job_id",
+    "jobdiva_id",
+    "title",
+    "customer_name",
+    "posted_date",
+    "created_at",
+    "pair_launched_at",
+    "outreach_stopped_at",
+    "is_archived",
+    "archive_reason",
+    "status",
+    "candidates_sourced",
+    "candidates_launched",
+    "jobdiva_total_subs",
+    "pair_external_subs",
+    "campaign_id",
+    "recruiter_emails",
+    "pair_posted_by",
+    "pair_launched_by",
+)
+
+
+# The unscoped view aggregates every job's candidates (all of
+# sourced_candidates), the heaviest statement on this page and not yet
+# measured on production-sized data. It gets its own bound below the pool's
+# 30s default, so a slow run costs at most this long before the page shows the
+# candidate columns as unavailable (jobs_timeline_metrics_available=false).
+_METRICS_STATEMENT_TIMEOUT_MS = int(os.getenv("ADMIN_ANALYTICS_METRICS_TIMEOUT_MS", "20000"))
+
+
+def _missing_optional_columns(conn) -> frozenset:
+    """Which OPTIONAL_MONITORED_JOBS_COLUMNS monitored_jobs lacks right now;
+    the timeline selects NULL for those (see routers/_helpers)."""
+    with conn.cursor() as cur:
+        exprs = optional_monitored_jobs_columns(cur, "")
+    return frozenset(col for col, expr in exprs.items() if expr == "NULL::text")
+
+
+def _jobs_timeline_sql(cond: str, missing_columns: frozenset = frozenset()) -> str:
+    # No candidate-table join here. The old `feedback_times` step joined
+    # sourced_candidates on EITHER job key (`= jobdiva_id OR = job_id::text`),
+    # so a job whose feedback sat under both keys came back as two timeline
+    # rows. Candidate numbers now come from `_compute_scoped_job_metrics`
+    # (one grouped query, DISTINCT candidates across both keys) and are
+    # merged in Python by job_id, which can't multiply rows.
+    dedup_key = "job_id::text"
+    order_ts = f"COALESCE({_utc('pair_launched_at')}, {_ts_utc('created_at')})"
+
+    def optional(col: str) -> str:
+        return f"NULL::text AS {col}" if col in missing_columns else col
+
+    return f"""
+        WITH deduped AS (
+            SELECT
+                job_id,
+                jobdiva_id,
+                enhanced_title,
+                title,
+                customer_name,
+                posted_date,
+                created_at,
+                pair_launched_at,
+                outreach_stopped_at,
+                is_archived,
+                archive_reason,
+                status,
+                candidates_sourced,
+                candidates_launched,
+                jobdiva_total_subs,
+                pair_external_subs,
+                campaign_id,
+                recruiter_emails,
+                {optional('pair_posted_by')},
+                {optional('pair_launched_by')},
+                {order_ts} AS sort_ts,
+                ROW_NUMBER() OVER(
+                    PARTITION BY {dedup_key}
+                    ORDER BY {order_ts} DESC NULLS LAST
+                ) as rn
+            FROM monitored_jobs
+            WHERE {cond}
+        )
+        SELECT
+            d.job_id AS job_id,
+            d.jobdiva_id AS jobdiva_id,
+            COALESCE(NULLIF(TRIM(d.enhanced_title), ''), NULLIF(TRIM(d.title), ''), 'Untitled') AS title,
+            COALESCE(NULLIF(TRIM(d.customer_name), ''), 'Unknown') AS customer_name,
+            d.posted_date AS posted_date,
+            {_ts_utc('d.created_at')} AS created_at,
+            {_utc('d.pair_launched_at')} AS pair_launched_at,
+            {_utc('d.outreach_stopped_at')} AS outreach_stopped_at,
+            COALESCE(d.is_archived, FALSE) AS is_archived,
+            d.archive_reason AS archive_reason,
+            d.status AS status,
+            {_int('d.candidates_sourced')} AS candidates_sourced,
+            {_int('d.candidates_launched')} AS candidates_launched,
+            {_int('d.jobdiva_total_subs')} AS jobdiva_total_subs,
+            {_int('d.pair_external_subs')} AS pair_external_subs,
+            d.campaign_id AS campaign_id,
+            d.recruiter_emails AS recruiter_emails,
+            d.pair_posted_by AS pair_posted_by,
+            d.pair_launched_by AS pair_launched_by
+        FROM deduped d
+        WHERE d.rn = 1
+        ORDER BY d.is_archived ASC, d.sort_ts DESC NULLS LAST
+        LIMIT 2000
+    """
+
+
+def _compute_scoped_job_metrics(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """Rank-list candidate outcomes for EVERY job in scope, in one query.
+
+    Computed once per request and shared: the timeline merges each row's
+    entry, and the submission cards sum the internal/external split over all
+    scoped jobs — not just the 2000 rows the timeline loads. Pass / feedback /
+    submit definitions live in services/job_candidate_metrics.py.
     """
     cond, params = _mj_filter(scope)
-    dedup_key = "job_id::text"
     with conn.cursor() as cur:
-        cur.execute(f"SELECT COUNT(DISTINCT {dedup_key}) FROM monitored_jobs WHERE {cond}", params)
+        cur.execute("SELECT current_setting('statement_timeout')")
+        previous_timeout = cur.fetchone()[0]
+        cur.execute(f"SET LOCAL statement_timeout = '{int(_METRICS_STATEMENT_TIMEOUT_MS)}ms'")
+        cur.execute(f"SELECT job_id, jobdiva_id FROM monitored_jobs WHERE {cond}", params)
+        jobs = cur.fetchall()
+    metrics = fetch_job_candidate_metrics(conn, jobs)
+    # SET LOCAL lasts until the transaction ends and the later sections share
+    # this transaction, so hand them back the timeout they would have had. On
+    # failure there is nothing to restore: _section's rollback discards it.
+    with conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = %s", (previous_timeout,))
+    return metrics
+
+
+def _compute_jobs_timeline(
+    conn,
+    scope: Optional[Dict[str, Any]] = None,
+    job_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Per-job lifecycle: when it was posted on JobDiva vs launched on Curate.
+
+    Every timestamp is a timestamptz, so the serialized values carry an
+    explicit offset — otherwise browsers parse naive strings in the viewer's
+    local timezone and dates can shift by a day.
+
+    `job_metrics` is `_compute_scoped_job_metrics` output. None means the
+    metrics were unavailable: rows then carry None (rendered "—") for every
+    candidate column rather than the whole timeline failing. Not zeros — a
+    0 Pass / 0 Feedback row reads as real data, and the CSV travels without
+    the page's "unavailable" notice.
+    """
+    cond, params = _mj_filter(scope)
+    missing_columns = _missing_optional_columns(conn)
+    if missing_columns:
+        logger.warning(
+            f"Admin analytics timeline: monitored_jobs lacks {sorted(missing_columns)}; "
+            "selecting NULL (schema init has not added them yet)"
+        )
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(DISTINCT job_id::text) FROM monitored_jobs WHERE {cond}", params)
         total_jobs = int(cur.fetchone()[0] or 0)
 
-        cur.execute(f"""
-            WITH deduped AS (
-                SELECT
-                    job_id,
-                    jobdiva_id,
-                    enhanced_title,
-                    title,
-                    customer_name,
-                    posted_date,
-                    created_at,
-                    pair_launched_at,
-                    outreach_stopped_at,
-                    is_archived,
-                    archive_reason,
-                    status,
-                    candidates_sourced,
-                    candidates_launched,
-                    jobdiva_total_subs,
-                    campaign_id,
-                    recruiter_emails,
-                    ROW_NUMBER() OVER(
-                        PARTITION BY {dedup_key}
-                        ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
-                    ) as rn
-                FROM monitored_jobs
-                WHERE {cond}
-            ),
-            feedback_times AS (
-                SELECT
-                    jobdiva_id,
-                    MIN(NULLIF(data->>'feedback_at', '')) AS first_feedback_at
-                FROM sourced_candidates
-                WHERE data->>'feedback_at' IS NOT NULL
-                GROUP BY jobdiva_id
-            )
-            SELECT
-                d.job_id,
-                d.jobdiva_id,
-                COALESCE(NULLIF(TRIM(d.enhanced_title), ''), NULLIF(TRIM(d.title), ''), 'Untitled') AS title,
-                COALESCE(NULLIF(TRIM(d.customer_name), ''), 'Unknown') AS customer_name,
-                d.posted_date,
-                ({_ts('d.created_at')}) AT TIME ZONE 'UTC' AS created_at,
-                ({_ts('d.pair_launched_at')}) AT TIME ZONE 'UTC' AS pair_launched_at,
-                ({_ts('d.outreach_stopped_at')}) AT TIME ZONE 'UTC' AS outreach_stopped_at,
-                COALESCE(d.is_archived, FALSE) AS is_archived,
-                d.archive_reason,
-                d.status,
-                {_int('d.candidates_sourced')},
-                {_int('d.candidates_launched')},
-                {_int('d.jobdiva_total_subs')},
-                d.campaign_id,
-                d.recruiter_emails,
-                ft.first_feedback_at
-            FROM deduped d
-            LEFT JOIN feedback_times ft
-              ON ft.jobdiva_id = d.jobdiva_id OR ft.jobdiva_id = d.job_id::text
-            WHERE d.rn = 1
-            ORDER BY d.is_archived ASC, COALESCE({_ts('d.pair_launched_at')}, {_ts('d.created_at')}) DESC NULLS LAST
-            LIMIT 2000
-        """, params)
+        cur.execute(_jobs_timeline_sql(cond, missing_columns), params)
         rows = cur.fetchall()
 
     scope_emails = set(scope["emails"]) if scope and scope.get("emails") else None
+    # A job absent from an available dict was created after the metrics read
+    # (it has no candidates yet), so zeros are right for it.
+    unavailable_metrics = dict.fromkeys(empty_metrics())
 
     timeline = []
-    for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
-         launched_at, stopped_at, is_archived, archive_reason, status, sourced, launched_count,
-         jobdiva_subs, campaign_id, raw_recruiter_emails, first_feedback_at) in rows:
+    for raw in rows:
+        r = dict(zip(_TIMELINE_COLUMNS, raw))
+        job_id = r["job_id"]
+        posted_raw = r["posted_date"]
+        launched_at = r["pair_launched_at"]
+        stopped_at = r["outreach_stopped_at"]
+        is_archived = r["is_archived"]
+        status = r["status"]
+        raw_recruiter_emails = r["recruiter_emails"]
         posted_on = _parse_posted_date(posted_raw)
         lag_days = None
         if launched_at is not None and posted_on is not None:
@@ -139,27 +258,49 @@ def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict
             except Exception:
                 pass
 
+        if job_metrics is None:
+            m = unavailable_metrics
+        else:
+            m = job_metrics.get(str(job_id or "").strip()) or empty_metrics()
+
         timeline.append({
             "job_id": str(job_id or ""),
-            "jobdiva_id": str(jobdiva_id or ""),
-            "title": title,
-            "customer_name": customer,
+            "jobdiva_id": str(r["jobdiva_id"] or ""),
+            "title": r["title"],
+            "customer_name": r["customer_name"],
             "posted_date_raw": str(posted_raw or ""),
             "jobdiva_posted_on": _iso(posted_on),
-            "added_to_curate_at": _iso(created_at),
+            "added_to_curate_at": _iso(r["created_at"]),
             "curate_launched_at": _iso(launched_at),
             "outreach_stopped_at": _iso(stopped_at),
             "posted_to_launch_days": lag_days,
             "is_archived": bool(is_archived),
-            "archive_reason": archive_reason,
+            "archive_reason": r["archive_reason"],
             "jobdiva_status": str(status or ""),
             "pair_status": pair_status,
-            "candidates_sourced": int(sourced or 0),
-            "candidates_launched": int(launched_count or 0),
-            "jobdiva_submittals": int(jobdiva_subs or 0),
-            "campaign_id": str(campaign_id or "") or None,
+            "candidates_sourced": int(r["candidates_sourced"] or 0),
+            "candidates_launched": int(r["candidates_launched"] or 0),
+            # Every JobDiva submittal on the job, PAIR or not.
+            "jobdiva_submittals": int(r["jobdiva_total_subs"] or 0),
+            "campaign_id": str(r["campaign_id"] or "") or None,
             "recruiter_emails": emails,
-            "first_feedback_at": _iso(first_feedback_at),
+            # posted_by / launched_by: NULL for jobs that predate the columns.
+            **attribution_fields(r["pair_posted_by"], r["pair_launched_by"]),
+            # What PAIR recorded, per candidate, on the rank list's rules.
+            "pass_candidates": m["passed"],
+            "fail_candidates": m["failed"],
+            "feedback_total": m["feedback_total"],
+            "feedback_submits": m["pair_submits"],
+            "feedback_rejects": m["rejects"],
+            "feedback_unreachable": m["unreachable"],
+            "pair_internal_submits": m["pair_internal_submits"],
+            "pair_external_submits": m["pair_external_submits"],
+            # ...next to what JobDiva confirms: a JobDiva submittal to the job
+            # contact for a PAIR-passed candidate (auto-sync's
+            # _count_external_curate_submittals). A gap is a real signal.
+            "jobdiva_confirmed_subs": int(r["pair_external_subs"] or 0),
+            "first_feedback_at": _iso(m["first_feedback_at"]),
+            "first_pair_external_submit_at": _iso(m["first_external_submit_at"]),
         })
 
     return {"rows": timeline, "total": total_jobs}
@@ -176,7 +317,7 @@ def _compute_launch_speed(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[
                                  AND COALESCE(is_archived, FALSE) = FALSE) AS unlaunched_active_jobs,
                 COUNT(*) FILTER (WHERE pair_launched_at IS NULL
                                  AND COALESCE(is_archived, FALSE) = FALSE
-                                 AND {_ts('created_at')} < NOW() - INTERVAL '7 days') AS aged_unlaunched_jobs
+                                 AND {_ts_utc('created_at')} < NOW() - INTERVAL '7 days') AS aged_unlaunched_jobs
             FROM monitored_jobs
             WHERE {cond}
         """, params)
@@ -238,13 +379,19 @@ def _compute_weekly_trends(conn, scope: Optional[Dict[str, Any]] = None, weeks: 
     mj_cond, mj_params = _mj_filter(scope)
     sc_cond, sc_params = _sc_filter(scope, "jobdiva_id")
     sub_cond, sub_params = ("TRUE", []) if scope is None else ("job_id = ANY(%s)", [scope["job_ids"]])
+    created_utc = f"({_ts_utc('created_at')} AT TIME ZONE 'UTC')"
 
     return {
         "weeks": labels,
+        # created_at is converted to the true instant (IST-suffix aware) and
+        # then to a UTC wall clock, the same basis as the naive-UTC columns
+        # the other series bucket on. Read with the bare _ts(), India-written
+        # rows landed 5h30m late, so a job added late on a Sunday (UTC) was
+        # counted in the following week.
         "jobs_added": series(f"""
-            SELECT date_trunc('week', {_ts('created_at')})::date, COUNT(*)
+            SELECT date_trunc('week', {created_utc})::date, COUNT(*)
             FROM monitored_jobs
-            WHERE {_ts('created_at')} >= date_trunc('week', NOW()) - make_interval(weeks => %s)
+            WHERE {created_utc} >= date_trunc('week', NOW()) - make_interval(weeks => %s)
               AND {mj_cond}
             GROUP BY 1
         """, mj_params),
@@ -282,17 +429,39 @@ def _compute_weekly_trends(conn, scope: Optional[Dict[str, Any]] = None, weeks: 
     }
 
 
-def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+# The JobDiva job a monitored_jobs row belongs to: the SQL twin of
+# routers.recruiter_analytics._family_key (a test pins the two together).
+# parent_job_id when set (clones store the root ref there), else the row's own
+# ref with the "-vN" version suffix stripped.
+_JOB_FAMILY_SQL = (
+    "COALESCE(NULLIF(LOWER(TRIM(parent_job_id::text)), ''), "
+    "LOWER(REGEXP_REPLACE(COALESCE(NULLIF(TRIM(jobdiva_id::text), ''), TRIM(job_id::text), ''), "
+    "'-v[0-9]+$', '', 'i')))"
+)
+
+
+def _compute_submission_metrics(
+    conn,
+    scope: Optional[Dict[str, Any]] = None,
+    job_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Submission funnel for the admin / team-lead dashboards.
 
-    Two sources:
+    Three sources:
       - monitored_jobs counters (refreshed each auto-sync cycle):
         complete/pass submissions (local PAIR funnel), pair_submits
-        (recruiter pressed Submit in PAIR), pair_external_subs (JobDiva
-        submittals matching the strict PAIR criteria) and
-        jobdiva_total_subs (raw JobDiva submittal count per job).
+        (recruiter pressed Submit in PAIR), pair_external_subs (the
+        JobDiva-CONFIRMED count: JobDiva submittals to the job contact for a
+        PAIR-passed candidate) and jobdiva_total_subs (raw JobDiva submittal
+        count per job). v2+ clones re-resolve to the SAME JobDiva job, so the
+        two JobDiva-derived counters are MAX-ed within a version family and
+        then summed (v1 and v2 count once, as on Recruiter Analytics); the
+        local counters are per version and summed per row.
       - jobdiva_submittals raw records (BI JobSubmittalsDetail mirror) for
         distinct-candidate and last-30-days cuts plus the top-jobs table.
+      - `job_metrics` (`_compute_scoped_job_metrics`, every scoped job) for
+        the internal / external split of PAIR submits. None when that
+        section failed: the split is then None ("unavailable"), not 0.
 
     All-time across active AND archived jobs — a submittal on a since-closed
     job still happened.
@@ -301,13 +470,22 @@ def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT
-                COALESCE(SUM({_int('complete_submissions')}), 0),
-                COALESCE(SUM({_int('pass_submissions')}), 0),
-                COALESCE(SUM({_int('pair_external_subs')}), 0),
-                COALESCE(SUM({_int('pair_submits')}), 0),
-                COALESCE(SUM({_int('jobdiva_total_subs')}), 0)
-            FROM monitored_jobs
-            WHERE {cond}
+                COALESCE(SUM(complete_subs), 0),
+                COALESCE(SUM(pass_subs), 0),
+                COALESCE(SUM(pair_external), 0),
+                COALESCE(SUM(pair_submits), 0),
+                COALESCE(SUM(jobdiva_total), 0)
+            FROM (
+                SELECT
+                    SUM({_int('complete_submissions')}) AS complete_subs,
+                    SUM({_int('pass_submissions')}) AS pass_subs,
+                    MAX({_int('pair_external_subs')}) AS pair_external,
+                    SUM({_int('pair_submits')}) AS pair_submits,
+                    MAX({_int('jobdiva_total_subs')}) AS jobdiva_total
+                FROM monitored_jobs
+                WHERE {cond}
+                GROUP BY {_JOB_FAMILY_SQL}
+            ) families
         """, params)
         complete_subs, pass_subs, pair_external, pair_submits, jobdiva_total = cur.fetchone()
 
@@ -350,6 +528,11 @@ def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
             for r in cur.fetchall()
         ]
 
+    def split_total(key: str) -> Optional[int]:
+        if job_metrics is None:
+            return None
+        return sum(int(m.get(key) or 0) for m in job_metrics.values())
+
     return {
         # Raw JobDiva v2 (BI JobSubmittalsDetail) submittal volume
         "jobdiva_total_submittals": int(jobdiva_total or 0),
@@ -363,6 +546,14 @@ def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
         # What PAIR recorded (recruiter pressed Submit) vs what JobDiva
         # confirms above. Both are reported; a gap is a real signal.
         "pair_submits": int(pair_submits or 0),
+        # PAIR submits split by where they went: internal = to a hiring
+        # manager for review, external = to the client (a Submit with no
+        # recorded type predates the split and counts as external). Read
+        # live from the candidate rows, not from the pair_submits counter,
+        # so internal + external can differ from pair_submits while that
+        # counter is stale (it is refreshed on each click and each sync).
+        "pair_internal_submits": split_total("pair_internal_submits"),
+        "pair_external_submits": split_total("pair_external_submits"),
         "top_jobs_by_submittals": top_jobs,
     }
 
@@ -562,10 +753,15 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                     pass
                 return default
 
-        jobs_timeline = _section(_compute_jobs_timeline, {"rows": [], "total": 0}, scope)
+        # Candidate outcomes for every scoped job, computed once and shared by
+        # the timeline rows and the submission split. None on failure (e.g. its
+        # own statement timeout): both consumers report the numbers as
+        # unavailable instead of failing or showing zeros.
+        job_metrics = _section(_compute_scoped_job_metrics, None, scope)
+        jobs_timeline = _section(_compute_jobs_timeline, {"rows": [], "total": 0}, scope, job_metrics)
         launch_speed = _section(_compute_launch_speed, {}, scope)
         weekly_trends = _section(_compute_weekly_trends, {}, scope)
-        submission_metrics = _section(_compute_submission_metrics, {}, scope)
+        submission_metrics = _section(_compute_submission_metrics, {}, scope, job_metrics)
         # LinkedIn accounts are global sourcing infrastructure — only shown
         # on the unscoped (all-teams admin) view.
         linkedin_accounts = _section(_compute_linkedin_accounts, []) if scope is None else []
@@ -583,6 +779,9 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             "candidates_by_source": candidates_by_source,
             "jobs_timeline": jobs_timeline.get("rows", []),
             "jobs_timeline_total": jobs_timeline.get("total", 0),
+            # False: the timeline's candidate columns are None this time and
+            # the page says so, instead of showing zeros that look real.
+            "jobs_timeline_metrics_available": job_metrics is not None,
             "launch_speed": launch_speed,
             "weekly_trends": weekly_trends,
             "submission_metrics": submission_metrics,
@@ -607,6 +806,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             "candidates_by_source": [],
             "jobs_timeline": [],
             "jobs_timeline_total": 0,
+            "jobs_timeline_metrics_available": False,
             "launch_speed": {},
             "weekly_trends": {},
             "submission_metrics": {},

@@ -2,38 +2,58 @@
 
 // Daily PAIR launch report.
 //
-// One row per job whose FIRST PAIR launch landed on the selected date. The
-// date is a calendar date in Eastern time, matching the backend
+// One row per job whose FIRST successful PAIR launch landed on the selected
+// date. The date is a calendar date in Eastern time, matching the backend
 // (routers/launch_report.py) — a job launched at 22:00 EDT belongs to that
 // day, not to the next UTC one. Every timestamp here renders in
-// America/New_York for the same reason.
+// America/New_York for the same reason, as "MM/DD/YYYY HH:MM:SS" with the
+// zone named once in the column header ("… (ET)") rather than in every cell
+// and CSV value (lib/date.ts).
 //
 // Each row is that job's rank list, summarised: the same candidate counts
 // the Rankings page shows for the job today (one unit per launched person,
 // over the job's whole lifetime), indexed by the day the job first launched.
 // The backend shares its population and classification code with the
-// Rankings header, so the two screens cannot disagree.
+// Rankings header, so the two screens cannot disagree, and every Interview
+// Status / Feedback number counts launched people only.
 //
 // The outreach columns (Pending → Extra 3) are fetched live from pair-bot,
 // one call per launched candidate. They can come back partially resolved, so
 // a row that did not fully resolve is marked rather than silently showing
 // zeros — see the "partial" badge on the job cell.
+//
+// Today is selectable. While the requested range includes today the page is
+// "Live": it silently re-requests the same range every 2 minutes, only while
+// the tab is visible and never on top of a request already in flight, and
+// keeps the current rows on screen while it does.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CalendarDays, Download, ShieldAlert, TriangleAlert } from "lucide-react";
+import { ArrowLeft, CalendarDays, Download, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
 import { PhaseOutreachInfo } from "./PhaseOutreachInfo";
 import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { normalizeToUtcDate } from "@/lib/date";
+import {
+  addIsoDays,
+  formatDuration,
+  formatEasternDate,
+  formatEasternDateTime,
+  formatEasternTime,
+  inclusiveDateSpanDays,
+  todayEastern,
+  withEasternLabel,
+} from "@/lib/date";
 
 interface LaunchReportRow {
   job_id: string;
   jobdiva_id: string;
   recruiter_emails: string[];
+  /** Who posted / first launched the job in PAIR; null = not recorded (jobs before 2026-09-23). */
+  posted_by: string | null;
+  launched_by: string | null;
   job_title: string;
   customer_name: string;
   launch_date: string | null;
@@ -56,12 +76,15 @@ interface LaunchReportRow {
   launch_to_response_minutes: number | null;
   overall_response_time_minutes: number | null;
   submitted_candidates: number;
+  internal_submitted_candidates: number;
+  external_submitted_candidates: number;
   rejected_candidates: number;
   passed_candidates: number;
   failed_candidates: number;
   outstanding_feedback: number;
   time_to_feedback_minutes: number | null;
   first_feedback_at: string | null;
+  first_external_submit_at: string | null;
   first_pass_at: string | null;
   time_to_first_pass_minutes: number | null;
   call: number;
@@ -98,84 +121,28 @@ interface LaunchReportData {
 
 const MAX_LAUNCH_REPORT_RANGE_DAYS = 31;
 
-function inclusiveDateSpanDays(start: string, end: string): number {
-  const startTime = Date.parse(`${start}T00:00:00Z`);
-  const endTime = Date.parse(`${end}T00:00:00Z`);
-  return Math.floor((endTime - startTime) / (24 * 60 * 60 * 1000)) + 1;
-}
+// Live-mode refresh cadence. Each refresh re-runs the whole report, which
+// asks pair-bot about every launched candidate (bounded server-side by a
+// concurrency cap and a 120s budget), so this stays at minutes, not seconds.
+// Measured from when the previous request SETTLED, not when it started: a
+// month-to-date range can itself take ~120s, and timing from the start made
+// such a report re-request the moment it finished, keeping pair-bot under
+// near-constant load from every open tab.
+const LIVE_REFRESH_MS = 120_000;
+// How often to check whether a live refresh is due. Checking often and
+// refreshing only when 2 minutes have passed since the last request settled
+// lets a tab that was hidden refresh as soon as it is visible again, without
+// a second refresh landing seconds later off an unrelated timer.
+const LIVE_CHECK_MS = 15_000;
 
-function addIsoDays(date: string, days: number): string {
-  const next = new Date(`${date}T00:00:00Z`);
-  next.setUTCDate(next.getUTCDate() + days);
-  return next.toISOString().slice(0, 10);
+type DateRange = { start: string; end: string };
+
+function rangeIncludes(range: DateRange | null, day: string): boolean {
+  return !!range && range.start <= day && day <= range.end;
 }
 
 function earliestIsoDate(a: string, b: string): string {
   return a < b ? a : b;
-}
-
-/** Yesterday's calendar date in Eastern time, as YYYY-MM-DD. */
-function yesterdayEastern(): string {
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  // en-CA gives ISO-shaped output (YYYY-MM-DD) directly.
-  return yesterday.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-}
-
-/** ISO date-only → "02/24/2026"; null/invalid → "—". */
-function formatDate(iso: string | null | undefined): string {
-  // Date-only strings are calendar values, not instants. Parse at noon UTC so
-  // rendering in America/New_York never rolls to the previous day.
-  if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-    const [y, m, d] = iso.split("-").map((v) => Number(v));
-    const safe = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      month: "2-digit", day: "2-digit", year: "numeric",
-    });
-    const parts = formatter.formatToParts(safe);
-    const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
-    return `${p.month}/${p.day}/${p.year}`;
-  }
-  const d = normalizeToUtcDate(iso);
-  if (!d) return "—";
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    month: "2-digit", day: "2-digit", year: "numeric",
-  });
-  const parts = formatter.formatToParts(d);
-  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
-  return `${p.month}/${p.day}/${p.year}`;
-}
-
-/** ISO datetime → "02/24/2026 10:30:05 EST"; null/invalid → "—". */
-function formatDateTime(iso: string | null | undefined): string {
-  const d = normalizeToUtcDate(iso);
-  if (!d) return "—";
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    month: "2-digit", day: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false, timeZoneName: "short",
-  });
-  const parts = formatter.formatToParts(d);
-  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
-  const hr = p.hour === '24' ? '00' : p.hour;
-  return `${p.month}/${p.day}/${p.year} ${hr}:${p.minute}:${p.second} ${p.timeZoneName}`;
-}
-
-/** Minutes → "45m" / "1h 22m" / "2d 3h"; null → "—". */
-function formatDuration(minutes: number | null | undefined): string {
-  if (minutes === null || minutes === undefined || Number.isNaN(minutes)) return "—";
-  const total = Math.round(minutes);
-  if (total < 60) return `${total}m`;
-  const hours = Math.floor(total / 60);
-  if (hours < 24) {
-    const rem = total % 60;
-    return rem ? `${hours}h ${rem}m` : `${hours}h`;
-  }
-  const days = Math.floor(hours / 24);
-  const remHours = hours % 24;
-  return remHours ? `${days}d ${remHours}h` : `${days}d`;
 }
 
 function formatPercent(value: number | null): string {
@@ -185,15 +152,22 @@ function formatPercent(value: number | null): string {
 /** "02/24/2026" for a single day, or "02/24/2026 – 02/28/2026" for a range. */
 function formatDateRange(start: string | null | undefined, end: string | null | undefined): string {
   if (!start) return "—";
-  if (!end || end === start) return formatDate(start);
-  return `${formatDate(start)} – ${formatDate(end)}`;
+  if (!end || end === start) return formatEasternDate(start);
+  return `${formatEasternDate(start)} – ${formatEasternDate(end)}`;
 }
 
+/** An email the backend may not have recorded (null → "—"). */
+const person = (email: string | null | undefined) => email || "—";
+
 // Column groups drive the header spans, the cell order AND the CSV export, so
-// the three can't drift apart as columns get added.
+// the three can't drift apart as columns get added. Every date-time column's
+// label carries "(ET)" (withEasternLabel) and its cells don't, on screen and
+// in the CSV alike; calendar-date columns carry neither.
 type Column = {
   key: string;
   label: string;
+  /** Header tooltip for a column whose name alone is ambiguous. Screen only. */
+  hint?: string;
   /** Plain-text value. Used for the CSV, and for display unless `render` overrides. */
   text: (row: LaunchReportRow) => string;
   /** Optional richer cell; the CSV always uses `text`. */
@@ -212,10 +186,11 @@ const COLUMN_GROUPS: ColumnGroup[] = [
     columns: [
       // Only shown for a multi-day range report — a single-day report has
       // one date for every row, so the column would be redundant there.
-      { key: "launch_date", label: "Launch Date", text: (r) => formatDate(r.launch_date) },
+      { key: "launch_date", label: "Launch Date", text: (r) => formatEasternDate(r.launch_date) },
       {
         key: "recruiter",
         label: "Recruiter",
+        hint: "The job's assigned recruiters",
         text: (r) => r.recruiter_emails.join("; ") || "—",
         render: (r) =>
           r.recruiter_emails.length ? (
@@ -229,14 +204,28 @@ const COLUMN_GROUPS: ColumnGroup[] = [
             "—"
           ),
       },
+      // Who acted in PAIR, not who is assigned. Not recorded ("—") for jobs
+      // posted or launched before 2026-09-23.
+      {
+        key: "posted_by",
+        label: "Posted By",
+        hint: "Who first saved the job in PAIR",
+        text: (r) => person(r.posted_by),
+      },
+      {
+        key: "launched_by",
+        label: "Launched By",
+        hint: "Whose Launch PAIR click first launched the job",
+        text: (r) => person(r.launched_by),
+      },
       { key: "customer", label: "Customer", text: (r) => r.customer_name || "—" },
     ],
   },
   {
     title: "Sourcing",
     columns: [
-      { key: "jd_published", label: "JobDiva Published", text: (r) => formatDate(r.jobdiva_published_date) },
-      { key: "pair_published", label: "PAIR Published", text: (r) => formatDateTime(r.pair_published_at) },
+      { key: "jd_published", label: "JobDiva Published", text: (r) => formatEasternDate(r.jobdiva_published_date) },
+      { key: "pair_published", label: withEasternLabel("PAIR Published"), text: (r) => formatEasternDateTime(r.pair_published_at) },
       { key: "tt_source", label: "Time to Source", numeric: true, text: (r) => formatDuration(r.time_to_source_minutes) },
       // Same population as the job's Rankings page ("Showing N of M candidates").
       { key: "sourced", label: "Sourced", numeric: true, text: (r) => num(r.total_candidates_sourced) },
@@ -245,7 +234,12 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Launch",
     columns: [
-      { key: "launch_at", label: "PAIR Launch", text: (r) => formatDateTime(r.pair_launch_at) },
+      {
+        key: "launch_at",
+        label: withEasternLabel("PAIR Launch"),
+        hint: "The job's first successful launch",
+        text: (r) => formatEasternDateTime(r.pair_launch_at),
+      },
       // The Rankings page's "Candidates Launched": people, not interviews. The
       // Interview Status buckets below are computed over exactly this set.
       { key: "launched", label: "Launched", numeric: true, text: (r) => num(r.total_candidates_launched) },
@@ -267,8 +261,10 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "pending", label: "Pending", numeric: true, text: (r) => num(r.pending) },
       { key: "in_progress", label: "In Progress", numeric: true, text: (r) => num(r.in_progress) },
       { key: "completed", label: "Completed", numeric: true, text: (r) => num(r.completed) },
-      { key: "passed", label: "Passed", numeric: true, text: (r) => num(r.passed_candidates) },
-      { key: "failed", label: "Failed", numeric: true, text: (r) => num(r.failed_candidates) },
+      // Pass / Fail exactly as the job's rank list labels each launched
+      // candidate; together they make up Completed.
+      { key: "passed", label: "Pass Candidates", numeric: true, text: (r) => num(r.passed_candidates) },
+      { key: "failed", label: "Fail Candidates", numeric: true, text: (r) => num(r.failed_candidates) },
       { key: "partial", label: "Partial Complete", numeric: true, text: (r) => num(r.partial_complete) },
       {
         key: "percentage",
@@ -289,8 +285,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Response",
     columns: [
-      { key: "first_attempted", label: "First Attempted", text: (r) => formatDateTime(r.first_attempted_at) },
-      { key: "first_completed", label: "First Completed", text: (r) => formatDateTime(r.first_completed_at) },
+      { key: "first_attempted", label: withEasternLabel("First Attempted"), text: (r) => formatEasternDateTime(r.first_attempted_at) },
+      { key: "first_completed", label: withEasternLabel("First Completed"), text: (r) => formatEasternDateTime(r.first_completed_at) },
       { key: "tt_first_resp", label: "To First Response", numeric: true, text: (r) => formatDuration(r.time_to_first_response_minutes) },
       { key: "launch_to_resp", label: "Launch → Response", numeric: true, text: (r) => formatDuration(r.launch_to_response_minutes) },
       { key: "overall_resp", label: "Overall Response", numeric: true, text: (r) => formatDuration(r.overall_response_time_minutes) },
@@ -298,14 +294,49 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Feedback",
+    // Recruiter decisions recorded in PAIR on LAUNCHED candidates, so none of
+    // these can exceed Launched. PAIR submittals are what recruiters recorded,
+    // not the JobDiva-confirmed count.
     columns: [
-      { key: "submitted", label: "Submitted", numeric: true, text: (r) => num(r.submitted_candidates) },
+      {
+        key: "submitted",
+        label: "Submitted",
+        numeric: true,
+        hint: "PAIR submittals, internal + external",
+        text: (r) => num(r.submitted_candidates),
+      },
+      {
+        key: "submitted_internal",
+        label: "Submitted – Internal",
+        numeric: true,
+        hint: "Sent to a hiring manager for review",
+        text: (r) => num(r.internal_submitted_candidates),
+      },
+      {
+        key: "submitted_external",
+        label: "Submitted – External",
+        numeric: true,
+        hint: "Submitted to the client",
+        text: (r) => num(r.external_submitted_candidates),
+      },
+      {
+        key: "first_external_submit_at",
+        label: withEasternLabel("First PAIR External Submittal"),
+        hint: "Earliest external submittal a recruiter recorded in PAIR",
+        text: (r) => formatEasternDateTime(r.first_external_submit_at),
+      },
       { key: "rejected", label: "Rejected", numeric: true, text: (r) => num(r.rejected_candidates) },
-      { key: "outstanding", label: "Outstanding", numeric: true, text: (r) => num(r.outstanding_feedback) },
+      {
+        key: "outstanding",
+        label: "Outstanding",
+        numeric: true,
+        hint: "Pass or Fail candidates with no recruiter decision yet",
+        text: (r) => num(r.outstanding_feedback),
+      },
       { key: "tt_feedback", label: "Time to Feedback", numeric: true, text: (r) => formatDuration(r.time_to_feedback_minutes) },
       { key: "tt_first_pass", label: "To First Pass", numeric: true, text: (r) => formatDuration(r.time_to_first_pass_minutes) },
-      { key: "first_pass_at", label: "First Pass Completed At", text: (r) => formatDateTime(r.first_pass_at) },
-      { key: "first_feedback_at", label: "First Feedback Submitted At", text: (r) => formatDateTime(r.first_feedback_at) },
+      { key: "first_pass_at", label: withEasternLabel("First Pass Completed At"), text: (r) => formatEasternDateTime(r.first_pass_at) },
+      { key: "first_feedback_at", label: withEasternLabel("First Feedback Submitted At"), text: (r) => formatEasternDateTime(r.first_feedback_at) },
     ],
   },
   {
@@ -380,29 +411,98 @@ export default function LaunchReportPage() {
   const { isAdmin, isTeamLead, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
 
-  // Computed once per mount: the report is historical, so re-deriving "today"
-  // mid-session would let the max silently drift past midnight.
-  const [maxDate] = useState<string>(yesterdayEastern);
+  // Today's Eastern date: the latest selectable date and what "Live" is
+  // measured against. Re-derived on every request and every live check, not
+  // once at mount, so a page left open past midnight moves its max forward
+  // and stops treating the old day as live.
+  const [today, setToday] = useState<string>(() => todayEastern());
+  // The default selection is the last complete day, like the backend's
+  // no-parameter default; "Today" is one click away.
+  const defaultDate = addIsoDays(today, -1);
   const [isRange, setIsRange] = useState(false);
-  const [selectedDate, setSelectedDate] = useState<string>(maxDate);
-  const [selectedEndDate, setSelectedEndDate] = useState<string>(maxDate);
-  const [requestedRange, setRequestedRange] = useState<{ start: string; end: string } | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>(() => addIsoDays(todayEastern(), -1));
+  const [selectedEndDate, setSelectedEndDate] = useState<string>(() => addIsoDays(todayEastern(), -1));
+  const [requestedRange, setRequestedRange] = useState<DateRange | null>(null);
   const [data, setData] = useState<LaunchReportData | null>(null);
+  // A full load: the table body shows "Loading…".
   const [isLoading, setIsLoading] = useState(false);
+  // A background load (live timer or the Refresh button): rows stay on screen.
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A failed background load. Non-blocking — the last good report stays up.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const maxRangeEndDate = useMemo(
-    () => earliestIsoDate(addIsoDays(selectedDate, MAX_LAUNCH_REPORT_RANGE_DAYS - 1), maxDate),
-    [selectedDate, maxDate],
+    () => earliestIsoDate(addIsoDays(selectedDate, MAX_LAUNCH_REPORT_RANGE_DAYS - 1), today),
+    [selectedDate, today],
   );
 
+  // Request bookkeeping lives in refs so the live timer reads current values
+  // without re-subscribing. requestSeq: the newest request wins — a slower,
+  // older response (an earlier range, or a background refresh overtaken by
+  // Generate) is dropped instead of overwriting newer data.
+  const inFlightRef = useRef(false);
+  const requestSeqRef = useRef(0);
+  const lastSettledAtRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      // Unmounting: whatever is still in flight must not land.
+      requestSeqRef.current += 1;
+    },
+    [],
+  );
+
+  const fetchReport = useCallback(async (range: DateRange, { background }: { background: boolean }) => {
+    const seq = ++requestSeqRef.current;
+    inFlightRef.current = true;
+    setToday(todayEastern());
+    if (background) {
+      setIsRefreshing(true);
+    } else {
+      setIsLoading(true);
+      setError(null);
+      setRefreshError(null);
+    }
+    try {
+      const res = await api.launchReport.get({ startDate: range.start, endDate: range.end });
+      if (seq !== requestSeqRef.current) return;
+      setData(res?.data ?? null);
+      setError(null);
+      setRefreshError(null);
+    } catch (err) {
+      if (seq !== requestSeqRef.current) return;
+      console.error("Error loading launch report:", err);
+      const message = err instanceof Error ? err.message : "Failed to load the launch report.";
+      if (background) {
+        setRefreshError(message);
+      } else {
+        setError(message);
+        setData(null);
+      }
+    } finally {
+      // Only the newest request settles the flags and starts the live
+      // countdown; a superseded one leaves both to the request that replaced
+      // it. A failed request counts too, so a failing report retries every
+      // LIVE_REFRESH_MS rather than every check.
+      if (seq === requestSeqRef.current) {
+        inFlightRef.current = false;
+        lastSettledAtRef.current = Date.now();
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    }
+  }, []);
+
   const generateReport = useCallback(() => {
+    const now = todayEastern();
+    setToday(now);
     if (!selectedDate || (isRange && !selectedEndDate)) {
       setError(isRange ? "Please select both a start and end date." : "Please select a date first.");
       return;
     }
     const end = isRange ? selectedEndDate : selectedDate;
-    if (selectedDate > maxDate || end > maxDate) {
-      setError("Today's report is not available yet. Please select a previous date.");
+    if (selectedDate > now || end > now) {
+      setError("That date is in the future. Please select today or an earlier date.");
       return;
     }
     if (isRange && selectedDate > end) {
@@ -413,10 +513,33 @@ export default function LaunchReportPage() {
       setError(`Date range cannot exceed ${MAX_LAUNCH_REPORT_RANGE_DAYS} days.`);
       return;
     }
+    // Set here as well as in fetchReport so the first render after the click
+    // already shows "Loading…" rather than a flash of "No jobs were launched".
     setIsLoading(true);
     setError(null);
     setRequestedRange({ start: selectedDate, end });
-  }, [selectedDate, selectedEndDate, isRange, maxDate]);
+  }, [selectedDate, selectedEndDate, isRange]);
+
+  const showToday = useCallback(() => {
+    const now = todayEastern();
+    setToday(now);
+    setIsRange(false);
+    setSelectedDate(now);
+    setSelectedEndDate(now);
+    setIsLoading(true);
+    setError(null);
+    setRequestedRange({ start: now, end: now });
+  }, []);
+
+  // Re-runs the report currently on screen. Keeps the rows up while it loads;
+  // with nothing on screen yet (e.g. the last load failed) it is a full load.
+  const refreshNow = useCallback(() => {
+    if (!requestedRange || inFlightRef.current) return;
+    void fetchReport(requestedRange, { background: !!data });
+  }, [requestedRange, data, fetchReport]);
+
+  // Live = the requested range includes today, so its rows can still change.
+  const isLive = canView && rangeIncludes(requestedRange, today);
 
   // Shows the Launch Date column and the range label only once the loaded
   // report actually spans more than one day, not just because range mode is on.
@@ -436,30 +559,38 @@ export default function LaunchReportPage() {
     URL.revokeObjectURL(url);
   }, [data, flatColumns, isMultiDay]);
 
+  // A new requested range (Generate / Today) is a full load.
   useEffect(() => {
     if (isRoleLoading || !canView || !requestedRange) return;
-    // Guards against a slow response for an earlier request landing after a
-    // newer one and overwriting it.
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await api.launchReport.get({ startDate: requestedRange.start, endDate: requestedRange.end });
-        if (cancelled) return;
-        setData(res?.data ?? null);
-        setError(null);
-      } catch (err) {
-        if (cancelled) return;
-        console.error("Error loading launch report:", err);
-        setError(err instanceof Error ? err.message : "Failed to load the launch report.");
-        setData(null);
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
+    void fetchReport(requestedRange, { background: false });
+  }, [isRoleLoading, canView, requestedRange, fetchReport]);
+
+  // Live refresh. Every LIVE_CHECK_MS, and whenever the tab becomes visible,
+  // refresh in the background if LIVE_REFRESH_MS has passed since the last
+  // request settled — never while the tab is hidden and never while a request
+  // is in flight. Torn down when the range changes, when it stops including
+  // today (midnight Eastern), and on unmount.
+  useEffect(() => {
+    if (!isLive || !requestedRange) return;
+    const range = requestedRange;
+    const refreshIfDue = () => {
+      const now = todayEastern();
+      setToday(now);
+      if (!rangeIncludes(range, now)) return;
+      if (document.visibilityState !== "visible") return;
+      if (inFlightRef.current) return;
+      if (Date.now() - lastSettledAtRef.current < LIVE_REFRESH_MS) return;
+      void fetchReport(range, { background: true });
     };
-  }, [isRoleLoading, canView, requestedRange]);
+    const interval = setInterval(refreshIfDue, LIVE_CHECK_MS);
+    document.addEventListener("visibilitychange", refreshIfDue);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshIfDue);
+    };
+  }, [isLive, requestedRange, fetchReport]);
+
+  const lastUpdated = data?.generated_at ? formatEasternTime(data.generated_at) : null;
 
 
   const rows = useMemo(() => data?.jobs ?? [], [data]);
@@ -486,7 +617,7 @@ export default function LaunchReportPage() {
     updateHeight();
     window.addEventListener("resize", updateHeight);
     return () => window.removeEventListener("resize", updateHeight);
-  }, [data, error, partialRows, isRange, rows.length]);
+  }, [data, error, refreshError, partialRows, isRange, rows.length]);
 
   if (isRoleLoading) {
     return (
@@ -534,8 +665,17 @@ export default function LaunchReportPage() {
           <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
             {rows.length} {rows.length === 1 ? "Job" : "Jobs"}
           </span>
+          {isLive && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[12px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200"
+              title="This report includes today. It refreshes itself every 2 minutes while this tab is open."
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden />
+              Live
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 h-10 px-2 text-[12px] font-semibold text-slate-500 select-none">
             <input
               type="checkbox"
@@ -560,14 +700,14 @@ export default function LaunchReportPage() {
               // Note: Safari ignores this and falls back to OS locale (accepted limitation for Admin tools).
               lang="en-US"
               value={selectedDate}
-              max={maxDate}
+              max={today}
               required
               // Clearing the field yields "" — fall back to the default date
               // rather than ignoring the event, so the input and state never
               // disagree about what is displayed.
               onChange={(e) => {
                 setError(null);
-                setSelectedDate(e.target.value || maxDate);
+                setSelectedDate(e.target.value || defaultDate);
               }}
               className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
             />
@@ -588,7 +728,7 @@ export default function LaunchReportPage() {
                 required
                 onChange={(e) => {
                   setError(null);
-                  setSelectedEndDate(e.target.value || maxDate);
+                  setSelectedEndDate(e.target.value || defaultDate);
                 }}
                 className="text-[13px] font-semibold text-slate-700 outline-none bg-transparent"
               />
@@ -596,11 +736,30 @@ export default function LaunchReportPage() {
           )}
           <Button
             variant="outline"
+            onClick={showToday}
+            disabled={isLoading}
+            title="Show jobs first launched today, refreshing live"
+            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
+          >
+            Today
+          </Button>
+          <Button
+            variant="outline"
             onClick={generateReport}
             disabled={isLoading}
             className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
           >
             Generate Report
+          </Button>
+          <Button
+            variant="outline"
+            onClick={refreshNow}
+            disabled={!requestedRange || isLoading || isRefreshing}
+            title={requestedRange ? "Re-run this report now" : "Generate a report first"}
+            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
+          >
+            <RefreshCw className={`h-4 w-4 text-slate-500 ${isRefreshing ? "animate-spin" : ""}`} />
+            Refresh
           </Button>
           <Button
             variant="outline"
@@ -616,20 +775,49 @@ export default function LaunchReportPage() {
       </div>
 
       <p className="text-[13px] text-slate-500 leading-relaxed max-w-[880px]">
-        Jobs whose first PAIR launch happened{" "}
+        Jobs whose first successful PAIR launch happened{" "}
         <span className="font-semibold text-slate-700">
           {isMultiDay ? "between " : "on "}
           {formatDateRange(
             data?.start_date ?? requestedRange?.start ?? selectedDate,
             data?.end_date ?? requestedRange?.end ?? (isRange ? selectedEndDate : selectedDate),
           )}
-        </span>. Dates and times
-        are Eastern (EDT/EST), so a job launched late in the evening belongs to that day rather than the next. Each row
-        shows the job&apos;s current rank-list numbers — one per launched candidate, over the whole life of the job — so
-        Sourced, Launched and the interview status columns match the job&apos;s Rankings page. Interview status, channel,
-        phase and response columns are read live from PAIR Bot. Date ranges are limited to{" "}
-        {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
+        </span>. All dates and times are Eastern Time (ET), so a job launched late in the evening belongs to that day
+        rather than the next. Each row shows the job&apos;s current rank-list numbers — one per launched candidate, over
+        the whole life of the job — so Sourced, Launched and the interview status columns match the job&apos;s Rankings
+        page, and the interview status and feedback columns count launched candidates only. Interview status, channel,
+        phase and response columns are read live from PAIR Bot. A report that includes today refreshes itself every 2
+        minutes while this tab is open. Date ranges are limited to {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
+
+      {/* Freshness: when these numbers were computed, and whether they are
+          still moving. A failed background refresh only warns here when a
+          report is on screen; with none, the error card above already says
+          the load failed. */}
+      {(lastUpdated || isRefreshing) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 -mt-3 text-[12px] text-slate-500">
+          {lastUpdated && (
+            <span className="tabular-nums">
+              Last updated <span className="font-semibold text-slate-700">{lastUpdated}</span> (ET)
+              {isLive && " · refreshes every 2 minutes"}
+            </span>
+          )}
+          {isRefreshing && (
+            <span className="inline-flex items-center gap-1 text-slate-400">
+              <RefreshCw className="h-3 w-3 animate-spin" aria-hidden />
+              Refreshing…
+            </span>
+          )}
+          {refreshError && data && !isRefreshing && (
+            <span className="inline-flex items-center gap-1 text-amber-700" role="status">
+              <TriangleAlert className="h-3.5 w-3.5" aria-hidden />
+              Couldn&apos;t refresh ({refreshError}). Showing the last report
+              {lastUpdated ? ` from ${lastUpdated} (ET)` : ""}
+              {isLive ? " — will retry automatically." : "."}
+            </span>
+          )}
+        </div>
+      )}
 
       {error && (
         <Card className="p-4 border-red-200 bg-red-50 text-[13px] text-red-700 rounded-xl">{error}</Card>
@@ -642,7 +830,7 @@ export default function LaunchReportPage() {
             PAIR Bot answered for {data?.totals.outreach_detail_resolved ?? 0} of{" "}
             {data?.totals.outreach_detail_expected ?? 0} launched candidates. {partialRows}{" "}
             {partialRows === 1 ? "row has" : "rows have"} incomplete outreach columns — status, channel, phase and
-            response figures on those rows undercount. Generate report again to retry.
+            response figures on those rows undercount. Refresh to retry.
           </p>
         </Card>
       )}
@@ -652,16 +840,20 @@ export default function LaunchReportPage() {
         <StatTile label="Jobs Launched" value={num(data?.totals.jobs ?? 0)} />
         <StatTile label="Candidates Sourced" value={num(data?.totals.candidates_sourced ?? 0)} />
         <StatTile label="Candidates Launched" value={num(data?.totals.candidates_launched ?? 0)} />
+        {/* Time as the value, date as the hint. (This used to split the
+            formatted string on ", " — which it never contains — so the tile
+            showed the whole date-time and repeated the date underneath.) */}
         <StatTile
-          label="Generated"
-          value={data?.generated_at ? formatDateTime(data.generated_at).split(", ").slice(-1)[0] : "—"}
-          hint={data?.generated_at ? formatDate(data.generated_at) : undefined}
+          label={withEasternLabel("Generated")}
+          value={data?.generated_at ? formatEasternTime(data.generated_at) : "—"}
+          hint={data?.generated_at ? formatEasternDate(data.generated_at) : undefined}
         />
       </div>
 
-      {/* The table is wide by design (29 columns) — it scrolls inside its own
-          container so the page body never scrolls horizontally, and the job
-          column is pinned so a row stays identifiable while scrolling. */}
+      {/* The table is wide by design (45+ columns; COLUMN_GROUPS is the
+          count) — it scrolls inside its own container so the page body never
+          scrolls horizontally, and the job column is pinned so a row stays
+          identifiable while scrolling. */}
       <Card className="border-slate-200 bg-white shadow-sm rounded-xl overflow-hidden">
         <div
           ref={tableWrapperRef}
@@ -695,6 +887,7 @@ export default function LaunchReportPage() {
                   group.columns.map((col, idx) => (
                     <th
                       key={col.key}
+                      title={col.hint}
                       className={`px-3 py-2 font-semibold text-[11px] text-slate-500 whitespace-nowrap ${
                         col.numeric ? "text-right" : "text-left"
                       } ${idx === 0 ? "border-l border-slate-200" : ""}`}
