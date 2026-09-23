@@ -365,7 +365,7 @@ def test_report_asks_pair_bot_once_per_launched_person_over_the_whole_lifetime(m
     sourced_by_job = {"55": [{"candidate_id": cid, "created_at": datetime.datetime(2026, 8, 26, 12, 0)} for cid in ("c1", "c2", "c3", "never-launched")]}
 
     def _load_inputs(_start, _end, _scope):
-        return [job], launched_by_job, sourced_by_job
+        return [job], launched_by_job, sourced_by_job, {}
 
     async def _fake_outreach(interview_ids):
         captured["ids"] = list(interview_ids)
@@ -1209,7 +1209,7 @@ def test_launch_report_accepts_range_at_the_server_cap(monkeypatch):
     def _load_inputs(start_date, end_date, scope_team_id):
         captured["dates"] = (start_date, end_date)
         captured["scope_team_id"] = scope_team_id
-        return [], {}, {}
+        return [], {}, {}, {}
 
     async def _no_outreach(_interview_ids):
         return {}
@@ -1239,7 +1239,7 @@ def _capture_dates(monkeypatch):
 
     def _load_inputs(start_date, end_date, scope_team_id):
         captured["dates"] = (start_date, end_date)
-        return [], {}, {}
+        return [], {}, {}, {}
 
     async def _no_outreach(_interview_ids):
         return {}
@@ -1404,6 +1404,13 @@ INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, stat
   ('r1','26-07100',   '971','Initiated','2026-08-30 01:40:00');   -- Aug 29 21:40 EDT
 """
 
+# The shipped Step 5 time DDL, as an empty temp table. The report reads it on
+# the same connection as everything else; without it every end-to-end run
+# here would quietly take the "Step 5 time unavailable" path instead.
+from services import job_step_time as _jst
+
+_STEP_TIME_SQL = _jst.SCHEMA_STATEMENTS[0].replace("CREATE TABLE", "CREATE TEMP TABLE") + " ON COMMIT DROP"
+
 
 @pytest.fixture()
 def pg_conn():
@@ -1417,6 +1424,7 @@ def pg_conn():
             # change how the naive TIMESTAMP columns read back.
             cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(_FIXTURE_SQL)
+            cur.execute(_STEP_TIME_SQL)
         yield conn
     finally:
         conn.rollback()  # ON COMMIT DROP never fires; rollback discards everything

@@ -8,6 +8,11 @@
 // backend's own rollup over the DISTINCT job set — never add recruiter rows
 // up on this page (routers/recruiter_analytics.py).
 //
+// Step 5 Active Time is the one column credited differently: it is the time
+// each recruiter spent on Step 5 (Source) themselves, on any job in view,
+// because PAIR records who had the step open. Step 5 → Launch is a job
+// property and follows assignment like the rest.
+//
 // The date range picks jobs by their first successful PAIR launch (the Launch
 // Report's PAIR Launch), as Eastern calendar dates; "All time" is every job in
 // scope, launched or not. Every timestamp is
@@ -73,6 +78,16 @@ interface MetricsBlock {
   avg_time_to_first_pass_minutes: number | null;
   /** passed / (passed + failed), 0..1; null when nothing is decided yet. */
   pass_rate: number | null;
+  /** Step 5 active time, in minutes. A recruiter row: the time THAT person
+   *  spent themselves, on any job in view. Totals: everyone's time on the
+   *  distinct jobs. null = nothing tracked (jobs worked before it existed). */
+  step5_active_minutes_total: number | null;
+  /** The total ÷ the jobs with time (step5_jobs_timed); null when none. */
+  step5_active_minutes_avg: number | null;
+  step5_jobs_timed: number;
+  /** Mean of first Step 5 entry → first successful launch over these jobs
+   *  (by assignment); jobs without both ends are left out. */
+  step5_to_launch_minutes_avg: number | null;
 }
 
 interface RecruiterRow extends MetricsBlock {
@@ -114,6 +129,14 @@ interface JobRow {
   jobdiva_confirmed_subs: number;
   jobdiva_total_subs: number;
   time_to_first_pass_minutes: number | null;
+  /** Everyone's Step 5 active time on this job; null = not tracked. */
+  step5_active_minutes: number | null;
+  /** Each assigned recruiter's own share (only those with time). */
+  step5_active_minutes_by_recruiter: Record<string, number>;
+  step5_first_entered_at: string | null;
+  /** The launch end of Step 5 → Launch (same rule as launched_at). */
+  step5_first_launch_at: string | null;
+  step5_to_launch_minutes: number | null;
 }
 
 interface RecruiterAnalyticsData {
@@ -132,6 +155,8 @@ interface RecruiterAnalyticsData {
   recruiters: RecruiterRow[];
   jobs: JobRow[];
   metrics_available: boolean;
+  /** false = the Step 5 time read failed on its own this load. */
+  step_time_available?: boolean;
   warnings: string[];
   cached: boolean;
 }
@@ -221,6 +246,9 @@ interface MetricColumn {
   /** Comes from the candidate-metrics read, which can fail on its own
    *  (metrics_available=false); the backend then sends zeros, shown as "—". */
   candidateDerived?: true;
+  /** Comes from the Step 5 time read, which can fail on its own too
+   *  (step_time_available=false). */
+  stepTimeDerived?: true;
 }
 
 const FIRST_EXTERNAL_LABEL = withEasternLabel("First PAIR External Submittal");
@@ -399,6 +427,47 @@ const METRIC_COLUMNS: MetricColumn[] = [
     cell: (b) => formatDuration(b.avg_time_to_first_pass_minutes),
     csv: (b) => [["Avg Time to First Pass", formatDuration(b.avg_time_to_first_pass_minutes)]],
   },
+  {
+    key: "step5_active",
+    stepTimeDerived: true,
+    label: "Step 5 Active Time",
+    sub: "Avg per job",
+    hint:
+      "Time this recruiter spent on Step 5 (Source) themselves: the step open and in use, paused when the tab is " +
+      "hidden or after 5 minutes idle. Unlike the other columns it is not credited by assignment, so it includes " +
+      "their time on colleagues' jobs in this view. Shows the average per job they timed, with their total and the " +
+      "job count below. Totals: everyone's time on the distinct jobs. — = not tracked (jobs worked before this existed).",
+    sortValue: (b) => b.step5_active_minutes_avg,
+    cell: (b) => (
+      <div className="flex flex-col items-end">
+        <span className="font-semibold text-slate-800 tabular-nums">{formatDuration(b.step5_active_minutes_avg)}</span>
+        {b.step5_jobs_timed > 0 && (
+          <span className="text-[11px] text-slate-400 tabular-nums whitespace-nowrap">
+            {formatDuration(b.step5_active_minutes_total)} total · {num(b.step5_jobs_timed)}{" "}
+            {b.step5_jobs_timed === 1 ? "job" : "jobs"}
+          </span>
+        )}
+      </div>
+    ),
+    csv: (b) => [
+      ["Step 5 Active Time (Avg per Job)", formatDuration(b.step5_active_minutes_avg)],
+      ["Step 5 Active Time (Total)", formatDuration(b.step5_active_minutes_total)],
+      ["Step 5 Jobs Timed", String(b.step5_jobs_timed ?? 0)],
+    ],
+  },
+  {
+    key: "step5_to_launch",
+    stepTimeDerived: true,
+    label: "Step 5 → Launch",
+    sub: "Avg per job",
+    hint:
+      "Wall-clock time from a job's first Step 5 visit (by anyone) to its first successful PAIR launch, averaged " +
+      "over the recruiter's assigned jobs that have both — a job number, credited by assignment like the other " +
+      "columns. — = not tracked, not launched, or launched before Step 5 was first timed.",
+    sortValue: (b) => b.step5_to_launch_minutes_avg,
+    cell: (b) => formatDuration(b.step5_to_launch_minutes_avg),
+    csv: (b) => [["Step 5 → Launch (Avg per Job)", formatDuration(b.step5_to_launch_minutes_avg)]],
+  },
 ];
 
 function sortRecruiters(rows: RecruiterRow[], sort: SortState): RecruiterRow[] {
@@ -423,20 +492,31 @@ function ariaSort(sort: SortState, key: string): "ascending" | "descending" | un
   return sort.dir === "asc" ? "ascending" : "descending";
 }
 
-/** A metrics-unavailable zero is not a real value: "—" on screen and in the file. */
-function metricCell(col: MetricColumn, b: MetricsBlock, metricsUnavailable: boolean): React.ReactNode {
-  return metricsUnavailable && col.candidateDerived ? <span className="text-slate-400">{EMPTY_DATE}</span> : col.cell(b);
+/** Which of the backend's independently-failing reads failed on this load. */
+interface Unavailable {
+  metrics: boolean;
+  stepTime: boolean;
+}
+
+function isUnavailable(col: MetricColumn, unavailable: Unavailable): boolean {
+  return (!!col.candidateDerived && unavailable.metrics) || (!!col.stepTimeDerived && unavailable.stepTime);
+}
+
+/** A fallback value from a failed read is not a real value: "—" on screen and in the file. */
+function metricCell(col: MetricColumn, b: MetricsBlock, unavailable: Unavailable): React.ReactNode {
+  return isUnavailable(col, unavailable) ? <span className="text-slate-400">{EMPTY_DATE}</span> : col.cell(b);
 }
 
 const METRICS_UNAVAILABLE_CSV_NOTE =
   "Note: candidate outcome columns (pass / fail / in progress / feedback / PAIR submittals / awaiting feedback / first PAIR external submittal) were unavailable for this export and show —";
+// Without it a "—" in these columns would read as "never tracked".
+const STEP_TIME_UNAVAILABLE_CSV_NOTE =
+  "Note: Step 5 time columns (Step 5 Active Time / Step 5 → Launch) were unavailable for this export and show —";
 
-function buildCsv(rows: RecruiterRow[], totals: RecruiterAnalyticsData["totals"], metricsUnavailable: boolean): string {
+function buildCsv(rows: RecruiterRow[], totals: RecruiterAnalyticsData["totals"], unavailable: Unavailable): string {
   const headerPairs = METRIC_COLUMNS.flatMap((c) => c.csv(totals));
   const metricCells = (b: MetricsBlock) =>
-    METRIC_COLUMNS.flatMap((c) =>
-      c.csv(b).map(([, value]) => (metricsUnavailable && c.candidateDerived ? EMPTY_DATE : value)),
-    );
+    METRIC_COLUMNS.flatMap((c) => c.csv(b).map(([, value]) => (isUnavailable(c, unavailable) ? EMPTY_DATE : value)));
   const csv = toCsv(
     ["Recruiter", "Team", "PAIR Login", ...headerPairs.map(([label]) => label)],
     [
@@ -451,7 +531,11 @@ function buildCsv(rows: RecruiterRow[], totals: RecruiterAnalyticsData["totals"]
     ],
   );
   // The file travels without the page's warning banner, so it says so itself.
-  return metricsUnavailable ? `${csv}\n\n${escapeCSV(METRICS_UNAVAILABLE_CSV_NOTE)}` : csv;
+  const notes = [
+    ...(unavailable.metrics ? [METRICS_UNAVAILABLE_CSV_NOTE] : []),
+    ...(unavailable.stepTime ? [STEP_TIME_UNAVAILABLE_CSV_NOTE] : []),
+  ];
+  return notes.length ? `${csv}\n\n${notes.map(escapeCSV).join("\n")}` : csv;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +586,38 @@ function KpiTile({
   );
 }
 
-function RecruiterJobs({ jobs, metricsUnavailable }: { jobs: JobRow[]; metricsUnavailable: boolean }) {
+function Step5ActiveCell({ job, recruiterEmail }: { job: JobRow; recruiterEmail: string }) {
+  // The job's own number is everyone's time; the row above it is this
+  // recruiter's own time, so their share is shown when others worked it too.
+  const mine = job.step5_active_minutes_by_recruiter?.[recruiterEmail];
+  const total = job.step5_active_minutes;
+  const showMine = mine !== undefined && total !== null && mine < total;
+  return (
+    <div
+      className="flex flex-col items-end"
+      title={
+        total === null
+          ? "Not tracked"
+          : `Everyone's Step 5 active time on this job${mine !== undefined ? `; ${recruiterEmail}: ${formatDuration(mine)}` : ""}`
+      }
+    >
+      <span>{formatDuration(total)}</span>
+      {showMine && <span className="text-[11px] text-slate-400">theirs {formatDuration(mine)}</span>}
+    </div>
+  );
+}
+
+function RecruiterJobs({
+  jobs,
+  recruiterEmail,
+  unavailable,
+}: {
+  jobs: JobRow[];
+  recruiterEmail: string;
+  unavailable: Unavailable;
+}) {
+  const metricsUnavailable = unavailable.metrics;
+  const dash = <span className="text-slate-400">{EMPTY_DATE}</span>;
   if (!jobs.length) {
     return <p className="px-6 py-4 text-[13px] text-slate-400">No jobs in this view.</p>;
   }
@@ -520,6 +635,18 @@ function RecruiterJobs({ jobs, metricsUnavailable }: { jobs: JobRow[]; metricsUn
             <th className="py-2 px-4 text-right">Pass</th>
             <th className="py-2 px-4 text-right whitespace-nowrap" title="PAIR Internal · PAIR External · JobDiva-Confirmed">
               Submittals <span className="font-medium text-slate-300">Int · Ext · JobDiva</span>
+            </th>
+            <th
+              className="py-2 px-4 text-right whitespace-nowrap"
+              title="Everyone's Step 5 (Source) active time on the job; this recruiter's share below when others worked it too."
+            >
+              Step 5 Active Time
+            </th>
+            <th
+              className="py-2 px-4 text-right whitespace-nowrap"
+              title="From the job's first Step 5 visit (by anyone) to its first successful PAIR launch."
+            >
+              Step 5 → Launch
             </th>
           </tr>
         </thead>
@@ -548,7 +675,7 @@ function RecruiterJobs({ jobs, metricsUnavailable }: { jobs: JobRow[]; metricsUn
               <td className="py-2 px-4">{job.launched_by || EMPTY_DATE}</td>
               <td className="py-2 px-4 text-right tabular-nums whitespace-nowrap">
                 {metricsUnavailable ? (
-                  <span className="text-slate-400">{EMPTY_DATE}</span>
+                  dash
                 ) : (
                   <>
                     <span className="font-semibold text-emerald-700">{num(job.passed)}</span>
@@ -559,6 +686,19 @@ function RecruiterJobs({ jobs, metricsUnavailable }: { jobs: JobRow[]; metricsUn
               <td className="py-2 px-4 text-right tabular-nums whitespace-nowrap">
                 {metricsUnavailable ? EMPTY_DATE : num(job.pair_internal_submits)} ·{" "}
                 {metricsUnavailable ? EMPTY_DATE : num(job.pair_external_submits)} · {num(job.jobdiva_confirmed_subs)}
+              </td>
+              <td className="py-2 px-4 text-right tabular-nums whitespace-nowrap">
+                {unavailable.stepTime ? dash : <Step5ActiveCell job={job} recruiterEmail={recruiterEmail} />}
+              </td>
+              <td
+                className="py-2 px-4 text-right tabular-nums whitespace-nowrap"
+                title={
+                  !unavailable.stepTime && job.step5_first_entered_at
+                    ? `First Step 5 visit ${formatEasternDateTime(job.step5_first_entered_at)} → first launch ${formatEasternDateTime(job.step5_first_launch_at)} (ET)`
+                    : undefined
+                }
+              >
+                {unavailable.stepTime ? dash : formatDuration(job.step5_to_launch_minutes)}
               </td>
             </tr>
           ))}
@@ -723,7 +863,11 @@ export default function RecruiterAnalyticsPage() {
 
   const downloadCsv = () => {
     if (!data) return;
-    const blob = new Blob([UTF8_BOM, buildCsv(visibleRecruiters, data.totals, data.metrics_available === false)], {
+    const unavailableNow: Unavailable = {
+      metrics: data.metrics_available === false,
+      stepTime: data.step_time_available === false,
+    };
+    const blob = new Blob([UTF8_BOM, buildCsv(visibleRecruiters, data.totals, unavailableNow)], {
       type: "text/csv;charset=utf-8;",
     });
     const url = URL.createObjectURL(blob);
@@ -779,6 +923,7 @@ export default function RecruiterAnalyticsPage() {
   // unknown, so the page must not read as "0 jobs, no recruiters".
   const loadFailed = !data && !isLoading;
   const metricsUnavailable = data?.metrics_available === false;
+  const unavailable: Unavailable = { metrics: metricsUnavailable, stepTime: data?.step_time_available === false };
   const tile = (candidateDerived: boolean, value: string, hint: string) =>
     loadFailed
       ? { value: EMPTY_DATE, hint: "" }
@@ -817,7 +962,7 @@ export default function RecruiterAnalyticsPage() {
           </div>
           <p className="mt-1.5 text-[13px] text-slate-500">
             Credited by job assignment — a job shared by several recruiters counts for each of them; totals count it
-            once.
+            once. Step 5 Active Time is the exception: it is the time each recruiter spent themselves.
           </p>
         </div>
 
@@ -1173,7 +1318,7 @@ export default function RecruiterAnalyticsPage() {
                         </td>
                         {METRIC_COLUMNS.map((col) => (
                           <td key={col.key} className="py-3 px-3 text-right tabular-nums">
-                            {metricCell(col, rec, metricsUnavailable)}
+                            {metricCell(col, rec, unavailable)}
                           </td>
                         ))}
                       </tr>
@@ -1182,7 +1327,8 @@ export default function RecruiterAnalyticsPage() {
                           <td colSpan={columnCount} className="p-0 border-l-2 border-primary/40">
                             <RecruiterJobs
                               jobs={rec.job_ids.map((id) => jobsById.get(id)).filter((j): j is JobRow => !!j)}
-                              metricsUnavailable={metricsUnavailable}
+                              recruiterEmail={rec.email}
+                              unavailable={unavailable}
                             />
                           </td>
                         </tr>
@@ -1203,7 +1349,7 @@ export default function RecruiterAnalyticsPage() {
                   </td>
                   {METRIC_COLUMNS.map((col) => (
                     <td key={col.key} className="py-3 px-3 text-right tabular-nums">
-                      {metricCell(col, totals, metricsUnavailable)}
+                      {metricCell(col, totals, unavailable)}
                     </td>
                   ))}
                 </tr>
@@ -1241,6 +1387,22 @@ export default function RecruiterAnalyticsPage() {
         <div>
           <dt className="inline font-semibold text-slate-700">Awaiting Feedback: </dt>
           <dd className="inline">the interview is decided but no recruiter decision is recorded yet.</dd>
+        </div>
+        <div>
+          <dt className="inline font-semibold text-slate-700">Step 5 Active Time: </dt>
+          <dd className="inline">
+            time the recruiter personally had Step 5 (Source) open and in use, on any job in view — paused when the
+            tab is hidden or after 5 minutes idle. Shown as the average per job they timed. Totals and each job&apos;s
+            own number include everyone who worked it, admins too.
+          </dd>
+        </div>
+        <div>
+          <dt className="inline font-semibold text-slate-700">Step 5 → Launch: </dt>
+          <dd className="inline">
+            from a job&apos;s first Step 5 visit (by anyone) to its first successful PAIR launch, averaged over the
+            recruiter&apos;s assigned jobs. A dash means there is no value: not tracked (jobs worked before this was
+            measured have no data), not launched yet, or launched before Step 5 was first timed.
+          </dd>
         </div>
       </dl>
     </div>

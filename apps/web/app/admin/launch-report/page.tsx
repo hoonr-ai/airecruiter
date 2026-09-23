@@ -66,6 +66,12 @@ interface LaunchReportRow {
   total_candidates_launched: number;
   time_to_launch_minutes: number | null;
   turn_around_time_minutes: number | null;
+  /**
+   * Step 5 ("Source") time. null = not tracked (a job worked before the
+   * tracking existed, or the read failed) — shown as "—", never as 0.
+   */
+  step5_active_minutes: number | null;
+  step5_to_launch_minutes: number | null;
   pending: number;
   in_progress: number;
   completed: number;
@@ -252,6 +258,24 @@ const COLUMN_GROUPS: ColumnGroup[] = [
         render: (r) => (
           <span title="PAIR Launch − PAIR Published">{formatDuration(r.turn_around_time_minutes)}</span>
         ),
+      },
+      // Measured by the job wizard itself (services/job_step_time.py), so a
+      // job worked before that existed has no data and shows "—", not 0m.
+      {
+        key: "step5_active",
+        label: "Step 5 Active Time",
+        numeric: true,
+        hint: "Time recruiters spent working on Step 5 (Source) — tab open and in use, all visits and recruiters",
+        text: (r) => formatDuration(r.step5_active_minutes),
+      },
+      // Ends at the PAIR Launch column's instant: both use the first
+      // SUCCESSFUL launch.
+      {
+        key: "step5_to_launch",
+        label: "Step 5 → Launch",
+        numeric: true,
+        hint: "From first opening Step 5 to the first successful PAIR launch",
+        text: (r) => formatDuration(r.step5_to_launch_minutes),
       },
     ],
   },
@@ -786,7 +810,8 @@ export default function LaunchReportPage() {
         rather than the next. Each row shows the job&apos;s current rank-list numbers — one per launched candidate, over
         the whole life of the job — so Sourced, Launched and the interview status columns match the job&apos;s Rankings
         page, and the interview status and feedback columns count launched candidates only. Interview status, channel,
-        phase and response columns are read live from PAIR Bot. A report that includes today refreshes itself every 2
+        phase and response columns are read live from PAIR Bot. The Step 5 time columns only cover jobs worked since
+        that tracking began; older jobs show a dash. A report that includes today refreshes itself every 2
         minutes while this tab is open. Date ranges are limited to {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
 

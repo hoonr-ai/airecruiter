@@ -284,6 +284,20 @@ export const api = {
         `/jobs/${jobId}/cross-submissions/${csId}/add`,
         { method: "POST" },
       ),
+    // Wizard step active time, sent by hooks/use-step-active-time.ts
+    // (routers/job_step_time.py). It sits under /api/ so nginx passes it
+    // through without a /jobs/{id}/<subpath> allowlist entry. keepalive lets
+    // the last flush outlive the page when the tab closes.
+    stepTime: (
+      jobRef: string,
+      body: { step: number; active_ms: number },
+      opts: { keepalive?: boolean } = {},
+    ) =>
+      req<{ status?: string }>(`/api/v1/jobs/${encodeURIComponent(jobRef)}/step-time`, {
+        method: "POST",
+        body,
+        keepalive: opts.keepalive,
+      }),
   },
   candidates: {
     save: (body: unknown) =>

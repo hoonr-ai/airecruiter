@@ -30,8 +30,8 @@ source of truth for a job's candidates, and this report must agree with it:
 Data comes from two places:
 
   * pair's own Postgres (`monitored_jobs`, `sourced_candidates`,
-    `engage_interview_audit`) for sourcing/launch/feedback columns and the
-    stored status fallbacks;
+    `engage_interview_audit`, `job_step_time`) for sourcing/launch/feedback
+    columns, the Step 5 time columns and the stored status fallbacks;
   * pair-bot, live, via `GET /api/interviews/{id}/outreach-status` for the
     outreach columns pair never stores — per-candidate status, channel counts
     (call/sms/web), phase distribution, and response times.
@@ -82,6 +82,7 @@ from services.feedback_metrics import (
     submission_kind,
 )
 from services.job_attribution import attribution_fields
+from services.job_step_time import STEP_SOURCE, fetch_step_metrics
 from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
     normalize_channel,
@@ -1121,6 +1122,8 @@ def _build_row(
     launched_rows: List[Dict[str, Any]],
     sourced_rows: List[Dict[str, Any]],
     live_by_interview: Dict[str, Dict[str, Any]],
+    *,
+    step_metrics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """One report row: the job's rank list, summarised.
 
@@ -1129,6 +1132,10 @@ def _build_row(
     row is indexed by the day the job first launched, but its numbers are the
     job's current numbers, the same ones the Rankings page shows.
 
+    ``step_metrics`` is this job's entry from
+    services.job_step_time.fetch_step_metrics. None (the read failed, or a
+    caller that has none) reports both Step 5 columns as not tracked.
+
     Invariant: only Sourced and Time to Source read ``sourced_rows``. Every
     count in the Interview Status and Feedback groups is a subset of
     Launched, and every lifecycle timestamp comes from a launched person.
@@ -1136,6 +1143,7 @@ def _build_row(
     cand = _summarise_candidates(sourced_rows)
     outreach, displays = _summarise_launched(launched_rows, live_by_interview)
     feedback = _summarise_feedback(launched_rows, displays)
+    step5 = step_metrics or {}
 
     # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
     # clicked, i.e. the first call out to pair-bot, which is exactly when the
@@ -1202,6 +1210,15 @@ def _build_row(
         # Turn Around Time = PAIR Launch − PAIR Published: how long the job sat
         # in pair before going out.
         "turn_around_time_minutes": _minutes_between(pair_published_at, launch_at),
+        # Step 5 ("Source") time, summed over every visit and recruiter. None,
+        # never 0, for a job nobody timed (worked before the tracking existed,
+        # or the read failed): the page shows a dash. A real 0 stays 0.
+        "step5_active_minutes": step5.get("active_minutes"),
+        # First Step 5 entry (any recruiter) → first SUCCESSFUL launch.
+        # fetch_step_metrics applies this report's own launch rule (an audit
+        # row with an interview id, on either job key), so the span ends at
+        # the PAIR Launch shown on this row, not at a failed attempt.
+        "step5_to_launch_minutes": step5.get("to_launch_minutes"),
 
         # Pending + In Progress + Completed + Partial Complete == Launched.
         "pending": buckets["pending"],
@@ -1268,14 +1285,38 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
     return keys
 
 
+def _load_step_metrics(conn, jobs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Step 5 time for every report job in one statement, keyed by str(job_id).
+
+    Best-effort: these two columns are an add-on to the report, so a failed
+    read is logged and returns {}, which every row reports as not tracked. It
+    must never cost the recruiter the rest of the report.
+    """
+    try:
+        return fetch_step_metrics(
+            conn, [(job["job_id"], job.get("jobdiva_id")) for job in jobs], step=STEP_SOURCE
+        )
+    except Exception as exc:
+        logger.warning(
+            f"LAUNCH-REPORT: Step 5 time unavailable for {len(jobs)} job(s) — reported as blank: {exc}",
+            exc_info=True,
+        )
+        return {}
+
+
 def _load_report_inputs(
     start_date: datetime.date, end_date: datetime.date, scope_team_id: Optional[str]
-) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, Dict[str, Any]],
+]:
     """All Postgres reads for the report, on a worker thread (psycopg2 is sync).
 
-    Returns (jobs, launched_by_job, sourced_by_job), the last two keyed by
-    str(job_id). Both populations are the rank list's, for the job's whole
-    lifetime — see services/launched_candidates.py.
+    Returns (jobs, launched_by_job, sourced_by_job, step_metrics_by_job), the
+    last three keyed by str(job_id). Both populations are the rank list's, for
+    the job's whole lifetime — see services/launched_candidates.py.
     """
     conn = get_db_connection()
     try:
@@ -1294,7 +1335,11 @@ def _load_report_inputs(
                 fetch_launched_candidates(conn, keys, include_feedback=True) if keys else []
             )
             sourced_by_job[job_key] = fetch_sourced_candidates(conn, keys) if keys else []
-        return jobs, launched_by_job, sourced_by_job
+        # Last on this connection on purpose: a failed statement aborts the
+        # transaction, so any read issued after it would fail too and take
+        # the whole report down with the optional columns.
+        step_metrics_by_job = _load_step_metrics(conn, jobs)
+        return jobs, launched_by_job, sourced_by_job, step_metrics_by_job
     finally:
         conn.close()
 
@@ -1369,7 +1414,7 @@ async def get_launch_report(
         report_start_date = report_end_date = yesterday
 
     try:
-        jobs, launched_by_job, sourced_by_job = await asyncio.to_thread(
+        jobs, launched_by_job, sourced_by_job, step_metrics_by_job = await asyncio.to_thread(
             _load_report_inputs, report_start_date, report_end_date, scope_team_id
         )
     except LookupError as e:
@@ -1397,6 +1442,7 @@ async def get_launch_report(
             launched_by_job.get(str(job["job_id"]), []),
             sourced_by_job.get(str(job["job_id"]), []),
             live_by_interview,
+            step_metrics=step_metrics_by_job.get(str(job["job_id"])),
         )
         for job in jobs
     ]

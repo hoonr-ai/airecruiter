@@ -21,6 +21,12 @@ Definitions are imported, never restated here:
     recorded) because a gap between the two is a real signal.
   * A job's launch (the range filter, "Launched", "Jobs Launched") is the
     Launch Report's: its first SUCCESSFUL launch, see _fetch_job_rows.
+  * Step 5 time comes from services/job_step_time.fetch_step_metrics, the
+    read the Launch Report and Admin Analytics use too. It is the one
+    exception to crediting by assignment: a recruiter row's Step 5 Active
+    Time is the time THAT person spent themselves (the table records who had
+    the step open), while Step 5 → Launch is a job property and is credited
+    by assignment like everything else. See _step5_active.
 
 Access mirrors Admin Analytics and the Launch Report: admins see everyone
 (optional team_id), team leads are pinned to their own team, everyone else
@@ -52,6 +58,7 @@ from routers._helpers import (
 from routers.launch_report import REPORT_DB_TIMEZONE
 from services.job_attribution import attribution_fields
 from services.job_candidate_metrics import empty_metrics, fetch_job_candidate_metrics
+from services.job_step_time import empty_step_metrics, fetch_step_metrics
 
 router = APIRouter(prefix="/api/v1", tags=["Recruiter Analytics"])
 logger = logging.getLogger(__name__)
@@ -63,9 +70,10 @@ REPORT_TIMEZONE = ZoneInfo(os.getenv("REPORT_TIMEZONE", "America/New_York"))
 # a typo'd year cannot turn into an unbounded request.
 MAX_RANGE_DAYS = 366
 
-# The jobs / directory reads are small indexed-or-tiny-table statements. The
-# candidate-metrics read aggregates sourced_candidates for every job in the
-# population, which on an all-time admin view is the heaviest statement here.
+# The jobs / Step 5 time / directory reads are small indexed-or-tiny-table
+# statements. The candidate-metrics read aggregates sourced_candidates for every
+# job in the population, which on an all-time admin view is the heaviest
+# statement here.
 _STATEMENT_TIMEOUT_MS = int(os.getenv("RECRUITER_ANALYTICS_STATEMENT_TIMEOUT_MS", "5000"))
 _METRICS_STATEMENT_TIMEOUT_MS = int(os.getenv("RECRUITER_ANALYTICS_METRICS_TIMEOUT_MS", "20000"))
 
@@ -253,6 +261,26 @@ def _to_minutes(value: Any) -> Optional[float]:
         return None
     # NaN fails the comparison; a negative span means two clocks disagreed.
     return minutes if minutes >= 0 else None
+
+
+def _ms_to_minutes(ms: float) -> float:
+    # The same rounding fetch_step_metrics applies to a job's own total.
+    return round(ms / 60000.0, 1)
+
+
+def _actor_ms(by_user: Any) -> Dict[str, int]:
+    """fetch_step_metrics' by_user, keyed like recruiter_emails (stripped,
+    lowercased) so it can be matched against the rows, keeping only people
+    with time. fetch_step_metrics already normalises and sums colliding keys
+    (and the step-time endpoint stores normalize_actor_email's form), so this
+    is a defensive re-normalisation, not the place spellings get merged."""
+    out: Dict[str, int] = {}
+    for email, ms in (by_user or {}).items():
+        key = str(email or "").strip().lower()
+        value = _to_int(ms)
+        if key and value > 0:
+            out[key] = out.get(key, 0) + value
+    return out
 
 
 def _unique(values: Iterable[str]) -> List[str]:
@@ -495,6 +523,9 @@ def _aggregate(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     first_external = [j["first_external_submit_at"] for j in jobs if j.get("first_external_submit_at")]
     ttfp = [j["time_to_first_pass_minutes"] for j in jobs if j.get("time_to_first_pass_minutes") is not None]
+    # Jobs with no Step 5 → Launch (untracked, unlaunched, or launched before
+    # Step 5 was first timed) are left out of the mean, never counted as 0.
+    to_launch = [j["step5_to_launch_minutes"] for j in jobs if j.get("step5_to_launch_minutes") is not None]
     passed, failed = total("passed"), total("failed")
     archived = sum(1 for j in jobs if j["is_archived"])
 
@@ -531,7 +562,25 @@ def _aggregate(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
         },
         "first_external_submit_at": _iso_et(min(first_external)) if first_external else None,
         "avg_time_to_first_pass_minutes": round(sum(ttfp) / len(ttfp), 1) if ttfp else None,
+        "step5_to_launch_minutes_avg": round(sum(to_launch) / len(to_launch), 1) if to_launch else None,
         "pass_rate": _pass_rate(passed, failed),
+    }
+
+
+def _step5_active(ms_per_job: Iterable[Optional[int]]) -> Dict[str, Any]:
+    """Step 5 Active Time over one set of per-job values, in ms.
+
+    Only jobs with time > 0 count as timed: an untracked job (None, worked
+    before the tracking existed) or an entry ping with no active time must not
+    drag the per-job average towards zero. Nothing timed → None, not 0, so the
+    page shows a dash rather than a real-looking "0m".
+    """
+    timed = [int(ms) for ms in ms_per_job if ms and ms > 0]
+    total_ms = sum(timed)
+    return {
+        "step5_active_minutes_total": _ms_to_minutes(total_ms) if timed else None,
+        "step5_active_minutes_avg": _ms_to_minutes(total_ms / len(timed)) if timed else None,
+        "step5_jobs_timed": len(timed),
     }
 
 
@@ -566,6 +615,20 @@ def _serialize_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "jobdiva_confirmed_subs": job["jobdiva_confirmed_subs"],
         "jobdiva_total_subs": job["jobdiva_total_subs"],
         "time_to_first_pass_minutes": job["time_to_first_pass_minutes"],
+        # The job's own numbers: everyone's active time on it (admins' and
+        # other teams' included) and its first Step 5 entry → first launch.
+        "step5_active_minutes": job["step5_active_minutes"],
+        "step5_first_entered_at": _iso_et(job["step5_first_entered_at"]),
+        "step5_first_launch_at": _iso_et(job["step5_first_launch_at"]),
+        "step5_to_launch_minutes": job["step5_to_launch_minutes"],
+        # Each assigned recruiter's own share, for the drill-down. Limited to
+        # recruiter_emails, which is already narrowed to the team scope, so a
+        # team's view never names an outsider or an admin who worked the job.
+        "step5_active_minutes_by_recruiter": {
+            email: _ms_to_minutes(job["step5_by_user"][email])
+            for email in job["recruiter_emails"]
+            if email in job["step5_by_user"]
+        },
     }
 
 
@@ -581,11 +644,26 @@ def _build_payload(
     warnings: List[str],
     metrics_available: bool = True,
     directory_available: bool = True,
+    step_metrics_by_job: Optional[Dict[str, Dict[str, Any]]] = None,
+    step_time_available: bool = True,
     now: Optional[datetime.datetime] = None,
 ) -> Dict[str, Any]:
     for job in jobs:
         metrics = metrics_by_job.get(job["job_id"]) or empty_metrics()
         job.update({k: metrics.get(k, v) for k, v in empty_metrics().items()})
+        step = (step_metrics_by_job or {}).get(job["job_id"]) or empty_step_metrics()
+        job.update({
+            # None = nothing tracked (jobs worked before 2026-09-23), not 0.
+            "step5_active_ms": step.get("active_ms"),
+            "step5_active_minutes": step.get("active_minutes"),
+            "step5_first_entered_at": _as_utc(step.get("first_entered_at")),
+            # The launch end the → Launch number was computed from. It follows
+            # the same rule as launched_at but is read separately, so the
+            # drill-down's hover shows this one to always agree with the number.
+            "step5_first_launch_at": _as_utc(step.get("first_launch_at")),
+            "step5_to_launch_minutes": step.get("to_launch_minutes"),
+            "step5_by_user": _actor_ms(step.get("by_user")),
+        })
 
     team_by_email: Dict[str, Dict[str, Any]] = directory.get("team_by_email") or {}
     accounts: Set[str] = set(directory.get("accounts") or ()) | _admin_env_emails()
@@ -602,6 +680,26 @@ def _build_payload(
                 continue
             jobs_by_recruiter.setdefault(email, []).append(job)
 
+    # Step 5 Active Time is credited to WHO SPENT IT, not by assignment: each
+    # row gets that person's own time on every job in the population, whether
+    # or not they are assigned to it (a recruiter helping on a colleague's job
+    # did that work). Rows still come only from assignment, so time only lands
+    # on a row that already exists:
+    #   * an admin, or anyone else who opens Step 5 without being assigned to
+    #     any job in view, gets no row; their time still counts in the job's
+    #     own total and in Totals;
+    #   * in a team's view the rows are the team's emails, so an outsider's
+    #     time on a shared job never becomes a row either;
+    #   * with a recruiter filter the population is that recruiter's assigned
+    #     jobs, so time they spent on other people's jobs is outside the view.
+    # Step 5 → Launch is a property of the job and stays with _aggregate's
+    # assignment credit.
+    actor_ms: Dict[str, List[int]] = {email: [] for email in jobs_by_recruiter}
+    for job in jobs:
+        for email, ms in job["step5_by_user"].items():
+            if email in actor_ms:
+                actor_ms[email].append(ms)
+
     recruiters: List[Dict[str, Any]] = []
     for email, their_jobs in jobs_by_recruiter.items():
         team = team_by_email.get(email) or {}
@@ -613,12 +711,16 @@ def _build_payload(
             # read as "no PAIR login" and the UI's hide toggle would drop them.
             "has_pair_account": True if email in accounts else (False if directory_available else None),
             **_aggregate(their_jobs),
+            **_step5_active(actor_ms[email]),
             "job_ids": [j["job_id"] for j in their_jobs],
         })
     recruiters.sort(key=lambda r: (-r["jobs"]["launched"], r["email"]))
 
     unassigned = sum(1 for j in jobs if j["unassigned"])
     totals = _aggregate(jobs)
+    # Everyone's time on the DISTINCT jobs, admins and people without a row
+    # included — so it is not the sum of the recruiter rows either.
+    totals.update(_step5_active(j["step5_active_ms"] for j in jobs))
     totals["jobs"]["unassigned"] = unassigned
     totals["recruiters"] = len(recruiters)
 
@@ -644,6 +746,7 @@ def _build_payload(
         "recruiters": recruiters,
         "jobs": [_serialize_job(j) for j in ordered_jobs],
         "metrics_available": metrics_available,
+        "step_time_available": step_time_available,
         "warnings": warnings,
     }
 
@@ -687,6 +790,24 @@ def _compute_recruiter_analytics_sync(
                 "Candidate outcome counts (pass, feedback, PAIR submittals) are temporarily "
                 "unavailable; only the job counters are current."
             )
+
+        def step_time() -> Dict[str, Dict[str, Any]]:
+            # One statement for the whole population, like the metrics read.
+            # It reads job_step_time (one row per job and person) and the
+            # audit's first successful launch on the indexed jobdiva_id — the
+            # same lookup _fetch_job_rows makes under this timeout.
+            with conn.cursor() as cur:
+                _set_statement_timeout(cur, _STATEMENT_TIMEOUT_MS)
+            return fetch_step_metrics(conn, [(j["job_id"], j["jobdiva_id"]) for j in jobs])
+
+        step_by_job, step_ok = _section(conn, "step 5 time", step_time, {})
+        if not step_ok:
+            # Its fallback is None everywhere, which the page already shows as
+            # a dash; the warning says the dash means "unavailable", not
+            # "never tracked". It also puts the payload on the short TTL.
+            warnings.append(
+                "Step 5 time (Step 5 Active Time and Step 5 → Launch) is temporarily unavailable."
+            )
         directory, directory_ok = _section(conn, "team/login directory", lambda: _load_directory(conn), {})
         if not directory_ok:
             warnings.append(
@@ -703,6 +824,8 @@ def _compute_recruiter_analytics_sync(
             warnings=warnings,
             metrics_available=metrics_ok,
             directory_available=directory_ok,
+            step_metrics_by_job=step_by_job,
+            step_time_available=step_ok,
         )
     finally:
         conn.close()
@@ -722,7 +845,7 @@ async def get_recruiter_analytics(
     user: UserIdentity = Depends(get_current_user),
     response: Response = Response(),
 ):
-    """Per-recruiter jobs, candidates, pass, feedback and submittal numbers.
+    """Per-recruiter jobs, candidates, pass, feedback, submittal and Step 5 time numbers.
 
     - Admins: everyone by default; ?team_id=... scopes to one team.
     - Team leads: always their own team (team_id is ignored); a recruiter

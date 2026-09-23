@@ -9,9 +9,11 @@ from routers.admin_analytics import (
     _TIMELINE_COLUMNS,
     _compute_jobs_timeline,
     _compute_scoped_job_metrics,
+    _compute_scoped_step_time,
     _compute_submission_metrics,
 )
 from services.job_candidate_metrics import empty_metrics
+from services.job_step_time import STEP_SOURCE, empty_step_metrics
 
 UTC = datetime.timezone.utc
 _REAL_MISSING_OPTIONAL_COLUMNS = aa._missing_optional_columns
@@ -304,6 +306,67 @@ def test_timeline_job_missing_from_available_metrics_gets_zeros():
 
 
 # ---------------------------------------------------------------------------
+# Step 5 time merged into the timeline (services/job_step_time)
+# ---------------------------------------------------------------------------
+
+
+def _step(**overrides):
+    s = empty_step_metrics()
+    s.update(overrides)
+    return s
+
+
+def test_timeline_merges_step5_time_by_job_id():
+    mock_conn, mock_cursor = _mock_conn()
+    mock_cursor.fetchone.return_value = (3,)
+    mock_cursor.fetchall.return_value = [
+        _timeline_row(job_id="101"),
+        _timeline_row(job_id="102"),
+        _timeline_row(job_id="103"),
+    ]
+    step_metrics = {
+        "101": _step(active_ms=3_750_000, active_minutes=62.5, to_launch_minutes=130.0),
+        # Timed, but not launched successfully yet (or launched before the
+        # tracking started): active time only.
+        "102": _step(active_ms=0, active_minutes=0.0),
+        # Worked before the tracking shipped.
+        "103": empty_step_metrics(),
+    }
+
+    rows = _compute_jobs_timeline(mock_conn, scope=None, job_metrics={}, step_metrics=step_metrics)["rows"]
+
+    by_id = {r["job_id"]: r for r in rows}
+    assert by_id["101"]["step5_active_minutes"] == 62.5
+    assert by_id["101"]["step5_to_launch_minutes"] == 130.0
+    # A real 0 stays 0 (an entry ping with no active time yet)...
+    assert by_id["102"]["step5_active_minutes"] == 0.0
+    assert by_id["102"]["step5_to_launch_minutes"] is None
+    # ...while an untracked job is None, rendered "—", never "0m".
+    assert by_id["103"]["step5_active_minutes"] is None
+    assert by_id["103"]["step5_to_launch_minutes"] is None
+    # No extra statements: the merge is in Python.
+    assert mock_cursor.execute.call_count == 2
+
+
+def test_timeline_step5_time_is_none_when_unavailable_or_missing():
+    """step_metrics=None (the section failed) and a job absent from the dict
+    (created after the read) both give None; the candidate columns are
+    unaffected."""
+    for step_metrics in (None, {}):
+        mock_conn, mock_cursor = _mock_conn()
+        mock_cursor.fetchone.return_value = (1,)
+        mock_cursor.fetchall.return_value = [_timeline_row(job_id="101")]
+
+        r = _compute_jobs_timeline(
+            mock_conn, scope=None, job_metrics={"101": _metrics(passed=3)}, step_metrics=step_metrics
+        )["rows"][0]
+
+        assert r["step5_active_minutes"] is None
+        assert r["step5_to_launch_minutes"] is None
+        assert r["pass_candidates"] == 3
+
+
+# ---------------------------------------------------------------------------
 # Optional attribution columns (schema init may not have added them yet)
 # ---------------------------------------------------------------------------
 
@@ -429,6 +492,71 @@ def test_scoped_job_metrics_failure_propagates_without_restoring(monkeypatch):
     assert all("= %s" not in c[0][0] for c in mock_cursor.execute.call_args_list)
 
 
+def test_scoped_step_time_only_receives_scoped_jobs(monkeypatch):
+    mock_conn, mock_cursor = _mock_conn()
+    scoped_rows = [("101", "26-101"), ("102", None)]
+    mock_cursor.fetchall.return_value = scoped_rows
+    seen = {}
+
+    def fake_fetch(conn, jobs, step):
+        seen["jobs"] = list(jobs)
+        seen["step"] = step
+        return {"101": _step(active_minutes=12.0)}
+
+    monkeypatch.setattr(aa, "fetch_step_metrics", fake_fetch)
+    scope = {"job_ids": ["101", "102"], "sc_keys": ["101", "102", "26-101"], "emails": ["a@x.com"]}
+
+    result = _compute_scoped_step_time(mock_conn, scope)
+
+    sql, params = _job_read_call(mock_cursor)
+    assert "job_id::text = ANY(%s)" in sql
+    assert params == [["101", "102"]]
+    assert seen["jobs"] == scoped_rows
+    assert seen["step"] == STEP_SOURCE == 5
+    assert result == {"101": _step(active_minutes=12.0)}
+
+
+def test_scoped_step_time_runs_under_its_own_timeout_then_restores(monkeypatch):
+    mock_conn, mock_cursor = _mock_conn()
+    mock_cursor.fetchone.return_value = ("30s",)
+    mock_cursor.fetchall.return_value = [("101", "26-101")]
+    order = []
+    mock_cursor.execute.side_effect = lambda sql, *a: order.append(sql)
+
+    def fake_fetch(conn, jobs, step):
+        order.append("<step time>")
+        return {}
+
+    monkeypatch.setattr(aa, "fetch_step_metrics", fake_fetch)
+    monkeypatch.setattr(aa, "_STEP_TIME_STATEMENT_TIMEOUT_MS", 4321)
+    # Its bound is its own, not the candidate metrics'.
+    monkeypatch.setattr(aa, "_METRICS_STATEMENT_TIMEOUT_MS", 99999)
+
+    _compute_scoped_step_time(mock_conn, None)
+
+    set_idx = order.index("SET LOCAL statement_timeout = '4321ms'")
+    read_idx = next(i for i, s in enumerate(order) if "FROM monitored_jobs" in s)
+    fetch_idx = order.index("<step time>")
+    assert set_idx < read_idx < fetch_idx
+    assert order[fetch_idx + 1:] == ["SET LOCAL statement_timeout = %s"]
+    assert mock_cursor.execute.call_args[0][1] == ("30s",)
+
+
+def test_scoped_step_time_failure_propagates_without_restoring(monkeypatch):
+    mock_conn, mock_cursor = _mock_conn()
+    mock_cursor.fetchone.return_value = ("30s",)
+    mock_cursor.fetchall.return_value = []
+
+    def boom(conn, jobs, step):
+        raise RuntimeError('relation "job_step_time" does not exist')
+
+    monkeypatch.setattr(aa, "fetch_step_metrics", boom)
+
+    with pytest.raises(RuntimeError):
+        _compute_scoped_step_time(mock_conn, None)
+    assert all("= %s" not in c[0][0] for c in mock_cursor.execute.call_args_list)
+
+
 def _submission_conn():
     mock_conn, mock_cursor = _mock_conn()
     # counters: complete, pass, pair_external_subs, pair_submits, jobdiva_total
@@ -479,7 +607,7 @@ def orchestrated(monkeypatch):
     replaced by a recorder so the wiring between them is what's under test."""
     mock_conn, _ = _mock_conn()  # the overview block iterates empty results
     monkeypatch.setattr(aa, "get_db_connection", lambda: mock_conn)
-    calls = {"metrics": 0}
+    calls = {"metrics": 0, "step_time": 0}
 
     def fake_metrics(conn, scope):
         calls["metrics"] += 1
@@ -488,8 +616,16 @@ def orchestrated(monkeypatch):
             raise RuntimeError("statement timeout")
         return {"101": _metrics(passed=2)}
 
-    def fake_timeline(conn, scope, job_metrics):
+    def fake_step_time(conn, scope):
+        calls["step_time"] += 1
+        calls["step_time_scope"] = scope
+        if calls.get("step_time_raises"):
+            raise RuntimeError('relation "job_step_time" does not exist')
+        return {"101": _step(active_minutes=30.0)}
+
+    def fake_timeline(conn, scope, job_metrics, step_metrics=None):
         calls["timeline_metrics"] = job_metrics
+        calls["timeline_step_metrics"] = step_metrics
         return {"rows": [{"job_id": "101"}], "total": 1}
 
     def fake_submissions(conn, scope, job_metrics):
@@ -497,6 +633,7 @@ def orchestrated(monkeypatch):
         return {"pair_submits": 0}
 
     monkeypatch.setattr(aa, "_compute_scoped_job_metrics", fake_metrics)
+    monkeypatch.setattr(aa, "_compute_scoped_step_time", fake_step_time)
     monkeypatch.setattr(aa, "_compute_jobs_timeline", fake_timeline)
     monkeypatch.setattr(aa, "_compute_submission_metrics", fake_submissions)
     monkeypatch.setattr(aa, "_compute_launch_speed", lambda conn, scope: {"launched_jobs": 1})
@@ -538,3 +675,39 @@ def test_metrics_receive_the_team_scope(orchestrated, monkeypatch):
     monkeypatch.setattr(aa, "_load_team_scope", lambda conn, team_id: scope)
     aa._compute_analytics_sync("t1")
     assert calls["metrics_scope"] is scope
+    assert calls["step_time_scope"] is scope
+
+
+def test_step_time_computed_once_and_passed_to_the_timeline(orchestrated):
+    _, calls = orchestrated
+    data = aa._compute_analytics_sync(None)
+    assert calls["step_time"] == 1
+    assert calls["timeline_step_metrics"] == {"101": _step(active_minutes=30.0)}
+    assert data["jobs_timeline_step_time_available"] is True
+    assert data["jobs_timeline_metrics_available"] is True
+
+
+def test_step_time_failure_blanks_only_its_columns(orchestrated):
+    """A missing job_step_time table (startup schema init cancelled) or its
+    timeout: the timeline still gets the candidate metrics, the Step 5
+    columns get None and the page is told why."""
+    mock_conn, calls = orchestrated
+    calls["step_time_raises"] = True
+    data = aa._compute_analytics_sync(None)
+    assert mock_conn.rollback.called
+    assert calls["timeline_step_metrics"] is None
+    assert calls["timeline_metrics"] == {"101": _metrics(passed=2)}
+    assert data["jobs_timeline"] == [{"job_id": "101"}]
+    assert data["jobs_timeline_step_time_available"] is False
+    assert data["jobs_timeline_metrics_available"] is True
+    assert "warning" not in data
+
+
+def test_whole_page_fallback_marks_step_time_unavailable(monkeypatch):
+    mock_conn, mock_cursor = _mock_conn()
+    mock_cursor.execute.side_effect = RuntimeError("relation monitored_jobs does not exist")
+    monkeypatch.setattr(aa, "get_db_connection", lambda: mock_conn)
+    data = aa._compute_analytics_sync(None)
+    assert "warning" in data
+    assert data["jobs_timeline_step_time_available"] is False
+    assert data["jobs_timeline_metrics_available"] is False

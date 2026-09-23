@@ -5,7 +5,9 @@
   * the timeline SELECT's column names match _TIMELINE_COLUMNS;
   * per-job candidate metrics merge into the timeline without duplicating a
     job whose candidates sit under both job keys (the old feedback_times join
-    did), and the metrics / submission split only ever see scoped jobs.
+    did), and the metrics / submission split only ever see scoped jobs;
+  * Step 5 time (services/job_step_time) merges the same way, for scoped jobs
+    only, and a failed read blanks just its two columns.
 
 Skips when no server is reachable (set LAUNCH_REPORT_TEST_DSN, e.g. to a
 pgserver instance). The session is pinned to UTC like managed PROD; the
@@ -21,6 +23,7 @@ import pytest
 
 import routers.admin_analytics as aa
 from services import job_candidate_metrics
+from services import job_step_time
 
 psycopg2 = pytest.importorskip("psycopg2")
 _TEST_DSN = os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
@@ -69,6 +72,11 @@ def pg():
         with conn.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(_SCHEMA_SQL)
+            # The shipped job_step_time DDL, as a temp table.
+            cur.execute(
+                job_step_time.SCHEMA_STATEMENTS[0].replace("CREATE TABLE", "CREATE TEMP TABLE")
+                + " ON COMMIT DROP"
+            )
         yield conn
     finally:
         conn.rollback()
@@ -474,4 +482,151 @@ def test_metrics_timeout_degrades_to_unavailable_not_zeros(pg, monkeypatch, capl
     assert data["submission_metrics"]["pair_submits"] == 2
     assert data["launch_speed"]["launched_jobs"] == 1
     # The short budget did not leak into the sections that ran after it.
+    assert _statement_timeout(pg) == before
+
+
+# ---------------------------------------------------------------------------
+# Step 5 time (services/job_step_time) merged into the timeline
+# ---------------------------------------------------------------------------
+
+
+def _utc_at(hour, minute=0):
+    return datetime.datetime(2026, 9, 22, hour, minute, tzinfo=UTC)
+
+
+def _time_step5(conn, job_id, email, *, minutes, entered):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO job_step_time (job_id, step, user_email, active_ms, first_entered_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (job_id, job_step_time.STEP_SOURCE, email, int(minutes * 60_000), entered),
+        )
+
+
+def _audit(conn, key, interview_id, created, candidate_id="c9"):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, created_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (candidate_id, key, interview_id, created.replace(tzinfo=None)),
+        )
+
+
+def _seed_step_time(pg):
+    # The launched job: two recruiters, 40 + 20 active minutes, first entry
+    # 08:00. pair_launched_at (the first launch click, see _seed) is 10:00,
+    # but that attempt reached no candidate; the first SUCCESSFUL launch is
+    # 10:30, so Step 5 → Launch is 150 minutes, not 120.
+    _time_step5(pg, NUM, "lead@x.com", minutes=40, entered=_utc_at(8))
+    _time_step5(pg, NUM, "member@x.com", minutes=20, entered=_utc_at(9))
+    _audit(pg, REF, "", _utc_at(10))
+    _audit(pg, REF, "iv-1", _utc_at(10, 30))
+    # 31990002: nobody timed it (worked before the tracking shipped).
+    # Out of scope: timed, never launched.
+    _time_step5(pg, "31990003", "outsider@y.com", minutes=5, entered=_utc_at(7))
+
+
+@pytest.fixture()
+def step_calls(monkeypatch):
+    """Which jobs reach the Step 5 read."""
+    calls = []
+    real_fetch = job_step_time.fetch_step_metrics
+
+    def spy(conn, jobs, step=job_step_time.STEP_SOURCE):
+        jobs = list(jobs)
+        calls.append((jobs, step))
+        return real_fetch(conn, jobs, step)
+
+    monkeypatch.setattr(aa, "fetch_step_metrics", spy)
+    return calls
+
+
+def test_team_view_merges_step5_time_for_scoped_jobs_only(analytics, step_calls, pg):
+    run, _ = analytics
+    _seed_step_time(pg)
+    data = run("t1")
+
+    assert data["jobs_timeline_step_time_available"] is True
+    assert len(step_calls) == 1
+    jobs, step = step_calls[0]
+    assert sorted(jobs) == [(NUM, REF), ("31990002", "26-00002")]
+    assert step == 5
+
+    rows = {r["job_id"]: r for r in data["jobs_timeline"]}
+    assert set(rows) == {NUM, "31990002"}
+    assert rows[NUM]["step5_active_minutes"] == 60.0
+    assert rows[NUM]["step5_to_launch_minutes"] == 150.0
+    # The first launch CLICK is earlier than the first successful launch.
+    assert _parse(rows[NUM]["curate_launched_at"]) == _utc_at(10)
+    assert rows["31990002"]["step5_active_minutes"] is None
+    assert rows["31990002"]["step5_to_launch_minutes"] is None
+
+
+def test_system_view_step5_time_covers_every_job(analytics, step_calls, pg):
+    run, _ = analytics
+    _seed_step_time(pg)
+    data = run(None)
+
+    assert len(step_calls) == 1 and len(step_calls[0][0]) == 3
+    rows = {r["job_id"]: r for r in data["jobs_timeline"]}
+    assert rows["31990003"]["step5_active_minutes"] == 5.0
+    assert rows["31990003"]["step5_to_launch_minutes"] is None  # never launched
+    assert rows[NUM]["step5_to_launch_minutes"] == 150.0
+
+
+def test_step_time_runs_under_its_own_timeout_and_restores_it(pg, monkeypatch):
+    _seed(pg)
+    _seed_step_time(pg)
+    before = _statement_timeout(pg)
+    seen = {}
+    real_fetch = job_step_time.fetch_step_metrics
+
+    def spy(conn, jobs, step):
+        seen["during"] = _statement_timeout(conn)
+        return real_fetch(conn, jobs, step)
+
+    monkeypatch.setattr(aa, "fetch_step_metrics", spy)
+    monkeypatch.setattr(aa, "_STEP_TIME_STATEMENT_TIMEOUT_MS", 6000)
+
+    step_metrics = aa._compute_scoped_step_time(pg, None)
+
+    assert seen["during"] == "6s"
+    assert _statement_timeout(pg) == before
+    assert step_metrics[NUM]["active_minutes"] == 60.0
+
+
+def test_missing_step_time_table_blanks_only_the_step5_columns(pg, monkeypatch, caplog):
+    """job_step_time is created by startup schema init, which can be cancelled
+    behind a long lock. The rest of the page still loads, the Step 5 columns
+    are None and the page is told they were unavailable (not untracked)."""
+    _seed(pg)
+    with pg.cursor() as cur:
+        cur.execute("DROP TABLE job_step_time")
+        # Dropping the temp table would unmask a permanent public.job_step_time
+        # on any database the API has started against (startup schema init
+        # creates it), and the read would then succeed. Every table the page
+        # reads is a temp table here, so search only pg_temp (pg_catalog is
+        # still searched implicitly). SET LOCAL sits before the savepoints, so
+        # the section rollbacks keep it; the fixture's rollback clears it.
+        cur.execute("SET LOCAL search_path = pg_temp")
+        cur.execute("SELECT to_regclass('job_step_time')")
+        assert cur.fetchone()[0] is None, "job_step_time must be unresolvable"
+    before = _statement_timeout(pg)
+    monkeypatch.setattr(aa, "get_db_connection", lambda: _SavepointConn(pg))
+
+    with caplog.at_level(logging.WARNING, logger=aa.logger.name):
+        data = aa._compute_analytics_sync(None)
+
+    assert "_compute_scoped_step_time unavailable" in caplog.text
+    assert "warning" not in data
+    assert data["jobs_timeline_step_time_available"] is False
+    assert data["jobs_timeline_metrics_available"] is True
+    rows = {r["job_id"]: r for r in data["jobs_timeline"]}
+    assert set(rows) == {NUM, "31990002", "31990003"}
+    for r in rows.values():
+        assert r["step5_active_minutes"] is None and r["step5_to_launch_minutes"] is None
+    # The candidate columns and the sections after it are unaffected.
+    assert rows[NUM]["pass_candidates"] == 1
+    assert data["submission_metrics"]["pair_internal_submits"] == 2
+    assert data["launch_speed"]["launched_jobs"] == 1
     assert _statement_timeout(pg) == before

@@ -22,6 +22,7 @@ from routers._helpers import (
 )
 from services.job_attribution import attribution_fields
 from services.job_candidate_metrics import empty_metrics, fetch_job_candidate_metrics
+from services.job_step_time import STEP_SOURCE, fetch_step_metrics
 
 router = APIRouter(prefix="/api/v1", tags=["Admin Analytics"])
 logger = logging.getLogger(__name__)
@@ -74,6 +75,11 @@ _TIMELINE_COLUMNS = (
 # 30s default, so a slow run costs at most this long before the page shows the
 # candidate columns as unavailable (jobs_timeline_metrics_available=false).
 _METRICS_STATEMENT_TIMEOUT_MS = int(os.getenv("ADMIN_ANALYTICS_METRICS_TIMEOUT_MS", "20000"))
+# Step 5 time is a lighter read (job_step_time holds one row per job and
+# recruiter, plus each scoped job's launch audit rows) with its own, lower
+# bound: the sections run one after another, so a slow run here must not add a
+# second full metrics budget before the Step 5 columns show as unavailable.
+_STEP_TIME_STATEMENT_TIMEOUT_MS = int(os.getenv("ADMIN_ANALYTICS_STEP_TIME_TIMEOUT_MS", "10000"))
 
 
 def _missing_optional_columns(conn) -> frozenset:
@@ -155,6 +161,25 @@ def _jobs_timeline_sql(cond: str, missing_columns: frozenset = frozenset()) -> s
     """
 
 
+def _for_scoped_jobs(conn, scope: Optional[Dict[str, Any]], timeout_ms: int, fetch):
+    """``fetch(conn, [(job_id, jobdiva_id), ...])`` over EVERY job in scope,
+    under its own statement_timeout (the scoped-job read included)."""
+    cond, params = _mj_filter(scope)
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_setting('statement_timeout')")
+        previous_timeout = cur.fetchone()[0]
+        cur.execute(f"SET LOCAL statement_timeout = '{int(timeout_ms)}ms'")
+        cur.execute(f"SELECT job_id, jobdiva_id FROM monitored_jobs WHERE {cond}", params)
+        jobs = cur.fetchall()
+    result = fetch(conn, jobs)
+    # SET LOCAL lasts until the transaction ends and the later sections share
+    # this transaction, so hand them back the timeout they would have had. On
+    # failure there is nothing to restore: _section's rollback discards it.
+    with conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = %s", (previous_timeout,))
+    return result
+
+
 def _compute_scoped_job_metrics(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
     """Rank-list candidate outcomes for EVERY job in scope, in one query.
 
@@ -163,26 +188,30 @@ def _compute_scoped_job_metrics(conn, scope: Optional[Dict[str, Any]] = None) ->
     scoped jobs — not just the 2000 rows the timeline loads. Pass / feedback /
     submit definitions live in services/job_candidate_metrics.py.
     """
-    cond, params = _mj_filter(scope)
-    with conn.cursor() as cur:
-        cur.execute("SELECT current_setting('statement_timeout')")
-        previous_timeout = cur.fetchone()[0]
-        cur.execute(f"SET LOCAL statement_timeout = '{int(_METRICS_STATEMENT_TIMEOUT_MS)}ms'")
-        cur.execute(f"SELECT job_id, jobdiva_id FROM monitored_jobs WHERE {cond}", params)
-        jobs = cur.fetchall()
-    metrics = fetch_job_candidate_metrics(conn, jobs)
-    # SET LOCAL lasts until the transaction ends and the later sections share
-    # this transaction, so hand them back the timeout they would have had. On
-    # failure there is nothing to restore: _section's rollback discards it.
-    with conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = %s", (previous_timeout,))
-    return metrics
+    return _for_scoped_jobs(conn, scope, _METRICS_STATEMENT_TIMEOUT_MS, fetch_job_candidate_metrics)
+
+
+def _compute_scoped_step_time(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """Step 5 ("Source") time for EVERY job in scope, in one query: active
+    minutes, and first Step 5 entry → first successful launch.
+
+    The definitions live in services/job_step_time.py, shared with the Launch
+    Report and Recruiter Analytics so the three reports can't disagree. Its
+    own section: if it fails (job_step_time not created yet because startup
+    schema init was cancelled, or its statement timeout), only the two Step 5
+    columns go blank.
+    """
+    return _for_scoped_jobs(
+        conn, scope, _STEP_TIME_STATEMENT_TIMEOUT_MS,
+        lambda c, jobs: fetch_step_metrics(c, jobs, STEP_SOURCE),
+    )
 
 
 def _compute_jobs_timeline(
     conn,
     scope: Optional[Dict[str, Any]] = None,
     job_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+    step_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Per-job lifecycle: when it was posted on JobDiva vs launched on Curate.
 
@@ -195,6 +224,11 @@ def _compute_jobs_timeline(
     candidate column rather than the whole timeline failing. Not zeros — a
     0 Pass / 0 Feedback row reads as real data, and the CSV travels without
     the page's "unavailable" notice.
+
+    `step_metrics` is `_compute_scoped_step_time` output, None when that
+    section failed. The Step 5 columns are None then, and also for any job
+    nobody timed (everything worked before the tracking shipped), so a job
+    reads "—", never "0m".
     """
     cond, params = _mj_filter(scope)
     missing_columns = _missing_optional_columns(conn)
@@ -258,10 +292,14 @@ def _compute_jobs_timeline(
             except Exception:
                 pass
 
+        job_key = str(job_id or "").strip()
         if job_metrics is None:
             m = unavailable_metrics
         else:
-            m = job_metrics.get(str(job_id or "").strip()) or empty_metrics()
+            m = job_metrics.get(job_key) or empty_metrics()
+        # Unavailable and untracked both read None here; the response flag
+        # jobs_timeline_step_time_available tells the page which it was.
+        step = (step_metrics or {}).get(job_key) or {}
 
         timeline.append({
             "job_id": str(job_id or ""),
@@ -274,6 +312,12 @@ def _compute_jobs_timeline(
             "curate_launched_at": _iso(launched_at),
             "outreach_stopped_at": _iso(stopped_at),
             "posted_to_launch_days": lag_days,
+            # Step 5 ("Source"), in minutes: active time summed over every
+            # visit and recruiter, and wall clock from the first Step 5 entry
+            # to the first SUCCESSFUL launch — which can be later than
+            # curate_launched_at, the first launch click.
+            "step5_active_minutes": step.get("active_minutes"),
+            "step5_to_launch_minutes": step.get("to_launch_minutes"),
             "is_archived": bool(is_archived),
             "archive_reason": r["archive_reason"],
             "jobdiva_status": str(status or ""),
@@ -758,7 +802,11 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
         # own statement timeout): both consumers report the numbers as
         # unavailable instead of failing or showing zeros.
         job_metrics = _section(_compute_scoped_job_metrics, None, scope)
-        jobs_timeline = _section(_compute_jobs_timeline, {"rows": [], "total": 0}, scope, job_metrics)
+        # Step 5 time, the same way: None on failure blanks just its columns.
+        step_metrics = _section(_compute_scoped_step_time, None, scope)
+        jobs_timeline = _section(
+            _compute_jobs_timeline, {"rows": [], "total": 0}, scope, job_metrics, step_metrics
+        )
         launch_speed = _section(_compute_launch_speed, {}, scope)
         weekly_trends = _section(_compute_weekly_trends, {}, scope)
         submission_metrics = _section(_compute_submission_metrics, {}, scope, job_metrics)
@@ -782,6 +830,9 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             # False: the timeline's candidate columns are None this time and
             # the page says so, instead of showing zeros that look real.
             "jobs_timeline_metrics_available": job_metrics is not None,
+            # False: the Step 5 columns are None because the read failed, not
+            # because the jobs predate the tracking.
+            "jobs_timeline_step_time_available": step_metrics is not None,
             "launch_speed": launch_speed,
             "weekly_trends": weekly_trends,
             "submission_metrics": submission_metrics,
@@ -807,6 +858,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             "jobs_timeline": [],
             "jobs_timeline_total": 0,
             "jobs_timeline_metrics_available": False,
+            "jobs_timeline_step_time_available": False,
             "launch_speed": {},
             "weekly_trends": {},
             "submission_metrics": {},

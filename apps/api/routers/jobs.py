@@ -18,6 +18,7 @@ from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
 from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_AGG_SQL
 from services.job_attribution import SCHEMA_STATEMENTS as ATTRIBUTION_SCHEMA_STATEMENTS, stamp_job_posted_by
+from services.job_step_time import SCHEMA_STATEMENTS as STEP_TIME_SCHEMA_STATEMENTS
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
 from models import (
@@ -238,6 +239,9 @@ def _ensure_monitored_jobs_schema() -> None:
             # '' (not recorded, never stamped); later rows start NULL and are
             # stamped by services.job_attribution — see its docstring.
             *ATTRIBUTION_SCHEMA_STATEMENTS,
+            # Active time recruiters spend on a wizard step (Step 5 for the
+            # reports); see services/job_step_time.py.
+            *STEP_TIME_SCHEMA_STATEMENTS,
 
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",

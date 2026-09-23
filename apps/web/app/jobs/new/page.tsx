@@ -97,6 +97,7 @@ import {
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow, type LaunchUnverifiedEmployer } from "@/hooks/use-engagement-flow";
+import { useStepActiveTime } from "@/hooks/use-step-active-time";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
 import {
   OUTREACH_MIN_SCORE,
@@ -2002,6 +2003,9 @@ function NewJobPageContent() {
     trackStepStart(currentStep);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
+
+  // Step 5 active time for the reports (hooks/use-step-active-time.ts).
+  useStepActiveTime({ jobRef: String(jobdivaId || numericJobId || ""), step: 5, enabled: currentStep === 5 });
 
   // Open-to-Work polling for Exa-sourced LinkedIn candidates.
   // Mirrors the Hoonrai/Revelio frontend polling pattern: every 5s POST any

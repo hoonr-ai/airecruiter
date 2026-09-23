@@ -35,6 +35,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
   EMPTY_DATE,
+  formatDuration,
   formatEasternDate,
   formatEasternDateTime,
   normalizeToUtcDate,
@@ -111,6 +112,12 @@ interface JobTimelineEntry {
   jobdiva_confirmed_subs?: number;
   /** Earliest current external Submit recorded in PAIR. */
   first_pair_external_submit_at?: string | null;
+  /** Step 5 ("Source") time in minutes: active time summed over every visit
+   *  and recruiter, and first Step 5 entry → first SUCCESSFUL launch. null =
+   *  not tracked (every job worked before 09/23/2026), not launched yet, or
+   *  unavailable this time (jobs_timeline_step_time_available=false). */
+  step5_active_minutes?: number | null;
+  step5_to_launch_minutes?: number | null;
 }
 
 interface LaunchSpeed {
@@ -194,6 +201,9 @@ interface AnalyticsData {
   /** false: the timeline's candidate columns (pass, feedback, PAIR
    *  submittals, first-feedback / first-external times) are null this time. */
   jobs_timeline_metrics_available?: boolean;
+  /** false: the Step 5 time columns are null because the read failed, not
+   *  because the jobs predate the tracking. */
+  jobs_timeline_step_time_available?: boolean;
   launch_speed?: LaunchSpeed;
   weekly_trends?: WeeklyTrends;
   submission_metrics?: SubmissionMetrics;
@@ -295,6 +305,18 @@ const pairSubmitsTotal = (sm: SubmissionMetrics): number =>
     ? sm.pair_internal_submits + sm.pair_external_submits
     : sm.pair_submits ?? 0;
 
+/** Step 5 time: "1h 22m", or "—" when null — not tracked (jobs worked
+ *  before 09/23/2026), not launched yet, or unavailable. A job nobody timed
+ *  must never read "0m". The CSV uses formatDuration directly. */
+const renderDurationCell = (minutes: number | null | undefined) => {
+  const formatted = formatDuration(minutes);
+  return formatted === EMPTY_DATE ? (
+    <span className="text-slate-300">{EMPTY_DATE}</span>
+  ) : (
+    <span className="font-semibold text-slate-700">{formatted}</span>
+  );
+};
+
 /** CSV twin of renderCountCell. No locale grouping: "1,234" would split the cell. */
 const countCsvValue = (value: number | null | undefined): string =>
   value === null || value === undefined ? EMPTY_DATE : String(value);
@@ -355,6 +377,8 @@ const TIMELINE_SKELETON_BARS: Array<{ center?: boolean; bar: string }> = [
   { bar: "h-4 w-20 rounded" }, // Added (PAIR)
   { bar: "h-4 w-20 rounded" }, // Launched (PAIR)
   { center: true, bar: "h-5 w-10 rounded-full" }, // Lag
+  { center: true, bar: "h-4 w-12 rounded" }, // Step 5 Active Time
+  { center: true, bar: "h-4 w-12 rounded" }, // Step 5 → Launch
   { center: true, bar: "h-5 w-16 rounded-full" }, // Active / Archived
   { center: true, bar: "h-5 w-16 rounded-full" }, // PAIR Status
   { center: true, bar: "h-4 w-8 rounded" }, // Sourced
@@ -371,14 +395,27 @@ const TIMELINE_SKELETON_BARS: Array<{ center?: boolean; bar: string }> = [
 const TIMELINE_COLUMN_COUNT = 3 + TIMELINE_SKELETON_BARS.length;
 
 /** A file travels without the page's notice, so say it in the file too. */
-const timelineCsvNote = (metricsUnavailable: boolean): string[] =>
-  metricsUnavailable
+const timelineCsvNote = (
+  metricsUnavailable: boolean,
+  stepTimeUnavailable: boolean,
+): string[] => [
+  ...(metricsUnavailable
     ? [
         escapeCSV(
           "Note: candidate outcome columns (pass / feedback / PAIR submittals / first feedback / first PAIR external submittal) were unavailable for this export and show —",
         ),
       ]
-    : [];
+    : []),
+  // Without this, a failed read would be indistinguishable in the file from
+  // jobs that predate the Step 5 tracking, which show — too.
+  ...(stepTimeUnavailable
+    ? [
+        escapeCSV(
+          "Note: Step 5 time columns (Step 5 Active Time / Step 5 → Launch) were unavailable for this export and show —",
+        ),
+      ]
+    : []),
+];
 
 const lagCsvValue = (lag: number | null | undefined): string =>
   // Mirror the UI's lag chip: negative = unreliable posted date
@@ -397,6 +434,9 @@ const timelineCsvHeaders = (withRecruiters: boolean): string[] => [
   withEasternLabel("Added to PAIR"),
   withEasternLabel("Launched on PAIR"),
   "Lag (days)",
+  // Durations as on screen ("1h 22m"), like the Launch Report's CSV; no zone.
+  "Step 5 Active Time",
+  "Step 5 → Launch",
   "Active / Archived Jobs",
   "Archive Reason",
   "PAIR Status",
@@ -428,6 +468,8 @@ const timelineCsvRow = (job: JobTimelineEntry, withRecruiters: boolean): string[
   formatEasternDateTime(job.added_to_curate_at),
   formatEasternDateTime(job.curate_launched_at),
   lagCsvValue(job.posted_to_launch_days),
+  formatDuration(job.step5_active_minutes),
+  formatDuration(job.step5_to_launch_minutes),
   job.is_archived ? "Archived" : "Active",
   job.archive_reason || "",
   job.pair_status,
@@ -729,6 +771,7 @@ export default function AdminAnalyticsPage() {
   const timelineRows = data?.jobs_timeline || [];
   // Absent (an older backend) is not "unavailable"; only an explicit false is.
   const timelineMetricsUnavailable = data?.jobs_timeline_metrics_available === false;
+  const timelineStepTimeUnavailable = data?.jobs_timeline_step_time_available === false;
   // jobs_timeline_total counts every matching job server-side (no LIMIT);
   // timelineRows is capped, so a larger total means older jobs aren't loaded
   // and any date-range filter below is only searching the loaded window.
@@ -1009,7 +1052,7 @@ export default function AdminAnalyticsPage() {
       ),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      ...timelineCsvNote(timelineMetricsUnavailable),
+      ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable),
       toCsv(
         timelineCsvHeaders(false),
         (data.jobs_timeline || []).map((job) => timelineCsvRow(job, false)),
@@ -1044,7 +1087,7 @@ export default function AdminAnalyticsPage() {
     downloadCsv(
       [
         "--- JOB LAUNCH TIMELINE ---",
-        ...timelineCsvNote(timelineMetricsUnavailable),
+        ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable),
         toCsv(
           timelineCsvHeaders(true),
           filteredTimeline.map((job) => timelineCsvRow(job, true)),
@@ -2318,6 +2361,22 @@ export default function AdminAnalyticsPage() {
           </div>
         )}
 
+        {/* Separate from the candidate notice: either read can fail alone, and
+            without it a failed read looks like jobs that predate the tracking. */}
+        {!isLoading && timelineStepTimeUnavailable && timelineRows.length > 0 && (
+          <div
+            role="status"
+            className="flex items-start gap-2 px-6 py-2.5 border-b border-amber-200 bg-amber-50 text-[12.5px] font-medium text-amber-800"
+          >
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+            <span>
+              Step 5 time columns (Step 5 Active Time and Step 5 &rarr; Launch)
+              couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Reload
+              to try again.
+            </span>
+          </div>
+        )}
+
         <div className="overflow-auto max-h-[700px] relative">
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
@@ -2358,6 +2417,16 @@ export default function AdminAnalyticsPage() {
                   {withEasternLabel("Launched (PAIR)")}
                 </th>
                 <th rowSpan={2} className="py-3 px-6 text-center">Lag</th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Time recruiters had Step 5 (Source) open and in use on this job, summed across every visit and every recruiter. It pauses while the tab is hidden or after 5 minutes with no activity. Tracked since 09/23/2026; jobs worked earlier show —.">
+                    Step 5 Active Time
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Wall-clock time from the first time anyone opened Step 5 (Source) on this job to its first SUCCESSFUL launch: the first time a candidate was actually launched to PAIR (the Launch Report's PAIR Launch). That can be later than Launched (PAIR), which is the first launch click. Shows — until the job has launched successfully, and for jobs worked before tracking started on 09/23/2026.">
+                    Step 5 &rarr; Launch
+                  </HeaderHint>
+                </th>
                 <th rowSpan={2} className="py-3 px-6 text-center">
                   Active / Archived Jobs
                 </th>
@@ -2537,6 +2606,12 @@ export default function AdminAnalyticsPage() {
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderLagChip(job.posted_to_launch_days)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderDurationCell(job.step5_active_minutes)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderDurationCell(job.step5_to_launch_minutes)}
                       </td>
                       <td className="py-3.5 px-6 text-center">
                         {renderArchivedBadge(job)}

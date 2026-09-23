@@ -25,6 +25,7 @@ from fastapi import HTTPException
 
 from core.auth import UserIdentity
 from routers import recruiter_analytics as ra
+from services import job_step_time as jst
 from services.job_candidate_metrics import empty_metrics
 
 UTC = datetime.timezone.utc
@@ -671,6 +672,10 @@ def pg(monkeypatch):
         with conn.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(_SCHEMA_SQL)
+            # The router reads Step 5 time too; a missing table would fail
+            # that section and its rollback would drop every temp table above.
+            # The shipped DDL, as a temp table (tests/test_job_step_time.py).
+            cur.execute(jst.SCHEMA_STATEMENTS[0].replace("CREATE TABLE", "CREATE TEMP TABLE") + " ON COMMIT DROP")
         _seed(conn)
 
         class _Borrowed:
