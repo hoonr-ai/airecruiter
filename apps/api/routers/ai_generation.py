@@ -884,6 +884,20 @@ async def moderate_screening_questions(
         if verdict is None:
             return unchecked
         data = verdict.model_dump()
+
+        # LLMs occasionally hallucinate grammar errors and return the exact same 
+        # string (or differing only in punctuation/case) as the "correction".
+        # If this happens, drop the grammatical_error flag.
+        flags_list = data.get("flags") or []
+        corrected_q = (data.get("corrected_question") or "").strip()
+        if "grammatical_error" in flags_list and corrected_q:
+            def _normalize_for_cmp(s: str) -> str:
+                return "".join(c.lower() for c in s if c.isalnum())
+            if _normalize_for_cmp(corrected_q) == _normalize_for_cmp(text):
+                flags_list = [f for f in flags_list if f != "grammatical_error"]
+                data["flags"] = flags_list
+                data["corrected_question"] = ""
+
         # Keep ok and flags consistent regardless of model drift.
         data["ok"] = bool(data.get("ok")) and not data.get("flags")
         if data["ok"]:
