@@ -1926,9 +1926,39 @@ class UnifiedCandidateSearch:
                                         # for the role-anchor check when the
                                         # profile supplies a real job title.
                                         _headline = str(cand.get("title") or "")
-                                        cand.update(self._extract_linkedin_profile_data(full_profile))
+                                        profile_data = self._extract_linkedin_profile_data(full_profile)
+                                        cand.update(profile_data)
                                         if _headline and not cand.get("headline"):
                                             cand["headline"] = _headline
+                                        # Fix: LinkedIn Recruiter search rows for 3rd-degree
+                                        # connections omit the candidate name; _resolve_candidate_name
+                                        # falls back to the headline (e.g. "Supply Chain Analyst | …")
+                                        # or fallback strings (e.g. "Professional at Company").
+                                        # The full profile payload reliably has the real name. We should
+                                        # always prefer it over the search row's name, unless the full
+                                        # profile name is an out-of-network generic placeholder.
+                                        _profile_name = str(profile_data.get("_profile_name") or "").strip()
+                                        if _profile_name:
+                                            _current_name = str(cand.get("name") or "")
+                                            _is_generic = _profile_name.lower() in (
+                                                "linkedin member",
+                                                "linkedin user",
+                                                "linkedin profile",
+                                            )
+                                            if not _is_generic and _profile_name != _current_name:
+                                                logger.info(
+                                                    "unipile_name_corrected provider_id=%s old=%r new=%r",
+                                                    provider_id,
+                                                    _current_name[:60],
+                                                    _profile_name,
+                                                )
+                                                cand["name"] = _profile_name
+                                                cand["firstName"] = str(profile_data.get("_profile_first_name") or "").strip()
+                                                cand["lastName"] = str(profile_data.get("_profile_last_name") or "").strip()
+                                        # Clean up internal helper keys — not needed downstream.
+                                        cand.pop("_profile_name", None)
+                                        cand.pop("_profile_first_name", None)
+                                        cand.pop("_profile_last_name", None)
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
                             # After enrichment, run the same role-anchor check.
@@ -7331,6 +7361,23 @@ class UnifiedCandidateSearch:
                 _public = f"https://www.linkedin.com/in/{_ident}"
         if "linkedin.com/in/" in _public.lower():
             extracted["profile_url"] = _public
+
+        # Extract the candidate's real name from the full profile. LinkedIn
+        # Recruiter search rows for 3rd-degree connections omit `name`,
+        # `first_name`, and `public_identifier`, so _resolve_candidate_name
+        # falls back to the headline (e.g. "Supply Chain Analyst | Logistics |…").
+        # The full profile payload always contains the real first/last name.
+        _first = str(profile.get("first_name") or profile.get("firstName") or "").strip()
+        _last = str(profile.get("last_name") or profile.get("lastName") or "").strip()
+        _full = str(profile.get("name") or profile.get("full_name") or "").strip()
+        if _full:
+            extracted["_profile_name"] = _full
+            extracted["_profile_first_name"] = _first or _full.split()[0]
+            extracted["_profile_last_name"] = _last or (_full.split()[-1] if len(_full.split()) > 1 else "")
+        elif _first or _last:
+            extracted["_profile_name"] = f"{_first} {_last}".strip()
+            extracted["_profile_first_name"] = _first
+            extracted["_profile_last_name"] = _last
 
         # Positive open-to-work signal from the profile itself; absence is
         # left unset so the Apify resolver still runs for the row.
