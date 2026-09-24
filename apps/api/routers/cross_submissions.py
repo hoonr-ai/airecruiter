@@ -71,6 +71,7 @@ async def run_cross_submissions(
         _build_resume_matching_criteria,
         _compute_resume_matching,
         _passes_step5_role_gate,
+        _warm_resume_matching,
     )
 
     try:
@@ -80,6 +81,7 @@ async def run_cross_submissions(
             criteria,
             _compute_resume_matching,
             prescreen=_passes_step5_role_gate,
+            warmer=_warm_resume_matching,
             force=True,
             send_email=bool(body.send_email),
             app_base_url=_frontend_origin(request),
