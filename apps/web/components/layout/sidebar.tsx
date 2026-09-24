@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -22,15 +22,17 @@ export function Sidebar() {
             ? [
                   { label: "Candidates", href: "/candidates", icon: Users, disabled: false },
                   { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
+                  { label: "Recruiter Analytics", href: "/admin/recruiter-analytics", icon: UserCheck, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
                   { label: "Teams", href: "/admin/teams", icon: UsersRound, disabled: false },
                   { label: "No Contact List", href: "/admin/no-contact", icon: ShieldOff, disabled: false },
               ]
             : []),
-        // Team leads get both pages auto-scoped to their team by the backend.
+        // Team leads get these pages auto-scoped to their team by the backend.
         ...(!isAdmin && isTeamLead
             ? [
                   { label: "Team Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
+                  { label: "Recruiter Analytics", href: "/admin/recruiter-analytics", icon: UserCheck, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
               ]
             : []),

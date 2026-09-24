@@ -796,6 +796,10 @@ def _merge_deterministic_grammar_verdict(data: Dict[str, Any], text: str) -> Dic
     }
 
 
+def _normalize_for_cmp(s: str) -> str:
+    return "".join(c.lower() for c in s if c.isalnum())
+
+
 @router.post("/screening-questions/moderate")
 async def moderate_screening_questions(
     req: ModerateQuestionsRequest,
@@ -842,9 +846,9 @@ async def moderate_screening_questions(
         # so it must be part of the key — a verdict for one job's context must
         # not serve another job for 7 days.
         expected_answer_text = (item.expected_answer or "").strip()[:1000]
-        # v3 adds corrected_question — bumped so pre-existing cache entries
-        # (which lack that field) don't mask the correction for 7 days.
-        cache_key = _llm_cache.make_key("q_moderation", 3, model, job_title, text, expected_answer_text)
+        # v4 filters out LLM grammatical_error hallucinations where corrected
+        # question is identical to original
+        cache_key = _llm_cache.make_key("q_moderation", 4, model, job_title, text, expected_answer_text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
@@ -884,8 +888,20 @@ async def moderate_screening_questions(
         if verdict is None:
             return unchecked
         data = verdict.model_dump()
+
+        # LLMs occasionally hallucinate grammar errors and return the exact same
+        # string (or differing only in punctuation/case) as the "correction".
+        # If this happens, drop the grammatical_error flag.
+        flags_list = data.get("flags") or []
+        corrected_q = (data.get("corrected_question") or "").strip()
+        if "grammatical_error" in flags_list and corrected_q:
+            if _normalize_for_cmp(corrected_q) == _normalize_for_cmp(text):
+                flags_list = [f for f in flags_list if f != "grammatical_error"]
+                data["flags"] = flags_list
+                data["corrected_question"] = ""
+
         # Keep ok and flags consistent regardless of model drift.
-        data["ok"] = bool(data.get("ok")) and not data.get("flags")
+        data["ok"] = not bool(data.get("flags"))
         if data["ok"]:
             data["reason"] = ""
             data["corrected_question"] = ""
