@@ -207,6 +207,29 @@ def test_create_job_application_with_resume_payload():
     call = _only(calls, "/apiv2/jobdiva/CreateJobApplicationWithResume")
     _assert_contract("/apiv2/jobdiva/CreateJobApplicationWithResume", call["json"])
     assert "candidateid" not in call["json"]
+    # Unconfigured: the legacy value, so nothing changes for tenants without a PAIR Resume Source.
+    assert call["json"]["resumesource"] == 0
+
+
+def test_pair_resume_source_is_schema_exact_on_both_application_endpoints(monkeypatch):
+    """The provenance marker rides in `resumesource`, a field BOTH schemas define
+    (CreateJobApplicationDef lists it as optional) -- so JobDiva keeps it."""
+    import services.jobdiva as jd
+
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_ID", 12)
+    monkeypatch.setattr(jd, "JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL", "LinkedIn-Exa:34")
+
+    calls = _capture(lambda s: s.create_job_application_with_resume(
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r", filename="x.txt", origin_source="LinkedIn-Exa",
+    ))
+    call = _only(calls, "/apiv2/jobdiva/CreateJobApplicationWithResume")
+    _assert_contract("/apiv2/jobdiva/CreateJobApplicationWithResume", call["json"])
+    assert call["json"]["resumesource"] == 34
+
+    calls = _capture(lambda s: s.link_candidate_to_job("462058065251", str(JOB_ID), 12))
+    call = _only(calls, "/apiv2/jobdiva/createJobApplication")
+    _assert_contract("/apiv2/jobdiva/createJobApplication", call["json"])
+    assert call["json"] == {"candidateid": 462058065251, "jobid": JOB_ID, "resumesource": 12}
 
 
 def test_update_candidate_profile_payload():

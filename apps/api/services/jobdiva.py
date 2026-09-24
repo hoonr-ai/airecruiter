@@ -15,7 +15,10 @@ from sqlalchemy import text
 from core import (
     JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, JOBDIVA_USERNAME,
     JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH,
-    JOBDIVA_PAIR_RECRUITER_ID
+    JOBDIVA_PAIR_RECRUITER_ID,
+    JOBDIVA_PAIR_RESUME_SOURCE_ID,
+    JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL,
+    JOBDIVA_PAIR_RESUME_SOURCE_NAMES,
 )
 from services.location_type import resolve_location_type
 
@@ -426,6 +429,188 @@ def jobdiva_profile_id(
     if str(declared_jobdiva_candidate_id or "").strip() == cid:
         return cid
     return None
+
+
+# ---------------------------------------------------------------------------
+# Provenance: "where PAIR found this person" vs "this person is in JobDiva now"
+# ---------------------------------------------------------------------------
+# `sourced_candidates.source` is the ORIGIN channel (LinkedIn-Exa, Dice,
+# JobDiva-Applicants, ...): written once when the row is first saved and never
+# changed by the provisioner, the applicant sync or a merge. JobDiva linkage is
+# separate state in `data`:
+#
+#   jobdiva_candidate_id        the profile id (person-level)
+#   jobdiva_profile_origin      "pair"  -- PAIR minted the profile on Launch PAIR
+#                               "jobdiva" -- the profile pre-existed in JobDiva
+#   jobdiva_application_origin  "pair"  -- PAIR recorded the application on this job
+#                               "organic" -- the person applied in JobDiva themselves
+#   jobdiva_provisioned_at / jobdiva_provisioned_from  (job-level bookkeeping)
+#
+# Every application PAIR records also carries a configurable Resume Source id so
+# JobDiva itself can tell PAIR's applications from organic ones.
+
+def _parse_resume_source_channel_map(raw: Any) -> Dict[str, int]:
+    """``"LinkedIn-Exa:12,Dice:14"`` (or a JSON object) -> ``{"linkedin-exa": 12, "dice": 14}``."""
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return {}
+    pairs: List[Tuple[str, Any]] = []
+    if text_value.startswith("{"):
+        try:
+            parsed = json.loads(text_value)
+            if isinstance(parsed, dict):
+                pairs = list(parsed.items())
+        except ValueError:
+            pairs = []
+    else:
+        for chunk in re.split(r"[,;]", text_value):
+            if ":" in chunk:
+                label, _, value = chunk.partition(":")
+                pairs.append((label, value))
+            elif "=" in chunk:
+                label, _, value = chunk.partition("=")
+                pairs.append((label, value))
+    out: Dict[str, int] = {}
+    for label, value in pairs:
+        key = str(label or "").strip().lower()
+        try:
+            rs_id = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if key and rs_id > 0:
+            out[key] = rs_id
+    return out
+
+
+def jobdiva_pair_resume_source_id(origin_source: Optional[str] = None) -> int:
+    """JobDiva Resume Source id to file a PAIR-recorded application under.
+
+    The per-channel map (JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL) wins when it
+    names the origin label -- exact match first, then the label's family (the
+    part before the first "-", so "LinkedIn" covers "LinkedIn-Exa"). Otherwise
+    JOBDIVA_PAIR_RESUME_SOURCE_ID. 0 means unconfigured: callers keep the legacy
+    payloads (resumesource 0 on create, omitted on attach).
+    """
+    label = str(origin_source or "").strip().lower()
+    by_channel = _parse_resume_source_channel_map(JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL)
+    if label and by_channel:
+        if label in by_channel:
+            return by_channel[label]
+        family = label.split("-", 1)[0]
+        if family in by_channel:
+            return by_channel[family]
+    try:
+        return max(0, int(JOBDIVA_PAIR_RESUME_SOURCE_ID or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _pair_resume_source_ids() -> set:
+    ids = set(_parse_resume_source_channel_map(JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL).values())
+    base = jobdiva_pair_resume_source_id()
+    if base > 0:
+        ids.add(base)
+    return ids
+
+
+def _pair_resume_source_names() -> set:
+    return {
+        part.strip().lower()
+        for part in str(JOBDIVA_PAIR_RESUME_SOURCE_NAMES or "").split(",")
+        if part.strip()
+    }
+
+
+# JobDiva BI applicant rows are not in Swagger, so the provenance hints are read
+# under every plausible spelling (get_field matches case- and punctuation-
+# insensitively: RESUMESOURCE / resumeSource / resume_source are one key).
+#
+# Only APPLICATION-level fields are read. Candidate-level ones (a profile's
+# SOURCE / OWNERID) are deliberately left out: a profile PAIR minted carries
+# PAIR's source and owner for life, so reading them would make the sync treat
+# that person's later, genuine application to ANOTHER job as PAIR-filed and
+# skip it. Losing a real applicant is worse than the twin the stamp match
+# already prevents, so an ambiguous signal counts as "not PAIR".
+_APPLICANT_RESUME_SOURCE_KEYS = [
+    "resumeSourceName", "resumeSource", "resumeSourceId", "applicationSource",
+]
+_APPLICANT_RECRUITER_KEYS = [
+    # `recruiterid` is the field PAIR sets on the application itself.
+    "recruiterId", "submittedBy", "submittedById", "createdBy", "createdById", "enteredBy",
+]
+
+
+def jobdiva_application_meta(record: Dict[str, Any]) -> Dict[str, str]:
+    """Provenance hints a JobDiva applicant record may carry: the Resume Source the
+    application was filed under and the recruiter/user who recorded it.
+
+    Best effort -- only present, non-blank values are returned, ``{}`` otherwise.
+    Consumers must treat an empty dict as "unknown", never as "organic".
+    """
+    meta: Dict[str, str] = {}
+    if not isinstance(record, dict):
+        return meta
+    resume_source = get_field(record, _APPLICANT_RESUME_SOURCE_KEYS)
+    if resume_source not in (None, "", [], {}):
+        meta["resume_source"] = str(resume_source).strip()
+    recruiter = get_field(record, _APPLICANT_RECRUITER_KEYS)
+    if recruiter not in (None, "", [], {}):
+        meta["recruiter_id"] = str(recruiter).strip()
+    return meta
+
+
+def jobdiva_application_created_by_pair(meta: Optional[Dict[str, Any]]) -> bool:
+    """True when the applicant record's hints say PAIR recorded this application:
+    its resume source is one of PAIR's configured Resume Source ids or names, or
+    the recording recruiter is the PAIR recruiter. False when the hints are
+    absent or nothing is configured -- unknown is never "created by PAIR".
+    """
+    if not isinstance(meta, dict) or not meta:
+        return False
+    resume_source = str(meta.get("resume_source") or "").strip()
+    if resume_source:
+        if resume_source.isdigit() and int(resume_source) in _pair_resume_source_ids():
+            return True
+        if resume_source.lower() in _pair_resume_source_names():
+            return True
+    recruiter = str(meta.get("recruiter_id") or "").strip()
+    try:
+        pair_recruiter = int(JOBDIVA_PAIR_RECRUITER_ID or 0)
+    except (TypeError, ValueError):
+        pair_recruiter = 0
+    if recruiter.isdigit() and pair_recruiter > 0 and int(recruiter) == pair_recruiter:
+        return True
+    return False
+
+
+class JobDivaApplicationOutcome(tuple):
+    """``(success, jobdiva_candidate_id)`` -- unpacks exactly like the historical
+    2-tuple -- plus how the application was recorded, for provenance stamping:
+
+    * ``path``: ``"linked"`` (createJobApplication on a known or looked-up
+      profile), ``"created"`` (CreateJobApplicationWithResume) or ``"failed"``.
+    * ``found_via_search``: the profile id came from searchCandidateProfile, not
+      from the caller (linked) or from JobDiva's create response (created: the
+      response carried no id and the lookup recovered one, so whether PAIR minted
+      that profile is unknown).
+    """
+
+    def __new__(cls, success: bool, candidate_id: Any, *, path: str = "failed", found_via_search: bool = False):
+        obj = super().__new__(cls, (bool(success), candidate_id))
+        obj.path = path
+        obj.found_via_search = bool(found_via_search)
+        return obj
+
+    @property
+    def success(self) -> bool:
+        return self[0]
+
+    @property
+    def candidate_id(self) -> Any:
+        return self[1]
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"JobDivaApplicationOutcome(success={self[0]}, candidate_id={self[1]!r}, path={self.path!r}, found_via_search={self.found_via_search})"
 
 
 def _get_candidate_email(data: Dict[str, Any]) -> str:
@@ -1112,11 +1297,16 @@ class JobDivaService:
                         work_state = get_field(c, ["workState", "WORKSTATE"]) or ""
                         work_location_str = ", ".join(p for p in [work_city, work_state] if p).strip()
                         home_location_str = ", ".join(p for p in [home_city, home_state] if p).strip()
+                        application_meta = jobdiva_application_meta(c)
 
                         jd_results.append({
                             "candidate_id": str(candidate_id),  # Add this field for consistency
                             "id": str(candidate_id),
                             **jobdiva_profile_stamp(candidate_id),
+                            # Who filed this application (resume source / recruiter),
+                            # when JobDiva's BI row says. The applicant sync uses it to
+                            # recognise PAIR's own applications whose local link is lost.
+                            **({"jobdiva_application_meta": application_meta} if application_meta else {}),
                             "name": full_name,
                             "first_name": first_name,  # Use underscore format
                             "last_name": last_name,    # Use underscore format
@@ -3688,10 +3878,12 @@ class JobDivaService:
                 get_field(candidate_detail, ["LASTNAME", "lastName"]) or "")
         full_name = f"{first_name} {last_name}".strip() or applicant.get("name", "") or candidate_detail.get("name", "") or "Professional Candidate"
         
+        application_meta = jobdiva_application_meta(applicant)
         return {
             "jobdiva_id": applicant.get("JOBID") or candidate_detail.get("JOBID") or "",
             "candidate_id": candidate_id,
             **jobdiva_profile_stamp(candidate_id),
+            **({"jobdiva_application_meta": application_meta} if application_meta else {}),
             "source": "JobDiva-Applicants" if candidate_type == "job_applicant" else "JobDiva-TalentSearch",
             "name": full_name,
             "firstName": first_name,
@@ -4827,7 +5019,9 @@ class JobDivaService:
         except (TypeError, ValueError):
             return 0
 
-    async def link_candidate_to_job(self, candidate_id: Any, job_id: Any) -> bool:
+    async def link_candidate_to_job(
+        self, candidate_id: Any, job_id: Any, resume_source_id: Optional[int] = None
+    ) -> bool:
         """Attach an EXISTING JobDiva profile to a job (apiv2/jobdiva/createJobApplication).
 
         This is the one JobDiva call that records "candidate applied to job" for
@@ -4836,6 +5030,11 @@ class JobDivaService:
         resumesource, and it is structurally incapable of creating a profile --
         exactly the property the provisioner needs for people sourced from
         JobDiva, who must never get a second profile.
+
+        ``resume_source_id`` (> 0) is sent as ``resumesource`` so the application
+        is filed under PAIR's Resume Source in JobDiva -- the marker that lets
+        JobDiva, and the applicant sync, tell a PAIR-recorded application from an
+        organic one. Omitted when unconfigured (legacy payload).
 
         Returns True when JobDiva acknowledged the application. JobDiva documents
         the response as a boolean, so a 2xx whose body is literally ``false`` is
@@ -4857,7 +5056,13 @@ class JobDivaService:
             return False
 
         url = f"{self.api_url}/apiv2/jobdiva/createJobApplication"
-        payload = {"candidateid": cid, "jobid": int(resolved_job_id)}
+        payload: Dict[str, Any] = {"candidateid": cid, "jobid": int(resolved_job_id)}
+        try:
+            resume_source = int(resume_source_id or 0)
+        except (TypeError, ValueError):
+            resume_source = 0
+        if resume_source > 0:
+            payload["resumesource"] = resume_source
         try:
             for attempt in range(2):
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -4912,7 +5117,8 @@ class JobDivaService:
         email: str = "",
         phone: str = "",
         allow_profile_creation: bool = True,
-    ) -> tuple:
+        origin_source: str = "",
+    ) -> "JobDivaApplicationOutcome":
         """Record a job application for a candidate, creating a JobDiva profile
         ONLY when nobody in JobDiva matches.
 
@@ -4946,12 +5152,21 @@ class JobDivaService:
         wall behind the link-first logic above, so a future refactor of either
         side cannot reopen the duplicate-minting path silently.
 
-        Returns ``(success, jobdiva_candidate_id)``: on the link path the linked id
-        (str); on the create path the int JobDiva returned (None if it sent no id).
+        ``origin_source`` is the row's origin channel label (LinkedIn-Exa, Dice,
+        JobDiva-TalentSearch, ...). It selects the JobDiva Resume Source id both
+        application calls are filed under (``jobdiva_pair_resume_source_id``), so
+        JobDiva records that PAIR -- and from which channel -- made the application.
+
+        Returns a ``JobDivaApplicationOutcome``: unpacks as ``(success,
+        jobdiva_candidate_id)`` -- on the link path the linked id (str); on the
+        create path the int JobDiva returned, or the id ``searchCandidateProfile``
+        recovers when the create response carried none (None if neither) -- and
+        carries ``.path`` / ``.found_via_search`` for provenance stamping.
         """
+        resume_source_id = jobdiva_pair_resume_source_id(origin_source)
         token = await self.authenticate()
         if not token:
-            return False, None
+            return JobDivaApplicationOutcome(False, None)
 
         linked_id = str(candidate_id).strip() if candidate_id is not None else ""
         if linked_id and not linked_id.isdigit():
@@ -4961,7 +5176,7 @@ class JobDivaService:
             logger.error(
                 f"❌ create_job_application_with_resume: refusing non-numeric candidate_id {candidate_id!r}"
             )
-            return False, None
+            return JobDivaApplicationOutcome(False, None)
 
         # Check if the person already exists to avoid a duplicate/Unknown-Unknown profile.
         found_via_search = False
@@ -4972,9 +5187,11 @@ class JobDivaService:
                 found_via_search = True
 
         if linked_id:
-            if await self.link_candidate_to_job(linked_id, job_id):
+            if await self.link_candidate_to_job(linked_id, job_id, resume_source_id):
                 logger.info(f"✅ JobDiva application linked → candidateId={linked_id}, job={job_id}")
-                return True, linked_id
+                return JobDivaApplicationOutcome(
+                    True, linked_id, path="linked", found_via_search=found_via_search
+                )
 
             # Linking failed. Only a *different* profile (stale id after a JobDiva
             # merge) justifies another attempt -- never a brand-new profile.
@@ -4985,14 +5202,14 @@ class JobDivaService:
                     logger.warning(
                         f"⚠️ Linked candidateId={linked_id} refused — retrying with email/phone-matched id={alt_id}"
                     )
-                    if await self.link_candidate_to_job(alt_id, job_id):
-                        return True, alt_id
+                    if await self.link_candidate_to_job(alt_id, job_id, resume_source_id):
+                        return JobDivaApplicationOutcome(True, alt_id, path="linked", found_via_search=True)
             logger.error(
                 f"❌ Could not attach job {job_id} to existing JobDiva profile {linked_id}; "
                 f"NOT creating a new profile (it would duplicate the person). "
                 f"Retry later via /engage/re-provision."
             )
-            return False, None
+            return JobDivaApplicationOutcome(False, None)
 
         # ── Nobody known in JobDiva: create a profile from the resume text.
         # This is the ONLY path that mints a JobDiva profile.
@@ -5003,7 +5220,7 @@ class JobDivaService:
                 f"phone={phone or '-'}): no link id was resolved and the lookup found nobody. "
                 f"Fix the row's jobdiva_candidate_id / source instead of minting a duplicate."
             )
-            return False, None
+            return JobDivaApplicationOutcome(False, None)
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
         url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
         # Resolve to the real numeric JobDiva job id (numeric, reference 26-06182,
@@ -5025,6 +5242,8 @@ class JobDivaService:
             resume_text = f"{header_text}\n\n================================\n\n{resume_text}"
 
         # Exactly the UploadResumeAndApplyJob schema -- no candidateid (see docstring).
+        # `resumesource` is PAIR's configured Resume Source for this origin channel
+        # (0 when unconfigured): the JobDiva-side record of who filed the application.
         json_payload = {
             "filename": filename,
             "textfile": resume_text,
@@ -5032,7 +5251,7 @@ class JobDivaService:
             "jobid": int(resolved_job_id or 0),
             "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
             "resumeDate": resume_date,
-            "resumesource": 0
+            "resumesource": int(resume_source_id or 0),
         }
         try:
             status, res_body = None, ""
@@ -5052,7 +5271,7 @@ class JobDivaService:
                     logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
                     token = await self.authenticate(force_refresh=True)
                     if not token:
-                        return False, None
+                        return JobDivaApplicationOutcome(False, None)
                     continue
 
                 logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
@@ -5073,26 +5292,43 @@ class JobDivaService:
                     except Exception:
                         new_cid = None
 
+                recovered_via_search = False
                 if not new_cid:
                     logger.warning(
                         f"⚠️ CreateJobApplicationWithResume returned no candidate id for job={job_id} "
                         f"(body={res_body[:100]!r}); a profile may exist that we cannot link to."
                     )
+                    # Without the id the row stays unlinked forever: the applicant
+                    # sync then cannot match this person and re-imports them as a
+                    # brand-new applicant. Recover the id from the profile JobDiva
+                    # just parsed out of our resume header (same email / phone).
+                    if email or phone:
+                        recovered = await self.search_candidate_profile(email, first_name, last_name, phone)
+                        if recovered:
+                            new_cid = recovered
+                            recovered_via_search = True
+                            logger.info(
+                                f"🔁 CreateJobApplicationWithResume: recovered candidateId={new_cid} "
+                                f"via searchCandidateProfile for job={job_id}"
+                            )
                 logger.info(f"✅ JobDiva profile created → candidateId={new_cid}, job={job_id}")
 
                 # We injected the name into the resume header, so JobDiva's parser should
                 # extract it perfectly. We still call _update_candidate_name instantly
                 # just to guarantee the exact spelling and apply any missing fields.
-                # Only here: we edit the profiles we create, never a linked one.
-                if new_cid and (first_name or last_name or email or phone):
+                # Only here: we edit the profiles we create, never a linked one -- a
+                # recovered id may belong to a pre-existing profile, so it is left alone.
+                if new_cid and not recovered_via_search and (first_name or last_name or email or phone):
                     await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
-                return True, new_cid
+                return JobDivaApplicationOutcome(
+                    True, new_cid, path="created", found_via_search=recovered_via_search
+                )
             else:
                 logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
         except Exception as e:
             logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
-        return False, None
+        return JobDivaApplicationOutcome(False, None)
 
     async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "", phone: str = "") -> bool:
         """

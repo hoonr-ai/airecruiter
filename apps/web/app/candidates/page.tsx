@@ -488,8 +488,9 @@ export default function GlobalCandidatesPage() {
       const submittedAt = new Date().toISOString();
       try {
         const c = candidates.find(cand => cand.id === actionCandidateId);
-        if (!c?.jobdiva_id) throw new Error("No job ID found");
-        await api.candidates.feedback(c.jobdiva_id, String(actionCandidateId), {
+        const jobRef = c?.jobdiva_id || c?.job_id;
+        if (!jobRef) throw new Error("No job ID found");
+        await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Submit',
           submission_type: submissionData.submission_type,
           manager_email: submissionData.manager_email,
@@ -514,8 +515,9 @@ export default function GlobalCandidatesPage() {
       const rejectedAt = new Date().toISOString();
       try {
         const c = candidates.find(cand => cand.id === actionCandidateId);
-        if (!c?.jobdiva_id) throw new Error("No job ID found");
-        await api.candidates.feedback(c.jobdiva_id, String(actionCandidateId), {
+        const jobRef = c?.jobdiva_id || c?.job_id;
+        if (!jobRef) throw new Error("No job ID found");
+        await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Reject',
           reason: trimmedReason
         });
@@ -537,7 +539,7 @@ export default function GlobalCandidatesPage() {
     setSyncingCandidateId(candidateId);
     try {
       if (!jobDivaId) throw new Error("No job ID found");
-      await api.candidates.feedback(jobDivaId, String(candidateId), { feedback_type: 'Unreachable' });
+      await api.candidates.feedback(String(jobDivaId), String(candidateId), { feedback_type: 'Unreachable' });
       setFeedbacks(prev => ({ ...prev, [candidateId]: 'Unreachable' }));
       setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
       setFeedbackReasons(prev => {

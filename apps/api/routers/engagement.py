@@ -23,6 +23,7 @@ import httpx
 import re
 from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
+from services.pair_auth import get_pair_auth_headers
 
 from core.email import (
     notify_pair_launched,
@@ -1242,10 +1243,7 @@ async def _post_to_pairbot(
     """
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
-    headers = {"Content-Type": "application/json"}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers = get_pair_auth_headers(json_content_type=True)
     for attempt in range(max_attempts):
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -1337,10 +1335,7 @@ async def _wait_for_pairbot_creation(
     gaps so a quiet-but-alive stream is not closed before timeout_seconds.
     """
     stream_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
-    headers: Dict[str, str] = {}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers: Dict[str, str] = get_pair_auth_headers()
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
@@ -1436,27 +1431,58 @@ async def _wait_for_pairbot_creation(
 _PAIR_SYNTHETIC_EMAIL_DOMAIN = "@no-email.jobdiva.local"
 
 
-def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[str, Any]) -> None:
-    """Brief write to stamp jobdiva_candidate_id into sourced_candidates.data.
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    Split out of _provision_candidate_to_jobdiva so the pool slot is held only
-    for the UPDATE itself, never across the multi-second JobDiva HTTP calls.
 
-    ``cand_data`` MUST be the delta to merge, never a whole row blob. The UPDATE
-    has no ``jobdiva_id`` predicate — correct for the id, since a JobDiva profile
-    is person-level and the id is valid on every job's row for that person — so
-    passing a full blob would splat one job's match_score / engage_status /
-    enhanced_info onto every other job's row for the same candidate. That in turn
-    trips ``/engage/launch`` idempotency (``engage_status NOT IN ('', 'failed')``)
-    and permanently silences outreach on jobs the person was never contacted for.
+def _persist_jobdiva_link_state(
+    candidate_id_internal: str,
+    job_keys: List[str],
+    *,
+    person_delta: Optional[Dict[str, Any]] = None,
+    job_delta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Stamp JobDiva linkage onto sourced_candidates.data, at the right scope.
+
+    Provenance is kept OUT of the `source` column (the origin channel, written
+    once) and lives in `data` -- see services/jobdiva.py, "Provenance":
+
+    * ``person_delta`` -- facts about the person's JobDiva profile, valid on
+      every job's row for this candidate_id: ``jobdiva_candidate_id`` and
+      ``jobdiva_profile_origin`` ("pair" when PAIR minted the profile, "jobdiva"
+      when it pre-existed). Written without a job predicate, like the id always was.
+    * ``job_delta`` -- facts about THIS job's application:
+      ``jobdiva_application_origin`` ("pair" / "organic"), ``jobdiva_provisioned_at``,
+      ``jobdiva_provisioned_from``. Scoped to the job's rows, because an
+      application exists per job -- splatting it onto another job's row would
+      claim PAIR applied the person there too.
+
+    Both are merge deltas (``||``), never whole blobs. The person-level UPDATE
+    has no ``jobdiva_id`` predicate -- correct for the profile facts, which hold
+    on every job's row for that person -- so a whole-row blob here would splat
+    one job's match_score / engage_status / enhanced_info onto every other job's
+    row for the same candidate. That in turn trips ``/engage/launch`` idempotency
+    (``engage_status NOT IN ('', 'failed')``) and permanently silences outreach
+    on jobs the person was never contacted for. The pool slot is held only for
+    the UPDATEs themselves, never across the JobDiva HTTP calls.
     """
+    if not person_delta and not job_delta:
+        return
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE sourced_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE candidate_id = %s",
-                (json.dumps(cand_data), candidate_id_internal),
-            )
+            if person_delta:
+                cur.execute(
+                    "UPDATE sourced_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb "
+                    "WHERE candidate_id = %s",
+                    (json.dumps(person_delta, default=str), candidate_id_internal),
+                )
+            if job_delta and job_keys:
+                cur.execute(
+                    "UPDATE sourced_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb "
+                    "WHERE candidate_id = %s AND jobdiva_id = ANY(%s)",
+                    (json.dumps(job_delta, default=str), candidate_id_internal, [str(k) for k in job_keys]),
+                )
         conn.commit()
     finally:
         conn.close()
@@ -1625,6 +1651,13 @@ async def _provision_batch_to_jobdiva(
         if missing:
             logger.warning(f"⚠️ [{label}] {missing}/{len(candidate_ids)} candidate IDs not found in sourced_candidates for job {ref_job_id}")
 
+        # Every jobdiva_id spelling the row load above accepts -- the job-level
+        # provenance stamps below must land on exactly those rows.
+        job_row_keys: List[str] = []
+        for key in (job_id_internal, numeric_job_id, ref_job_id, "unknown"):
+            if key and str(key) not in job_row_keys:
+                job_row_keys.append(str(key))
+
         # ── Phase 3: Fetch existing applicants from JobDiva ONCE
         jd_job_id = numeric_job_id or ref_job_id
         existing_applicants: List[Dict[str, Any]] = []
@@ -1757,10 +1790,29 @@ async def _provision_batch_to_jobdiva(
                         or existing_emails.get(email_lower, "")
                         or existing_phones.get(phone_norm, "")
                     )
+                    person_delta: Dict[str, Any] = {}
+                    job_delta: Dict[str, Any] = {}
                     if matched_jd_id and existing_jd_id != str(matched_jd_id):
                         cand_data["jobdiva_candidate_id"] = matched_jd_id
-                        _persist_jobdiva_candidate_id(
-                            cand_id, {"jobdiva_candidate_id": matched_jd_id}
+                        person_delta["jobdiva_candidate_id"] = matched_jd_id
+                    # Provenance we can assert here: a JobDiva-sourced person's
+                    # profile pre-existed, and a JobDiva-Applicants row's
+                    # application is organic by definition. Anything else (an
+                    # Exa row already listed as an applicant) stays as stamped --
+                    # PAIR may have filed that application on an earlier launch.
+                    if own_jd_id and not cand_data.get("jobdiva_profile_origin"):
+                        person_delta["jobdiva_profile_origin"] = "jobdiva"
+                    if (
+                        not cand_data.get("jobdiva_application_origin")
+                        and str(row.get("source") or "").strip().lower() == "jobdiva-applicants"
+                    ):
+                        job_delta["jobdiva_application_origin"] = "organic"
+                    if person_delta or job_delta:
+                        cand_data.update(person_delta)
+                        cand_data.update(job_delta)
+                        _persist_jobdiva_link_state(
+                            cand_id, job_row_keys,
+                            person_delta=person_delta or None, job_delta=job_delta or None,
                         )
                     return "skipped"
 
@@ -1799,7 +1851,7 @@ async def _provision_batch_to_jobdiva(
                 # JobDiva by email/phone either) reaches CreateJobApplicationWithResume,
                 # the call that parses the resume into a NEW profile.
                 try:
-                    success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
+                    outcome = await jobdiva_service.create_job_application_with_resume(
                         candidate_id=link_candidate_id,
                         job_id=jd_job_id,
                         resume_text=resume_text,
@@ -1809,10 +1861,25 @@ async def _provision_batch_to_jobdiva(
                         email=email or "",
                         phone=phone or "",
                         allow_profile_creation=link_candidate_id is None,
+                        # Origin channel -> JobDiva Resume Source id, so JobDiva
+                        # itself records that PAIR filed this application.
+                        origin_source=str(row.get("source") or ""),
                     )
+                    success, new_jd_id = outcome
                 except Exception as exc:
                     logger.error(f"❌ [{label}] Exception for {cand_id}: {exc}", exc_info=True)
                     return "failed"
+
+                # How the application was recorded (JobDivaApplicationOutcome);
+                # a bare tuple (older fakes) is read by which endpoint must have run.
+                outcome_path = getattr(outcome, "path", None) or ("linked" if link_candidate_id else "created")
+                outcome_found_via_search = bool(getattr(outcome, "found_via_search", False))
+                # This job's application was recorded by PAIR, whichever endpoint did it.
+                job_delta = {
+                    "jobdiva_application_origin": "pair",
+                    "jobdiva_provisioned_at": _utc_now_iso(),
+                    "jobdiva_provisioned_from": str(row.get("source") or ""),
+                }
 
                 if success and new_jd_id:
                     persisted_id = str(new_jd_id)
@@ -1832,9 +1899,21 @@ async def _provision_batch_to_jobdiva(
                         persisted_id = own_jd_id
                         status = "duplicate_suspected"
                     logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {persisted_id}")
-                    cand_data["jobdiva_candidate_id"] = persisted_id
-                    _persist_jobdiva_candidate_id(
-                        cand_id, {"jobdiva_candidate_id": persisted_id}
+                    person_delta = {"jobdiva_candidate_id": persisted_id}
+                    # Who minted the profile: a JobDiva-sourced person's profile
+                    # pre-existed; the create endpoint answering with an id means
+                    # PAIR minted it (a recovered/looked-up id is a pre-existing
+                    # profile or unknown, so only an absent stamp is filled).
+                    if own_jd_id:
+                        person_delta["jobdiva_profile_origin"] = "jobdiva"
+                    elif outcome_path == "created" and not outcome_found_via_search:
+                        person_delta["jobdiva_profile_origin"] = "pair"
+                    elif outcome_found_via_search and not cand_data.get("jobdiva_profile_origin"):
+                        person_delta["jobdiva_profile_origin"] = "jobdiva"
+                    cand_data.update(person_delta)
+                    cand_data.update(job_delta)
+                    _persist_jobdiva_link_state(
+                        cand_id, job_row_keys, person_delta=person_delta, job_delta=job_delta
                     )
                     # Add to in-memory sets so concurrent siblings don't re-create the same person.
                     # This covers both newly created AND pre-existing profiles that were linked.
@@ -1846,9 +1925,13 @@ async def _provision_batch_to_jobdiva(
                     return status
                 elif success:
                     # Only the create path can get here (linking always returns the
-                    # linked id): JobDiva made the application but sent no profile id,
-                    # so there is nothing to persist — treat as success.
+                    # linked id): JobDiva made the application but sent no profile id
+                    # and the service's lookup could not recover one. Record that
+                    # PAIR filed this job's application anyway -- the id-less row is
+                    # what the applicant-origin audit and re-provision look for.
                     logger.warning(f"⚠️ [{label}] Application created for {cand_id} but JobDiva returned no candidate id")
+                    cand_data.update(job_delta)
+                    _persist_jobdiva_link_state(cand_id, job_row_keys, job_delta=job_delta)
                     return "success"
                 else:
                     logger.error(f"❌ [{label}] create_job_application_with_resume returned False for {cand_id}")
@@ -3348,13 +3431,14 @@ async def get_assessment_data(interview_id: str):
       - Outreach status (communication timeline)
     """
     base_url = EXTERNAL_INTERVIEW_API_URL
+    headers = get_pair_auth_headers()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Fire all 4 requests in parallel
-        interview_task = client.get(f"{base_url}/api/interviews/{interview_id}")
-        evaluation_task = client.get(f"{base_url}/api/interviews/{interview_id}/evaluation")
-        transcription_task = client.get(f"{base_url}/api/interviews/{interview_id}/transcriptions")
-        outreach_task = client.get(f"{base_url}/api/interviews/{interview_id}/outreach-status")
+        interview_task = client.get(f"{base_url}/api/interviews/{interview_id}", headers=headers)
+        evaluation_task = client.get(f"{base_url}/api/interviews/{interview_id}/evaluation", headers=headers)
+        transcription_task = client.get(f"{base_url}/api/interviews/{interview_id}/transcriptions", headers=headers)
+        outreach_task = client.get(f"{base_url}/api/interviews/{interview_id}/outreach-status", headers=headers)
 
         # Await all
         interview_res = await interview_task
@@ -3428,10 +3512,7 @@ async def get_assessment_data(interview_id: str):
 # ---------------------------------------------------------------------------
 async def _proxy_get(path: str, params: dict = None):
     try:
-        headers = {}
-        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-        if pair_api_key:
-            headers["Authorization"] = f"Bearer {pair_api_key}"
+        headers = get_pair_auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params, headers=headers)
             res.raise_for_status()
@@ -3442,10 +3523,7 @@ async def _proxy_get(path: str, params: dict = None):
 
 async def _proxy_post(path: str, json_data: dict = None):
     try:
-        headers = {"Content-Type": "application/json"}
-        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-        if pair_api_key:
-            headers["Authorization"] = f"Bearer {pair_api_key}"
+        headers = get_pair_auth_headers(json_content_type=True)
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data, headers=headers)
             res.raise_for_status()
@@ -4007,14 +4085,26 @@ def _require_admin(user: UserIdentity) -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
-async def _jobdiva_profile_audit_job_filter(job_id: Optional[str]) -> Tuple[str, list]:
-    """SQL fragment + params scoping an audit query to one job (any id form), or none."""
+async def _audit_job_ids(job_id: Optional[str]) -> List[str]:
+    """Every stored spelling of ``job_id`` (as given, numeric PK, reference) for an
+    admin audit's job scope; ``[]`` means no job filter."""
     job_id = str(job_id or "").strip()
     if not job_id:
-        return "", []
+        return []
     numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(job_id)
-    ids = [job_id] + [str(x) for x in (numeric_job_id, ref_job_id) if x and str(x) != job_id]
-    return " AND sc.jobdiva_id = ANY(%s)", [ids]
+    return [job_id] + [str(x) for x in (numeric_job_id, ref_job_id) if x and str(x) != job_id]
+
+
+def _audit_job_filter_sql(job_ids: List[str], alias: str) -> str:
+    """``" AND <alias>.jobdiva_id = ANY(%s)"`` for a scoped audit, ``""`` for all jobs.
+    The matching param is ``[job_ids]`` (one list param) or none -- see callers."""
+    return f" AND {alias}.jobdiva_id = ANY(%s)" if job_ids else ""
+
+
+async def _jobdiva_profile_audit_job_filter(job_id: Optional[str]) -> Tuple[str, list]:
+    """SQL fragment + params scoping a profile-audit query (alias ``sc``) to one job, or none."""
+    job_ids = await _audit_job_ids(job_id)
+    return _audit_job_filter_sql(job_ids, "sc"), ([job_ids] if job_ids else [])
 
 
 class JobDivaProfileAuditRepairRequest(BaseModel):
@@ -4106,3 +4196,216 @@ async def jobdiva_profile_audit_repair(
         request.job_id or "ALL", repaired, user.email,
     )
     return {"success": True, "job_id": request.job_id or None, "repaired": repaired}
+
+
+# ---------------------------------------------------------------------------
+# Applicant-origin audit (admin): the "everyone became a JobDiva applicant" twins
+# ---------------------------------------------------------------------------
+# Launch PAIR records a job application in JobDiva for every person it
+# provisions, so JobDiva's applicant list then contains the Exa/LinkedIn/Dice
+# people too. Until the applicant sync matched them back to their origin row
+# (services/auto_assign_service.py `_build_candidate_lookup_index` built its
+# index for a job that did not exist), each one was re-imported as a second
+# row: `(job, <JobDiva profile id>, 'JobDiva-Applicants')` next to the origin
+# row `(job, 'exa_...', 'LinkedIn-Exa')` that carries that same profile id in
+# data.jobdiva_candidate_id. The re-launch of a JobDiva-labelled copy of a
+# provisioned person produced the same shape under a TalentSearch/JobAgent
+# label. Every reader then favoured the JobDiva-labelled twin.
+#
+# The audit lists the pairs; the repair folds the twin's engage state into the
+# origin row (which keeps its origin `source`) and deletes the twin. Neither
+# touches JobDiva.
+
+# A twin `t` of an origin row `o`: same job, a JobDiva-labelled row whose own
+# candidate_id is the JobDiva profile id the origin stores. Correlated on both
+# aliases so it can sit inside a subquery over `t` for a given `o`.
+_TWIN_OF_ORIGIN = """t.jobdiva_id = o.jobdiva_id
+               AND t.id <> o.id
+               AND t.candidate_id <> o.candidate_id
+               AND t.candidate_id = o.data->>'jobdiva_candidate_id'
+               AND lower(t.source) LIKE 'jobdiva%%'
+               AND t.candidate_id ~ '^[0-9]+$'"""
+
+_APPLICANT_TWIN_JOIN = f"""
+              FROM sourced_candidates t
+              JOIN sourced_candidates o
+                ON {_TWIN_OF_ORIGIN}
+               AND lower(o.source) NOT LIKE 'jobdiva%%'
+             WHERE TRUE"""
+
+# Engage bookkeeping a twin may hold from its own (duplicate) auto-launch;
+# folded into the origin row only where the origin has nothing.
+_APPLICANT_TWIN_FOLD_KEYS = (
+    "engage_status", "engage_interview_id", "engage_score", "engage_updated_at",
+    "engage_last_response", "engage_hard_filter_status", "engage_hard_filter_reason",
+    "engage_passed_email_sent", "engage_candidate_score", "engage_total_score",
+)
+
+
+class ApplicantOriginRepairRequest(BaseModel):
+    job_id: Optional[str] = None
+    # Default True: report what WOULD be merged/deleted. Pass false to apply.
+    dry_run: bool = True
+
+
+@router.get("/engage/applicant-origin-audit")
+async def applicant_origin_audit(
+    job_id: Optional[str] = None,
+    limit: int = 200,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Admin: JobDiva-labelled rows that are twins of a provisioned origin row.
+
+    A pair is `origin` (non-JobDiva source, e.g. LinkedIn-Exa, whose stored
+    jobdiva_candidate_id is the profile Launch PAIR created or attached) and
+    `twin` (a JobDiva-* row whose candidate_id IS that profile id) on the same
+    job. The twin is the sync's or a re-launch's re-import of the same person;
+    the origin row is the one that should survive, keeping its source label.
+    One origin can have several twins (an Applicants row from the sync and a
+    TalentSearch/JobAgent row from a re-launch); each pair is one row here.
+    """
+    _require_admin(user)
+    limit = max(1, min(int(limit or 200), 2000))
+    job_ids = await _audit_job_ids(job_id)
+    job_sql = _audit_job_filter_sql(job_ids, "t")
+    job_params: list = [job_ids] if job_ids else []
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            {_APPLICANT_TWIN_JOIN}{job_sql}
+            """,
+            job_params,
+        )
+        total = int((cur.fetchone() or {}).get("n") or 0)
+        cur.execute(
+            f"""
+            SELECT t.jobdiva_id AS job_id,
+                   o.candidate_id AS origin_candidate_id,
+                   o.source AS origin_source,
+                   o.data->>'jobdiva_application_origin' AS origin_application_origin,
+                   o.data->>'engage_status' AS origin_engage_status,
+                   t.candidate_id AS jobdiva_candidate_id,
+                   t.source AS twin_source,
+                   t.data->>'engage_status' AS twin_engage_status,
+                   COALESCE(NULLIF(o.name, ''), t.name) AS name,
+                   t.created_at AS twin_created_at
+            {_APPLICANT_TWIN_JOIN}{job_sql}
+            ORDER BY t.created_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            job_params + [limit],
+        )
+        rows = [dict(r) for r in (cur.fetchall() or [])]
+        cur.close()
+    finally:
+        conn.close()
+    return {"success": True, "job_id": job_id or None, "total": total, "returned": len(rows), "rows": rows}
+
+
+@router.post("/engage/applicant-origin-audit/repair")
+async def applicant_origin_audit_repair(
+    request: ApplicantOriginRepairRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Admin: fold every JobDiva-labelled twin into its origin row, then delete the twins.
+
+    Per origin row: engage bookkeeping the origin lacks is taken from its twins
+    -- ALL of them, key by key, the most recently updated twin winning a key
+    that several carry -- the merge is noted in data.jobdiva_twin_merged_at /
+    jobdiva_twin_sources / jobdiva_twin_count, and the twins are deleted. The
+    origin keeps its `source` -- that is the whole point. `dry_run` (default)
+    only counts. Idempotent: a repaired job has no pairs left.
+
+    The fold is a correlated subquery over the origin, not an ``UPDATE ... FROM``
+    join: with a join, an origin with two twins is matched twice and Postgres
+    applies SET from one arbitrary match, so the other twin's engage state would
+    be dropped -- and then deleted with the twin.
+    """
+    _require_admin(user)
+    job_ids = await _audit_job_ids(request.job_id)
+    job_params: list = [job_ids] if job_ids else []
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        if request.dry_run:
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                {_APPLICANT_TWIN_JOIN}{_audit_job_filter_sql(job_ids, "t")}
+                """,
+                job_params,
+            )
+            row = cur.fetchone()
+            would = int((row[0] if isinstance(row, (tuple, list)) else (row or {}).get("count")) or 0)
+            cur.close()
+            return {"success": True, "job_id": request.job_id or None, "dry_run": True, "would_merge": would}
+
+        fold_keys_sql = ", ".join("%s" for _ in _APPLICANT_TWIN_FOLD_KEYS)
+        cur.execute(
+            f"""
+            UPDATE sourced_candidates AS o
+            SET data = COALESCE(o.data, '{{}}'::jsonb)
+                       || COALESCE((
+                            -- Every engage key the origin lacks, from whichever twin
+                            -- carries it; when several do, the most recently updated
+                            -- twin's value wins (deterministic, no state dropped).
+                            SELECT jsonb_object_agg(folded.k, folded.v)
+                            FROM (
+                                SELECT DISTINCT ON (e.k) e.k, e.v
+                                FROM sourced_candidates AS t
+                                CROSS JOIN LATERAL jsonb_each(COALESCE(t.data, '{{}}'::jsonb)) AS e(k, v)
+                                WHERE {_TWIN_OF_ORIGIN}
+                                  AND e.k IN ({fold_keys_sql})
+                                  AND (o.data -> e.k) IS NULL
+                                ORDER BY e.k, t.updated_at DESC NULLS LAST, t.id DESC
+                            ) AS folded
+                          ), '{{}}'::jsonb)
+                       || jsonb_build_object(
+                            'jobdiva_twin_merged_at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                            'jobdiva_twin_sources', (
+                                SELECT COALESCE(jsonb_agg(DISTINCT t.source), '[]'::jsonb)
+                                FROM sourced_candidates AS t
+                                WHERE {_TWIN_OF_ORIGIN}
+                            ),
+                            'jobdiva_twin_count', (
+                                SELECT COUNT(*)
+                                FROM sourced_candidates AS t
+                                WHERE {_TWIN_OF_ORIGIN}
+                            )
+                          ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE lower(o.source) NOT LIKE 'jobdiva%%'
+              AND EXISTS (
+                  SELECT 1
+                  FROM sourced_candidates AS t
+                  WHERE {_TWIN_OF_ORIGIN}
+              ){_audit_job_filter_sql(job_ids, "o")}
+            """,
+            list(_APPLICANT_TWIN_FOLD_KEYS) + job_params,
+        )
+        origins_updated = cur.rowcount
+        cur.execute(
+            f"""
+            DELETE FROM sourced_candidates AS t
+            USING sourced_candidates AS o
+            WHERE {_TWIN_OF_ORIGIN}
+              AND lower(o.source) NOT LIKE 'jobdiva%%'{_audit_job_filter_sql(job_ids, "t")}
+            """,
+            job_params,
+        )
+        twins_deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+    logger.info(
+        "applicant origin audit repair: job=%s origins_updated=%s twins_deleted=%s by=%s",
+        request.job_id or "ALL", origins_updated, twins_deleted, user.email,
+    )
+    return {
+        "success": True, "job_id": request.job_id or None, "dry_run": False,
+        "origins_updated": origins_updated, "twins_deleted": twins_deleted,
+    }

@@ -89,6 +89,17 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
   });
 }
 
+export {
+  ApiError,
+  isNotFoundError,
+  LIVE_REPORT_PROD_ONLY_MESSAGE,
+  isWithinRedirectCooldown,
+  recordRedirectTimestamp,
+  MSAL_REDIRECT_COOLDOWN_MS,
+  MSAL_REDIRECT_STORAGE_KEY,
+} from "./api-error";
+import { ApiError, isWithinRedirectCooldown, recordRedirectTimestamp } from "./api-error";
+
 // fetch() network failures surface as a TypeError in all major browsers
 // (Chrome "Failed to fetch", Safari "Load failed", Firefox "NetworkError when
 // attempting to fetch resource"), and a dropped streaming-body read rejects
@@ -148,10 +159,26 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
 
     if (!res.ok) {
       if (res.status === 401 && typeof window !== "undefined") {
-        const activeAccount =
-          msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
-        if (activeAccount) {
-          msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+        let withinCooldown = false;
+        try {
+          withinCooldown = isWithinRedirectCooldown(Date.now(), window.sessionStorage);
+        } catch {
+          withinCooldown = false;
+        }
+
+        if (withinCooldown) {
+          console.warn("Skipping MSAL loginRedirect: 401 received within cooldown window to prevent redirect loop.");
+        } else {
+          const activeAccount =
+            msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
+          if (activeAccount) {
+            try {
+              recordRedirectTimestamp(Date.now(), window.sessionStorage);
+            } catch {
+              // Ignore storage write failure
+            }
+            msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+          }
         }
       }
       const text = await res.text().catch(() => "");
@@ -162,7 +189,7 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
         status: res.status,
         duration_ms: durationMs,
       });
-      throw new Error(`${res.status} ${path}${text ? `: ${text}` : ""}`);
+      throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`);
     }
 
     trackEvent("api_request_success", {
@@ -337,5 +364,13 @@ export const api = {
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "PUT", body }),
     remove: (teamId: string) =>
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
+  },
+  liveReport: {
+    getLaunches: () => req<any>(`/api/analytics/live-report/launches`),
+    getHealth: () => req<any>(`/api/analytics/live-report/health`),
+    getSnapshot: (bulkId: string, reveal = false) =>
+      req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`),
+    streamUrl: (bulkId: string) =>
+      `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
 };

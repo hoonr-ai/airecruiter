@@ -16,7 +16,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import patch, MagicMock
+
 
 @pytest.fixture
 def mock_db_connection():
@@ -26,15 +26,18 @@ def mock_db_connection():
         cur.fetchone.return_value = ("jobdiva_123", "job_123")
         yield mock_conn
 
+
 @pytest.fixture
 def mock_verify_job_access():
     with patch("routers.jobs._verify_job_access_by_id") as mock_verify:
         yield mock_verify
 
+
 @pytest.fixture
 def mock_fetch_all_outreach():
     with patch("routers.jobs._fetch_all_outreach") as mock_fetch:
         yield mock_fetch
+
 
 @pytest.fixture
 def mock_launched():

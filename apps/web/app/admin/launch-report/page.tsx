@@ -19,10 +19,11 @@
 // a row that did not fully resolve is marked rather than silently showing
 // zeros — see the "partial" badge on the job cell.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, ShieldAlert, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseOutreachInfo } from "./PhaseOutreachInfo";
 import { UTF8_BOM, toCsv } from "@/lib/csv";
 import { useUserRole } from "@/hooks/use-user-role";
 import { Card } from "@/components/ui/card";
@@ -56,9 +57,12 @@ interface LaunchReportRow {
   overall_response_time_minutes: number | null;
   submitted_candidates: number;
   rejected_candidates: number;
+  passed_candidates: number;
+  failed_candidates: number;
   outstanding_feedback: number;
   time_to_feedback_minutes: number | null;
   first_feedback_at: string | null;
+  first_pass_at: string | null;
   time_to_first_pass_minutes: number | null;
   call: number;
   sms: number;
@@ -198,7 +202,7 @@ type Column = {
   numeric?: boolean;
 };
 
-type ColumnGroup = { title: string; columns: Column[] };
+type ColumnGroup = { title: string; columns: Column[]; showInfo?: boolean };
 
 const num = (value: number) => (value ? value.toLocaleString() : "0");
 
@@ -263,6 +267,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "pending", label: "Pending", numeric: true, text: (r) => num(r.pending) },
       { key: "in_progress", label: "In Progress", numeric: true, text: (r) => num(r.in_progress) },
       { key: "completed", label: "Completed", numeric: true, text: (r) => num(r.completed) },
+      { key: "passed", label: "Passed", numeric: true, text: (r) => num(r.passed_candidates) },
+      { key: "failed", label: "Failed", numeric: true, text: (r) => num(r.failed_candidates) },
       { key: "partial", label: "Partial Complete", numeric: true, text: (r) => num(r.partial_complete) },
       {
         key: "percentage",
@@ -298,6 +304,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "outstanding", label: "Outstanding", numeric: true, text: (r) => num(r.outstanding_feedback) },
       { key: "tt_feedback", label: "Time to Feedback", numeric: true, text: (r) => formatDuration(r.time_to_feedback_minutes) },
       { key: "tt_first_pass", label: "To First Pass", numeric: true, text: (r) => formatDuration(r.time_to_first_pass_minutes) },
+      { key: "first_pass_at", label: "First Pass Completed At", text: (r) => formatDateTime(r.first_pass_at) },
       { key: "first_feedback_at", label: "First Feedback Submitted At", text: (r) => formatDateTime(r.first_feedback_at) },
     ],
   },
@@ -311,6 +318,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Phase",
+    showInfo: true,
     columns: [
       { key: "phase1", label: "Phase 1", numeric: true, text: (r) => num(r.phase1) },
       { key: "phase2", label: "Phase 2", numeric: true, text: (r) => num(r.phase2) },
@@ -320,6 +328,7 @@ const COLUMN_GROUPS: ColumnGroup[] = [
   },
   {
     title: "Extra Outreach (>80% Match)",
+    showInfo: true,
     columns: [
       { key: "extra1", label: "Extra 1", numeric: true, text: (r) => num(r.extra1) },
       { key: "extra2", label: "Extra 2", numeric: true, text: (r) => num(r.extra2) },
@@ -461,6 +470,23 @@ export default function LaunchReportPage() {
     () => rows.filter((r) => r.outreach_detail_resolved < r.outreach_detail_expected).length,
     [rows],
   );
+
+  const tableWrapperRef = useRef<HTMLDivElement>(null);
+  const [tableMaxHeight, setTableMaxHeight] = useState<string>("calc(100vh - 320px)");
+
+  useEffect(() => {
+    const updateHeight = () => {
+      if (!tableWrapperRef.current) return;
+      const top = tableWrapperRef.current.getBoundingClientRect().top;
+      const available = window.innerHeight - top - 32;
+      const calculatedHeight = Math.max(350, Math.floor(available));
+      setTableMaxHeight(`${calculatedHeight}px`);
+    };
+
+    updateHeight();
+    window.addEventListener("resize", updateHeight);
+    return () => window.removeEventListener("resize", updateHeight);
+  }, [data, error, partialRows, isRange, rows.length]);
 
   if (isRoleLoading) {
     return (
@@ -637,13 +663,17 @@ export default function LaunchReportPage() {
           container so the page body never scrolls horizontally, and the job
           column is pinned so a row stays identifiable while scrolling. */}
       <Card className="border-slate-200 bg-white shadow-sm rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
+        <div
+          ref={tableWrapperRef}
+          style={{ maxHeight: tableMaxHeight }}
+          className="overflow-auto min-h-[350px] relative scrollbar-thin scrollbar-thumb-slate-200"
+        >
           <table className="w-full border-collapse text-[13px]">
-            <thead>
+            <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
               <tr className="bg-slate-50 border-b border-slate-200">
                 <th
                   rowSpan={2}
-                  className="sticky left-0 z-20 bg-slate-50 text-left px-4 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-500 border-r border-slate-200 min-w-[240px]"
+                  className="sticky left-0 top-0 z-30 bg-slate-50 text-left px-4 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-500 border-r border-slate-200 min-w-[240px]"
                 >
                   Job
                 </th>
@@ -653,7 +683,10 @@ export default function LaunchReportPage() {
                     colSpan={group.columns.length}
                     className="text-left px-3 py-2 font-extrabold uppercase tracking-wider text-[10px] text-slate-400 border-l border-slate-200"
                   >
-                    {group.title}
+                    <span className="inline-flex items-center gap-0.5">
+                      {group.title}
+                      {group.showInfo && <PhaseOutreachInfo />}
+                    </span>
                   </th>
                 ))}
               </tr>

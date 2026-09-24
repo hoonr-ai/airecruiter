@@ -42,9 +42,22 @@ from routers import launch_report as lr
         ("phase1", "in_progress"),
         ("phase3", "in_progress"),
         ("in_progress", "in_progress"),
+        ("In Progress", "in_progress"),
+        ("in progress", "in_progress"),
         ("completed", "completed"),
         ("passed", "completed"),
         ("failed", "completed"),
+        ("qualified", "completed"),
+        ("shortlisted", "completed"),
+        ("selected", "completed"),
+        ("hired", "completed"),
+        ("disqualified", "completed"),
+        ("declined", "completed"),
+        ("rejected", "completed"),
+        ("screening", "in_progress"),
+        ("contacted", "in_progress"),
+        ("interview_completed", "in_progress"),
+        ("interview completed", "in_progress"),
         ("outreach_incomplete", "partial_complete"),
         ("expired", "partial_complete"),
         ("no_response", "partial_complete"),
@@ -492,9 +505,19 @@ def test_summarise_outreach_passed_failed_sub_buckets():
         _outreach("completed"),
     ]
     summary = lr._summarise_outreach(payloads)
+    # `completed` with no hard-filter fail is Pass — same as rankings.
     assert summary["buckets"]["passed"] == 2
     assert summary["buckets"]["failed"] == 1
     assert summary["buckets"]["completed"] == 3
+
+
+def test_summarise_outreach_completed_hard_filter_fail_is_failed():
+    payload = _outreach("completed")
+    payload["outreach"]["engage_hard_filter_status"] = "failed"
+    summary = lr._summarise_outreach([payload])
+    assert summary["buckets"]["completed"] == 1
+    assert summary["buckets"]["passed"] == 0
+    assert summary["buckets"]["failed"] == 1
 
 
 def test_summarise_outreach_unengaged_failed_buckets_as_pending():
@@ -506,6 +529,119 @@ def test_summarise_outreach_unengaged_failed_buckets_as_pending():
     assert summary["buckets"]["pending"] == 1
     assert summary["buckets"]["failed"] == 0
 
+
+def test_summarise_outreach_interview_in_progress_wins_over_pending_outreach():
+    """Pair Bot list shows In Progress while outreach_status stays pending (later phases)."""
+    payload = {
+        "outreach": {
+            "outreach_status": "pending",
+            "interview_status": "in_progress",
+            "outreach_phase": "phase3",
+        },
+        "communications": [],
+    }
+    summary = lr._summarise_outreach([payload], shift_phases=True)
+    assert summary["buckets"]["in_progress"] == 1
+    assert summary["buckets"]["pending"] == 0
+    assert summary["phases"]["phase4"] == 1
+
+
+def test_summarise_outreach_pending_interview_stays_pending_at_phase4():
+    payload = {
+        "outreach": {
+            "outreach_status": "pending",
+            "interview_status": "pending",
+            "outreach_phase": "phase3",
+        },
+        "communications": [],
+    }
+    summary = lr._summarise_outreach([payload], shift_phases=True)
+    assert summary["buckets"]["pending"] == 1
+    assert summary["buckets"]["in_progress"] == 0
+    assert summary["phases"]["phase4"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _status_rank and _funnel_status_raw unit tests
+# (no unit tests previously existed; added as part of reviewer feedback)
+# ---------------------------------------------------------------------------
+
+def test_status_rank_known_values():
+    assert lr._status_rank("completed") == 4
+    assert lr._status_rank("passed") == 4
+    assert lr._status_rank("partial_complete") == 3
+    assert lr._status_rank("in_progress") == 2
+    assert lr._status_rank("In Progress") == 2
+    assert lr._status_rank("in progress") == 2
+    assert lr._status_rank("interview completed") == 2
+    assert lr._status_rank("phase1") == 2
+    assert lr._status_rank("pending") == 1
+    assert lr._status_rank("scheduled") == 1
+    assert lr._status_rank(None) == 0
+    assert lr._status_rank("") == 0
+    assert lr._status_rank("some_unknown_value") == 0
+
+
+def test_funnel_status_raw_returns_outreach_status_when_no_interview_status():
+    merged = {"outreach_status": "in_progress"}
+    assert lr._funnel_status_raw(merged, "in_progress") == "in_progress"
+
+
+def test_funnel_status_raw_interview_status_wins_when_higher_rank():
+    """interview_status=In Progress beats outreach_status=pending."""
+    merged = {"outreach_status": "pending", "interview_status": "In Progress"}
+    assert lr._funnel_status_raw(merged, "pending") == "In Progress"
+
+
+def test_funnel_status_raw_interview_status_does_not_win_when_lower_rank():
+    """outreach_status=completed stays; interview_status=pending cannot downgrade it."""
+    merged = {"outreach_status": "completed", "interview_status": "pending"}
+    assert lr._funnel_status_raw(merged, "completed") == "completed"
+
+
+def test_funnel_status_raw_interview_status_missing_falls_back():
+    merged = {"outreach_status": "pending"}
+    assert lr._funnel_status_raw(merged, "pending") == "pending"
+
+
+def test_funnel_status_raw_pending_with_extra_phase_stays_pending():
+    """pending outreach_status in an extra phase must NOT be promoted to in_progress.
+    A candidate at phase1_extra with outreach_status=pending means the extra outreach
+    job is queued but not yet sent — they have not been contacted and are still Pending."""
+    for extra_phase in ("phase1_extra", "phase1_6hr_extra", "phase2_extra", "phase3_extra",
+                        "extra", "extra1", "extra2", "extra3"):
+        merged = {"outreach_phase": extra_phase}
+        result = lr._funnel_status_raw(merged, "pending")
+        assert result == "pending", (
+            f"pending+{extra_phase!r} should stay pending (not promoted to in_progress), got {result!r}"
+        )
+
+
+def test_summarise_outreach_pending_with_extra_phase_stays_in_pending_bucket():
+    """End-to-end regression: a candidate with outreach_status=pending and an extra
+    outreach_phase must land in the Pending bucket, not In Progress.
+
+    This logic has flip-flopped (PR #669 promoted it, PR #670 reverted). This
+    test closes the loop at the bucket level so a future change to _funnel_status_raw
+    or _bucket_status cannot silently reintroduce the regression.
+    """
+    for extra_phase in ("phase1_extra", "phase1_6hr_extra", "phase2_extra",
+                        "phase3_extra", "extra1", "extra2", "extra3"):
+        payload = {
+            "outreach": {
+                "outreach_status": "pending",
+                "outreach_phase": extra_phase,
+            },
+            "communications": [],
+        }
+        summary = lr._summarise_outreach([payload], shift_phases=True)
+        assert summary["buckets"]["pending"] == 1, (
+            f"outreach_phase={extra_phase!r} with pending status should be Pending, "
+            f"got buckets={summary['buckets']}"
+        )
+        assert summary["buckets"]["in_progress"] == 0, (
+            f"outreach_phase={extra_phase!r} with pending status must NOT be In Progress"
+        )
 
 
 def test_phase_distribution_falls_back_to_status_when_phase_missing():
@@ -524,6 +660,43 @@ def test_phase_distribution_does_not_promote_contact_check_status_to_phase1_when
     payload = {"outreach": {"outreach_status": "contact_check"}, "communications": []}
     summary = lr._summarise_outreach([payload], shift_phases=True)
     assert summary["phases"] == {"phase1": 0, "phase2": 0, "phase3": 0, "phase4": 0, "extra": 0, "extra1": 0, "extra2": 0, "extra3": 0}
+
+
+def test_summarise_outreach_promotes_phase1_to_extra1_from_processing_job():
+    payload = {
+        "outreach": {"outreach_status": "in_progress", "outreach_phase": "phase1"},
+        "scheduled_jobs": [
+            {
+                "status": "processing",
+                "payload": {
+                    "is_high_score_extra": True,
+                    "high_score_phase": "phase1",
+                    "reminder_type": "high_score_extra",
+                },
+            }
+        ],
+        "communications": [],
+    }
+    phases = lr._summarise_outreach([payload], shift_phases=True)["phases"]
+    assert phases["extra1"] == 1
+    assert phases["phase1"] == 0
+    assert phases["extra"] == 1
+
+
+def test_summarise_outreach_promotes_phase2_to_extra3_from_communications():
+    """PairBot Extra Outreach Phase 3 with stored phase2 and completed Extra sends."""
+    payload = {
+        "outreach": {"outreach_status": "pending", "outreach_phase": "phase2"},
+        "scheduled_jobs": [],
+        "communications": [
+            {"phase": "phase2_extra", "channel": "email"},
+            {"phase": "phase2_extra", "channel": "sms"},
+        ],
+    }
+    phases = lr._summarise_outreach([payload], shift_phases=True)["phases"]
+    assert phases["extra3"] == 1
+    assert phases["phase3"] == 0
+    assert phases["extra"] == 1
 
 
 def test_outstanding_feedback_never_goes_negative():
@@ -1349,6 +1522,28 @@ def test_merge_outreach_payloads_monotonic_state_progression():
     assert merged2["outreach_status"] == "completed"
 
 
+def test_merge_outreach_payloads_spaced_in_progress_is_not_downgraded():
+    """A stale Pending layer cannot overwrite Pair Bot's spaced status form."""
+    merged = lr.merge_outreach_payloads(
+        {"outreach_status": "in progress"},
+        {"outreach_status": "pending"},
+        None,
+    )
+    assert merged["outreach_status"] == "in progress"
+
+
+def test_build_merged_payload_spaced_in_progress_audit_status_overrides_pending():
+    """The audit column's spaced status must rank above its stale JSON payload."""
+    payload = lr.build_merged_outreach_payload(
+        {"engage_status": "pending"},
+        {"outreach_status": "pending", "status": "pending"},
+        "in progress",
+        None,
+    )
+    assert payload["outreach_status"] == "in progress"
+    assert payload["status"] == "in progress"
+
+
 def test_eastern_date_expr_sql():
     """Explicit timezone conversion in SQL query matches project defaults."""
     expr = lr._eastern_date_expr("a.created_at")
@@ -1427,6 +1622,15 @@ def test_build_merged_outreach_payload_unrecognised_audit_status():
     assert payload["outreach_status"] == "brand_new_state"
 
 
+def test_build_merged_does_not_override_equal_rank_audit_response_status():
+    """Audit JSON status wins over an equal-rank column/candidate alias."""
+    cand_data = {"engage_status": "completed"}
+    audit_response = {"outreach_status": "passed", "status": "passed"}
+    payload = lr.build_merged_outreach_payload(cand_data, audit_response, "completed", None)
+    assert payload["outreach_status"] == "passed"
+    assert payload["status"] == "passed"
+
+
 def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     """_fetch_jobs_launched_on filters on l.first_launch_at in the outer query, not a.created_at in the CTE."""
     class FakeCursor:
@@ -1471,6 +1675,3 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     assert "total_launched" not in sql
     # Outer query filters on l.first_launch_at
     assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
-
-
-
