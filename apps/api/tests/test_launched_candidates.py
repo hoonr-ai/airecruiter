@@ -7,7 +7,9 @@ launch_report.summarise_launched_candidates. These tests pin
 
   (a) the population rules (a person, not an interview; needs an interview id;
       a failed launch is not a launch; lifetime, not launch day),
-  (b) the row shape the aggregation relies on,
+  (b) the row shape the aggregation relies on, including the recorded
+      recruiter decision the launch report's Feedback columns read (which
+      must never change the count),
   (c) the rank-list visibility fragment, byte-for-byte against the rank list's
       own query so "Sourced" cannot drift from "Showing N of M candidates",
   (d) the SQL itself against a real Postgres when one is reachable
@@ -36,10 +38,15 @@ def test_key_pair_repeats_a_single_key_and_drops_blanks():
 
 def test_launched_sql_is_one_row_per_person_not_per_interview():
     sql = lc.LAUNCHED_CANDIDATES_SQL
-    assert sql.count("DISTINCT ON (candidate_id)") == 2      # latest audit + latest JSONB per person
-    assert "DISTINCT ON (interview_id)" not in sql
-    # Newest row per person wins on both sides, like the rank list's latest_audit.
-    assert sql.count("ORDER BY candidate_id, id DESC") == 2
+    # latest audit + latest JSONB per person, and (launch report's feedback
+    # SQL only) the person's current recruiter decision
+    assert sql.count("DISTINCT ON (candidate_id)") == 2
+    assert lc.LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL.count("DISTINCT ON (candidate_id)") == 3
+    assert lc.LAUNCHED_CANDIDATE_COUNT_SQL.count("DISTINCT ON (candidate_id)") == 2
+    for statement in (sql, lc.LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL):
+        assert "DISTINCT ON (interview_id)" not in statement
+        # Newest row per person wins on both sides, like the rank list's latest_audit.
+        assert statement.count("ORDER BY candidate_id, id DESC") == 2
 
 
 def test_launched_sql_requires_an_interview_id_from_either_side():
@@ -57,10 +64,42 @@ def test_launched_sql_prefers_the_jsonb_interview_id_like_the_rank_list_row():
 
 def test_launched_sql_takes_both_job_keys_and_no_date_filter():
     sql = lc.LAUNCHED_CANDIDATES_SQL
+    feedback_sql = lc.LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL
     assert sql.count("(jobdiva_id = %s OR jobdiva_id = %s)") == 2
     assert sql.count("%s") == 4
+    assert feedback_sql.count("(jobdiva_id = %s OR jobdiva_id = %s)") == 3
+    assert feedback_sql.count("%s") == 6
+    assert lc.LAUNCHED_CANDIDATE_COUNT_SQL.count("%s") == 4
     assert "created_at" not in sql.split("FROM engage_interview_audit")[1].split("ORDER BY")[0]
     assert lc._launched_params(["26-01234", "55"]) == ("26-01234", "55", "26-01234", "55")
+    assert lc._launched_feedback_params(["26-01234", "55"]) == ("26-01234", "55") * 3
+    assert lc._launched_feedback_params(["55"]) == ("55",) * 6
+
+
+def test_feedback_fields_ride_on_the_rows_but_never_touch_the_count():
+    """The launch report's Feedback columns are computed over these rows, so
+    each launched person carries their recorded decision. Rankings' count and
+    its header rows are the bare population: the feedback join must not be in
+    either, and in the feedback SQL it is a LEFT JOIN so it can neither add
+    nor drop a person."""
+    rows_sql = lc.LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL
+    count_sql = lc.LAUNCHED_CANDIDATE_COUNT_SQL
+    # Exactly what launch_report._summarise_feedback reads.
+    assert lc._FEEDBACK_FIELDS == ("feedback_type", "feedback_at", "submission_type")
+    for field in lc._FEEDBACK_FIELDS:
+        assert f"data->>'{field}' AS {field}" in rows_sql
+        assert f"lf.{field}" in rows_sql
+        assert field not in count_sql
+        assert field not in lc.LAUNCHED_CANDIDATES_SQL
+    assert "latest_feedback" not in lc.LAUNCHED_CANDIDATES_SQL
+    assert "LEFT JOIN latest_feedback lf ON lf.candidate_id = l.candidate_id" in rows_sql
+    # The decision predicate is the dashboard's own (services/feedback_metrics.py).
+    from services.feedback_metrics import HAS_DECISION_SQL
+    assert HAS_DECISION_SQL.format(alias="") in rows_sql.split("latest_feedback AS")[1]
+    # The population itself is unchanged: the row SQL is the count's CTE plus
+    # the feedback join, never a second copy of the population rules.
+    assert rows_sql.startswith(lc._LAUNCHED_CTE_SQL)
+    assert "%" not in rows_sql.replace("%s", "")
 
 
 def test_count_sql_shares_the_population_cte_with_the_row_sql():
@@ -68,6 +107,8 @@ def test_count_sql_shares_the_population_cte_with_the_row_sql():
     be the same query, not two queries that happen to agree today."""
     cte = lc._LAUNCHED_CTE_SQL
     assert lc.LAUNCHED_CANDIDATES_SQL.startswith(cte)
+    assert lc.LAUNCHED_CANDIDATES_SQL.rstrip().endswith("SELECT * FROM launched ORDER BY candidate_id")
+    assert lc.LAUNCHED_CANDIDATES_WITH_FEEDBACK_SQL.startswith(cte)
     assert lc.LAUNCHED_CANDIDATE_COUNT_SQL.startswith(cte)
     assert lc.LAUNCHED_CANDIDATE_COUNT_SQL.rstrip().endswith("SELECT COUNT(*) FROM launched")
 
@@ -112,6 +153,10 @@ def test_sourced_visibility_fragment_is_the_rank_lists_own_where_clause():
     assert fragment in rank_list_sql, "rank list counts query no longer matches sourced_visibility_sql('sc')"
     assert lc.sourced_visibility_sql("sc").count("%s") == 2
     assert lc.SOURCED_CANDIDATES_SQL.count("%s") == 4
+    # The sourced population feeds only Sourced / Time to Source: it must not
+    # offer pass, feedback or lifecycle fields for a report to misread.
+    select_list = lc.SOURCED_CANDIDATES_SQL.split("FROM sourced_candidates sc")[0]
+    assert "data->>" not in select_list
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +195,9 @@ def pg():
         pytest.skip(f"no Postgres reachable at {_TEST_DSN!r}: {exc}")
     try:
         with conn.cursor() as cur:
+            # Managed PROD runs UTC; a dev machine's default zone must not
+            # change how the naive TIMESTAMP columns read back.
+            cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(_SCHEMA_SQL)
         yield conn
     finally:
@@ -262,7 +310,8 @@ def test_pg_sourced_population_is_the_rank_lists_visible_rows(pg):
     assert sorted(rows) == ["c1", "c10", "c12", "c13", "c2", "c3", "c4", "c5", "c6"]
     # both-keys candidate: one row, earliest sourcing time
     assert str(rows["c6"]["created_at"]).startswith("2026-08-27 09:00:00")
-    assert rows["c10"]["feedback_type"] == "submit"
+    # c10 has a recorded Submit, but the sourced rows carry no decision at all.
+    assert set(rows["c10"]) == {"candidate_id", "created_at"}
 
 
 def test_pg_report_row_and_rankings_header_agree_by_construction(pg):
@@ -279,3 +328,77 @@ def test_pg_report_row_and_rankings_header_agree_by_construction(pg):
     assert buckets["in_progress"] == 1       # c1 — the only one who has started
     assert buckets["completed"] == buckets["passed"] == 1   # c3, JSONB passed
     assert buckets["pending"] == 5           # launch-time `sent` / `Initiated`, exactly what the table shows
+
+
+def test_pg_launched_rows_carry_the_recorded_decision_without_changing_the_count(pg):
+    """Feedback rides on the launched rows; a submitted-but-never-launched
+    person (c10) is still not a launched row, and the count is unchanged."""
+    _seed(pg)
+    before = lc.count_launched_candidates(pg, [REF, NUM])
+    with pg.cursor() as cur:
+        cur.execute(
+            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE candidate_id = 'c3'",
+            (json.dumps({"feedback_type": "Submit", "submission_type": "internal",
+                         "feedback_at": "2026-08-29T10:00:00+00:00", "submitted_by": "r@x.com"}),),
+        )
+    rows = {r["candidate_id"]: r for r in lc.fetch_launched_candidates(pg, [REF, NUM], include_feedback=True)}
+    assert len(rows) == before == lc.count_launched_candidates(pg, [REF, NUM]) == 7
+    assert "c10" not in rows                       # submitted, never launched
+    assert rows["c3"]["feedback_type"] == "Submit"
+    assert rows["c3"]["submission_type"] == "internal"
+    assert rows["c3"]["feedback_at"] == "2026-08-29T10:00:00+00:00"
+    assert rows["c1"]["feedback_type"] is None     # launched, no decision yet
+    assert rows["c7"]["feedback_type"] is None     # audit-only launch: no sourced row at all
+
+
+def test_pg_default_rows_are_the_same_people_without_the_feedback_scan(pg):
+    """The Rankings header (jobs.get_job_outreach_stats) fetches without
+    feedback: same people and population fields, no decision columns."""
+    _seed(pg)
+    with pg.cursor() as cur:
+        cur.execute(
+            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE candidate_id = 'c3'",
+            (json.dumps({"feedback_type": "Submit", "feedback_at": "2026-08-29T10:00:00+00:00"}),),
+        )
+    plain = lc.fetch_launched_candidates(pg, [REF, NUM])
+    with_feedback = lc.fetch_launched_candidates(pg, [REF, NUM], include_feedback=True)
+    assert [r["candidate_id"] for r in plain] == [r["candidate_id"] for r in with_feedback]
+    for bare, full in zip(plain, with_feedback):
+        assert not set(lc._FEEDBACK_FIELDS) & set(bare)
+        assert {k: v for k, v in full.items() if k not in lc._FEEDBACK_FIELDS} == bare
+
+
+def test_pg_decision_on_the_other_keys_row_is_not_lost(pg):
+    """The feedback endpoint writes ONE row. For a person stored under both
+    job keys that can be the older row, which latest_sourced does not read —
+    the decision must still reach the launched row."""
+    _seed(pg)
+    with pg.cursor() as cur:
+        # c6 is stored under REF (older id) and NUM (newer id); the decision
+        # lands on the REF row only.
+        cur.execute(
+            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE candidate_id = 'c6' AND jobdiva_id = %s",
+            (json.dumps({"feedback_type": "Reject", "feedback_reason": "Skills",
+                         "feedback_at": "2026-08-29T10:00:00+00:00"}), REF),
+        )
+    row = {r["candidate_id"]: r for r in lc.fetch_launched_candidates(pg, [REF, NUM], include_feedback=True)}["c6"]
+    assert row["feedback_type"] == "Reject"
+    assert row["feedback_at"] == "2026-08-29T10:00:00+00:00"
+    # …and the JSONB engage fields still come from the newest row, as before.
+    assert row["engage_status"] == "sent"
+
+
+def test_pg_newest_decision_wins_across_rows(pg):
+    _seed(pg)
+    with pg.cursor() as cur:
+        cur.execute(
+            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE candidate_id = 'c6' AND jobdiva_id = %s",
+            (json.dumps({"feedback_type": "Reject", "feedback_at": "2026-08-29T10:00:00+00:00"}), REF),
+        )
+        cur.execute(
+            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE candidate_id = 'c6' AND jobdiva_id = %s",
+            (json.dumps({"feedback_type": "Submit", "feedback_at": "2026-08-30T10:00:00+00:00"}), NUM),
+        )
+    row = {r["candidate_id"]: r for r in lc.fetch_launched_candidates(pg, [REF, NUM], include_feedback=True)}["c6"]
+    assert row["feedback_type"] == "Submit"
+    assert row["feedback_at"] == "2026-08-30T10:00:00+00:00"

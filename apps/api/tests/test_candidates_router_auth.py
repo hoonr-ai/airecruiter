@@ -282,14 +282,33 @@ def test_bulk_contacts_checks_job_access_per_item():
 
 
 def test_launched_pass_filter_excludes_incomplete_statuses():
-    """Pass filtering must use terminal states, not a broad `complete` substring."""
+    """Pass filtering must classify exact status tokens, never a broad
+    `complete` substring (which matched "incomplete" interviews).
+
+    Since 2026-09-23 the filter classifies with the rank list's own rule —
+    engage_display_sql, the SQL twin of format_engage_status, whose IN lists
+    are generated from the same tuples — instead of a hand-kept raw-status
+    list. Behaviour is pinned on a real Postgres in
+    tests/test_candidates_launched_report.py.
+    """
     src = ROUTER_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
-    body = next(
-        ast.get_source_segment(src, node)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "get_launched_candidates"
-    )
-    assert "LIKE '%complete%'" not in body
-    assert "('complete', 'completed', 'passed', 'pass')" in body
+
+    def body_of(name: str) -> str:
+        return next(
+            ast.get_source_segment(src, node)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        )
+
+    endpoint = body_of("get_launched_candidates")
+    conditions = body_of("_launched_filter_conditions")
+    status_filter = body_of("_launched_status_filter")
+    assert "_launched_filter_conditions(" in endpoint
+    assert "_launched_status_filter(status)" in conditions
+    assert "LAUNCHED_PASS_STATUS_SQL" in status_filter
+    assert "LAUNCHED_PASS_STATUS_SQL = engage_display_sql(" in src
+    for body in (endpoint, conditions, status_filter):
+        assert "LIKE '%complete%'" not in body
+        assert "LOWER(la.status) IN" not in body

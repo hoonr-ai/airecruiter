@@ -15,7 +15,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api } from "@/lib/api";
+import { api, getActiveUserEmail } from "@/lib/api";
+import { toCsv, UTF8_BOM } from "@/lib/csv";
+import { EMPTY_DATE, formatEasternDate, formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
@@ -29,25 +31,43 @@ import {
 } from "@/components/ui/select";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 
-const formatDate = (dateStr: string) => {
-  if (!dateStr) return "—";
-  try {
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-      month: '2-digit',
-      day: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-      timeZoneName: 'short'
-    }).replace(",", "");
-  } catch {
-    return dateStr;
+// On-screen column count. The skeleton rows and the empty state span this many
+// cells, so keep it in step with the header row.
+const TABLE_COLUMN_COUNT = 14;
+
+type FeedbackAction = "Submit" | "Reject" | "Unreachable";
+type SubmissionKind = "internal" | "external";
+
+// The API's `feedback` is already normalised (routers/candidates
+// _launched_feedback_fields); an unrecognised stored value shows no action.
+const knownFeedback = (raw: unknown): FeedbackAction | undefined =>
+  raw === "Submit" || raw === "Reject" || raw === "Unreachable" ? raw : undefined;
+
+const FEEDBACK_DISPLAY: Record<FeedbackAction, string> = {
+  Submit: "Submitted",
+  Reject: "Rejected",
+  Unreachable: "Unreachable",
+};
+
+// Mirrors routers/candidates._submittal_status, for the optimistic update
+// after a feedback click; the next fetch replaces it with the server's label.
+// Reject / Unreachable are feedback, not submittal states.
+const submittalStatusFor = (kind: SubmissionKind | null, jobdivaCount: number | null | undefined): string => {
+  const inJobDiva = Boolean(jobdivaCount);
+  if (kind === "external") return inJobDiva ? "Submitted – External (JobDiva confirmed)" : "Submitted – External";
+  if (kind === "internal") return inJobDiva ? "Submitted – Internal (JobDiva confirmed)" : "Submitted – Internal";
+  return inJobDiva ? "Submitted in JobDiva" : "Not Submitted";
+};
+
+const submittalBadgeClass = (status: string): string => {
+  if (status.startsWith("Submitted – External")) {
+    return status.includes("JobDiva confirmed")
+      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : "bg-indigo-50 text-indigo-700 border-indigo-200";
   }
+  if (status.startsWith("Submitted – Internal")) return "bg-violet-50 text-violet-700 border-violet-200";
+  if (status === "Submitted in JobDiva") return "bg-sky-50 text-sky-700 border-sky-200";
+  return "bg-slate-50 text-slate-500 border-slate-200";
 };
 
 const extractLinkedInFromText = (text?: string | null): string => {
@@ -163,6 +183,8 @@ interface CandidateData {
   feedback_type?: string;
   feedback_reason?: string;
   feedback_at?: string;
+  submission_type?: string;
+  submitted_by?: string;
   jobdiva_candidate_id?: string;
   engage_hard_filter_needs_review?: boolean;
   engage_needs_review_questions?: Array<{
@@ -198,9 +220,26 @@ interface Candidate {
   engage_hard_filter_needs_review?: boolean;
   engage_needs_review_questions?: { question: string; answer?: string; reason?: string }[];
   job_title: string;
+  /** The monitored job's numeric JobDiva job id (jobdiva_id may be the ref). */
+  job_id?: string | null;
+  customer_name?: string | null;
   recruiter_emails?: string | string[];
   screening_level: string;
   attended_via: string;
+  /** Rank-list label: Pass | Fail | In Progress | Pending (same as engage_status). */
+  pass_status?: string;
+  // The recruiter's current decision on this job's row.
+  feedback?: string | null;
+  feedback_reason?: string | null;
+  feedback_at?: string | null;
+  feedback_by?: string | null;
+  submission_type?: SubmissionKind | null;
+  /** See submittalStatusFor. */
+  submittal_status?: string;
+  /** Earliest JobDiva submittal, calendar date YYYY-MM-DD (JobDiva's zone is unknown). */
+  jobdiva_submittal_date?: string | null;
+  /** null = the JobDiva lookup failed, so confirmation is unknown. */
+  jobdiva_submittal_count?: number | null;
   data?: CandidateData;
   location?: string;
   work_location?: string;
@@ -215,6 +254,27 @@ interface Candidate {
 // share a candidate ID but belong to different JobDiva jobs.
 const candidateRowKey = (candidate: Candidate) =>
   `${candidate.jobdiva_id ?? ""}:${candidate.candidate_id}`;
+
+// One placeholder row, a cell per column: the four sticky identity columns,
+// then TABLE_COLUMN_COUNT - 4 plain ones.
+function CandidateSkeletonRow() {
+  return (
+    <TableRow>
+      <TableCell className="border-b border-slate-200 text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
+      <TableCell className="border-b border-slate-200 text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
+      <TableCell className="border-b border-slate-200 text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
+      <TableCell className="border-b border-slate-200 sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-40 mx-auto" />
+          <Skeleton className="h-3 w-32 mx-auto" />
+        </div>
+      </TableCell>
+      {Array.from({ length: TABLE_COLUMN_COUNT - 4 }).map((_, i) => (
+        <TableCell key={i} className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-20 mx-auto" /></TableCell>
+      ))}
+    </TableRow>
+  );
+}
 
 function ResumeScreeningHoverCard({
   candidate,
@@ -460,10 +520,9 @@ export default function GlobalCandidatesPage() {
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
 
-  // Feedback states
-  const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
-  const [feedbackReasons, setFeedbackReasons] = useState<Record<string, string>>({});
-  const [feedbackTimes, setFeedbackTimes] = useState<Record<string, string>>({});
+  // Feedback states. The decision itself lives on the row (c.feedback, …) and
+  // is patched in place after a successful click, together with the
+  // Submittal Status it implies, so the two columns can't disagree.
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -482,10 +541,29 @@ export default function GlobalCandidatesPage() {
     setIsLoading(true);
   };
 
+  // Optimistic write-back of a recorded decision, mirroring what the feedback
+  // endpoint stores (feedback_at = now, submitted_by = the signed-in user).
+  const applyLocalFeedback = (
+    candidateId: number,
+    feedback: FeedbackAction,
+    reason: string | null,
+    kind: SubmissionKind | null,
+  ) => {
+    const actor = (getActiveUserEmail() || "").trim().toLowerCase() || null;
+    setCandidates(prev => prev.map(c => c.id !== candidateId ? c : {
+      ...c,
+      feedback,
+      feedback_reason: reason,
+      feedback_at: new Date().toISOString(),
+      feedback_by: actor,
+      submission_type: kind,
+      submittal_status: submittalStatusFor(kind, c.jobdiva_submittal_count),
+    }));
+  };
+
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
-      const submittedAt = new Date().toISOString();
       try {
         const c = candidates.find(cand => cand.id === actionCandidateId);
         const jobRef = c?.jobdiva_id || c?.job_id;
@@ -496,8 +574,7 @@ export default function GlobalCandidatesPage() {
           manager_email: submissionData.manager_email,
           recruiter_notes: submissionData.recruiter_notes,
         });
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
+        applyLocalFeedback(actionCandidateId, 'Submit', null, submissionData.submission_type);
       } catch (error) {
         console.error('Error syncing submission:', error);
       } finally {
@@ -512,7 +589,6 @@ export default function GlobalCandidatesPage() {
     const trimmedReason = rejectReason?.trim() || "";
     if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
-      const rejectedAt = new Date().toISOString();
       try {
         const c = candidates.find(cand => cand.id === actionCandidateId);
         const jobRef = c?.jobdiva_id || c?.job_id;
@@ -521,9 +597,7 @@ export default function GlobalCandidatesPage() {
           feedback_type: 'Reject',
           reason: trimmedReason
         });
-        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
-        setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
+        applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null);
       } catch (error) {
         console.error('Error syncing rejection:', error);
       } finally {
@@ -540,13 +614,7 @@ export default function GlobalCandidatesPage() {
     try {
       if (!jobDivaId) throw new Error("No job ID found");
       await api.candidates.feedback(String(jobDivaId), String(candidateId), { feedback_type: 'Unreachable' });
-      setFeedbacks(prev => ({ ...prev, [candidateId]: 'Unreachable' }));
-      setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
-      setFeedbackReasons(prev => {
-        const next = { ...prev };
-        delete next[candidateId];
-        return next;
-      });
+      applyLocalFeedback(candidateId, 'Unreachable', null, null);
     } catch (error) {
       console.error('Error marking unreachable:', error);
     } finally {
@@ -559,12 +627,6 @@ export default function GlobalCandidatesPage() {
   const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, replace: boolean = false) => {
     fetchIdRef.current += 1;
     const currentFetchId = fetchIdRef.current;
-
-    if (replace) {
-      setFeedbacks({});
-      setFeedbackReasons({});
-      setFeedbackTimes({});
-    }
 
     try {
       const query = new URLSearchParams({
@@ -597,25 +659,6 @@ export default function GlobalCandidatesPage() {
       if (currentFetchId !== fetchIdRef.current) return;
 
       if (candData.status === "success" && Array.isArray(candData.candidates)) {
-        const pageFeedbacks: Record<string, string> = {};
-        const pageFeedbackReasons: Record<string, string> = {};
-        const pageFeedbackTimes: Record<string, string> = {};
-        candData.candidates.forEach((c: Candidate) => {
-          if (c.data?.feedback_type) {
-            const raw = c.data.feedback_type.trim();
-            const lower = raw.toLowerCase();
-            if (lower.startsWith("reject")) pageFeedbacks[c.id] = "Reject";
-            else if (lower === "submit" || lower === "submitted") pageFeedbacks[c.id] = "Submit";
-            else if (lower === "unreachable") pageFeedbacks[c.id] = "Unreachable";
-            else pageFeedbacks[c.id] = "";
-          }
-          if (c.data?.feedback_reason) pageFeedbackReasons[c.id] = c.data.feedback_reason;
-          if (c.data?.feedback_at) pageFeedbackTimes[c.id] = c.data.feedback_at;
-        });
-        setFeedbacks(prev => ({ ...prev, ...pageFeedbacks }));
-        setFeedbackReasons(prev => ({ ...prev, ...pageFeedbackReasons }));
-        setFeedbackTimes(prev => ({ ...prev, ...pageFeedbackTimes }));
-
         if (replace) {
           setCandidates(candData.candidates);
         } else {
@@ -665,72 +708,6 @@ export default function GlobalCandidatesPage() {
 
   const hasMore = candidates.length < totalCount;
 
-  const handleExport = () => {
-    if (!candidates || candidates.length === 0) return;
-
-    const escapeCsvField = (field: unknown) => {
-      if (field === null || field === undefined) return "";
-      let str = String(field);
-      if (/^[=+\-@]/.test(str)) {
-        str = "'" + str;
-      }
-      if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-        return `"${str.replace(/"/g, '""')}"`;
-      }
-      return str;
-    };
-
-    const headers = [
-      "JobDiva ID",
-      "Candidate Name",
-      "Email",
-      "Phone",
-      "Source",
-      "Launched Date",
-      "Resume Screening Score",
-      "Engage Status",
-      "Engage Score",
-      "Total Fit Score",
-      "Recruiter Email"
-    ];
-
-    const generateRows = (cands: any[]) => cands.map((c) => {
-      const resumeScore = Math.round(c.match_score || 0);
-      const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
-      const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
-
-      const statusInfo = normalizeInterviewStatus(c.engage_status);
-
-      return [
-        escapeCsvField(c.jobdiva_id || ""),
-        escapeCsvField(c.name || "Unknown"),
-        escapeCsvField(c.email || ""),
-        escapeCsvField(c.phone || ""),
-        escapeCsvField(normalizeSourceLabel(c.source)),
-        escapeCsvField(c.engage_created_at ? formatDate(c.engage_created_at) : ""),
-        escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
-        escapeCsvField(statusInfo.label),
-        escapeCsvField(engageScoreStr),
-        escapeCsvField(totalFitScoreStr),
-        escapeCsvField(getRecruiterEmailsArray(c.recruiter_emails).join(", ") || "N/A")
-      ].join(",");
-    });
-
-    const rows = generateRows(candidates);
-    const csvContent = [headers.join(","), ...rows].join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute(
-      "download",
-      `Master_Candidate_Pool_${new Date().toISOString().split("T")[0]}.csv`
-    );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   const handleExportWithDateRange = async () => {
     if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
       setToast({ message: "Start Date cannot be after End Date.", type: "error" });
@@ -770,57 +747,62 @@ export default function GlobalCandidatesPage() {
       }
 
       if (allExportCandidates.length > 0) {
-        
-        const escapeCsvField = (field: unknown) => {
-          if (field === null || field === undefined) return "";
-          let str = String(field);
-          if (/^[=+\-@]/.test(str)) {
-            str = "'" + str;
-          }
-          if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-            return `"${str.replace(/"/g, '""')}"`;
-          }
-          return str;
-        };
-
+        // Same values as the table: Eastern times with the zone stated once in
+        // the header, the table's Pass / feedback / submittal labels. toCsv
+        // carries the formula-injection guard; the BOM keeps Excel from
+        // mangling the en dashes and "—" placeholders.
         const headers = [
           "JobDiva ID",
+          "Job Title",
           "Candidate Name",
           "Email",
           "Phone",
           "Source",
-          "Launched Date",
+          "Recruiter Email",
+          withEasternLabel("Launched Date"),
+          "Screening Level",
           "Resume Screening Score",
-          "Engage Status",
+          "Pass Status",
           "Engage Score",
           "Total Fit Score",
-          "Recruiter Email"
+          "Candidate Feedback",
+          "Feedback Reason",
+          "Feedback By",
+          withEasternLabel("Feedback At"),
+          "Submittal Status",
+          "JobDiva Submittal Date",
         ];
 
-        const generateRows = (cands: Candidate[]) => cands.map((c) => {
+        const rows = allExportCandidates.map((c) => {
           const resumeScore = Math.round(c.match_score || 0);
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
           const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
-
-          const statusInfo = normalizeInterviewStatus(c.engage_status);
+          const feedback = knownFeedback(c.feedback);
 
           return [
-            escapeCsvField(c.jobdiva_id || ""),
-            escapeCsvField(c.name || "Unknown"),
-            escapeCsvField(c.email || ""),
-            escapeCsvField(c.phone || ""),
-            escapeCsvField(normalizeSourceLabel(c.source)),
-            escapeCsvField(c.engage_created_at ? formatDate(c.engage_created_at) : ""),
-            escapeCsvField(resumeScore > 0 ? resumeScore : "N/A"),
-            escapeCsvField(statusInfo.label),
-            escapeCsvField(engageScoreStr),
-            escapeCsvField(totalFitScoreStr),
-            escapeCsvField(getRecruiterEmailsArray(c.recruiter_emails).join(", ") || "N/A")
-          ].join(",");
+            c.jobdiva_id || "",
+            c.job_title || "",
+            c.name || "Unknown",
+            c.email || "",
+            c.phone || "",
+            normalizeSourceLabel(c.source),
+            getRecruiterEmailsArray(c.recruiter_emails).join(", ") || "N/A",
+            formatEasternDateTime(c.engage_created_at),
+            c.screening_level || "",
+            resumeScore > 0 ? String(resumeScore) : "N/A",
+            normalizeInterviewStatus(c.pass_status ?? c.engage_status).label,
+            engageScoreStr,
+            totalFitScoreStr,
+            feedback ? FEEDBACK_DISPLAY[feedback] : "",
+            feedback ? c.feedback_reason || "" : "",
+            feedback ? c.feedback_by || "" : "",
+            feedback ? formatEasternDateTime(c.feedback_at) : "",
+            c.submittal_status || "",
+            formatEasternDate(c.jobdiva_submittal_date),
+          ];
         });
 
-        const rows = generateRows(allExportCandidates);
-        const csvContent = [headers.join(","), ...rows].join("\n");
+        const csvContent = UTF8_BOM + toCsv(headers, rows);
         const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -1008,52 +990,37 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] sticky left-[370px] z-30 bg-slate-50 text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">CANDIDATE NAME</TableHead>
                 <TableHead className="w-[300px] min-w-[300px] max-w-[300px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RECRUITER EMAIL</TableHead>
                 <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SOURCE</TableHead>
-                <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">LAUNCHED DATE</TableHead>
+                <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("LAUNCHED DATE")}</TableHead>
                 <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SCREENING LEVEL</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
-                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
+                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">PASS STATUS</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
-                <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">CANDIDATE FEEDBACK</TableHead>
+                <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("CANDIDATE FEEDBACK")}</TableHead>
+                <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SUBMITTAL STATUS</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
-                Array.from({ length: 10 }).map((_, i) => (
-                  <TableRow key={`skel-${i}`}>
-                    <TableCell className="border-b border-slate-200 text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
-                      <div className="space-y-2">
-                        <Skeleton className="h-4 w-40 mx-auto" />
-                        <Skeleton className="h-3 w-32 mx-auto" />
-                      </div>
-                    </TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
-                  </TableRow>
-                ))
+                Array.from({ length: 10 }).map((_, i) => <CandidateSkeletonRow key={`skel-${i}`} />)
               ) : candidates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="h-48 text-center">
+                  <TableCell colSpan={TABLE_COLUMN_COUNT} className="h-48 text-center">
                     <div className="text-slate-400 text-[14px]">No candidates found.</div>
                   </TableCell>
                 </TableRow>
               ) : (
                 candidates.map((c, i) => {
-                  const statusInfo = normalizeInterviewStatus(c.engage_status);
+                  const rowKey = candidateRowKey(c);
+                  const statusInfo = normalizeInterviewStatus(c.pass_status ?? c.engage_status);
                   const resumeScore = Math.round(c.match_score || 0);
                   const parsedRecruiterEmails = getRecruiterEmailsArray(c.recruiter_emails); // Cache parsed emails once per row
+                  const feedback = knownFeedback(c.feedback);
+                  const feedbackTime = feedback ? formatEasternDateTime(c.feedback_at) : EMPTY_DATE;
+                  const submittalStatus = c.submittal_status || "Not Submitted";
 
                   return (
-                    <TableRow key={candidateRowKey(c)} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
+                    <TableRow key={rowKey} className="group hover:bg-slate-50 transition-colors cursor-default h-[60px] border-b border-slate-200">
                       <TableCell className="border-b border-slate-200 text-center text-[13px] font-medium text-slate-400 sticky left-0 z-10 bg-white group-hover:bg-slate-50 transition-colors">
                         {i + 1}
                       </TableCell>
@@ -1146,7 +1113,7 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 border-l border-slate-200 text-center font-medium text-slate-600 text-[12px]">
-                        {c.engage_created_at ? formatDate(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
+                        {c.engage_created_at ? formatEasternDateTime(c.engage_created_at) : <span className="text-slate-400 italic">N/A</span>}
                       </TableCell>
                       
                       <TableCell className="border-b border-slate-200 text-center font-medium border-l border-slate-200">
@@ -1163,9 +1130,9 @@ export default function GlobalCandidatesPage() {
                         {resumeScore > 0 ? (
                           <div
                             className="relative group/score inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
-                            onMouseEnter={() => setHoveredScoreCandidateId(c.candidate_id)}
+                            onMouseEnter={() => setHoveredScoreCandidateId(rowKey)}
                             onMouseLeave={() => setHoveredScoreCandidateId(null)}
-                            onFocus={() => setHoveredScoreCandidateId(c.candidate_id)}
+                            onFocus={() => setHoveredScoreCandidateId(rowKey)}
                             onBlur={() => setHoveredScoreCandidateId(null)}
                             tabIndex={0}
                             aria-label="View Resume Screening Details"
@@ -1176,7 +1143,7 @@ export default function GlobalCandidatesPage() {
                             </span>
                             <ResumeScreeningHoverCard
                               candidate={c}
-                              open={hoveredScoreCandidateId === c.candidate_id}
+                              open={hoveredScoreCandidateId === rowKey}
                             />
                           </div>
                         ) : (
@@ -1204,9 +1171,9 @@ export default function GlobalCandidatesPage() {
                         {c.engage_score !== null && c.engage_score !== undefined ? (
                           <div
                             className="relative group/engage inline-block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
-                            onMouseEnter={() => setHoveredEngageCandidateId(c.candidate_id)}
+                            onMouseEnter={() => setHoveredEngageCandidateId(rowKey)}
                             onMouseLeave={() => setHoveredEngageCandidateId(null)}
-                            onFocus={() => setHoveredEngageCandidateId(c.candidate_id)}
+                            onFocus={() => setHoveredEngageCandidateId(rowKey)}
                             onBlur={() => setHoveredEngageCandidateId(null)}
                             tabIndex={0}
                             aria-label="View Hard Filter Details"
@@ -1217,7 +1184,7 @@ export default function GlobalCandidatesPage() {
                             </span>
                             <HardFilterHoverCard
                               details={c.audit_payload?.hard_filter_details}
-                              open={hoveredEngageCandidateId === c.candidate_id}
+                              open={hoveredEngageCandidateId === rowKey}
                             />
                           </div>
                         ) : (
@@ -1237,7 +1204,7 @@ export default function GlobalCandidatesPage() {
                         <div className="flex flex-col items-center justify-center gap-1.5 min-h-[64px]">
                           <Select
                             disabled={syncingCandidateId === c.id}
-                            value={feedbacks[c.id]?.startsWith("Reject") ? "Reject" : feedbacks[c.id] || undefined}
+                            value={feedback}
                             onValueChange={(val) => {
                               if (val === "Reject") {
                                 setActionCandidateId(c.id);
@@ -1260,55 +1227,54 @@ export default function GlobalCandidatesPage() {
                               <SelectItem value="Unreachable" className="text-[12px] font-semibold text-slate-700 focus:bg-orange-50 focus:text-orange-700">Unreachable</SelectItem>
                             </SelectContent>
                           </Select>
-                          {feedbacks[c.id] && (
+                          {feedback && (
                             <div className="flex flex-col items-center gap-1 mt-1.5">
-                              <div className={`text-[12px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[c.id] === 'Submit' ? 'text-indigo-600' : feedbacks[c.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
-                                {feedbacks[c.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
-                                 feedbacks[c.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 
-                                 <><PhoneOff className="w-3 h-3" /> Unreachable</>}
+                              <div className={`text-[12px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedback === 'Submit' ? 'text-indigo-600' : feedback === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
+                                {feedback === 'Submit' ? <Check className="w-3 h-3" /> : feedback === 'Reject' ? <X className="w-3 h-3" /> : <PhoneOff className="w-3 h-3" />}
+                                {FEEDBACK_DISPLAY[feedback]}
                               </div>
-                              {feedbackReasons[c.id] && (
+                              {c.feedback_reason && (
                                 <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
-                                  {feedbackReasons[c.id]}
+                                  {c.feedback_reason}
                                 </div>
                               )}
-                              {feedbackTimes[c.id] && (() => {
-                                const d = new Date(feedbackTimes[c.id]);
-                                if (isNaN(d.getTime())) return null;
-                                return (
-                                  <div className="text-[10px] text-slate-400 font-medium text-center whitespace-nowrap" title={feedbackTimes[c.id]}>
-                                    {formatDate(feedbackTimes[c.id])}
-                                  </div>
-                                );
-                              })()}
+                              {feedbackTime !== EMPTY_DATE && (
+                                <div className="text-[10px] text-slate-400 font-medium text-center whitespace-nowrap">
+                                  {feedbackTime}
+                                </div>
+                              )}
+                              {c.feedback_by && (
+                                <div className="max-w-[200px] text-[10px] text-slate-400 font-medium text-center break-all" title={c.feedback_by}>
+                                  by {c.feedback_by}
+                                </div>
+                              )}
                             </div>
                           )}
+                        </div>
+                      </TableCell>
+
+                      <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-4 align-middle">
+                        <div className="flex flex-col items-center justify-center gap-1">
+                          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold border whitespace-normal leading-tight max-w-[220px] ${submittalBadgeClass(submittalStatus)}`}>
+                            {submittalStatus}
+                          </span>
+                          {c.jobdiva_submittal_date ? (
+                            <div className="text-[10px] text-slate-400 font-medium whitespace-nowrap">
+                              JobDiva: {formatEasternDate(c.jobdiva_submittal_date)}
+                              {(c.jobdiva_submittal_count ?? 0) > 1 ? ` (${c.jobdiva_submittal_count} submittals)` : ""}
+                            </div>
+                          ) : c.jobdiva_submittal_count === null ? (
+                            <div className="text-[10px] text-slate-400 italic whitespace-nowrap" title="The JobDiva submittal lookup failed; this status is from PAIR data only.">
+                              JobDiva status unavailable
+                            </div>
+                          ) : null}
                         </div>
                       </TableCell>
                     </TableRow>
                   );
                 })
               )}
-              {isFetchingMore && Array.from({ length: 3 }).map((_, i) => (
-                  <TableRow key={`skel-more-${i}`}>
-                    <TableCell className="border-b border-slate-200 text-center sticky left-0 z-10 bg-white"><Skeleton className="h-4 w-6 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center sticky left-[50px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center sticky left-[170px] z-10 bg-white border-l border-slate-200"><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 sticky left-[370px] z-10 bg-white border-l border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
-                      <div className="space-y-2">
-                        <Skeleton className="h-4 w-40 mx-auto" />
-                        <Skeleton className="h-3 w-32 mx-auto" />
-                      </div>
-                    </TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-16 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-24 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-12 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-6 w-24 mx-auto rounded-full" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                    <TableCell className="border-b border-slate-200 text-center border-l border-slate-200"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
-                  </TableRow>
-              ))}
+              {isFetchingMore && Array.from({ length: 3 }).map((_, i) => <CandidateSkeletonRow key={`skel-more-${i}`} />)}
             </TableBody>
           </Table>
 
@@ -1368,7 +1334,7 @@ export default function GlobalCandidatesPage() {
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={candidates.find(c => c.id === actionCandidateId)?.job_title || "Job"}
         jobRef={candidates.find(c => c.id === actionCandidateId)?.jobdiva_id || ""}
-        clientName={String(candidates.find(c => c.id === actionCandidateId)?.company || "-")}
+        clientName={candidates.find(c => c.id === actionCandidateId)?.customer_name || "-"}
         onConfirmSubmit={handleConfirmSubmit}
         isSubmitting={syncingCandidateId === actionCandidateId}
       />

@@ -17,6 +17,8 @@ from services.ai_service import ai_service
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
 from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_AGG_SQL
+from services.job_attribution import SCHEMA_STATEMENTS as ATTRIBUTION_SCHEMA_STATEMENTS, stamp_job_posted_by
+from services.job_step_time import SCHEMA_STATEMENTS as STEP_TIME_SCHEMA_STATEMENTS
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
 from models import (
@@ -231,6 +233,16 @@ def _ensure_monitored_jobs_schema() -> None:
             # campaign_id at row birth in services.jobdiva.monitor_job_locally.
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS campaign_id TEXT",
 
+            # Who posted / launched the job in PAIR (lowercased email of the
+            # signed-in user), for the "Posted By" / "Launched By" report
+            # columns. Rows that exist when the columns are added are marked
+            # '' (not recorded, never stamped); later rows start NULL and are
+            # stamped by services.job_attribution — see its docstring.
+            *ATTRIBUTION_SCHEMA_STATEMENTS,
+            # Active time recruiters spend on a wizard step (Step 5 for the
+            # reports); see services/job_step_time.py.
+            *STEP_TIME_SCHEMA_STATEMENTS,
+
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
@@ -257,6 +269,7 @@ def _ensure_monitored_jobs_schema() -> None:
             )""",
             "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_job ON jobdiva_submittals (job_id)",
             "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_date ON jobdiva_submittals (submit_date)",
+            "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_job_candidate ON jobdiva_submittals (job_id, candidate_id)",
             # Cross submissions (services/cross_submissions.py): one row per
             # (new job, person) PAIR surfaced from its 60-day screened pool.
             # UNIQUE(job_id, person_key) is the email-once claim. The
@@ -980,6 +993,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     """
     _verify_job_access_by_id(job_id, user, allow_not_found=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
+    # Runs after the response — i.e. only when the save succeeded and the row
+    # exists. First writer wins (services/job_attribution.py).
+    background_tasks.add_task(stamp_job_posted_by, job_id, user.email)
     try:
         import json
         import psycopg2.extras
@@ -1212,6 +1228,9 @@ async def create_external_job(req: ExternalJobCreateRequest, user: UserIdentity 
         conn.commit()
         cursor.close()
         conn.close()
+        # Best-effort, after the row exists: a boot whose ALTER never added
+        # pair_posted_by must not fail job creation (services/job_attribution.py).
+        stamp_job_posted_by(str(new_job_id), user.email)
 
         logger.info(f"✅ Created external job {new_job_id} (ref {new_ref}) — '{req.title[:60]}'")
         return {
@@ -1357,13 +1376,19 @@ async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, b
         raise HTTPException(status_code=500, detail=f"Failed to auto-save step: {str(e)}")
 
 @router.post("/jobs/{job_id}/monitor")
-async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData, user: UserIdentity = Depends(get_current_user)):
+async def save_job_to_monitored_jobs_only(
+    job_id: str,
+    draft_data: JobDraftData,
+    background_tasks: BackgroundTasks,
+    user: UserIdentity = Depends(get_current_user),
+):
     """
     Save job data directly to monitored_jobs table without touching drafts table.
     This is used when the user wants form data to go straight to monitoring.
     """
     _verify_job_access_by_id(job_id, user, allow_not_found=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
+    background_tasks.add_task(stamp_job_posted_by, job_id, user.email)
     try:
         import json
         
@@ -1878,6 +1903,10 @@ def _create_job_version_sync(job_id_or_ref: str) -> dict:
                 "processing_status": "step_1_complete",
                 "processing_stage": None,
                 "pair_launched_at": None,
+                # Attribution belongs to this version's own first save / launch
+                # (services/job_attribution.py), not to v1's people.
+                "pair_launched_by": None,
+                "pair_posted_by": None,
                 "outreach_stopped_at": None,
                 "candidates_sourced": 0,
                 "candidates_launched": 0,
@@ -1978,12 +2007,15 @@ async def publish_job_draft(job_id: str, publish_request: JobPublishRequest):
         conn.close()
         
         if result == "Draft published successfully":
-            # Update pair_launched_at timestamp in monitored_jobs
+            # Update pair_launched_at timestamp in monitored_jobs. COALESCE: it
+            # is the job's FIRST launch (Admin Analytics "Launched (PAIR)", the
+            # Recruiter Analytics launch-date filter), so a re-publish must not
+            # move it — /candidates/save stamps it the same way.
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "UPDATE monitored_jobs SET pair_launched_at = NOW() WHERE jobdiva_id = %s OR id = %s",
+                    "UPDATE monitored_jobs SET pair_launched_at = COALESCE(pair_launched_at, NOW()) WHERE jobdiva_id = %s OR id = %s",
                     (job_id, job_id)
                 )
                 conn.commit()

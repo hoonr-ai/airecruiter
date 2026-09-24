@@ -62,6 +62,58 @@ def _ts(col: str) -> str:
     return f"NULLIF(substring({col}::text from 1 for 19), '')::timestamp"
 
 
+def _ts_utc(col: str) -> str:
+    """timestamptz expression for a monitored_jobs date column, zone-correct.
+
+    `readable_ist_now()` writers store an India wall-clock reading with an
+    " IST" suffix ("2026-09-21 19:16:55 IST"); NOW()-style writers store UTC.
+    `_ts()` truncates the suffix away, so `_ts(col) AT TIME ZONE 'UTC'` read
+    every IST row 5h30m late — the "Added on PAIR is +5:30" bug in Admin
+    Analytics. This honours the suffix exactly like the launch report's
+    `_parse_monitored_jobs_timestamp` (IST when the text ends in "IST",
+    otherwise UTC), so both reports agree on the same row.
+
+    No '%' and no placeholders: safe inside parameterised statements.
+    """
+    return (
+        f"(CASE WHEN RIGHT(UPPER(TRIM({col}::text)), 3) = 'IST' "
+        f"THEN ({_ts(col)}) AT TIME ZONE 'Asia/Kolkata' "
+        f"ELSE ({_ts(col)}) AT TIME ZONE 'UTC' END)"
+    )
+
+
+# monitored_jobs columns added after the base table by a startup ALTER
+# (routers/jobs._ensure_monitored_jobs_schema). That ALTER needs an ACCESS
+# EXCLUSIVE lock and runs inside main.py's 10s startup schema budget, swallowing
+# its own errors, so behind a long query it can be cancelled and leave a column
+# missing until a later boot. A report that selects a missing column would 500
+# as a whole; selecting NULL just renders "—" in that column.
+OPTIONAL_MONITORED_JOBS_COLUMNS = ("pair_posted_by", "pair_launched_by")
+
+# to_regclass resolves through search_path like the reports' bare
+# `monitored_jobs`, and yields NULL (no rows) instead of raising if the table
+# is absent. No '%': it runs with an empty params tuple.
+_PRESENT_MONITORED_JOBS_COLUMNS_SQL = (
+    "SELECT attname FROM pg_attribute "
+    "WHERE attrelid = to_regclass('monitored_jobs') AND attnum > 0 AND NOT attisdropped"
+)
+
+
+def optional_monitored_jobs_columns(cur, alias: str = "mj.") -> Dict[str, str]:
+    """``{column: select expression}`` for OPTIONAL_MONITORED_JOBS_COLUMNS:
+    ``<alias><column>`` when monitored_jobs has it, else ``NULL::text``.
+
+    One sub-millisecond catalog read per request, deliberately not cached: a
+    cache would have to notice the ALTER landing on a later boot.
+    """
+    cur.execute(_PRESENT_MONITORED_JOBS_COLUMNS_SQL, ())
+    present = {str(r[0]) for r in cur.fetchall() or []}
+    return {
+        col: (f"{alias}{col}" if col in present else "NULL::text")
+        for col in OPTIONAL_MONITORED_JOBS_COLUMNS
+    }
+
+
 def _int(col: str) -> str:
     """Type-agnostic integer expression for counter columns (INT or TEXT)."""
     return f"COALESCE(NULLIF(TRIM({col}::text), '')::numeric, 0)::int"

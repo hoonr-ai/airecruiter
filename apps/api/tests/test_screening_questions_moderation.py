@@ -58,7 +58,7 @@ def test_expected_answer_is_moderated_and_part_of_the_cache_key(monkeypatch):
     assert result["results"][0]["flags"] == ["unsafe", "grammatical_error"]
     make_key.assert_called_once_with(
         "q_moderation",
-        3,
+        4,
         "gpt-4o-mini",
         "Software Engineer",
         "What is your favorite color?",
@@ -88,7 +88,7 @@ def test_cache_hit_uses_expected_answer_key_and_skips_the_llm(monkeypatch):
     assert result["results"][0]["flags"] == ["nsfw"]
     make_key.assert_called_once_with(
         "q_moderation",
-        3,
+        4,
         "gpt-4o-mini",
         "Software Engineer",
         "What is your favorite color?",
@@ -154,5 +154,44 @@ def test_deterministic_grammar_flag_overrides_an_llm_ok_verdict(monkeypatch):
         "flags": ["grammatical_error"],
         "reason": "Use ‘How many years’ rather than ‘How much years.’",
         "corrected_question": "How many years of experience do you have?",
+        "checked": True,
+    }
+
+
+def test_llm_hallucinated_grammar_flag_is_dropped(monkeypatch):
+    mock_oai = MagicMock()
+    mock_parse = AsyncMock()
+    mock_oai.beta.chat.completions.parse = mock_parse
+    monkeypatch.setattr(ai_generation, "get_openai_client", lambda: mock_oai)
+    monkeypatch.setattr(llm_cache, "make_key", MagicMock(return_value="grammar_key"))
+    monkeypatch.setattr(llm_cache, "get_json", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_cache, "set_json", AsyncMock())
+
+    verdict = MagicMock()
+    # Model hallucinates grammar error but returns identical string
+    verdict.model_dump.return_value = {
+        "ok": False, 
+        "flags": ["grammatical_error"], 
+        "reason": "Fix grammar",
+        "corrected_question": "What is your current designation?"
+    }
+    mock_parse.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(parsed=verdict))]
+    )
+    req = ai_generation.ModerateQuestionsRequest(
+        questions=[ai_generation.ModerateQuestionItem(
+            key="grammar_key", question_text="What is your current designation?"
+        )]
+    )
+
+    result = _run(ai_generation.moderate_screening_questions(req, _user()))
+
+    assert result["results"][0] == {
+        "key": "grammar_key",
+        "question_text": "What is your current designation?",
+        "ok": True,
+        "flags": [],
+        "reason": "",
+        "corrected_question": "",
         "checked": True,
     }
