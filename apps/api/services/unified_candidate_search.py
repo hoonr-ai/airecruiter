@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import contextvars
 import json
 import math
 import os
@@ -281,6 +282,19 @@ def resolve_jobdiva_sources(sources: Sequence[str]) -> Dict[str, bool]:
     }
 
 
+# Role family for scoring OUTSIDE a live search (`score_candidate_off_search`).
+# `_current_family` is instance state set once per `search_candidates` call on a
+# module-level singleton, so an off-search scorer (the cross-submissions scan,
+# the re-score endpoints) would otherwise read whichever family the last search
+# happened to leave behind — and clobber it for a search still streaming.
+# A ContextVar is per-task/per-thread (`asyncio.to_thread` copies the context),
+# so each off-search scorer gets its own value and the live search keeps its own.
+_UNSET_FAMILY = "\x00unset"
+_off_search_family: contextvars.ContextVar = contextvars.ContextVar(
+    "scoring_role_family", default=_UNSET_FAMILY
+)
+
+
 class SearchCriteria(BaseModel):
     job_id: str
     title_criteria: List[Dict[str, Any]] = []
@@ -473,6 +487,16 @@ class UnifiedCandidateSearch:
         # time, not import time.
         self._exa_agent_semaphore: Optional[asyncio.Semaphore] = None
 
+    @property
+    def _active_family(self) -> Optional[str]:
+        """The role family the CURRENT scoring pass should use.
+
+        An off-search scorer sets `_off_search_family` for its own
+        task/thread; everything else reads the live search's instance state.
+        """
+        scoped = _off_search_family.get()
+        return self._current_family if scoped == _UNSET_FAMILY else scoped
+
     def _resolve_search_family(self, criteria: "SearchCriteria") -> Optional[str]:
         """Detect role family from the criteria's title + skill hints.
 
@@ -663,210 +687,8 @@ class UnifiedCandidateSearch:
         }
 
         def finalize_candidate(cand):
-            """Apply match scoring to a candidate."""
-            # Ensure name is title-cased if it exists
-            if cand.get("name"):
-                cand["name"] = str(cand["name"]).title()
-
-            # Location hygiene at the emit choke-point: no path may display or
-            # persist a work-arrangement string ("Remote"/"Hybrid"/"WFH") as
-            # the candidate's location — it isn't a place, it dodges the
-            # radius gate (can't geocode → unknown → soft-keep), and it hides
-            # the CRM's real city/state. Blank it and rebuild from the
-            # structured fields; an empty location is honest.
-            loc = sanitize_candidate_location(cand.get("location"))
-            if not loc:
-                # CRM city fields can literally say "REMOTE" ("REMOTE, GA"),
-                # so the rebuild is sanitized too.
-                loc = sanitize_candidate_location(", ".join(
-                    p for p in [
-                        str(cand.get("city") or "").strip(),
-                        str(cand.get("state") or "").strip(),
-                    ] if p
-                ))
-            cand["location"] = loc
-
-            # No-contact companies (services/no_contact.py): flag at the emit
-            # choke-point so every source is covered — external rows carry
-            # employer fields pre-LLM, JobDiva rows only after enhancement.
-            # Flagged rows are display-only: never scored (match_score None
-            # renders as the grey "N/A" pill, and the None-safe score gates
-            # keep the row visible), greyed out client-side, and blocked
-            # server-side at /candidates/save and the launch gate.
-            if apply_no_contact_flag(cand):
-                cand["match_score"] = None
-                cand["missing_skills"] = []
-                cand["matched_skills"] = []
-                cand["explainability"] = [
-                    cand.get("no_contact_reason") or "No-contact company"
-                ]
-                cand["match_score_details"] = {}
-                return cand
-
-            # Hiring-client conflict: current OR last employer is the client.
-            # Stamped at the same choke-point so every source is covered, and
-            # kept as a FLAG rather than a drop — the row stays visible in the
-            # candidate list, greyed out with the reason on it, so a recruiter
-            # can see why the person is off-limits instead of silently never
-            # meeting them. (External rows whose CURRENT employer is the client
-            # are still dropped upstream by _drop_client_employees, per the
-            # standing "never source a client's own employees" rule.) Scoring
-            # is left intact: unlike the no-contact list this is a per-job
-            # conflict, and the match quality is still worth showing.
-            apply_client_conflict_flag(cand, getattr(criteria, "client_name", ""))
-
-            if criteria.bypass_screening:
-                cand["match_score"] = 0
-                cand["missing_skills"] = []
-                cand["matched_skills"] = []
-                cand["explainability"] = ["Scoring skipped (auto-assignment)"]
-                cand["match_score_details"] = {}
-                return cand
-
-            score_result = self._score_candidate(cand, criteria)
-            base_score = score_result["score"]
-            cand["match_score"] = base_score
-            cand["missing_skills"] = score_result["missing_skills"]
-            cand["matched_skills"] = score_result.get("matched_skills", [])
-            cand["explainability"] = score_result["explainability"]
-            cand["match_score_details"] = score_result.get("score_details", {})
-
-            if cand.get("scoring_mode") == "high_level":
-                # No % is shown for agent rows (see the match_score=None stamp
-                # below), so drop the rubric tier-judgment line — it reads as
-                # a verdict on a score the recruiter never sees. Concrete
-                # lines (matched dimensions, location note, hard exclusions)
-                # stay: those are the legitimate reasons the popup surfaces.
-                _tier_lines = {
-                    "Excellent rubric and sourcing alignment",
-                    "Strong overall fit across active filters",
-                    "Partial fit; review missing rubric requirements",
-                    "Limited fit against active rubric and sourcing filters",
-                    *_MATRIX_BAND_LINES.values(),
-                }
-                _expl = [
-                    line for line in (cand["explainability"] or [])
-                    if line not in _tier_lines
-                ]
-                cand["explainability"] = [
-                    "Matched by JobDiva agent search — detailed AI skills "
-                    "analysis skipped"
-                ] + _expl[:5]
-
-            # JobAgent-rank floor: JobDiva's JobAgent endpoint pre-ranks
-            # candidates by their own relevance matcher. After refactor
-            # `b5a6aaa` (JobAgent-only sourcing), every JobDiva candidate
-            # that reaches this code has already been vetted for the job
-            # by JobDiva's matcher — recruiters trust that signal more
-            # than our rubric-literal-match score, which can crater on
-            # phrasing variants (resume "Microsoft Office" vs rubric
-            # "MS Office Suite"). Apply a tiered floor so JobDiva's top
-            # picks never score below what their rank implies; rubric
-            # match still wins when it's *higher* than the floor, so
-            # rubric-strong candidates aren't artificially capped.
-            #
-            # Skipped when hard-veto fired (base_score == 0): exclusion
-            # rules always trump rank trust.
-            # Scoring matrix v2: the percentage IS the matrix — none of the
-            # additive floors/bonuses below apply (title relevance lives inside
-            # the 15% bucket; source trust is not a rubric signal).
-            source = str(cand.get("source") or "")
-            api_rank = cand.get("api_rank")
-            if (
-                not SCORING_MATRIX_V2
-                and source == "JobDiva-JobAgent"
-                and base_score > 0
-                and isinstance(api_rank, int)
-            ):
-                floor = 0
-                for rank_cutoff, floor_value in JOBAGENT_RANK_SCORE_FLOOR:
-                    if api_rank < rank_cutoff:
-                        floor = floor_value
-                        break
-                if floor and cand["match_score"] < floor:
-                    cand["match_score_details"]["jobagent_rank_floor"] = {
-                        "api_rank": api_rank,
-                        "floor": floor,
-                        "rubric_score": base_score,
-                    }
-                    cand["match_score"] = floor
-                    # base_score is what the source-tier bonus stacks on
-                    # below — re-anchor to the floored value so the bonus
-                    # math reflects the post-floor baseline.
-                    base_score = floor
-
-            # Source-tier bonus: warm leads (recruiter's own applicants,
-            # JobDiva talent pool, curated DBs) outrank cold scrapes when
-            # raw scores are close. Only applied when base_score > 0 so
-            # excluded / hard-vetoed candidates aren't promoted.
-            bonus = SOURCE_TIER_BONUS.get(source, 0)
-            if bonus and base_score > 0 and not SCORING_MATRIX_V2:
-                boosted = min(100, cand["match_score"] + bonus)
-                cand["match_score"] = boosted
-                cand["match_score_details"]["source_tier_bonus"] = {
-                    "source": source,
-                    "bonus": bonus,
-                    "base_score": base_score,
-                }
-
-            # Title-match boost via role taxonomy. Without this, a SQL dev
-            # whose resume happens to mention "program management" can outrank
-            # a Senior Program Manager whose title actually matches the search.
-            if base_score > 0 and criteria.title_criteria and not SCORING_MATRIX_V2:
-                title_boost = _compute_title_boost(cand, criteria.title_criteria)
-                if title_boost > 0:
-                    prev_score = cand["match_score"]
-                    cand["match_score"] = min(100, prev_score + title_boost)
-                    cand["match_score_details"]["title_boost"] = title_boost
-
-            # Open-to-Work boost. Candidates confirmed open to work (the real
-            # Apify #OpenToWork signal, resolved for LinkedIn sources) get a
-            # small tie-breaker bump — an actively-job-seeking match is more
-            # actionable than an identical passive one. Only when the signal is
-            # explicitly True (not "checking"/unknown) and base_score > 0, so a
-            # hard-vetoed candidate is never promoted. For candidates whose
-            # status resolves asynchronously after this scoring pass (cold Apify
-            # cache), the UI still shows the badge via polling; the score bump
-            # lands on the warm path / subsequent searches.
-            if (
-                base_score > 0
-                and OPEN_TO_WORK_SCORE_BONUS
-                and cand.get("open_to_work") is True
-                and not SCORING_MATRIX_V2
-            ):
-                prev_score = cand["match_score"]
-                cand["match_score"] = min(100, prev_score + OPEN_TO_WORK_SCORE_BONUS)
-                cand["match_score_details"]["open_to_work_bonus"] = OPEN_TO_WORK_SCORE_BONUS
-
-            # Candidate-details failure: when the JobDiva detail/résumé fetch or
-            # LLM extraction yielded no real data (detail_failed), we can't fairly
-            # score the candidate. Surface "N/A" (match_score=None) instead of a
-            # misleading 0% / floored score so they aren't dropped at Launch PAIR.
-            # A genuine hard-veto (exclusion rule / out-of-radius) always takes
-            # precedence — those keep their 0% and are skipped at launch.
-            if cand.get("detail_failed"):
-                hard_veto = (cand.get("match_score_details") or {}).get("hard_veto") or {}
-                if not hard_veto.get("triggered"):
-                    cand["match_score"] = None
-
-            # JobDiva-JobAgent rows are never presented as a percentage
-            # (2026-08-25 policy): they follow the criteria the recruiter
-            # authored inside JobDiva and JobDiva's own ranking, so a rubric %
-            # misleads. The scoring pass above still runs — matched/missing
-            # skills, explainability, and the location badge feed the row and
-            # its popup — only the number is withheld. NULL match_score is
-            # already the storage/UI "unscored" sentinel (kept by every
-            # min-score gate, NULLS LAST in rank-list sorting).
-            # Exception: assess_all_sources (sample→approve→auto-launch flow)
-            # runs the full LLM assessment on agent rows precisely so they
-            # carry a real, comparable percentage — keep it.
-            if (
-                str(cand.get("source") or "") == "JobDiva-JobAgent"
-                and not criteria.assess_all_sources
-            ):
-                cand["match_score"] = None
-
-            return cand
+            """Apply match scoring to a candidate — see apply_scoring_policy."""
+            return self.apply_scoring_policy(cand, criteria)
 
         # Which JobDiva producers this request selects — see
         # resolve_jobdiva_sources for the source-name contract.
@@ -4676,7 +4498,7 @@ class UnifiedCandidateSearch:
         # Locations and other non-skill collections are excluded —
         # embeddings make sense only for free-form skill / title text.
         embedding_score = 0.0
-        embedding_active = embedding_skill_match_for_family(self._current_family)
+        embedding_active = embedding_skill_match_for_family(self._active_family)
         if embedding_active and not is_location_only:
             candidate_terms: List[str] = []
             for coll in collections:
@@ -5304,6 +5126,267 @@ class UnifiedCandidateSearch:
                 return 1.0, True
         return SCORING_MATRIX_RECENCY_DECAY, True
 
+    async def warm_scoring_embeddings(
+        self, criteria: SearchCriteria, candidates: Sequence[Dict[str, Any]]
+    ) -> None:
+        """Pre-warm embeddings for an off-search scoring pass.
+
+        `skill_embeddings.best_cosine` is cache-only — it returns 0.0 for any
+        term that was never warmed. A live search warms the query side once in
+        `search_candidates` and each candidate's side in `emit_candidate`, so
+        an off-search scorer that skipped warming would silently score every
+        embedding-matched skill as a miss and come out BELOW the Step-5
+        number. Warms both sides in one batched call; no-op when the family
+        has embedding matching off.
+        """
+        family = self._resolve_search_family(criteria)
+        if not embedding_skill_match_for_family(family):
+            return
+        terms = list(self._criteria_query_terms(criteria))
+        for cand in candidates or []:
+            terms.extend(self._candidate_skill_terms(cand))
+        if not terms:
+            return
+        try:
+            await skill_embeddings.warm_terms(terms)
+        except Exception as exc:  # never let embedding warm break a scoring pass
+            logger.warning(f"off-search embedding warm failed: {exc}")
+
+    def score_candidate_off_search(
+        self, cand: Dict[str, Any], criteria: SearchCriteria
+    ) -> Dict[str, Any]:
+        """`apply_scoring_policy` for callers outside a live search.
+
+        Resolves the role family from `criteria` into a task-local ContextVar
+        rather than the shared `_current_family` instance attribute, so the
+        score matches what Step 5 would produce for the same job and a search
+        streaming concurrently on this worker keeps its own family.
+        """
+        token = _off_search_family.set(self._resolve_search_family(criteria))
+        try:
+            return self.apply_scoring_policy(cand, criteria)
+        finally:
+            _off_search_family.reset(token)
+
+    def apply_scoring_policy(
+        self, cand: Dict[str, Any], criteria: SearchCriteria
+    ) -> Dict[str, Any]:
+        """The Step-5 scoring pipeline, in one place.
+
+        This is what produces the match % the recruiter sees on Step 5:
+        location hygiene → no-contact / client-conflict flags → the
+        scoring matrix (`_score_candidate`) → the N/A policies. Every
+        path that shows or stores a match % MUST go through here, so a
+        candidate cannot score one way on Step 5 and another way
+        somewhere else (see `routers.candidates._compute_resume_matching`,
+        which the cross-submissions scan and the re-score endpoints use).
+
+        Mutates and returns `cand`.
+        """
+        # Ensure name is title-cased if it exists
+        if cand.get("name"):
+            cand["name"] = str(cand["name"]).title()
+
+        # Location hygiene at the emit choke-point: no path may display or
+        # persist a work-arrangement string ("Remote"/"Hybrid"/"WFH") as
+        # the candidate's location — it isn't a place, it dodges the
+        # radius gate (can't geocode → unknown → soft-keep), and it hides
+        # the CRM's real city/state. Blank it and rebuild from the
+        # structured fields; an empty location is honest.
+        loc = sanitize_candidate_location(cand.get("location"))
+        if not loc:
+            # CRM city fields can literally say "REMOTE" ("REMOTE, GA"),
+            # so the rebuild is sanitized too.
+            loc = sanitize_candidate_location(", ".join(
+                p for p in [
+                    str(cand.get("city") or "").strip(),
+                    str(cand.get("state") or "").strip(),
+                ] if p
+            ))
+        cand["location"] = loc
+
+        # No-contact companies (services/no_contact.py): flag at the emit
+        # choke-point so every source is covered — external rows carry
+        # employer fields pre-LLM, JobDiva rows only after enhancement.
+        # Flagged rows are display-only: never scored (match_score None
+        # renders as the grey "N/A" pill, and the None-safe score gates
+        # keep the row visible), greyed out client-side, and blocked
+        # server-side at /candidates/save and the launch gate.
+        if apply_no_contact_flag(cand):
+            cand["match_score"] = None
+            cand["missing_skills"] = []
+            cand["matched_skills"] = []
+            cand["explainability"] = [
+                cand.get("no_contact_reason") or "No-contact company"
+            ]
+            cand["match_score_details"] = {}
+            return cand
+
+        # Hiring-client conflict: current OR last employer is the client.
+        # Stamped at the same choke-point so every source is covered, and
+        # kept as a FLAG rather than a drop — the row stays visible in the
+        # candidate list, greyed out with the reason on it, so a recruiter
+        # can see why the person is off-limits instead of silently never
+        # meeting them. (External rows whose CURRENT employer is the client
+        # are still dropped upstream by _drop_client_employees, per the
+        # standing "never source a client's own employees" rule.) Scoring
+        # is left intact: unlike the no-contact list this is a per-job
+        # conflict, and the match quality is still worth showing.
+        apply_client_conflict_flag(cand, getattr(criteria, "client_name", ""))
+
+        if criteria.bypass_screening:
+            cand["match_score"] = 0
+            cand["missing_skills"] = []
+            cand["matched_skills"] = []
+            cand["explainability"] = ["Scoring skipped (auto-assignment)"]
+            cand["match_score_details"] = {}
+            return cand
+
+        score_result = self._score_candidate(cand, criteria)
+        base_score = score_result["score"]
+        cand["match_score"] = base_score
+        cand["missing_skills"] = score_result["missing_skills"]
+        cand["matched_skills"] = score_result.get("matched_skills", [])
+        cand["explainability"] = score_result["explainability"]
+        cand["match_score_details"] = score_result.get("score_details", {})
+
+        if cand.get("scoring_mode") == "high_level":
+            # No % is shown for agent rows (see the match_score=None stamp
+            # below), so drop the rubric tier-judgment line — it reads as
+            # a verdict on a score the recruiter never sees. Concrete
+            # lines (matched dimensions, location note, hard exclusions)
+            # stay: those are the legitimate reasons the popup surfaces.
+            _tier_lines = {
+                "Excellent rubric and sourcing alignment",
+                "Strong overall fit across active filters",
+                "Partial fit; review missing rubric requirements",
+                "Limited fit against active rubric and sourcing filters",
+                *_MATRIX_BAND_LINES.values(),
+            }
+            _expl = [
+                line for line in (cand["explainability"] or [])
+                if line not in _tier_lines
+            ]
+            cand["explainability"] = [
+                "Matched by JobDiva agent search — detailed AI skills "
+                "analysis skipped"
+            ] + _expl[:5]
+
+        # JobAgent-rank floor: JobDiva's JobAgent endpoint pre-ranks
+        # candidates by their own relevance matcher. After refactor
+        # `b5a6aaa` (JobAgent-only sourcing), every JobDiva candidate
+        # that reaches this code has already been vetted for the job
+        # by JobDiva's matcher — recruiters trust that signal more
+        # than our rubric-literal-match score, which can crater on
+        # phrasing variants (resume "Microsoft Office" vs rubric
+        # "MS Office Suite"). Apply a tiered floor so JobDiva's top
+        # picks never score below what their rank implies; rubric
+        # match still wins when it's *higher* than the floor, so
+        # rubric-strong candidates aren't artificially capped.
+        #
+        # Skipped when hard-veto fired (base_score == 0): exclusion
+        # rules always trump rank trust.
+        # Scoring matrix v2: the percentage IS the matrix — none of the
+        # additive floors/bonuses below apply (title relevance lives inside
+        # the 15% bucket; source trust is not a rubric signal).
+        source = str(cand.get("source") or "")
+        api_rank = cand.get("api_rank")
+        if (
+            not SCORING_MATRIX_V2
+            and source == "JobDiva-JobAgent"
+            and base_score > 0
+            and isinstance(api_rank, int)
+        ):
+            floor = 0
+            for rank_cutoff, floor_value in JOBAGENT_RANK_SCORE_FLOOR:
+                if api_rank < rank_cutoff:
+                    floor = floor_value
+                    break
+            if floor and cand["match_score"] < floor:
+                cand["match_score_details"]["jobagent_rank_floor"] = {
+                    "api_rank": api_rank,
+                    "floor": floor,
+                    "rubric_score": base_score,
+                }
+                cand["match_score"] = floor
+                # base_score is what the source-tier bonus stacks on
+                # below — re-anchor to the floored value so the bonus
+                # math reflects the post-floor baseline.
+                base_score = floor
+
+        # Source-tier bonus: warm leads (recruiter's own applicants,
+        # JobDiva talent pool, curated DBs) outrank cold scrapes when
+        # raw scores are close. Only applied when base_score > 0 so
+        # excluded / hard-vetoed candidates aren't promoted.
+        bonus = SOURCE_TIER_BONUS.get(source, 0)
+        if bonus and base_score > 0 and not SCORING_MATRIX_V2:
+            boosted = min(100, cand["match_score"] + bonus)
+            cand["match_score"] = boosted
+            cand["match_score_details"]["source_tier_bonus"] = {
+                "source": source,
+                "bonus": bonus,
+                "base_score": base_score,
+            }
+
+        # Title-match boost via role taxonomy. Without this, a SQL dev
+        # whose resume happens to mention "program management" can outrank
+        # a Senior Program Manager whose title actually matches the search.
+        if base_score > 0 and criteria.title_criteria and not SCORING_MATRIX_V2:
+            title_boost = _compute_title_boost(cand, criteria.title_criteria)
+            if title_boost > 0:
+                prev_score = cand["match_score"]
+                cand["match_score"] = min(100, prev_score + title_boost)
+                cand["match_score_details"]["title_boost"] = title_boost
+
+        # Open-to-Work boost. Candidates confirmed open to work (the real
+        # Apify #OpenToWork signal, resolved for LinkedIn sources) get a
+        # small tie-breaker bump — an actively-job-seeking match is more
+        # actionable than an identical passive one. Only when the signal is
+        # explicitly True (not "checking"/unknown) and base_score > 0, so a
+        # hard-vetoed candidate is never promoted. For candidates whose
+        # status resolves asynchronously after this scoring pass (cold Apify
+        # cache), the UI still shows the badge via polling; the score bump
+        # lands on the warm path / subsequent searches.
+        if (
+            base_score > 0
+            and OPEN_TO_WORK_SCORE_BONUS
+            and cand.get("open_to_work") is True
+            and not SCORING_MATRIX_V2
+        ):
+            prev_score = cand["match_score"]
+            cand["match_score"] = min(100, prev_score + OPEN_TO_WORK_SCORE_BONUS)
+            cand["match_score_details"]["open_to_work_bonus"] = OPEN_TO_WORK_SCORE_BONUS
+
+        # Candidate-details failure: when the JobDiva detail/résumé fetch or
+        # LLM extraction yielded no real data (detail_failed), we can't fairly
+        # score the candidate. Surface "N/A" (match_score=None) instead of a
+        # misleading 0% / floored score so they aren't dropped at Launch PAIR.
+        # A genuine hard-veto (exclusion rule / out-of-radius) always takes
+        # precedence — those keep their 0% and are skipped at launch.
+        if cand.get("detail_failed"):
+            hard_veto = (cand.get("match_score_details") or {}).get("hard_veto") or {}
+            if not hard_veto.get("triggered"):
+                cand["match_score"] = None
+
+        # JobDiva-JobAgent rows are never presented as a percentage
+        # (2026-08-25 policy): they follow the criteria the recruiter
+        # authored inside JobDiva and JobDiva's own ranking, so a rubric %
+        # misleads. The scoring pass above still runs — matched/missing
+        # skills, explainability, and the location badge feed the row and
+        # its popup — only the number is withheld. NULL match_score is
+        # already the storage/UI "unscored" sentinel (kept by every
+        # min-score gate, NULLS LAST in rank-list sorting).
+        # Exception: assess_all_sources (sample→approve→auto-launch flow)
+        # runs the full LLM assessment on agent rows precisely so they
+        # carry a real, comparable percentage — keep it.
+        if (
+            str(cand.get("source") or "") == "JobDiva-JobAgent"
+            and not criteria.assess_all_sources
+        ):
+            cand["match_score"] = None
+
+        return cand
+
     def _score_candidate_matrix(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
         """Score against the recruiter matrix:
 
@@ -5716,7 +5799,7 @@ class UnifiedCandidateSearch:
             return self._score_candidate_matrix(candidate, criteria)
         profile = self._candidate_profile(candidate)
         dimensions = self._collect_scoring_dimensions(criteria)  # Use scoring dimensions for evaluation
-        weights = scoring_weights_for_family(self._current_family)
+        weights = scoring_weights_for_family(self._active_family)
 
         weighted_scores: List[float] = []
         weighted_max = 0.0
@@ -6253,7 +6336,7 @@ class UnifiedCandidateSearch:
         unknown family resolve to the legacy default weight set, so IT
         scoring is byte-identical to pre-fix behavior.
         """
-        weights = scoring_weights_for_family(self._current_family)
+        weights = scoring_weights_for_family(self._active_family)
         dimensions = {
             # Rubric-driven scored dimensions. "domain" and "education_certs"
             # are merges of the legacy keywords / education+certifications

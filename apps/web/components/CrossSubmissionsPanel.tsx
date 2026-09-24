@@ -18,7 +18,37 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronUp, ExternalLink, Loader2, Mail, Phone, RefreshCw, Repeat, UserPlus, Check } from "lucide-react";
 import { api, type CrossSubmission } from "@/lib/api";
+import { getScoreBand, getScoreTone } from "@/lib/match-score";
 import { cn } from "@/lib/utils";
+
+// These rows are scored by the same matrix as Step 5
+// (services/unified_candidate_search.apply_scoring_policy), so they are shown
+// with the same bands — 85+ Excellent · 75–84 Strong · 60–74 Good — straight
+// from lib/match-score.ts. A bare percentage here let the panel drift from the
+// colours and labels the recruiter reads everywhere else.
+function MatchScorePill({ score }: { score: number | null | undefined }) {
+  const tone = getScoreTone(score);
+  if (score == null || !tone) {
+    return (
+      <span
+        className="inline-flex items-center justify-center px-2 py-1 rounded-md text-[11px] font-bold bg-slate-100 text-slate-500 border border-slate-200"
+        title="Couldn't score this candidate against this job's criteria."
+      >
+        N/A
+      </span>
+    );
+  }
+  const band = getScoreBand(score);
+  return (
+    <span
+      className="inline-flex items-center justify-center px-2 py-1 rounded-md text-[11px] font-bold border"
+      style={{ backgroundColor: tone.bg, color: tone.text, borderColor: tone.ring }}
+      title={`${band.label} — ${band.action}`}
+    >
+      {Math.round(Number(score))}%
+    </span>
+  );
+}
 
 type Notify = (type: "info" | "error" | "success", message: string) => void;
 
@@ -221,8 +251,8 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">{formatDate(row.screened_at)}</div>
                     </td>
-                    <td className="px-3 py-2.5 text-right font-bold text-slate-800 whitespace-nowrap">
-                      {row.match_score != null ? `${Math.round(row.match_score)}%` : "—"}
+                    <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                      <MatchScorePill score={row.match_score} />
                     </td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5">
