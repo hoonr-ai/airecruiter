@@ -17,6 +17,7 @@ that used to drift:
 No DB: `_build_resume_matching_criteria` is exercised with a mocked
 connection, everything else is pure.
 """
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
@@ -454,67 +455,73 @@ def _mock_scan_conn(prior):
     return conn
 
 
-@pytest.mark.asyncio
-async def test_async_warmer_runs_on_the_event_loop_before_scoring():
-    """`run_for_job` is sync in a worker thread; the warmer is a coroutine.
+def test_async_warmer_runs_on_the_event_loop_before_scoring():
+    async def _run():
+        """`run_for_job` is sync in a worker thread; the warmer is a coroutine.
 
-    Pins the `run_coroutine_threadsafe` bridge: the warmer must actually be
-    awaited on the calling loop, with every payload, BEFORE any row is scored.
-    """
-    import asyncio as aio
+        Pins the `run_coroutine_threadsafe` bridge: the warmer must actually be
+        awaited on the calling loop, with every payload, BEFORE any row is scored.
+        """
+        import asyncio as aio
 
-    calls = {"warmed": None, "warm_loop": None, "warm_criteria": None,
-             "scored_after_warm": []}
-    main_loop = aio.get_running_loop()
+        calls = {"warmed": None, "warm_loop": None, "warm_criteria": None,
+                 "scored_after_warm": []}
+        main_loop = aio.get_running_loop()
 
-    async def warmer(payloads, criteria):
-        calls["warmed"] = [p["candidate_id"] for p in payloads]
-        calls["warm_loop"] = aio.get_running_loop()
-        calls["warm_criteria"] = criteria
+        async def warmer(payloads, criteria):
+            calls["warmed"] = [p["candidate_id"] for p in payloads]
+            calls["warm_loop"] = aio.get_running_loop()
+            calls["warm_criteria"] = criteria
 
-    def scorer(payload, criteria):
-        calls["scored_after_warm"].append(calls["warmed"] is not None)
-        return {"score": 90}
+        def scorer(payload, criteria):
+            calls["scored_after_warm"].append(calls["warmed"] is not None)
+            return {"score": 90}
 
-    conn = _mock_scan_conn([_cross_sub_row()])
-    with patch.object(cs, "get_db_connection", return_value=conn), \
-         patch("core.email.notify_cross_submissions", return_value=True):
-        summary = await cs.run_for_job_async(
-            "26-22222", JAVA_DEV_RUBRIC, scorer, warmer=warmer, force=True,
-        )
+        conn = _mock_scan_conn([_cross_sub_row()])
+        with patch.object(cs, "get_db_connection", return_value=conn), \
+             patch("core.email.notify_cross_submissions", return_value=True):
+            summary = await cs.run_for_job_async(
+                "26-22222", JAVA_DEV_RUBRIC, scorer, warmer=warmer, force=True,
+            )
 
-    assert summary["ran"] is True and summary["selected"] == 1
-    assert calls["warmed"] == ["q1"]
-    assert calls["warm_loop"] is main_loop, "warmer must run on the caller's loop"
-    assert calls["scored_after_warm"] == [True], "scored before the cache was warm"
-    # Warmed against the same criteria the rows are scored with.
-    assert calls["warm_criteria"].assess_all_sources is True
+        assert summary["ran"] is True and summary["selected"] == 1
+        assert calls["warmed"] == ["q1"]
+        assert calls["warm_loop"] is main_loop, "warmer must run on the caller's loop"
+        assert calls["scored_after_warm"] == [True], "scored before the cache was warm"
+        # Warmed against the same criteria the rows are scored with.
+        assert calls["warm_criteria"].assess_all_sources is True
 
-
-@pytest.mark.asyncio
-async def test_a_failing_warmer_does_not_sink_the_scan():
-    """A cold cache costs score fidelity; it must not lose the whole list."""
-    import asyncio as aio
-
-    async def warmer(payloads, criteria):
-        raise RuntimeError("embedding provider down")
-
-    conn = _mock_scan_conn([_cross_sub_row()])
-    with patch.object(cs, "get_db_connection", return_value=conn), \
-         patch("core.email.notify_cross_submissions", return_value=True):
-        summary = await cs.run_for_job_async(
-            "26-22222", JAVA_DEV_RUBRIC, lambda p, c: {"score": 90},
-            warmer=warmer, force=True,
-        )
-    assert summary["ran"] is True and summary["selected"] == 1
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_scan_without_a_warmer_still_runs():
-    conn = _mock_scan_conn([_cross_sub_row()])
-    with patch.object(cs, "get_db_connection", return_value=conn), \
-         patch("core.email.notify_cross_submissions", return_value=True):
-        summary = await cs.run_for_job_async(
-            "26-22222", JAVA_DEV_RUBRIC, lambda p, c: {"score": 90}, force=True,
-        )
-    assert summary["ran"] is True and summary["selected"] == 1
+def test_a_failing_warmer_does_not_sink_the_scan():
+    async def _run():
+        """A cold cache costs score fidelity; it must not lose the whole list."""
+        import asyncio as aio
+
+        async def warmer(payloads, criteria):
+            raise RuntimeError("embedding provider down")
+
+        conn = _mock_scan_conn([_cross_sub_row()])
+        with patch.object(cs, "get_db_connection", return_value=conn), \
+             patch("core.email.notify_cross_submissions", return_value=True):
+            summary = await cs.run_for_job_async(
+                "26-22222", JAVA_DEV_RUBRIC, lambda p, c: {"score": 90},
+                warmer=warmer, force=True,
+            )
+        assert summary["ran"] is True and summary["selected"] == 1
+
+    asyncio.run(_run())
+
+
+def test_scan_without_a_warmer_still_runs():
+    async def _run():
+        conn = _mock_scan_conn([_cross_sub_row()])
+        with patch.object(cs, "get_db_connection", return_value=conn), \
+             patch("core.email.notify_cross_submissions", return_value=True):
+            summary = await cs.run_for_job_async(
+                "26-22222", JAVA_DEV_RUBRIC, lambda p, c: {"score": 90}, force=True,
+            )
+        assert summary["ran"] is True and summary["selected"] == 1
+
+    asyncio.run(_run())
