@@ -249,6 +249,45 @@ export type CrossSubmissionsResponse = {
   candidates: CrossSubmission[];
 };
 
+export type DashboardQuery = {
+  startDate?: string | null;
+  endDate?: string | null;
+  teamId?: string | null;
+  job?: string | null;
+  priority?: string | null;
+  client?: string | null;
+  jdStatus?: string | null;
+  pairStatus?: string | null;
+  vertical?: string | null;
+  refresh?: boolean;
+};
+
+function dashboardQuery(opts?: DashboardQuery & { postedFrom?: string | null; postedTo?: string | null }): string {
+  const qs = new URLSearchParams();
+  if (!opts) return "";
+  if (opts.startDate && opts.endDate) {
+    qs.set("start_date", opts.startDate);
+    qs.set("end_date", opts.endDate);
+  }
+  if (opts.postedFrom && opts.postedTo) {
+    qs.set("posted_from", opts.postedFrom);
+    qs.set("posted_to", opts.postedTo);
+  }
+  const pairs: [string, string | null | undefined][] = [
+    ["team_id", opts.teamId],
+    ["job", opts.job],
+    ["priority", opts.priority],
+    ["client", opts.client],
+    ["jd_status", opts.jdStatus],
+    ["pair_status", opts.pairStatus],
+    ["vertical", opts.vertical],
+  ];
+  for (const [key, value] of pairs) if (value) qs.set(key, value);
+  if (opts.refresh) qs.set("refresh", "true");
+  const suffix = qs.toString();
+  return suffix ? `?${suffix}` : "";
+}
+
 export const api = {
   jobs: {
     fetch: (body: { job_id: string }) =>
@@ -392,6 +431,21 @@ export const api = {
         `/api/v1/admin/recruiter-analytics${suffix ? `?${suffix}` : ""}`,
       );
     },
+  },
+  dashboard: {
+    // PAIR Dashboard (routers/pair_dashboard.py). Dates are Eastern calendar
+    // days, both or neither (neither = all time). Team leads are pinned to
+    // their own team server-side, so teamId only matters for admins; refresh
+    // skips the backend's short per-worker cache. The page owns the payload
+    // types (components/dashboard/types.ts).
+    options: (opts?: { teamId?: string | null; refresh?: boolean }) =>
+      req<{ status?: string; data?: unknown }>(`/api/v1/admin/dashboard/options${dashboardQuery(opts)}`),
+    overview: (opts?: DashboardQuery) =>
+      req<{ status?: string; data?: unknown }>(`/api/v1/admin/dashboard/overview${dashboardQuery(opts)}`),
+    funnel: (opts?: DashboardQuery & { postedFrom?: string | null; postedTo?: string | null }) =>
+      req<{ status?: string; data?: unknown }>(`/api/v1/admin/dashboard/funnel${dashboardQuery(opts)}`),
+    productivity: (opts?: DashboardQuery) =>
+      req<{ status?: string; data?: unknown }>(`/api/v1/admin/dashboard/productivity${dashboardQuery(opts)}`),
   },
   noContact: {
     // Read-only: the list is code-managed (core/sourcing_config.py); admins
