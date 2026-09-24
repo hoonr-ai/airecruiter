@@ -90,6 +90,25 @@ _EXA_CONTACT_SCHEMA = {
         }
     },
 }
+EXA_CONTACT_FIELDS = ("email", "phone")
+
+
+def _exa_contact_schema(fields: Tuple[str, ...]) -> Dict[str, Any]:
+    """``_EXA_CONTACT_SCHEMA`` narrowed to ``fields``. The agent bills per
+    contact field it fills, so a lookup for a candidate who already has an
+    email asks for the phone only (and vice versa)."""
+    contact = _EXA_CONTACT_SCHEMA["properties"]["contact"]
+    return {
+        "type": "object",
+        "properties": {
+            "contact": {
+                **{k: v for k, v in contact.items() if k != "properties"},
+                "properties": {f: contact["properties"][f] for f in fields},
+            }
+        },
+    }
+
+
 # Free/consumer mailbox domains → classify the agent's email as personal.
 _PERSONAL_EMAIL_DOMAINS = {
     "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
@@ -489,10 +508,19 @@ def sanitize_agent_contact(email: Any, phone: Any) -> Tuple[str, str]:
     return e, p
 
 
-def _build_exa_contact_query(full_name: str, company: str, linkedin_url: str) -> str:
+def _build_exa_contact_query(
+    full_name: str,
+    company: str,
+    linkedin_url: str,
+    fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
+) -> str:
     """Natural-language query for the Exa Agent contact-enrichment run."""
     who = (full_name or "").strip() or "this person"
-    parts = [f"Find the work email and phone number for {who}"]
+    wanted = " and ".join(
+        label for field, label in (("email", "work email"), ("phone", "phone number"))
+        if field in fields
+    )
+    parts = [f"Find the {wanted} for {who}"]
     company = (company or "").strip()
     if company:
         parts.append(f"at {company}")
@@ -507,21 +535,29 @@ async def exa_enrich_by_linkedin(
     linkedin_url: str,
     full_name: str = "",
     company: str = "",
+    fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
 ) -> Dict[str, Any]:
     """Enrich one person via the Exa Agent API (by LinkedIn URL). Pure async.
 
+    ``fields`` limits the lookup to the contact the caller still lacks (a
+    subset of ``EXA_CONTACT_FIELDS``) — the agent bills per field it fills.
+
     Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
     ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
-    ``EXA_CONTACT_ENRICH_ENABLED`` is off or ``EXA_API_KEY`` is missing. Bounded
-    by ``EXA_CONTACT_ENRICH_TIMEOUT_S``; all failures logged and swallowed.
+    ``EXA_CONTACT_ENRICH_ENABLED`` is off, ``EXA_API_KEY`` is missing or no
+    field is requested. Bounded by ``EXA_CONTACT_ENRICH_TIMEOUT_S``; all
+    failures logged and swallowed.
     """
     if not EXA_CONTACT_ENRICH_ENABLED:
         return {"ok": False, "message": "Exa contact enrichment disabled"}
+    wanted = tuple(f for f in EXA_CONTACT_FIELDS if f in (fields or ()))
+    if not wanted:
+        return {"ok": False, "message": "no contact fields requested"}
     if not EXA_API_KEY:
         logger.warning("Exa enrichment skipped for %s: EXA_API_KEY not configured", candidate_id)
         return {"ok": False, "message": "EXA_API_KEY not configured"}
 
-    query = _build_exa_contact_query(full_name, company, linkedin_url)
+    query = _build_exa_contact_query(full_name, company, linkedin_url, wanted)
     headers = {
         "Content-Type": "application/json",
         "x-api-key": EXA_API_KEY,
@@ -529,7 +565,7 @@ async def exa_enrich_by_linkedin(
     }
     body = {
         "query": query,
-        "outputSchema": _EXA_CONTACT_SCHEMA,
+        "outputSchema": _exa_contact_schema(wanted),
         "effort": EXA_CONTACT_ENRICH_EFFORT,
     }
 
@@ -1070,10 +1106,15 @@ async def enrich_contact_for_sourcing(
         # line for a job identical — useless for answering "which candidate did
         # Exa resolve, and which timed out?".
         exa_label = (full_name or "").strip() or linkedin_url
+        # Only what the candidate lacks — Exa bills per field it fills.
+        exa_fields = tuple(
+            field for field, have in (("email", seed_email), ("phone", seed_phone)) if not have
+        )
         try:
             async with _exa_semaphore():
                 exa_result = await exa_enrich_by_linkedin(
-                    exa_label, linkedin_url, full_name or "", company or ""
+                    exa_label, linkedin_url, full_name or "", company or "",
+                    fields=exa_fields,
                 )
         except Exception as e:
             logger.warning(

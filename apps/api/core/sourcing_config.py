@@ -485,6 +485,18 @@ try:
 except ValueError:
     EXA_AGENT_CONCURRENCY = 1
 
+# Ask the deep-search Agent run for each profile's email + phone. OFF by
+# default: the agent's contact tool bills per hit (email $0.02 / phone $0.07)
+# for EVERY profile it returns — 30+ discovered plus up to EXA_AGENT_MAX_INPUT
+# seeds that Pass A had already enriched — and it ran before Apollo was ever
+# asked. With it off, deep-search rows go through the regular sourcing chain
+# (ZoomInfo → Apollo, paid Exa only on a miss, capped by
+# EXA_SOURCING_CONTACT_CAP), and only for rows Step 5 actually shows. Also
+# requires EXA_CONTACT_ENRICH_ENABLED.
+EXA_AGENT_CONTACT_FIELDS = _os.getenv(
+    "EXA_AGENT_CONTACT_FIELDS", "false"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
 # Exa Agent as the sourcing-time contact fallback for LinkedIn-sourced
 # candidates. ZoomInfo can't match by LinkedIn URL (name→personId only) and
 # Apollo credits run dry, so URL-only LinkedIn/Exa candidates were streaming
