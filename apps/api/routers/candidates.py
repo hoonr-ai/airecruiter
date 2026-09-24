@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from services.gender_logic import normalize_gender_prediction, to_gender_fields,
 from services.location import sanitize_candidate_location
 from services.feedback_metrics import refresh_feedback_metrics_sync
 from services import contact_enrichment
+from services.pair_auth import get_pair_auth_headers
 from utils.phone import normalize_phone
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
@@ -34,10 +36,18 @@ from services.launched_candidates import count_launched_candidates
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 def _manager_email_allowed(email: str) -> bool:
-    raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com")
-    allowed = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    """Validate that the manager's email domain belongs to an approved organization.
+
+    Default trusted domains include Pyramid Consulting Group sister entities:
+      - pyramidci.com   : Pyramid Consulting (parent company)
+      - celsiortech.com : Celsior Technologies (IT & digital consulting division)
+      - genspark.net    : GenSpark (custom talent & training division)
+    To customize per environment, set PAIR_MANAGER_EMAIL_DOMAINS in .env or app settings.
+    """
+    raw = os.getenv("PAIR_MANAGER_EMAIL_DOMAINS", "pyramidci.com, celsiortech.com, genspark.net")
+    allowed = [part.strip("\"' ").lower() for part in raw.split(",") if part.strip("\"' ")]
     if not allowed:
-        allowed = ["pyramidci.com"]
+        allowed = ["pyramidci.com", "celsiortech.com", "genspark.net"]
     normalized = email.strip().lower()
     domain = normalized.rsplit("@", 1)[-1]
     return any(
@@ -1521,6 +1531,13 @@ async def get_job_candidates(
             if isinstance(data_blob, dict):
                 if data_blob.get("jobdiva_candidate_id"):
                     cand["jobdiva_candidate_id"] = str(data_blob.get("jobdiva_candidate_id"))
+                # JobDiva linkage provenance (services/jobdiva.py "Provenance"):
+                # `source` is the origin channel; these say how the person got
+                # into JobDiva, so the UI can show "LinkedIn" + "In JobDiva · via
+                # PAIR" instead of relabelling them an applicant.
+                for _prov_key in ("jobdiva_application_origin", "jobdiva_profile_origin", "jobdiva_provisioned_from"):
+                    if data_blob.get(_prov_key):
+                        cand[_prov_key] = str(data_blob.get(_prov_key))
                 if data_blob.get("work_city"):
                     cand["work_city"] = data_blob.get("work_city")
                 if data_blob.get("work_state"):
@@ -1707,8 +1724,13 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
+                # The stored JobDiva profile id rides along: Launch PAIR gives an
+                # Exa/LinkedIn person a JobDiva profile, and the JobDiva pools then
+                # return that same person under the profile id with a JobDiva-*
+                # label. Without the id the Step-5 list cannot recognise that row
+                # as already launched and offers a second launch (a "twin" row).
                 cur.execute("""
-                    SELECT candidate_id, source
+                    SELECT candidate_id, source, data->>'jobdiva_candidate_id'
                     FROM sourced_candidates
                     WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                 """, (str(resolved_jobdiva_id), str(job_id_or_ref)))
@@ -1716,7 +1738,13 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
         finally:
             conn.close()
 
-        launched = [{"candidate_id": r[0], "source": r[1]} for r in rows]
+        launched = []
+        for r in rows:
+            item = {"candidate_id": r[0], "source": r[1]}
+            jd_id = str(r[2] or "").strip() if len(r) > 2 else ""
+            if jd_id:
+                item["jobdiva_candidate_id"] = jd_id
+            launched.append(item)
         return {"status": "success", "launched": launched}
     except Exception as e:
         logger.error(f"Error fetching launched candidate keys for {job_id_or_ref}: {e}")
@@ -3768,6 +3796,7 @@ async def get_candidate_evaluation_report(
     """
     import os, httpx as _httpx
     PAIR_BASE = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+    pair_headers = get_pair_auth_headers()
 
     try:
         from psycopg2.extras import RealDictCursor
@@ -3776,6 +3805,9 @@ async def get_candidate_evaluation_report(
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. sourced_candidates — prefer the row tied to this job
+                cand_id_str = str(candidate_id).strip()
+                pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+
                 if job_id:
                     cur.execute(
                         """
@@ -3784,25 +3816,33 @@ async def get_candidate_evaluation_report(
                         JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id
                          OR mj.job_id      = sc.jobdiva_id
-                        WHERE sc.candidate_id = %s
+                        WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
                           AND (mj.job_id = %s OR mj.jobdiva_id = %s)
                         ORDER BY sc.updated_at DESC
                         LIMIT 1
                         """,
-                        (candidate_id, job_id, job_id),
+                        (cand_id_str, pk_val, pk_val, job_id, job_id),
                     )
                     cand_row = cur.fetchone()
                     if not cand_row:
                         # Fallback: any row for this candidate
                         cur.execute(
-                            "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
-                            (candidate_id,),
+                            """
+                            SELECT * FROM sourced_candidates
+                            WHERE candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s)
+                            ORDER BY updated_at DESC LIMIT 1
+                            """,
+                            (cand_id_str, pk_val, pk_val),
                         )
                         cand_row = cur.fetchone()
                 else:
                     cur.execute(
-                        "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
-                        (candidate_id,),
+                        """
+                        SELECT * FROM sourced_candidates
+                        WHERE candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s)
+                        ORDER BY updated_at DESC LIMIT 1
+                        """,
+                        (cand_id_str, pk_val, pk_val),
                     )
                     cand_row = cur.fetchone()
 
@@ -3932,6 +3972,7 @@ async def get_candidate_evaluation_report(
         if audit_row and audit_row.get("status"):
             engage_status = str(audit_row["status"])
             
+
         hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
         if audit_row and audit_row.get("response"):
             resp = audit_row["response"]
@@ -4009,10 +4050,10 @@ async def get_candidate_evaluation_report(
             try:
                 async with _httpx.AsyncClient(timeout=20.0) as client:
                     interview_res, evaluation_res, transcription_res, outreach_res = await asyncio.gather(
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}"),
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation"),
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions"),
-                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}", headers=pair_headers),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation", headers=pair_headers),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions", headers=pair_headers),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status", headers=pair_headers),
                         return_exceptions=True,
                     )
 
@@ -4072,6 +4113,19 @@ async def get_candidate_evaluation_report(
                 # Scores should be picked from data_blob/audit_row for consistency with rankings
             except Exception as pair_err:
                 logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
+
+        if pair_data.get("outreach"):
+            # If we successfully fetched live outreach data, the top-level status or interview_status is more authoritative
+            # than what was in the DB or audit row. We merge them using build_merged_outreach_payload rules.
+            merged_live = build_merged_outreach_payload(
+                data_blob if isinstance(data_blob, dict) else {},
+                audit_row.get("response") if audit_row else None,
+                audit_row.get("status") if audit_row else None,
+                pair_data["outreach"]
+            )
+            live_status = select_engage_status(merged_live)
+            if live_status:
+                engage_status = live_status
 
         # Inject audit data if available
         if audit_row:
@@ -4303,10 +4357,13 @@ async def save_candidate_feedback(
         action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
     
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
-    #    The frontend sends `candidate.id` (the sourced_candidates integer PK) in the URL.
+    #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
-    #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.jobdiva_id).
-    jd_candidate_id = candidate_id   # fallback: use whatever was passed
+    #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.job_id).
+    cand_id_str = str(candidate_id).strip()
+    pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+
+    jd_candidate_id = cand_id_str   # fallback: use whatever was passed
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
@@ -4318,74 +4375,73 @@ async def save_candidate_feedback(
         _conn = get_db_connection()
         try:
             with _conn.cursor() as _cur:
-                # Try treating candidate_id as the integer PK (candidate.id from the frontend)
-                try:
-                    pk_int = int(candidate_id)
+                # Resolve candidate row matching either candidate_id or integer PK id, scoped to job
+                _cur.execute(
+                    """
+                    SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                           sc.name, mj.title, mj.customer_name
+                    FROM sourced_candidates sc
+                    LEFT JOIN monitored_jobs mj
+                      ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                    WHERE (
+                        sc.candidate_id = %s
+                        OR (%s::bigint IS NOT NULL AND sc.id = %s)
+                    )
+                    AND (
+                        sc.jobdiva_id = %s
+                        OR mj.job_id = %s
+                        OR mj.jobdiva_id = %s
+                        OR sc.jobdiva_id IN (
+                            SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                        )
+                    )
+                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                )
+                row = _cur.fetchone()
+
+                # Fallback: if not matched with job scope, try candidate ID alone
+                if not row:
                     _cur.execute(
                         """
-                           SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
                                sc.name, mj.title, mj.customer_name
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
-                        WHERE sc.id = %s
+                        WHERE (
+                            sc.candidate_id = %s
+                            OR (%s::bigint IS NOT NULL AND sc.id = %s)
+                        )
                         ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
                         LIMIT 1
                         """,
-                        (pk_int,)
+                        (cand_id_str, pk_val, pk_val)
                     )
                     row = _cur.fetchone()
-                    if row:
-                        sc_row_id      = row[0]
-                        sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
-                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
-                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
-                        candidate_name = str(row[5] or candidate_name)
-                        job_title      = str(row[6] or job_title)
-                        customer_name  = str(row[7] or customer_name)
-                        
-                        # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
-                        data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
-                        if data_blob.get("jobdiva_candidate_id"):
-                            jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
-                        else:
-                            jd_candidate_id = sc_candidate_id
-                            
-                except (ValueError, TypeError):
-                    # candidate_id is not an integer PK – try matching as a candidate_id string
-                    _cur.execute(
-                        """
-                           SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                               sc.name, mj.title, mj.customer_name
-                        FROM sourced_candidates sc
-                        LEFT JOIN monitored_jobs mj
-                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
-                        WHERE sc.candidate_id = %s
-                          AND (sc.jobdiva_id = %s
-                               OR sc.jobdiva_id IN (
-                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
-                               ))
-                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
-                        LIMIT 1
-                        """,
-                        (candidate_id, job_id_or_ref, job_id_or_ref)
-                    )
-                    row = _cur.fetchone()
-                    if row:
-                        sc_row_id      = row[0]
-                        sc_candidate_id = str(row[1])
-                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
-                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
-                        candidate_name = str(row[5] or candidate_name)
-                        job_title      = str(row[6] or job_title)
-                        customer_name  = str(row[7] or customer_name)
-                        
-                        # Use JobDiva candidate ID if available in data blob
-                        data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
-                        if data_blob.get("jobdiva_candidate_id"):
-                            jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
-                        else:
-                            jd_candidate_id = sc_candidate_id
+
+                if row:
+                    sc_row_id       = row[0]
+                    sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
+                    mj_job_id       = str(row[4]) if row[4] else ""
+                    sc_jobdiva_ref  = str(row[2]) if row[2] else ""
+
+                    # For JobDiva API note creation, numeric JobDiva ID (mj.job_id) is preferred
+                    jd_job_ref      = mj_job_id or sc_jobdiva_ref or job_id_or_ref
+                    # For web deep-links, prefer jobdiva_id or job_id
+                    app_job_ref     = mj_job_id or sc_jobdiva_ref or job_id_or_ref
+                    candidate_name  = str(row[5] or candidate_name)
+                    job_title       = str(row[6] or job_title)
+                    customer_name   = str(row[7] or customer_name)
+
+                    # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
+                    data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
+                    if data_blob.get("jobdiva_candidate_id"):
+                        jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
+                    else:
+                        jd_candidate_id = sc_candidate_id
         finally:
             _conn.close()
     except Exception as e:
@@ -4394,41 +4450,17 @@ async def save_candidate_feedback(
 
     logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, app_job_ref={app_job_ref}, sc_row_id={sc_row_id}")
 
-    # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
-    #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
-    from core import JOBDIVA_PAIR_RECRUITER_ID
-    from core.email import candidate_report_link, notify_internal_submission_to_manager, resolve_app_base_url
-    
-    report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
-    safe_report_link = html.escape(report_link, quote=True)
-
-    if request.feedback_type == "Unreachable":
-        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
-        jobdiva_result = {"status": "success"}
-    else:
-        jobdiva_result = await jobdiva_service.create_candidate_note(
-            candidate_id=jd_candidate_id,
-            job_id=jd_job_ref,
-            action=action_string,
-            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
-            recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
-        )
-
-
-        if jobdiva_result.get("status") == "error":
-            logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
-        else:
-            logger.info(f"✅ JobDiva note created — action='{action_string}', "
-                        f"candidate={jd_candidate_id}, job={jd_job_ref}")
-
-    # 4. Persist feedback locally in sourced_candidates.data (JSONB merge)
+    # 3. Persist feedback locally in sourced_candidates.data (JSONB merge) first.
+    #    Persisting locally before triggering external side-effects ensures that if
+    #    the DB write fails, execution aborts immediately with HTTP 500 without leaving
+    #    orphaned JobDiva notes or duplicate manager emails.
     try:
         _conn2 = get_db_connection()
         with _conn2.cursor() as _cur2:
             feedback_data = {
                 "feedback_type": request.feedback_type,
                 "feedback_reason": request.reason,
-                "feedback_synced": jobdiva_result.get("status") == "success",
+                "feedback_synced": False,
                 "feedback_at": datetime.now(timezone.utc).isoformat(),
                 "submitted_by": user.email,
             }
@@ -4450,17 +4482,72 @@ async def save_candidate_feedback(
                 _cur2.execute(
                     """UPDATE sourced_candidates
                           SET data = data || %s::jsonb
-                        WHERE candidate_id = %s
+                        WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
                           AND (jobdiva_id = %s
                                OR jobdiva_id IN (
-                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                                ))""",
-                    (feedback_payload, jd_candidate_id, job_id_or_ref, job_id_or_ref)
+                    (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
                 )
             _conn2.commit()
         _conn2.close()
     except Exception as e:
-        logger.error(f"❌ Failed to persist feedback locally: {e}")
+        logger.error(f"❌ Failed to persist feedback locally: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist candidate feedback in database. Please try again."
+        )
+
+    # 4. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
+    #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
+    from core import JOBDIVA_PAIR_RECRUITER_ID
+    from core.email import candidate_report_link, notify_internal_submission_to_manager, resolve_app_base_url
+    
+    report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
+    safe_report_link = html.escape(report_link, quote=True)
+
+    if request.feedback_type == "Unreachable":
+        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
+        jobdiva_result = {"status": "success"}
+    else:
+        jobdiva_result = await jobdiva_service.create_candidate_note(
+            candidate_id=jd_candidate_id,
+            job_id=jd_job_ref,
+            action=action_string,
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+        )
+
+        if jobdiva_result.get("status") == "error":
+            logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+        else:
+            logger.info(f"✅ JobDiva note created — action='{action_string}', "
+                        f"candidate={jd_candidate_id}, job={jd_job_ref}")
+            # Mark feedback_synced = True in local DB
+            try:
+                _conn_sync = get_db_connection()
+                with _conn_sync.cursor() as _cur_sync:
+                    sync_payload = json.dumps({"feedback_synced": True})
+                    if sc_row_id is not None:
+                        _cur_sync.execute(
+                            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                            (sync_payload, sc_row_id)
+                        )
+                    else:
+                        _cur_sync.execute(
+                            """UPDATE sourced_candidates
+                                  SET data = data || %s::jsonb
+                                WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
+                                  AND (jobdiva_id = %s
+                                       OR jobdiva_id IN (
+                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                                       ))""",
+                            (sync_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                        )
+                    _conn_sync.commit()
+                _conn_sync.close()
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to update feedback_synced flag: {e}")
 
     manager_email_sent = None
     if request.feedback_type == "Submit" and submission_type == "internal":
@@ -4490,25 +4577,30 @@ async def save_candidate_feedback(
     #    (closed/filled status, or a processing_status the cron doesn't
     #    select). Recomputing here makes the recruiter's own action land on
     #    the next dashboard load.
-    feedback_metrics = await asyncio.to_thread(
-        refresh_feedback_metrics_sync, str(app_job_ref or job_id_or_ref)
-    )
-    if feedback_metrics is not None:
-        # Drop this worker's cached /jobs/monitored payload so the fresh
-        # counts aren't hidden behind the 30s cache TTL.
-        try:
-            invalidate_monitored_jobs_cache()
-        except Exception:  # noqa: BLE001
-            pass
-        logger.info(
-            f"📊 Job {app_job_ref}: feedback_completed="
-            f"{feedback_metrics['feedback_completed']} "
-            f"pair_submits={feedback_metrics['pair_submits']}"
+    feedback_metrics = None
+    try:
+        feedback_metrics = await asyncio.to_thread(
+            refresh_feedback_metrics_sync, str(app_job_ref or job_id_or_ref)
         )
+        if feedback_metrics is not None:
+            # Drop this worker's cached /jobs/monitored payload so the fresh
+            # counts aren't hidden behind the 30s cache TTL.
+            try:
+                invalidate_monitored_jobs_cache()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.info(
+                f"📊 Job {app_job_ref}: feedback_completed="
+                f"{feedback_metrics['feedback_completed']} "
+                f"pair_submits={feedback_metrics['pair_submits']}"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to refresh feedback metrics for {app_job_ref}: {e}")
 
     return {
         "status": "success",
         "jobdiva_sync": jobdiva_result.get("status"),
+        "jobdiva_message": jobdiva_result.get("message"),
         "action_string": action_string,
         "submission_type": submission_type if request.feedback_type == "Submit" else None,
         "manager_email_sent": manager_email_sent,

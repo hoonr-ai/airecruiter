@@ -1,12 +1,19 @@
 """Shared normalization helpers for outreach phase and communication channel.
 
-Used across routers (e.g. launch_report, voice_agent) to map PairBot status,
-phase, and channel variants onto canonical values (contact_check, phase1/phase1_6hr/phase2/phase3,
-extra outreach phases, and call/sms/web).
+Used across routers (e.g. launch_report, voice_agent, jobs outreach-stats) to
+map PairBot status, phase, and channel variants onto canonical values:
+
+  contact_check,
+  phase1 / phase1_6hr / phase2 / phase3  (PairBot analytics labels P1–P4),
+  phase1_extra / phase1_6hr_extra / phase2_extra  (Extra 1–3, resume score ≥ 80),
+  and call/sms/web.
+
+PairBot persists the canonical `phase1` / `phase1_6hr` / `phase*_extra` tokens,
+not the table shorthand P1/E1. Those shorthand strings are UI labels only.
 """
 import json
 import logging
-from typing import Any, Dict, Optional, Iterable
+from typing import Any, Dict, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,27 @@ _CANONICAL_PHASES = {
     "phase1_extra",
     "phase1_6hr_extra",
     "phase2_extra",
+    "phase3_extra",
+}
+
+# Mirrors Pair Bot `OUTREACH_PHASE_RANK` so Extra promotion never regresses.
+_OUTREACH_PHASE_RANK = {
+    "contact_check": 0,
+    "phase1": 10,
+    "phase1_extra": 20,
+    "phase1_6hr": 30,
+    "phase1_6hr_extra": 40,
+    "phase2": 50,
+    "phase2_extra": 60,
+    "phase3": 70,
+    "phase3_extra": 80,
+}
+
+_BASE_TO_EXTRA = {
+    "phase1": "phase1_extra",
+    "phase1_6hr": "phase1_6hr_extra",
+    "phase2": "phase2_extra",
+    "phase3": "phase3_extra",
 }
 
 _PHASE_ALIASES = {
@@ -86,7 +114,18 @@ _PHASE_ALIASES = {
     "extra outreach": "phase1_extra",
     "extra outreach (>80% match)": "phase1_extra",
     "high_score_extra": "phase1_extra",
+    "extra 1": "phase1_extra",
+    "extra 2": "phase1_6hr_extra",
+    "extra 3": "phase2_extra",
 }
+
+
+def _phase_rank(phase: Optional[str]) -> int:
+    return _OUTREACH_PHASE_RANK.get((phase or "").strip().lower(), 0)
+
+
+def _extra_token_for_base(base_phase: str) -> Optional[str]:
+    return _BASE_TO_EXTRA.get((base_phase or "").strip().lower())
 
 
 def normalize_phase(raw: Optional[str], *, allow_pending_aliases: bool = True) -> Optional[str]:

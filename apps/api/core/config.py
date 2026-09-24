@@ -112,6 +112,27 @@ JOBDIVA_PAIR_QUALIFICATION_ID = int(get_env_with_default("JOBDIVA_PAIR_QUALIFICA
 JOBDIVA_PASS_ACTION_NAME = get_env_with_default("JOBDIVA_PASS_ACTION_NAME", "PAIR Pass Candidate Report")
 JOBDIVA_PASS_QUALIFICATION_VALUE = get_env_with_default("JOBDIVA_PASS_QUALIFICATION_VALUE", "Pass")
 
+# ---- JobDiva provenance: mark the applications PAIR records ----
+# JobDiva's applicant list (bi/JobApplicantsDetail) cannot tell an application
+# PAIR recorded on Launch PAIR from one the person made themselves, so every
+# provisioned Exa/LinkedIn/Dice person re-surfaces there as an "applicant".
+# Configure a "PAIR" Resume Source in JobDiva (Admin -> Resume Sources) and set
+# its id here: both application calls (CreateJobApplicationWithResume and
+# createJobApplication) then carry it, JobDiva itself records who filed the
+# application, and the applicant sync can recognise PAIR's own applications
+# (services/jobdiva.py `jobdiva_application_created_by_pair`). 0 (default) keeps
+# the legacy payloads: resumesource 0 on create, omitted on attach.
+JOBDIVA_PAIR_RESUME_SOURCE_ID = int(get_env_with_default("JOBDIVA_PAIR_RESUME_SOURCE_ID", "0"))
+# Optional per-channel Resume Source ids, e.g. "LinkedIn-Exa:12,LinkedIn:13,Dice:14"
+# (a JSON object works too). A channel without an entry falls back to
+# JOBDIVA_PAIR_RESUME_SOURCE_ID; a bare family ("LinkedIn") covers its variants
+# ("LinkedIn-Exa", "LinkedIn-Unipile").
+JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL = get_env_with_default("JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL", "")
+# Resume Source *names* JobDiva may echo back on an applicant record PAIR filed
+# (comma separated, case-insensitive). The sync treats an unmatched applicant
+# whose source is one of these as PAIR's own application, never as a new applicant.
+JOBDIVA_PAIR_RESUME_SOURCE_NAMES = get_env_with_default("JOBDIVA_PAIR_RESUME_SOURCE_NAMES", "PAIR")
+
 # ---- Encryption ----
 ENCRYPTION_KEY = get_env_or_fail("ENCRYPTION_KEY")
 ENCRYPTION_SALT = os.getenv("ENCRYPTION_SALT")

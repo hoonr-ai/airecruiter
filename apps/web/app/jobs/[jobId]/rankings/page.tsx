@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { jobDivaLinkage, mergeProvisionedTwins } from "@/lib/candidateTwins";
 import {
   Table,
   TableBody,
@@ -277,6 +278,11 @@ interface OutreachStats {
     phase1: number;
     phase2: number;
     phase3: number;
+    phase4?: number;
+    extra?: number;
+    extra1?: number;
+    extra2?: number;
+    extra3?: number;
   };
 }
 
@@ -332,7 +338,7 @@ interface Candidate {
 }
 
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
-type ToastState = { type: "info" | "error" | "success"; message: string } | null;
+type ToastState = { type: "info" | "error" | "success" | "warning"; message: string } | null;
 
 function ResumeScreeningHoverCard({
   candidate,
@@ -553,7 +559,7 @@ export default function CandidateRankingsPage() {
       setSyncingCandidateId(actionCandidateId);
       const submittedAt = new Date().toISOString();
       try {
-        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+        const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Submit',
           submission_type: submissionData.submission_type,
           manager_email: submissionData.manager_email,
@@ -561,6 +567,11 @@ export default function CandidateRankingsPage() {
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: submittedAt }));
+        if (res?.jobdiva_sync === 'error') {
+          setToast({ message: `Submission saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
+        } else {
+          setToast({ message: "Submission saved and synchronized successfully", type: "success" });
+        }
       } catch (error) {
         console.error('Error syncing submission:', error);
         setToast({ message: "Failed to save submission", type: "error" });
@@ -578,13 +589,18 @@ export default function CandidateRankingsPage() {
       setSyncingCandidateId(actionCandidateId);
       const rejectedAt = new Date().toISOString();
       try {
-        await api.candidates.feedback(jobId as string, String(actionCandidateId), {
+        const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
           reason: trimmedReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
         setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
+        if (res?.jobdiva_sync === 'error') {
+          setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
+        } else {
+          setToast({ message: "Rejection saved successfully", type: "success" });
+        }
       } catch (error) {
         console.error('Error syncing rejection:', error);
         setToast({ message: "Failed to save rejection reason", type: "error" });
@@ -974,9 +990,15 @@ export default function CandidateRankingsPage() {
   const [hoveredResumeScoreKey, setHoveredResumeScoreKey] = useState<string | null>(null);
   const [hoveredEngageScoreKey, setHoveredEngageScoreKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
-  const pushToast = (message: string, type: "info" | "error" | "success" = "info") => {
+  const pushToast = (message: string, type: "info" | "error" | "success" | "warning" = "info") => {
     setToast({ message, type });
   };
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
   const [refreshingResumeMatchIds, setRefreshingResumeMatchIds] = useState<Set<string>>(new Set());
   const [candidateProfileUrls, setCandidateProfileUrls] = useState<Record<string, string>>({});
 
@@ -1515,8 +1537,18 @@ export default function CandidateRankingsPage() {
     };
 
 
+    // Provisioned twins first: a JobDiva-labelled row whose candidate_id is the
+    // JobDiva profile id another row of this job stores in jobdiva_candidate_id
+    // is the same person, re-imported from JobDiva after Launch PAIR provisioned
+    // them (their contacts may differ, so the identity keys below would not
+    // catch it). The stamped origin row survives with its own source label and
+    // absorbs the twin's engage bookkeeping.
+    const twinFreeRows = mergeProvisionedTwins(rows, (origin, twin) =>
+      mergeRowBestOf({ ...origin }, twin),
+    );
+
     const dedupedByIdentity = new Map<string, any>();
-    rows.forEach((candidate: any) => {
+    twinFreeRows.forEach((candidate: any) => {
       const dedupKey = getCanonicalCandidateKey(candidate);
       const existing = dedupedByIdentity.get(dedupKey);
       if (!existing) {
@@ -1935,7 +1967,7 @@ export default function CandidateRankingsPage() {
                 Couldn&apos;t load live outreach stats. Showing last known counts may be unavailable — try refreshing.
               </div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-0 lg:divide-y-0 divide-y lg:divide-x divide-slate-200">
                 <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pb-6 lg:pb-0 lg:pr-8">
                   {isInitialLoading || !statsLoaded ? (
                     <StatsGroupSkeleton count={3} />
@@ -1974,9 +2006,9 @@ export default function CandidateRankingsPage() {
                   )}
                 </div>
 
-                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full py-6 lg:py-0 lg:px-8">
                   {isInitialLoading || !statsLoaded ? (
-                    <StatsGroupSkeleton count={3} />
+                    <StatsGroupSkeleton count={4} />
                   ) : (
                     <>
                       <div className="flex justify-between items-center">
@@ -1990,6 +2022,31 @@ export default function CandidateRankingsPage() {
                       <div className="flex justify-between items-center">
                         <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 3:</span>
                         <strong className="text-indigo-600">{outreachStats!.phases?.phase3 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-indigo-300"></div>Phase 4:</span>
+                        <strong className="text-indigo-600">{outreachStats!.phases?.phase4 ?? 0}</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-3 text-[13px] text-slate-500 font-medium w-full pt-6 lg:pt-0 lg:pl-8">
+                  {isInitialLoading || !statsLoaded ? (
+                    <StatsGroupSkeleton count={3} />
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-amber-300"></div>Extra 1:</span>
+                        <strong className="text-amber-700">{outreachStats!.phases?.extra1 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-amber-300"></div>Extra 2:</span>
+                        <strong className="text-amber-700">{outreachStats!.phases?.extra2 ?? 0}</strong>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-amber-300"></div>Extra 3:</span>
+                        <strong className="text-amber-700">{outreachStats!.phases?.extra3 ?? 0}</strong>
                       </div>
                     </>
                   )}
@@ -2620,6 +2677,21 @@ export default function CandidateRankingsPage() {
                           <span className="text-[12px] font-semibold text-slate-700">
                             {normalizeSourceLabel(candidate.source)}
                           </span>
+                          {(() => {
+                            // Origin stays the label; JobDiva linkage is a separate
+                            // fact, so an Exa person Launch PAIR put into JobDiva
+                            // reads "LinkedIn" + "In JobDiva · via PAIR", never
+                            // "Job-Diva Applicant".
+                            const caption = jobDivaLinkage(candidate).caption;
+                            return caption ? (
+                              <span
+                                className="block text-[10px] font-medium text-slate-400 mt-0.5 whitespace-nowrap"
+                                title="This person has a JobDiva profile and an application on this job. 'via PAIR' means Launch PAIR recorded it; 'applied directly' means they applied in JobDiva."
+                              >
+                                {caption}
+                              </span>
+                            ) : null;
+                          })()}
                         </TableCell>
 
 
@@ -3061,7 +3133,9 @@ export default function CandidateRankingsPage() {
               ? "border-emerald-200 bg-emerald-50 text-emerald-700"
               : toast.type === "error"
                 ? "border-rose-200 bg-rose-50 text-rose-700"
-                : "border-slate-200 bg-white text-slate-700"
+                : toast.type === "warning"
+                  ? "border-amber-200 bg-amber-50 text-amber-700"
+                  : "border-slate-200 bg-white text-slate-700"
               }`}
           >
             {toast.message}

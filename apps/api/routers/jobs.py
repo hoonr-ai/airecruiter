@@ -361,10 +361,12 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END) AS cm,
                             COUNT(DISTINCT CASE
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                    AND NULLIF(sc.data->>'engage_interview_id', '') IS NOT NULL
                                 THEN sc.candidate_id
                             END) AS ps,
                             """
@@ -1701,7 +1703,6 @@ async def get_job_outreach_stats(job_id_or_ref: str, user: UserIdentity = Depend
     Pending + In Progress + Completed + Partial Complete == Candidates Launched.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
-    
 
     conn = get_db_connection()
     try:

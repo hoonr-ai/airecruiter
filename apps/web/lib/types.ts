@@ -150,6 +150,14 @@ export interface Candidate {
   enhanced_info?: Record<string, unknown>;
   jobdiva_candidate_id?: string;
   jobdiva_resume_id?: string;
+  // JobDiva linkage provenance (apps/api/services/jobdiva.py "Provenance").
+  // `source` stays the origin channel; these say how the person got into
+  // JobDiva: "pair" = Launch PAIR minted the profile / filed the application,
+  // "jobdiva" / "organic" = it pre-existed / they applied themselves.
+  jobdiva_profile_origin?: "pair" | "jobdiva" | string;
+  jobdiva_application_origin?: "pair" | "organic" | string;
+  jobdiva_provisioned_at?: string;
+  jobdiva_provisioned_from?: string;
   recruiter_candidate_id?: string | null;
   data?: Record<string, unknown>;
   raw?: Record<string, unknown>;

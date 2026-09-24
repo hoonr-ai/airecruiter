@@ -76,3 +76,94 @@ Code: `services/jobdiva.py` `link_candidate_to_job` (attach) and
 1. Add the path to `ENDPOINTS` in `scripts/jobdiva_swagger_snapshot.py`, refresh the fixture.
 2. Build the payload from the fixture's field list; add a case to the contract test.
 3. Never pass an id to an endpoint whose schema does not define it and expect linking.
+
+## Provenance: origin vs JobDiva linkage (2026-09)
+
+**Rule.** `sourced_candidates.source` is the **origin channel** -- where PAIR found
+the person for this job (`LinkedIn-Exa`, `Dice`, `JobDiva-Applicants`, ...). It is
+written once, on the first save, and is never changed by the provisioner, the
+applicant sync or a merge. Whether the person is in JobDiva, and who put them
+there, is **separate state** in `data`:
+
+| key | scope | values |
+|---|---|---|
+| `jobdiva_candidate_id` | person | the JobDiva profile id |
+| `jobdiva_profile_origin` | person | `pair` (Launch PAIR minted the profile) / `jobdiva` (it pre-existed) |
+| `jobdiva_application_origin` | job | `pair` (Launch PAIR filed this job's application) / `organic` (the person applied in JobDiva) |
+| `jobdiva_provisioned_at`, `jobdiva_provisioned_from` | job | when Launch PAIR filed it, and from which channel label |
+
+Absent keys mean *unknown* (legacy rows). Readers must never derive origin from
+JobDiva linkage: after Launch PAIR *everyone* has a `jobdiva_candidate_id`.
+
+### Why (the "everyone became a JobDiva applicant" incident)
+
+Both application calls (`createJobApplication`, `CreateJobApplicationWithResume`)
+record a job application, so JobDiva's applicant list (`bi/JobApplicantsDetail`)
+then contains every provisioned Exa/LinkedIn person, and JobDiva could not say
+who filed the application (`resumesource` was hard-coded 0). The applicant sync
+(`services/auto_assign_service.py`) is meant to match each applicant back to the
+local row -- by the provisioner's stamp, email, phone or URL -- and update it in
+place. Its lookup index was built with `ref_id, num_id = mj_row` on a
+RealDictCursor row, which binds the column *names*, so the index matched nobody
+and every applicant was inserted as a fresh `(job, <profile id>, 'JobDiva-Applicants')`
+row -- a **twin** of the origin row -- and auto-launched again. Every reader then
+favoured the JobDiva-labelled twin.
+
+### The layers
+
+1. **JobDiva-side marker.** Configure a "PAIR" Resume Source in JobDiva and set
+   `JOBDIVA_PAIR_RESUME_SOURCE_ID` (optionally per channel via
+   `JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL="LinkedIn-Exa:12,Dice:14"`). Both
+   application calls then send it as `resumesource` (`jobdiva_pair_resume_source_id`).
+   `JOBDIVA_PAIR_RESUME_SOURCE_NAMES` lists the names JobDiva may echo back.
+   Unconfigured (`0`) keeps the legacy payloads.
+2. **Provisioner stamps linkage, not labels.** `_persist_jobdiva_link_state` writes
+   person-level keys on every row of the candidate and job-level keys only on the
+   job's rows; every success branch stamps `jobdiva_application_origin = pair`,
+   including the "JobDiva returned no id" branch (the service first tries to
+   recover the id via `searchCandidateProfile`). `create_job_application_with_resume`
+   returns a `JobDivaApplicationOutcome` (still unpacks as `(success, id)`) whose
+   `.path` / `.found_via_search` drive `jobdiva_profile_origin`.
+3. **Sync classifies before it writes.** `_monitored_job_ids` makes the index
+   shape-agnostic; `_find_in_index` also matches the stamp, the synthetic
+   `pair-<digits>@no-email.jobdiva.local` address, national phone digits and
+   normalised LinkedIn URLs. A match is an UPDATE that never assigns `source`,
+   keeps a real score over the bypass placeholder 0, and is not auto-launched.
+   An unmatched applicant whose Resume Source / recruiter is PAIR's is skipped
+   and logged under `PAIR_APPLICATION_UNLINKED`. New applicants are stamped
+   `organic`. The profile table is only written for rows the sync owns.
+4. **Readers keep the origin label.** `GET /jobs/{id}/launched-candidate-keys`
+   returns the stored profile id so Step 5 hides the JobDiva-labelled copy of a
+   launched person as "launched" instead of offering a second launch. The rank
+   list folds twins into the stamped origin row (`apps/web/lib/candidateTwins.ts`)
+   and shows linkage as a caption ("In JobDiva · via PAIR" / "applied directly")
+   under the origin label. `GET /jobs/{id}/candidates` promotes the provenance keys.
+5. **Backfill (admin).** `GET /api/v1/engagement/engage/applicant-origin-audit?job_id=`
+   lists twin pairs (one origin can have several twins: the sync's Applicants row
+   and a re-launch's TalentSearch/JobAgent row); `POST .../applicant-origin-audit/repair
+   {job_id, dry_run}` (dry-run by default) folds the engage state of ALL of an
+   origin's twins into it -- key by key, the most recently updated twin winning,
+   never overwriting what the origin already has -- notes `jobdiva_twin_merged_at`
+   / `jobdiva_twin_sources` / `jobdiva_twin_count`, and deletes the twins. The fold
+   is a correlated subquery, not an `UPDATE ... FROM` join (which applies SET from
+   one arbitrary twin when there are two). Verified against a real Postgres in
+   `tests/test_applicant_origin_repair_postgres.py` (runs when `pgserver` is
+   installed). Legacy rows keep `jobdiva_application_origin` unknown -- it is not
+   guessed.
+6. **Tests.** `tests/test_applicant_sync_provenance.py` (index, matching, blob,
+   one full cycle), `tests/test_jobdiva_provisioner_failsafes.py` (stamps per
+   scope), `tests/test_jobdiva_link_via_create_job_application.py` and
+   `tests/test_jobdiva_payload_contract.py` (`resumesource`, outcome, id recovery),
+   `tests/test_applicant_origin_audit_endpoint.py`, `apps/web/lib/candidateTwins.test.ts`.
+
+### Still to verify live
+
+Whether `bi/JobApplicantsDetail` returns the application's Resume Source / recruiter
+(the sync reads the application-level spellings `resumeSource*`, `applicationSource`,
+`recruiterId`, `submittedBy`, `createdBy`, `enteredBy`; candidate-level `SOURCE` /
+`OWNERID` are deliberately ignored -- a profile PAIR minted carries them for life,
+and reading them would drop that person's genuine application to another job).
+If the BI row carries none of these, layer 3's "PAIR-filed but unlinked" branch
+never fires and the stamp/email/phone/URL match carries the whole load -- which is
+sufficient once the profile id is stamped.
+

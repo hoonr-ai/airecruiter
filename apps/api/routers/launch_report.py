@@ -67,6 +67,7 @@ from services.engage_status import (
     score_from_payload,
     select_engage_status,
 )
+from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
     normalize_channel,
     normalize_phase,
@@ -106,8 +107,16 @@ MAX_LAUNCH_REPORT_RANGE_DAYS = int(os.getenv("LAUNCH_REPORT_MAX_RANGE_DAYS", "31
 # let a candidate land in two buckets and break the Percentage denominator.
 # Unrecognised values are logged and bucketed as partial (see _bucket_status).
 _PENDING_STATUSES = {"pending", "scheduled", "queued", "contact_check", "not_started", "initiated"}
-_IN_PROGRESS_STATUSES = {"in_progress", "phase1", "phase2", "phase3", "phase4", "active", "sent", "call_in_progress"}
-_COMPLETED_STATUSES = {"completed", "passed", "failed", "pass", "fail", "complete"}
+_IN_PROGRESS_STATUSES = {
+    "in_progress",
+    "phase1", "phase2", "phase3", "phase4", "active", "sent",
+    "call_in_progress", "screening", "interview_completed",
+    "contacted",
+}
+_COMPLETED_STATUSES = {
+    "completed", "passed", "failed", "pass", "fail", "complete", "hired",
+    "qualified", "shortlisted", "selected", "disqualified", "declined", "rejected",
+}
 _PARTIAL_STATUSES = {
     "outreach_incomplete", "partial", "partial_complete", "incomplete",
     "expired", "no_response", "unreachable", "abandoned", "outreach_failed",
@@ -258,7 +267,7 @@ def _funnel_status_raw(merged: Dict[str, Any], outreach_status: Optional[str]) -
 
 def _bucket_status(raw: Optional[str]) -> str:
     """Map a pair-bot outreach_status onto one of the four report buckets."""
-    status = (raw or "").strip().lower()
+    status = (raw or "").strip().lower().replace(" ", "_")
     if not status:
         return "pending"
     if status in _PENDING_STATUSES:
@@ -297,8 +306,9 @@ def _normalize_phase(
       phase1_extra           -> extra1
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
+      phase3_extra           -> extra3
 
-    When shift_phases=False (standard mode for routers.jobs::get_job_outreach_stats):
+    When shift_phases=False (raw PairBot vocabulary, tests / other callers):
       contact_check / phase1 -> phase1
       phase1_6hr             -> phase1_6hr
       phase2                 -> phase2
@@ -306,6 +316,7 @@ def _normalize_phase(
       phase1_extra           -> extra1
       phase1_6hr_extra       -> extra2
       phase2_extra           -> extra3
+      phase3_extra           -> extra3
     """
     norm = normalize_phase(raw, allow_pending_aliases=allow_pending_aliases)
     if not norm:
@@ -323,7 +334,7 @@ def _normalize_phase(
             return "extra1"
         if norm == "phase1_6hr_extra":
             return "extra2"
-        if norm == "phase2_extra":
+        if norm in ("phase2_extra", "phase3_extra"):
             return "extra3"
     else:
         if norm in ("contact_check", "phase1"):
@@ -334,7 +345,7 @@ def _normalize_phase(
             return "extra1"
         if norm == "phase1_6hr_extra":
             return "extra2"
-        if norm == "phase2_extra":
+        if norm in ("phase2_extra", "phase3_extra"):
             return "extra3"
     return None
 
@@ -358,6 +369,10 @@ def _extract_phase(
         or outreach.get("phase")
         or outreach.get("current_phase")
     )
+    if promote_extra:
+        raw = promote_high_score_extra_phase(
+            outreach, raw, include_pending_extra=include_pending_extra
+        )
     phase = _normalize_phase(raw, shift_phases=shift_phases)
     if phase:
         return phase
@@ -501,10 +516,7 @@ async def _fetch_all_outreach(interview_ids: List[str]) -> Dict[str, Dict[str, A
     if not interview_ids:
         return {}
 
-    headers = {}
-    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
-    if pair_api_key:
-        headers["Authorization"] = f"Bearer {pair_api_key}"
+    headers = get_pair_auth_headers()
 
     semaphore = asyncio.Semaphore(_OUTREACH_CONCURRENCY)
     deadline = asyncio.get_running_loop().time() + _OUTREACH_BUDGET_S
@@ -545,15 +557,13 @@ def merge_outreach_payloads(
             for k, v in source.items():
                 if v is not None:
                     if k in ("outreach_status", "status"):
-                        # Normalise spaces → underscores so "In Progress" and
-                        # "in_progress" both resolve to the same hierarchy key.
-                        existing_st = str(merged_payload.get(k) or "").strip().lower().replace(" ", "_")
-                        new_st = str(v).strip().lower().replace(" ", "_")
+                        existing_rank = _status_rank(merged_payload.get(k))
+                        new_rank = _status_rank(v)
                         # If both statuses are recognized in the hierarchy, enforce monotonic progression.
                         # If either is unrecognised, allow the higher-priority layer to win so genuinely
                         # newer pair-bot statuses are surfaced to logs rather than silently swallowed.
-                        if existing_st in _STATUS_HIERARCHY and new_st in _STATUS_HIERARCHY:
-                            if _STATUS_HIERARCHY[new_st] >= _STATUS_HIERARCHY[existing_st]:
+                        if existing_rank and new_rank:
+                            if new_rank >= existing_rank:
                                 merged_payload[k] = v
                         else:
                             merged_payload[k] = v
@@ -587,18 +597,14 @@ def build_merged_outreach_payload(
     raw_comp = cand_data.get("first_completed_at") or cand_data.get("engage_completed_at")
     if raw_comp:
         cand_fallback["first_completed_at"] = raw_comp
-    # Score and hard-filter status must travel with the candidate so that
-    # select_engage_status / format_engage_status can correctly classify
-    # fail-with-score vs outreach-miss and completed-pass vs completed-fail.
-    raw_score = cand_data.get("engage_score")
-    if raw_score not in (None, ""):
-        cand_fallback["engage_score"] = raw_score
-    raw_hf = cand_data.get("engage_hard_filter_status")
-    if raw_hf not in (None, ""):
-        cand_fallback["engage_hard_filter_status"] = raw_hf
-    raw_upd = cand_data.get("engage_updated_at")
-    if raw_upd not in (None, ""):
-        cand_fallback["engage_updated_at"] = raw_upd
+    if cand_data.get("engage_completed_at"):
+        cand_fallback["engage_completed_at"] = cand_data["engage_completed_at"]
+    if cand_data.get("engage_updated_at"):
+        cand_fallback["engage_updated_at"] = cand_data["engage_updated_at"]
+    if cand_data.get("engage_score") is not None:
+        cand_fallback["engage_score"] = cand_data["engage_score"]
+    if cand_data.get("engage_hard_filter_status"):
+        cand_fallback["engage_hard_filter_status"] = cand_data["engage_hard_filter_status"]
 
     # Layer 2: Local DB Audit Row Response
     audit_fallback = {}
@@ -622,15 +628,20 @@ def build_merged_outreach_payload(
         audit_fallback["status"] = audit_fallback["outreach_status"]
 
     if audit_status:
-        st_hier = str(audit_status).strip().lower()
-        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip().lower()
-        if st_hier in _STATUS_HIERARCHY and curr_st in _STATUS_HIERARCHY:
-            if _STATUS_HIERARCHY[st_hier] >= _STATUS_HIERARCHY[curr_st]:
-                audit_fallback["outreach_status"] = audit_status
-                audit_fallback["status"] = audit_status
-        else:
+        curr_st = str(audit_fallback.get("outreach_status") or audit_fallback.get("status") or "").strip()
+        audit_status_rank = _status_rank(audit_status)
+        current_status_rank = _status_rank(curr_st)
+        # Backfill missing keys only; never replace an already-recorded audit
+        # response status at equal rank (passed vs completed, fail vs failed).
+        if not curr_st:
             audit_fallback["outreach_status"] = audit_status
             audit_fallback["status"] = audit_status
+        elif audit_status_rank and current_status_rank:
+            if audit_status_rank > current_status_rank:
+                audit_fallback["outreach_status"] = audit_status
+                audit_fallback["status"] = audit_status
+        # Unrecognised overlay must not clobber a status the audit response
+        # already stored; missing-key backfill above covers the empty case.
 
     # Layer 3: Live PairBot HTTP API Response
     # Unwrap nested `outreach` key from live API payload if present
@@ -643,7 +654,13 @@ def build_merged_outreach_payload(
     return merge_outreach_payloads(cand_fallback, audit_fallback, live_api)
 
 
-def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = False, include_pending_extra: bool = True) -> Dict[str, Any]:
+def _summarise_outreach(
+    payloads: List[Dict[str, Any]],
+    *,
+    shift_phases: bool = False,
+    promote_extra: bool = True,
+    include_pending_extra: bool = True,
+) -> Dict[str, Any]:
     """Collapse per-interview outreach payloads into one job's outreach columns.
 
     Channel counts are per *candidate reached on that channel*, not per message
@@ -680,6 +697,16 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
         # For a raw pair-bot body the top level has no status keys and the
         # block simply fills them in.
         merged = {**outreach_dict, **payload}
+
+        # If the local DB has 'pass'/'fail' as the outreach_phase but the live
+        # API now returns the real canonical phase (e.g. phase1), use the
+        # live phase so we bucket the completed candidate correctly.
+        terminal_phases = ("pass", "fail", "completed")
+        if payload.get("outreach_phase") in terminal_phases and outreach_dict.get("outreach_phase") not in terminal_phases + (None,):
+            merged["outreach_phase"] = outreach_dict["outreach_phase"]
+        elif payload.get("outreach_phase") in terminal_phases and payload.get("phase") not in terminal_phases + (None,):
+            # Fallback to pair-bot's raw 'phase' key if available
+            merged["outreach_phase"] = payload["phase"]
 
         # ONE status per candidate, the same selection the rank list table
         # makes for its row (select_engage_status): the merge, lifted by a
@@ -747,20 +774,25 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
 
         if display == "Pass":
             buckets["passed"] += 1
-            pass_at_raw = (
-                merged.get("first_pass_at")
-                or merged.get("first_completed_at")
-                or merged.get("engage_completed_at")
-                or merged.get("completed_at")
-                or merged.get("engage_updated_at")
+            passed_at = (
+                _parse_iso(merged.get("first_pass_at"))
+                or _parse_iso(merged.get("first_completed_at"))
+                or _parse_iso(merged.get("engage_completed_at"))
+                or _parse_iso(merged.get("engage_updated_at"))
+                or _parse_iso(merged.get("completed_at"))
+                or _parse_iso(merged.get("updated_at"))
             )
-            pass_dt = _parse_iso(pass_at_raw)
-            if pass_dt:
-                first_pass_timestamps.append(pass_dt)
+            if passed_at:
+                first_pass_timestamps.append(passed_at)
         elif display == "Fail":
             buckets["failed"] += 1
 
-        phase = _extract_phase(merged, shift_phases=shift_phases, include_pending_extra=include_pending_extra)
+        phase = _extract_phase(
+            merged,
+            shift_phases=shift_phases,
+            promote_extra=promote_extra,
+            include_pending_extra=include_pending_extra,
+        )
         if phase:
             phases[phase] = phases.get(phase, 0) + 1
             if phase in ("extra1", "extra2", "extra3"):
@@ -843,11 +875,12 @@ def _summarise_outreach(payloads: List[Dict[str, Any]], *, shift_phases: bool = 
 def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Sourcing + recruiter-feedback columns, all from pair's own tables."""
     submitted = rejected = 0
+    passed = failed = 0
     time_to_feedback: List[float] = []
     sourced_at: List[datetime.datetime] = []
     first_attempted_at: List[datetime.datetime] = []
     first_completed_at: List[datetime.datetime] = []
-    first_pass_timestamps: List[datetime.datetime] = []
+    first_pass_at: List[datetime.datetime] = []
 
     for row in rows:
         feedback_type = (row.get("feedback_type") or "").strip().lower()
@@ -856,6 +889,22 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             submitted += 1
         elif feedback_type == "reject":
             rejected += 1
+
+        engage_status = (row.get("engage_status") or "").strip().lower()
+        engage_score = parse_engage_score(row.get("engage_score"))
+        hf_status = (row.get("engage_hard_filter_status") or "").strip().lower()
+        display = format_engage_status(engage_status, engage_score, hf_status)
+        if display == "Pass":
+            passed += 1
+            completed_time = (
+                _parse_iso(row.get("first_completed_at"))
+                or _parse_iso(row.get("engage_completed_at"))
+                or _parse_iso(row.get("engage_updated_at"))
+            )
+            if completed_time:
+                first_pass_at.append(completed_time)
+        elif display == "Fail":
+            failed += 1
 
         created = _parse_iso(row.get("created_at"))
         if created:
@@ -868,22 +917,6 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         completed = _parse_iso(row.get("first_completed_at")) or _parse_iso(row.get("engage_completed_at"))
         if completed:
             first_completed_at.append(completed)
-
-        display = format_engage_status(
-            (row.get("engage_status") or "").strip().lower(),
-            parse_engage_score(row.get("engage_score")),
-            (row.get("engage_hard_filter_status") or "").strip().lower(),
-        )
-        if display == "Pass":
-            pass_at_raw = (
-                row.get("first_pass_at")
-                or row.get("first_completed_at")
-                or row.get("engage_completed_at")
-                or row.get("engage_updated_at")
-            )
-            pass_dt = _parse_iso(pass_at_raw)
-            if pass_dt:
-                first_pass_timestamps.append(pass_dt)
 
         if feedback_type and has_reason:
             elapsed = _minutes_between(
@@ -900,12 +933,14 @@ def _summarise_candidates(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "first_completed_at": min(first_completed_at) if first_completed_at else None,
         "submitted_candidates": submitted,
         "rejected_candidates": rejected,
+        "passed_candidates": passed,
+        "failed_candidates": failed,
+        "first_pass_at": min(first_pass_at) if first_pass_at else None,
         "time_to_feedback_minutes": _mean(time_to_feedback),
         "first_feedback_at": min(
             (_parse_iso(r.get("feedback_at")) for r in rows if r.get("feedback_at")),
             default=None,
         ),
-        "first_pass_at": min(first_pass_timestamps) if first_pass_timestamps else None,
     }
 
 
@@ -1092,10 +1127,15 @@ def _build_row(
         ),
         "time_to_feedback_minutes": cand["time_to_feedback_minutes"],
         "first_feedback_at": _edt(cand["first_feedback_at"]),
+        "first_pass_at": _edt(merged_first_pass),
         "time_to_first_pass_minutes": (
-            round(float(job["time_to_first_pass"]), 1)
-            if job.get("time_to_first_pass") is not None
-            else None
+            live_ttp
+            if live_ttp is not None
+            else (
+                round(float(job["time_to_first_pass"]), 1)
+                if job.get("time_to_first_pass") is not None
+                else None
+            )
         ),
 
         "call": outreach["channels"]["call"],
@@ -1110,12 +1150,6 @@ def _build_row(
         "extra2": outreach["phases"]["extra2"],
         "extra3": outreach["phases"]["extra3"],
         "percentage": percentage,
-
-        # Earliest timestamp at which any launched candidate reached Pass.
-        # Merges the outreach (launched) path and the sourced-candidate path
-        # to handle stale JSONB (live pair-bot may show Pass before the JSONB
-        # is updated) and audit-row loss (stored JSONB is the only record).
-        "first_pass_at": _edt(merged_first_pass),
 
         # Lets the UI mark a row whose outreach columns are partial rather
         # than showing dashes that look like real zeros.
