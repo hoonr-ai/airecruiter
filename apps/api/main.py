@@ -201,6 +201,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"teams_schema_init_failed: {e}; continuing")
 
+    # Provision the JobDiva BI mirror (all Pyramid reqs, submittal / interview
+    # / start activity, the user directory) behind the PAIR Dashboard, and
+    # schedule its sync. Every worker schedules it; an advisory lock lets one
+    # run each cycle. Delayed like the auto-sync so boot stays uncontested.
+    try:
+        from services import jobdiva_bi_sync
+    except Exception as e:  # noqa: BLE001 - never let the dashboard mirror block boot
+        logger.error(f"jobdiva_bi_sync_import_failed: {e}; continuing")
+        jobdiva_bi_sync = None
+    if jobdiva_bi_sync is not None:
+        try:
+            await asyncio.wait_for(jobdiva_bi_sync.init_jobdiva_bi_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("jobdiva_bi_schema_init_timeout (10s); continuing")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"jobdiva_bi_schema_init_failed: {e}; continuing")
+    if jobdiva_bi_sync is not None and jobdiva_bi_sync.SYNC_ENABLED:
+        try:
+            scheduler.add_job(
+                jobdiva_bi_sync.scheduled_sync,
+                "interval",
+                minutes=jobdiva_bi_sync.SYNC_INTERVAL_MINUTES,
+                id="jobdiva_bi_sync",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=120),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"jobdiva_bi_sync_schedule_failed: {e}; continuing")
+
     # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
     # has a 30s TTL, but the live query can spike to 20-30s during
     # poll-loop lock contention — long enough that the frontend's 8s
@@ -347,6 +378,7 @@ campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
 cross_submissions_router = _safe_import("cross_submissions")
 live_report_router = _safe_import("live_report")
+pair_dashboard_router = _safe_import("pair_dashboard")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -402,6 +434,7 @@ _mount(job_step_time_router, "job_step_time")
 _mount(teams_router, "teams")
 _mount(cross_submissions_router, "cross_submissions")
 _mount(live_report_router, "live_report")
+_mount(pair_dashboard_router, "pair_dashboard")
 # Mounted under /api so the existing nginx `location /api/` passthrough routes
 # it to the backend — avoids a collision with the frontend's /campaigns pages
 # (same trick keeps job_criteria under /api/jobs/...). No nginx changes needed.
