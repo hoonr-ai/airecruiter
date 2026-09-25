@@ -11,7 +11,10 @@ Auto-creates the engage_interview_audit table on startup.
 """
 
 import asyncio
+import hashlib
+import hmac
 import html
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
@@ -4434,10 +4437,12 @@ async def reconcile_job_interviews(job_id: str) -> dict[str, Any]:
                 for iv in interviews:
                     candidate_id = iv.get("source_candidate_id")
                     interview_id = iv.get("interview_id")
+                    iv_job_id = str(iv.get("jobdiva_id") or clean_job_id).strip()
                     if not candidate_id or not interview_id:
                         continue
 
                     # Update sourced_candidates if interview_id was missing
+                    # Support both clean_job_id and any alternate format returned by PairBot
                     cur.execute(
                         """
                         UPDATE sourced_candidates
@@ -4452,7 +4457,7 @@ async def reconcile_job_interviews(job_id: str) -> dict[str, Any]:
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
                           AND (data->>'engage_interview_id' IS NULL OR data->>'engage_interview_id' = '')
                         """,
-                        (str(interview_id), str(candidate_id), clean_job_id, clean_job_id),
+                        (str(interview_id), str(candidate_id), clean_job_id, iv_job_id),
                     )
                     if cur.rowcount > 0:
                         reconciled_count += cur.rowcount
@@ -4464,7 +4469,7 @@ async def reconcile_job_interviews(job_id: str) -> dict[str, Any]:
                             VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                             ON CONFLICT DO NOTHING
                             """,
-                            (str(candidate_id), clean_job_id, str(interview_id), iv.get("status") or "processing"),
+                            (str(candidate_id), iv_job_id, str(interview_id), iv.get("status") or "processing"),
                         )
             conn.commit()
         finally:
@@ -4508,11 +4513,10 @@ class CreationCompletedWebhookPayload(BaseModel):
 
 @router.post("/webhooks/creation-completed")
 async def handle_creation_completed_webhook(
-    payload: CreationCompletedWebhookPayload,
     request: Request,
 ):
     """Webhook invoked by PairBot outbox when bulk interview creation finishes."""
-    # Optional HMAC / Secret verification if configured
+    raw_body = await request.body()
     webhook_secret = os.getenv("EVALUATION_WEBHOOK_SECRET")
     if webhook_secret:
         auth_header = request.headers.get("X-Webhook-Secret") or request.headers.get("Authorization") or ""
@@ -4520,10 +4524,31 @@ async def handle_creation_completed_webhook(
             request.headers.get("X-Webhook-Signature")
             or request.headers.get("X-Signature")
             or request.headers.get("X-Hub-Signature-256")
+            or ""
         )
-        if auth_header != webhook_secret and not sig_header:
+        # Verify either shared secret auth header OR HMAC signature
+        is_secret_match = (auth_header == webhook_secret)
+        is_sig_match = False
+        if sig_header:
+            expected_mac = hmac.new(
+                webhook_secret.encode("utf-8"),
+                msg=raw_body,
+                digestmod=hashlib.sha256,
+            ).hexdigest()
+            # Support both "sha256=..." prefix and bare hex string
+            clean_sig = sig_header.split("=", 1)[-1].strip()
+            is_sig_match = hmac.compare_digest(clean_sig, expected_mac)
+
+        if not is_secret_match and not is_sig_match:
             logger.warning("creation_completed webhook rejected: missing or invalid secret/signature")
             raise HTTPException(status_code=401, detail="Unauthorized webhook")
+
+    try:
+        body_json = json.loads(raw_body.decode("utf-8") or "{}")
+        payload = CreationCompletedWebhookPayload(**body_json)
+    except Exception as parse_err:
+        logger.warning(f"Failed to parse creation_completed webhook payload: {parse_err}")
+        raise HTTPException(status_code=400, detail="Invalid payload JSON")
 
     bulk_id = payload.bulk_id
     logger.info("Received creation_completed webhook for bulk_id %s (created=%s)", bulk_id, payload.total_created)
