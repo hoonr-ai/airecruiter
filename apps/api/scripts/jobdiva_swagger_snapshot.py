@@ -46,6 +46,7 @@ ENDPOINTS: List[str] = [
     "/apiv2/jobdiva/getCandidateById",
     "/apiv2/jobdiva/createCandidate",
     "/apiv2/jobdiva/updateCandidateProfile",
+    "/apiv2/jobdiva/updateCandidateSNLinks",
     "/apiv2/jobdiva/createCandidateNote",
     "/apiv2/jobdiva/createCandidateStickyNote",
     "/apiv2/jobdiva/pinUnPinCandidateNotes",

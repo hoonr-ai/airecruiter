@@ -216,10 +216,10 @@ def test_search_candidate_profile_id_priority(jobdiva_service):
     asyncio.run(run_test())
 
 def test_update_candidate_name_fallback(jobdiva_service):
-    """A rejected update (500 unique-constraint on email/phone) is retried with
-    fewer fields -- phones, then email -- until the name lands. The phone rides
-    in the schema's phones[] (the flat `phone` field was never in
-    UpdateCandidateProfileDef, so it never reached JobDiva)."""
+    """A rejected update (500 unique-constraint on the email) is retried group
+    by group: name with, then without, the email -- then the phone on its own,
+    so the refused email never costs the phone. The phone rides in the schema's
+    phones[] (the flat `phone` field was never in UpdateCandidateProfileDef)."""
     async def run_test():
         with patch("services.jobdiva.httpx.AsyncClient") as mock_client_class:
             mock_client = mock_client_class.return_value.__aenter__.return_value
@@ -232,7 +232,7 @@ def test_update_candidate_name_fallback(jobdiva_service):
             mock_res_200.status_code = 200
             mock_res_200.text = "Success"
 
-            mock_client.post = AsyncMock(side_effect=[mock_res_500, mock_res_500, mock_res_200])
+            mock_client.post = AsyncMock(side_effect=[mock_res_500, mock_res_500, mock_res_200, mock_res_200])
 
             success = await jobdiva_service._update_candidate_name(
                 token="fake_token",
@@ -244,7 +244,7 @@ def test_update_candidate_name_fallback(jobdiva_service):
             )
 
             assert success is True
-            assert mock_client.post.call_count == 3
+            assert mock_client.post.call_count == 4
 
             payloads = [c.kwargs["json"] for c in mock_client.post.call_args_list]
             # Full update first: email + phones[] (cell, insert) + name.
@@ -252,9 +252,10 @@ def test_update_candidate_name_fallback(jobdiva_service):
             assert payloads[0]["email"] == "conflict@email.com"
             assert payloads[0]["phones"] == [{"phone": "555-0000", "type": "C", "action": 1}]
             assert "phone" not in payloads[0]
-            # Then without the phone, then name only.
-            assert "phones" not in payloads[1] and payloads[1]["email"] == "conflict@email.com"
+            # Then name + email, name only, and the phone on its own.
+            assert payloads[1] == {"candidateid": 123, "firstName": "John", "lastName": "Doe", "email": "conflict@email.com"}
             assert payloads[2] == {"candidateid": 123, "firstName": "John", "lastName": "Doe"}
+            assert payloads[3] == {"candidateid": 123, "phones": [{"phone": "555-0000", "type": "C", "action": 1}]}
     asyncio.run(run_test())
 
 

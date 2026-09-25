@@ -302,3 +302,23 @@ def test_created_profile_payloads_with_resume_file_and_address_are_schema_exact(
     _assert_contract("/apiv2/jobdiva/updateCandidateProfile", update["json"])
     assert update["json"]["phones"] == [{"phone": "5551234567", "type": "C", "action": 1}]
     assert {"city", "state", "zipCode", "countryid"} <= set(update["json"])
+
+
+def test_upload_resume_payload_is_schema_exact():
+    calls = _capture(lambda s: s.upload_resume(
+        "777", "Ada Lovelace\nEngineer", resume_file=b"PK\x03\x04docx", filename="Ada_Lovelace_Resume.docx",
+        origin_source="LinkedIn-Exa",
+    ))
+    call = _only(calls, "/apiv2/jobdiva/uploadResume")
+    _assert_contract("/apiv2/jobdiva/uploadResume", call["json"])
+    assert call["json"]["candidateid"] == 777
+
+
+def test_update_candidate_social_links_payload_is_schema_exact():
+    calls = _capture(lambda s: s.update_candidate_social_links(
+        "777", [{"name": "LinkedIn", "link": "https://www.linkedin.com/in/ada"}, {"name": "Myspace?", "link": "x"}],
+    ))
+    call = _only(calls, "/apiv2/jobdiva/updateCandidateSNLinks")
+    _assert_contract("/apiv2/jobdiva/updateCandidateSNLinks", call["json"])
+    # Only JobDiva's own network names go out.
+    assert call["json"] == {"id": 777, "socialnetworks": [{"name": "LinkedIn", "link": "https://www.linkedin.com/in/ada"}]}

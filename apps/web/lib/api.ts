@@ -337,6 +337,14 @@ export const api = {
       req<any>(`/api/v1/engagement/interviews/${interviewId}/score-summary`),
     getAssessmentData: (interviewId: string) =>
       req<any>(`/api/v1/engagement/assess/${interviewId}`),
+    // Admin: repair JobDiva profiles PAIR created blank (dry run unless dry_run: false).
+    jobdivaBlankProfileBackfill: (body: {
+      dry_run: boolean;
+      limit?: number;
+      job_id?: string;
+      jobdiva_ids?: string[];
+    }) =>
+      req<any>(`/api/v1/engagement/engage/jobdiva-blank-profile-backfill`, { method: "POST", body }),
   },
   auth: {
     getMe: () => req<any>(`/api/v1/auth/me`),
