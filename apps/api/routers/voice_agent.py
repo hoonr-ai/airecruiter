@@ -211,8 +211,8 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
 
         status_norm = _normalized_webhook_status(payload.status)
         target_job_id = payload.jobdiva_id
-        # Prefer source_candidate_id sent by PairBot, fall back to candidate_id
-        target_candidate_id = payload.source_candidate_id or payload.candidate_id
+        # Prefer source_candidate_id sent by PairBot; never fall back to internal candidate_id for external updates
+        target_candidate_id = payload.source_candidate_id
         
         # Update DB - similar to sync_interview_details
         with get_db_connection() as conn:
@@ -231,7 +231,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 else:
                     logger.warning(
                         f"Webhook: No audit log found for interview {payload.interview_id}. "
-                        f"Falling back to payload candidate: {target_candidate_id}, job: {target_job_id}"
+                        f"Falling back to payload source_candidate_id: {target_candidate_id}, job: {target_job_id}"
                     )
 
                 # Pass logic: completed interview → pass = hard filters passed (no score threshold)

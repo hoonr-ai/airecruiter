@@ -12,7 +12,7 @@ Auto-creates the engage_interview_audit table on startup.
 
 import asyncio
 import html
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
@@ -4507,8 +4507,20 @@ class CreationCompletedWebhookPayload(BaseModel):
 
 
 @router.post("/webhooks/creation-completed")
-async def handle_creation_completed_webhook(payload: CreationCompletedWebhookPayload):
+async def handle_creation_completed_webhook(
+    payload: CreationCompletedWebhookPayload,
+    request: Request,
+):
     """Webhook invoked by PairBot outbox when bulk interview creation finishes."""
+    # Optional HMAC / Secret verification if configured
+    webhook_secret = os.getenv("EVALUATION_WEBHOOK_SECRET")
+    if webhook_secret:
+        auth_header = request.headers.get("X-Webhook-Secret") or request.headers.get("Authorization") or ""
+        sig_header = request.headers.get("X-Signature") or request.headers.get("X-Hub-Signature-256")
+        if auth_header != webhook_secret and not sig_header:
+            logger.warning("creation_completed webhook rejected: missing or invalid secret/signature")
+            raise HTTPException(status_code=401, detail="Unauthorized webhook")
+
     bulk_id = payload.bulk_id
     logger.info("Received creation_completed webhook for bulk_id %s (created=%s)", bulk_id, payload.total_created)
 
@@ -4534,11 +4546,15 @@ async def handle_creation_completed_webhook(payload: CreationCompletedWebhookPay
                 if not interview_id or not candidate_id:
                     continue
 
-                where_clause = "candidate_id = %s"
-                params = [str(interview_id), str(candidate_id)]
+                where_clauses = ["candidate_id = %s"]
+                where_params = [str(candidate_id)]
+
                 if jobdiva_id:
-                    where_clause += " AND (jobdiva_id = %s OR jobdiva_id = %s)"
-                    params.extend([str(jobdiva_id), str(jobdiva_id)])
+                    where_clauses.append("jobdiva_id = %s")
+                    where_params.append(str(jobdiva_id))
+
+                where_sql = " AND ".join(where_clauses)
+                full_params = [str(interview_id)] + where_params
 
                 cur.execute(
                     f"""
@@ -4550,10 +4566,10 @@ async def handle_creation_completed_webhook(payload: CreationCompletedWebhookPay
                         true
                     ),
                     updated_at = CURRENT_TIMESTAMP
-                    WHERE {where_clause}
+                    WHERE {where_sql}
                       AND (data->>'engage_interview_id' IS NULL OR data->>'engage_interview_id' = '')
                     """,
-                    tuple(params),
+                    tuple(full_params),
                 )
                 if cur.rowcount > 0:
                     reconciled_count += cur.rowcount
