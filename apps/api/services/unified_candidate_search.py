@@ -60,6 +60,7 @@ from core.config import (
 from services import skill_embeddings
 from services import role_taxonomy
 from services import contact_enrichment
+from services.profile_resume import deep_search_profile, normalize_linkedin_profile
 from services.role_family import detect_role_family
 
 
@@ -571,13 +572,10 @@ class UnifiedCandidateSearch:
         if "linkedin.com/in/" not in profile_url.lower():
             return
         source = str(cand.get("source") or "")
-        enhanced = cand.get("enhanced_info") if isinstance(cand.get("enhanced_info"), dict) else {}
-        company = str(
-            cand.get("current_company")
-            or enhanced.get("current_company")
-            or enhanced.get("company")
-            or ""
-        ).strip()
+        # Scopes the ZoomInfo name search (an unscoped name is ambiguous) and
+        # sharpens the Exa query. The LLM extraction has no `current_company`
+        # key, so this reads the stored roles too.
+        company = contact_enrichment.current_company_of(cand)
         try:
             enrich = await contact_enrichment.enrich_contact_for_sourcing(
                 profile_url,
@@ -1770,6 +1768,25 @@ class UnifiedCandidateSearch:
                                         cand.update(profile_data)
                                         if _headline and not cand.get("headline"):
                                             cand["headline"] = _headline
+                                        # The WHOLE profile (role descriptions,
+                                        # summary, languages ...) rides to
+                                        # /candidates/save so Launch PAIR can give
+                                        # JobDiva a complete résumé; the fields
+                                        # above are only what scoring reads.
+                                        _linkedin_profile = normalize_linkedin_profile(full_profile)
+                                        if _linkedin_profile:
+                                            cand["linkedin_profile"] = _linkedin_profile
+                                            # Contact the member shares on LinkedIn
+                                            # is free -- take it before any paid
+                                            # ZoomInfo / Apollo / Exa lookup runs.
+                                            _li_email, _li_phone = contact_enrichment.sanitize_agent_contact(
+                                                (_linkedin_profile.get("emails") or [""])[0],
+                                                (_linkedin_profile.get("phones") or [""])[0],
+                                            )
+                                            if _li_email and not is_placeholder_email(_li_email) and not str(cand.get("email") or "").strip():
+                                                cand["email"] = _li_email
+                                            if _li_phone and not str(cand.get("phone") or "").strip():
+                                                cand["phone"] = _li_phone
                                         # Fix: LinkedIn Recruiter search rows for 3rd-degree
                                         # connections omit the candidate name; _resolve_candidate_name
                                         # falls back to the headline (e.g. "Supply Chain Analyst | …")
@@ -2015,10 +2032,42 @@ class UnifiedCandidateSearch:
             can show "Exa deep-search ran (N enriched, M new)" or "Exa
             deep-search failed — falling back to keyword results" in the
             status bar without the recruiter having to inspect API logs.
+
+            Contact info is NOT requested from the agent (see
+            EXA_AGENT_CONTACT_FIELDS): its contact tool billed a lookup for
+            every returned profile before Apollo was ever tried. New rows get
+            the regular Apollo-first chain instead, after they are shown.
             """
             enriched = 0
             new_found = 0
             failure_reason = ""
+            contact_tasks: List[asyncio.Task] = []
+
+            async def _enrich_shown_deep_row(cand: Dict[str, Any]) -> None:
+                """Apollo-first contact lookup for a deep-search row that is
+                already on screen (paid Exa only when Apollo misses — see
+                enrich_contact_for_sourcing); whatever it finds streams as a
+                patch. Runs after emit so the score/location gates decide who
+                gets a paid lookup, and so the row paints without waiting."""
+                before = {k: str(cand.get(k) or "").strip() for k in ("email", "phone")}
+                await self._apply_contact_enrichment(cand, criteria, overwrite=True)
+                patch = {
+                    k: cand[k] for k in ("email", "phone")
+                    if str(cand.get(k) or "").strip() and str(cand.get(k)).strip() != before[k]
+                }
+                if patch:
+                    # The row was keyed for cross-source dedup before its
+                    # contact existed; later rows for the same person must
+                    # still merge into it.
+                    for key in self._dedup_keys(cand):
+                        dedup_owner.setdefault(key, cand)
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": str(cand.get("candidate_id") or cand.get("id") or ""),
+                        "stage": "contact_enrichment",
+                        "patch": patch,
+                    })
+
             try:
                 await queue.put({"type": "stage", "data": "Exa deep-search warming up..."})
                 # Bounded wait so a hung Pass A can't stall Pass B forever.
@@ -2092,10 +2141,11 @@ class UnifiedCandidateSearch:
                         "exa_recent_companies": entry.get("recent_companies") or [],
                         "exa_fit_rationale": entry.get("fit_rationale") or "",
                     }
-                    # Contact fields from the agent's enrichment tool (schema
-                    # requests them with descriptions when the enrich flag is
-                    # on). Sanity-gate before use; only backfill — never
-                    # overwrite ZoomInfo/Apollo data already on the row.
+                    # Contact fields from the agent's enrichment tool — only
+                    # present when EXA_AGENT_CONTACT_FIELDS re-enables them
+                    # (off by default: Apollo gets first refusal). Sanity-gate
+                    # before use; only backfill — never overwrite ZoomInfo/Apollo
+                    # data already on the row.
                     agent_email, agent_phone = contact_enrichment.sanitize_agent_contact(
                         entry.get("email"), entry.get("phone")
                     )
@@ -2163,6 +2213,10 @@ class UnifiedCandidateSearch:
                             "sources": ["LinkedIn-DeepSearch"],
                             "skills": [],
                             "resume_text": rationale_blob,  # feeds the scorer
+                            # The person's own profile facts (title, location,
+                            # recent roles) for the JobDiva résumé -- the
+                            # rationale above is PAIR's words and never goes there.
+                            "linkedin_profile": deep_search_profile(entry),
                             "_stage": "exa_deep_search",
                             **{k: v for k, v in patch_fields.items() if v is not None},
                         }
@@ -2211,27 +2265,31 @@ class UnifiedCandidateSearch:
                                 "excluded": [], "score": 0,
                             }
                         # Deep-only candidates never pass through the Pass A
-                        # enrichment block. The agent run may have supplied
-                        # email/phone already (contact fields in the output
-                        # schema); only fall through to ZoomInfo→Apollo when
-                        # something is still missing — mirrors the launch-time
-                        # chain's first-hit-wins short-circuit and preserves
-                        # the per-job enrichment budget. overwrite=True keeps
-                        # ZoomInfo/Apollo as the source of truth for whatever
-                        # fields they do return.
-                        if not (
+                        # enrichment block, so they get the same ZoomInfo →
+                        # Apollo → (Exa on a miss) chain here — but only once
+                        # emit_candidate has shown them. Rows the score/location
+                        # gates drop, and no-contact-company rows, cost nothing.
+                        if not await emit_candidate(new_cand, assessment):
+                            continue
+                        new_found += 1
+                        if not new_cand.get("no_contact") and not (
                             str(new_cand.get("email") or "").strip()
                             and str(new_cand.get("phone") or "").strip()
                         ):
-                            await self._apply_contact_enrichment(
-                                new_cand, criteria, overwrite=True
+                            contact_tasks.append(
+                                asyncio.create_task(_enrich_shown_deep_row(new_cand))
                             )
-                        await emit_candidate(new_cand, assessment)
-                        new_found += 1
+                # Patches must land before this producer's SENTINEL closes
+                # its share of the stream.
+                if contact_tasks:
+                    await asyncio.gather(*contact_tasks, return_exceptions=True)
             except Exception as e:
                 logger.error(f"Exa Agent producer failed: {e}", exc_info=True)
                 failure_reason = failure_reason or f"producer crashed: {type(e).__name__}"
             finally:
+                for task in contact_tasks:
+                    if not task.done():
+                        task.cancel()
                 # Final status emit so the UI status bar reflects what
                 # happened, even when no candidate_detail patches landed.
                 if failure_reason and (enriched + new_found) == 0:

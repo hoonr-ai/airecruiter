@@ -82,7 +82,7 @@ def _row(**over):
     row = {
         "candidate_id": OWN, "name": "Ada Lovelace", "email": "ada@example.com",
         "phone": "5551234567", "resume_text": "resume", "data": {}, "jobdiva_id": JOB,
-        "source": "JobDiva-JobAgent",
+        "source": "JobDiva-JobAgent", "headline": "Analytical Engine Programmer",
     }
     row.update(over)
     return row
@@ -101,7 +101,16 @@ def harness(monkeypatch):
             "person": person_delta, "job": job_delta,
         })
 
-    def run(rows, fake):
+    reread_calls: List[str] = []
+
+    def run(rows, fake, reread=None):
+        # Never a real Unipile read from a test (see _provisioning_resume):
+        # the LinkedIn re-read answers `reread` (a normalised profile) or {}.
+        async def _linkedin_reread(row, _data):
+            reread_calls.append(str(row.get("candidate_id")))
+            return dict(reread or {})
+
+        monkeypatch.setattr(eng, "_fetch_linkedin_profile_for_resume", _linkedin_reread)
         monkeypatch.setattr(eng, "get_db_connection", lambda: _Conn(rows))
         monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
         monkeypatch.setattr(eng, "jobdiva_service", fake)
@@ -110,6 +119,7 @@ def harness(monkeypatch):
         return asyncio.run(eng._provision_batch_to_jobdiva([r["candidate_id"] for r in rows], JOB))
 
     run.persisted = persisted  # type: ignore[attr-defined]
+    run.reread_calls = reread_calls  # type: ignore[attr-defined]
     return run
 
 
@@ -175,7 +185,9 @@ def test_jobdiva_row_without_link_id_fails_closed(harness, caplog, monkeypatch):
     results = harness([_row()], fake)
 
     assert fake.calls == []
-    assert results == {"success": 0, "skipped": 0, "failed": 1, "duplicate_suspected": 0}
+    assert results == {
+        "success": 0, "skipped": 0, "failed": 1, "duplicate_suspected": 0, "blank_profile_refused": 0,
+    }
     assert JOBDIVA_PROFILE_INVARIANT in caplog.text
     assert "jobdiva_row_without_link_id" in caplog.text
 
@@ -347,3 +359,147 @@ def test_link_state_writes_person_and_job_scopes_separately(monkeypatch):
     import re
     for sql in (person_sql, job_sql):
         assert re.search(r"SET\s+data\s*=", sql) and not re.search(r"\bsource\s*=", sql), sql
+
+
+# ---------------------------------------------------------------------------
+# Blank-profile fix (2026-09-25): what a created JobDiva profile is built from
+# ---------------------------------------------------------------------------
+
+from services.profile_resume import normalize_linkedin_profile  # noqa: E402
+
+_LINKEDIN_PROFILE = normalize_linkedin_profile({
+    "first_name": "Ada", "last_name": "Lovelace", "headline": "Principal Data Engineer",
+    "summary": "Builds data platforms.",
+    "work_experience": [{"position": "Principal Data Engineer", "company": "Acme Bank", "start": "1/2021",
+                         "description": "Led the lakehouse migration."}],
+    "education": [{"school": "Stevens Institute of Technology", "degree": "MS"}],
+    "skills": ["Python", "Spark"],
+})
+
+
+def _linkedin_row(**over):
+    row = _row(
+        candidate_id="unipile_AEMAA1", source="LinkedIn-Unipile", email="ada@lovelace.dev",
+        headline="Principal Data Engineer", location="Jersey City, New Jersey, United States",
+        profile_url="https://www.linkedin.com/in/ada-lovelace", resume_text="",
+        data={"linkedin_profile": _LINKEDIN_PROFILE},
+    )
+    row.update(over)
+    return row
+
+
+def test_linkedin_row_is_created_from_a_full_resume_file_and_address(harness):
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    results = harness([_linkedin_row()], fake)
+
+    assert results["success"] == 1
+    (call,) = fake.calls
+    assert call["candidate_id"] is None and call["allow_profile_creation"] is True
+    assert (call["first_name"], call["last_name"]) == ("Ada", "Lovelace")
+    # A real Word document goes to JobDiva, not just a text field.
+    assert call["resume_file"][:2] == b"PK"
+    assert call["filename"] == "Ada_Lovelace_Resume.docx"
+    text = call["resume_text"]
+    for expected in ("Ada Lovelace", "Email: ada@lovelace.dev", "Phone: 5551234567",
+                     "LinkedIn: https://www.linkedin.com/in/ada-lovelace", "PROFESSIONAL EXPERIENCE",
+                     "Principal Data Engineer at Acme Bank", "Led the lakehouse migration.",
+                     "Stevens Institute of Technology", "Python, Spark"):
+        assert expected in text, expected
+    assert "(Profile sourced via PAIR)" not in text
+    assert call["profile_fields"] == {"city": "Jersey City", "state": "NJ", "countryid": "US"}
+    # A full profile needs no LinkedIn re-read.
+    assert harness.reread_calls == []
+
+
+def test_name_only_row_is_refused_instead_of_creating_a_blank_profile(harness, caplog):
+    caplog.set_level(logging.ERROR)
+    fake = _FakeJobDiva(result=(True, 777))
+    results = harness([_row(candidate_id="exa_linkedin.com/in/x", source="LinkedIn-Exa", headline="")], fake)
+
+    assert fake.calls == []
+    assert results["failed"] == 1 and results["blank_profile_refused"] == 1
+    assert eng.JOBDIVA_BLANK_PROFILE_REFUSED in caplog.text and "no_profile_data" in caplog.text
+    assert harness.persisted == []  # not provisioned: re-provision retries it
+
+
+def test_placeholder_name_is_refused(harness, caplog):
+    caplog.set_level(logging.ERROR)
+    fake = _FakeJobDiva(result=(True, 777))
+    results = harness([_linkedin_row(name="LinkedIn Candidate", data={})], fake)
+
+    assert fake.calls == []
+    assert results["blank_profile_refused"] == 1
+    assert "no_usable_name" in caplog.text
+
+
+def test_placeholder_name_is_rescued_by_the_linkedin_profile_name(harness):
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    harness([_linkedin_row(name="Principal Data Engineer | Spark")], fake)
+
+    (call,) = fake.calls
+    assert (call["first_name"], call["last_name"]) == ("Ada", "Lovelace")
+
+
+def test_thin_row_rereads_the_linkedin_profile_before_creating(harness):
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    thin = _row(candidate_id="exadeep_1_ada", source="LinkedIn-DeepSearch", headline="Data Engineer",
+                profile_url="https://www.linkedin.com/in/ada-lovelace",
+                resume_text="Strong fit because of Spark", data={})
+    harness([thin], fake, reread=_LINKEDIN_PROFILE)
+
+    assert harness.reread_calls == ["exadeep_1_ada"]
+    (call,) = fake.calls
+    assert "Principal Data Engineer at Acme Bank" in call["resume_text"]
+    assert "Strong fit" not in call["resume_text"]  # the agent's rationale is not a résumé
+
+
+def test_linkedin_rereads_are_capped_per_batch(harness, monkeypatch):
+    monkeypatch.setattr(eng, "JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP", 1)
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    rows = [
+        _row(candidate_id=f"exadeep_{i}", source="LinkedIn-DeepSearch", headline="Data Engineer",
+             email=f"a{i}@lovelace.dev", phone=f"555123456{i}", data={})
+        for i in range(3)
+    ]
+    results = harness(rows, fake)
+
+    assert len(harness.reread_calls) == 1
+    # Thin but not blank (name + headline): still created, just without a re-read.
+    assert results["success"] == 3
+
+
+def test_linkedin_reread_can_be_switched_off(harness, monkeypatch):
+    monkeypatch.setattr(eng, "JOBDIVA_PROVISION_LINKEDIN_REFETCH", False)
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    harness([_row(candidate_id="exadeep_1", source="LinkedIn-DeepSearch", headline="Data Engineer")], fake)
+
+    assert harness.reread_calls == []
+    assert len(fake.calls) == 1
+
+
+def test_link_path_builds_no_resume_and_never_rereads(harness):
+    fake = _FakeJobDiva(result=(True, OWN))
+    harness([_row()], fake)
+
+    (call,) = fake.calls
+    assert call["candidate_id"] == OWN
+    assert call["resume_text"] == "" and "resume_file" not in call
+    assert harness.reread_calls == []
+
+
+def test_profile_jobdiva_matched_to_an_existing_person_is_not_claimed_as_pair_minted(harness):
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 555, path="created", matched_existing=True))
+    harness([_linkedin_row()], fake)
+
+    (rec,) = harness.persisted
+    assert rec["person"] == {"jobdiva_candidate_id": "555", "jobdiva_profile_origin": "jobdiva"}
+    assert rec["job"] == _pair_job("LinkedIn-Unipile")
+
+
+def test_synthetic_lookup_email_goes_to_the_service_but_not_onto_the_resume(harness):
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    harness([_linkedin_row(email="")], fake)
+
+    (call,) = fake.calls
+    assert call["email"] == "pair-5551234567@no-email.jobdiva.local"
+    assert "no-email.jobdiva.local" not in call["resume_text"]

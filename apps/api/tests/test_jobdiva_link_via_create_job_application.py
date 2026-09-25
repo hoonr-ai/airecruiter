@@ -414,3 +414,217 @@ def test_create_without_a_returned_id_and_no_match_is_still_a_success_without_id
     assert outcome == (True, None)
     assert outcome.path == "created" and outcome.found_via_search is False
     assert _calls_to(calls, "updateCandidateProfile") == []
+
+
+# ---------------------------------------------------------------------------
+# Blank-profile fix (2026-09-25): the résumé is uploaded as a FILE, and the
+# created profile's blank fields are filled from what PAIR knows.
+#
+# JobDiva reads the résumé from `filecontent` (base64); `textfile` is only the
+# "Alternate text resume". PAIR sent `filecontent: ""`, and every profile it
+# created came back with a 0-byte résumé, an Auto_ email and no phone/address.
+# ---------------------------------------------------------------------------
+
+import base64
+from datetime import datetime
+
+from services.jobdiva import (
+    created_profile_fill,
+    jobdiva_profile_created_recently,
+)
+
+
+def _now_et_str():
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _dispatch_create_flow(read_back=None, create_statuses=(200,), create_body="777", read_status=200):
+    """Nobody matches; the create answers `create_statuses` in turn; the
+    CandidatesProfileDetail read-back returns `read_back` (a record or None)."""
+    statuses = iter(create_statuses)
+
+    def dispatch(url, body):
+        if url.endswith("/searchCandidateProfile"):
+            return _FakeResponse(200, json_data=[])
+        if url.endswith("/CreateJobApplicationWithResume"):
+            status = next(statuses)
+            return _FakeResponse(status, text=create_body if status in (200, 201) else "rejected")
+        if url.endswith("/CandidatesProfileDetail"):
+            payload = {"data": [read_back]} if read_back else {"data": []}
+            return _FakeResponse(read_status, json_data=payload)
+        if url.endswith("/updateCandidateProfile"):
+            return _FakeResponse(200, text="true")
+        return _FakeResponse(200)
+    return dispatch
+
+
+def test_resume_document_is_uploaded_in_filecontent():
+    document = b"PK\x03\x04 a real docx"
+    outcome, calls = _run(
+        _service(), _dispatch_create_flow(),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="Ada Lovelace\nPrincipal Data Engineer",
+        resume_file=document, filename="Ada_Lovelace_Resume.docx",
+        first_name="Ada", last_name="Lovelace", email="ada@example.com", phone="5551234567",
+    )
+    assert outcome == (True, 777)
+    (create,) = _calls_to(calls, "CreateJobApplicationWithResume")
+    payload = create["json"]
+    assert set(payload) == UPLOAD_RESUME_AND_APPLY_JOB_FIELDS
+    assert payload["filename"] == "Ada_Lovelace_Resume.docx"
+    assert base64.b64decode(payload["filecontent"]) == document
+    # The alternate text résumé still carries the confirmed contact header.
+    assert payload["textfile"].startswith("Name: Ada Lovelace\nEmail: ada@example.com\nPhone: 5551234567")
+    assert payload["textfile"].endswith("Ada Lovelace\nPrincipal Data Engineer")
+
+
+def test_without_a_document_the_resume_text_is_uploaded_as_a_txt_file():
+    _outcome, calls = _run(
+        _service(), _dispatch_create_flow(),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="the whole résumé",
+        filename="Ada_Lovelace_Resume.docx", first_name="Ada", last_name="Lovelace",
+    )
+    (create,) = _calls_to(calls, "CreateJobApplicationWithResume")
+    assert create["json"]["filename"] == "Ada_Lovelace_Resume.txt"
+    assert base64.b64decode(create["json"]["filecontent"]).decode("utf-8") == "the whole résumé"
+
+
+def test_filecontent_is_never_empty_even_without_resume_text():
+    _outcome, calls = _run(
+        _service(), _dispatch_create_flow(),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="", first_name="Ada", last_name="Lovelace",
+        email="ada@example.com",
+    )
+    (create,) = _calls_to(calls, "CreateJobApplicationWithResume")
+    assert base64.b64decode(create["json"]["filecontent"]).decode("utf-8").startswith("Name: Ada Lovelace")
+
+
+def test_rejected_document_is_retried_once_as_text():
+    outcome, calls = _run(
+        _service(), _dispatch_create_flow(create_statuses=(415, 200)),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="résumé text",
+        resume_file=b"PK docx", filename="Ada_Resume.docx", first_name="Ada", last_name="Lovelace",
+    )
+    assert outcome == (True, 777)
+    first, second = _calls_to(calls, "CreateJobApplicationWithResume")
+    assert first["json"]["filename"] == "Ada_Resume.docx"
+    assert second["json"]["filename"] == "Ada_Resume.txt"
+    assert base64.b64decode(second["json"]["filecontent"]).decode("utf-8") == "résumé text"
+
+
+def test_server_error_is_not_retried_because_the_profile_may_exist():
+    """After a 5xx JobDiva may already have created the profile; a second upload
+    would mint a duplicate. Re-provision looks the person up first."""
+    outcome, calls = _run(
+        _service(), _dispatch_create_flow(create_statuses=(500, 200)),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r", resume_file=b"PK", filename="A.docx",
+        first_name="Ada", last_name="Lovelace",
+    )
+    assert outcome == (False, None)
+    assert len(_calls_to(calls, "CreateJobApplicationWithResume")) == 1
+
+
+def test_created_profile_gets_its_blank_fields_filled_from_what_pair_knows():
+    """JobDiva parsed the name and email from the résumé but left phone and
+    address blank: only those are written, the phone as phones[]."""
+    read_back = {
+        "ID": "777", "FIRSTNAME": "Ada", "LASTNAME": "Lovelace", "EMAIL": "ada@lovelace.dev",
+        "PHONE1": "", "CELLPHONE": "", "CITY": "", "STATE": "", "ZIPCODE": "", "COUNTRY": "US",
+        "DATECREATED": _now_et_str(), "RESUMECOUNT": "1",
+    }
+    outcome, calls = _run(
+        _service(), _dispatch_create_flow(read_back=read_back),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email="ada@lovelace.dev", phone="+12015550100",
+        profile_fields={"city": "Toronto", "state": "ON", "countryid": "CA"},
+    )
+    assert outcome == (True, 777) and outcome.matched_existing is False
+    (update,) = _calls_to(calls, "updateCandidateProfile")
+    assert update["json"] == {
+        "candidateid": 777,
+        "phones": [{"phone": "+12015550100", "type": "C", "action": 1}],
+        "city": "Toronto", "state": "ON", "countryid": "CA",
+    }
+
+
+def test_auto_placeholder_profile_gets_name_email_and_phone():
+    read_back = {"ID": "777", "FIRSTNAME": "Unknown", "LASTNAME": "Unknown",
+                 "EMAIL": "Auto_777@jobdiva.com", "DATECREATED": _now_et_str()}
+    _outcome, calls = _run(
+        _service(), _dispatch_create_flow(read_back=read_back),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email="ada@lovelace.dev", phone="5551234567",
+    )
+    (update,) = _calls_to(calls, "updateCandidateProfile")
+    assert update["json"]["firstName"] == "Ada" and update["json"]["lastName"] == "Lovelace"
+    assert update["json"]["email"] == "ada@lovelace.dev"
+    assert update["json"]["phones"] == [{"phone": "5551234567", "type": "C", "action": 1}]
+    assert "phone" not in update["json"]
+
+
+def test_resume_matched_to_an_existing_profile_keeps_that_profiles_data():
+    """JobDiva filed the application on a profile it already had (created years
+    ago): nothing it holds is overwritten, and the outcome says so."""
+    read_back = {"ID": "777", "FIRSTNAME": "Adelaide", "LASTNAME": "Lovelace-King",
+                 "EMAIL": "ada.king@kingmail.dev", "PHONE2": "(201) 555-0199", "CITY": "Newark",
+                 "STATE": "", "COUNTRY": "US", "DATECREATED": "2019-04-02T10:00:00"}
+    outcome, calls = _run(
+        _service(), _dispatch_create_flow(read_back=read_back),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email="ada@lovelace.dev", phone="5551234567",
+        profile_fields={"city": "Jersey City", "state": "NJ", "countryid": "CA"},
+    )
+    assert outcome == (True, 777)
+    assert outcome.path == "created" and outcome.matched_existing is True
+    (update,) = _calls_to(calls, "updateCandidateProfile")
+    # Only the blank state; name, email, phone, city and country are left alone.
+    assert update["json"] == {"candidateid": 777, "state": "NJ"}
+
+
+def test_failed_read_back_falls_back_to_writing_everything():
+    _outcome, calls = _run(
+        _service(), _dispatch_create_flow(read_back=None, read_status=500),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email="ada@lovelace.dev", phone="5551234567",
+        profile_fields={"city": "Jersey City", "state": "NJ", "countryid": "US"},
+    )
+    (update,) = _calls_to(calls, "updateCandidateProfile")
+    assert update["json"] == {
+        "candidateid": 777, "firstName": "Ada", "lastName": "Lovelace", "email": "ada@lovelace.dev",
+        "phones": [{"phone": "5551234567", "type": "C", "action": 1}],
+        "city": "Jersey City", "state": "NJ", "countryid": "US",
+    }
+
+
+def test_synthetic_lookup_email_stays_off_the_resume_but_lands_on_the_profile():
+    synthetic = "pair-5551234567@no-email.jobdiva.local"
+    read_back = {"ID": "777", "FIRSTNAME": "Ada", "LASTNAME": "Lovelace",
+                 "EMAIL": "Auto_777@jobdiva.com", "PHONE1": "5551234567", "DATECREATED": _now_et_str()}
+    _outcome, calls = _run(
+        _service(), _dispatch_create_flow(read_back=read_back),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email=synthetic, phone="5551234567",
+    )
+    (create,) = _calls_to(calls, "CreateJobApplicationWithResume")
+    assert synthetic not in create["json"]["textfile"]
+    (update,) = _calls_to(calls, "updateCandidateProfile")
+    assert update["json"] == {"candidateid": 777, "email": synthetic}  # the re-provision lookup key
+
+
+def test_profile_created_recently_reads_naive_eastern_timestamps():
+    now = datetime(2026, 9, 25, 9, 0, 0)
+    assert jobdiva_profile_created_recently({"DATECREATED": "2026-09-25T08:59:00"}, now_et=now) is True
+    assert jobdiva_profile_created_recently({"DATECREATED": "2026-09-24T08:00:00"}, now_et=now) is False
+    assert jobdiva_profile_created_recently({"DATECREATED": "09/25/2026 08:30:00"}, now_et=now) is True
+    assert jobdiva_profile_created_recently({}, now_et=now) is None
+    assert jobdiva_profile_created_recently({"DATECREATED": "garbage"}, now_et=now) is None
+
+
+def test_created_profile_fill_never_overwrites_real_values():
+    current = {"FIRSTNAME": "Ada", "LASTNAME": "Lovelace", "EMAIL": "ada@real.dev",
+               "CELLPHONE": "2015550100", "CITY": "Newark", "STATE": "NJ", "ZIPCODE": "07102", "COUNTRY": "US"}
+    assert created_profile_fill(
+        current, first_name="Ada", last_name="Lovelace", email="other@real.dev", phone="5551234567",
+        address={"city": "Jersey City", "state": "NJ", "zipCode": "07302", "countryid": "US"}, fresh=True,
+    ) == {}

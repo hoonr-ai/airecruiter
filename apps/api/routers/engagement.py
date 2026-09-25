@@ -42,6 +42,16 @@ from services.jobdiva import (
     _get_candidate_email as _jd_candidate_email,
     _get_candidate_phone as _jd_candidate_phone,
 )
+from services.profile_resume import (
+    ProfileResume,
+    build_profile_resume,
+    is_placeholder_name,
+    jobdiva_address_fields,
+    linkedin_public_identifier,
+    normalize_linkedin_profile,
+    resume_to_docx,
+    split_person_name,
+)
 from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
 from core.auth import UserIdentity, get_current_user
@@ -73,6 +83,19 @@ ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed")
 # slots (briefly, after Fix 1). 5 matches the scale jobdiva_ratelimit_probe.py
 # has been probing — tunable via env if JobDiva's rate budget changes.
 _PROVISION_CONCURRENCY = asyncio.Semaphore(int(os.getenv("PROVISION_CONCURRENCY", "5")))
+
+# A person PAIR creates in JobDiva gets a résumé built from everything we hold
+# (services/profile_resume.py). When that is thin -- no work history, summary or
+# résumé text, typically an Exa deep-search row -- the LinkedIn profile is read
+# once more through Unipile before the JobDiva profile is created. Bounded per
+# provisioning batch: each read is a LinkedIn profile view on a recruiter seat.
+JOBDIVA_PROVISION_LINKEDIN_REFETCH = os.getenv(
+    "JOBDIVA_PROVISION_LINKEDIN_REFETCH", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP = max(0, int(os.getenv("JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP", "40") or 0))
+# Grep / alert marker for a create the provisioner refused because the person
+# would have landed in JobDiva as a blank profile (no usable name, nothing else).
+JOBDIVA_BLANK_PROFILE_REFUSED = "JOBDIVA_BLANK_PROFILE_REFUSED"
 _NR_RESPONSE_BODY_LIMIT = 16000
 
 
@@ -1603,6 +1626,82 @@ async def _resolve_provisioning_job_ids(job_id_internal: str):
     return numeric_job_id, ref_job_id
 
 
+_provisioning_unipile_service_instance: Optional[Any] = None
+
+
+def _provisioning_unipile_service():
+    global _provisioning_unipile_service_instance
+    if _provisioning_unipile_service_instance is None:
+        from services.unipile import UnipileService
+
+        _provisioning_unipile_service_instance = UnipileService()
+    return _provisioning_unipile_service_instance
+
+
+async def _fetch_linkedin_profile_for_resume(row: Dict[str, Any], cand_data: Dict[str, Any]) -> Dict[str, Any]:
+    """The person's full LinkedIn profile (``normalize_linkedin_profile`` shape),
+    read through Unipile by member id (``unipile_<id>`` rows) or by the public
+    ``/in/<slug>``. ``{}`` when the row has no LinkedIn identity or the read fails."""
+    candidate_id = str(row.get("candidate_id") or "")
+    identifier = candidate_id[len("unipile_"):] if candidate_id.startswith("unipile_") else ""
+    if not identifier:
+        urls = cand_data.get("urls") if isinstance(cand_data.get("urls"), dict) else {}
+        identifier = (
+            linkedin_public_identifier(row.get("profile_url"))
+            or linkedin_public_identifier(urls.get("linkedin"))
+            or linkedin_public_identifier(urls.get("linkedin_url"))
+        )
+    if not identifier:
+        return {}
+    try:
+        raw = await asyncio.wait_for(
+            _provisioning_unipile_service().get_candidate_profile(identifier), timeout=30
+        )
+    except Exception as exc:
+        logger.warning("LinkedIn re-read for the JobDiva résumé failed for %s: %s", candidate_id, exc)
+        return {}
+    return normalize_linkedin_profile(raw) if isinstance(raw, dict) else {}
+
+
+async def _provisioning_resume(
+    row: Dict[str, Any],
+    cand_data: Dict[str, Any],
+    *,
+    email: str,
+    phone: str,
+    refetch_budget: List[int],
+) -> ProfileResume:
+    """The résumé a JobDiva profile will be created from.
+
+    Built from the row (services/profile_resume.py). A thin one -- no work
+    history, summary or résumé text -- or one with no real name triggers one
+    LinkedIn re-read while the batch's ``refetch_budget`` lasts
+    (JOBDIVA_PROVISION_LINKEDIN_REFETCH / _CAP).
+    """
+    resume = build_profile_resume(row, cand_data, email=email, phone=phone)
+    needs_reread = resume.is_thin or is_placeholder_name(resume.name)
+    if not (needs_reread and JOBDIVA_PROVISION_LINKEDIN_REFETCH and refetch_budget[0] > 0):
+        return resume
+    refetch_budget[0] -= 1
+    profile = await _fetch_linkedin_profile_for_resume(row, cand_data)
+    if not profile:
+        return resume
+    enriched = dict(cand_data)
+    stored = cand_data.get("linkedin_profile") if isinstance(cand_data.get("linkedin_profile"), dict) else {}
+    enriched["linkedin_profile"] = {**stored, **profile}
+    refreshed = build_profile_resume(row, enriched, email=email, phone=phone)
+    logger.info(
+        "LinkedIn re-read for %s: résumé sections %s -> %s",
+        row.get("candidate_id"), list(resume.sections), list(refreshed.sections),
+    )
+    return refreshed
+
+
+def _resume_file_stem(name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip()).strip("._") or "Candidate"
+    return f"{stem[:80]}_Resume"
+
+
 async def _provision_batch_to_jobdiva(
     candidate_ids: List[str],
     job_id_internal: str,
@@ -1620,9 +1719,13 @@ async def _provision_batch_to_jobdiva(
 
     Returns a dict with 'success', 'skipped', 'failed' counts.
     """
-    results: Dict[str, int] = {"success": 0, "skipped": 0, "failed": 0, "duplicate_suspected": 0}
+    results: Dict[str, int] = {
+        "success": 0, "skipped": 0, "failed": 0, "duplicate_suspected": 0, "blank_profile_refused": 0,
+    }
     if not candidate_ids:
         return results
+    # LinkedIn re-reads left for this batch (see _provisioning_resume).
+    refetch_budget = [JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP]
 
     try:
         # ── Phase 1: Resolve job IDs (one DB round-trip)
@@ -1734,6 +1837,9 @@ async def _provision_batch_to_jobdiva(
                         cand_data = {}
 
                 email = (row.get("email") or "").strip()
+                # Real contact only on the résumé; `email` may become the synthetic
+                # lookup address below.
+                resume_email = email if email and not is_placeholder_email(email) else ""
                 phone = (row.get("phone") or "").strip()
                 existing_jd_id = str(cand_data.get("jobdiva_candidate_id") or "").strip()
                 # The profile to attach this job to, if we know it: a JobDiva-sourced
@@ -1817,18 +1923,6 @@ async def _provision_batch_to_jobdiva(
                     return "skipped"
 
                 # ── Not found → create a new JobDiva application
-                candidate_name = (row.get("name") or "").strip()
-                name_parts = candidate_name.split(" ", 1) if candidate_name else ["", ""]
-                first_name = name_parts[0]
-                last_name = name_parts[1] if len(name_parts) > 1 else ""
-                safe_name = (candidate_name or "Candidate").replace(" ", "_")
-
-                actual_resume = (row.get("resume_text") or "").strip()
-                resume_text = (
-                    f"{candidate_name.upper()}\n"
-                    f"Email: {email or 'N/A'} | Phone: {phone or 'N/A'}\n\n"
-                    + (actual_resume or "(Profile sourced via PAIR)")
-                )
 
                 # Fail closed: a JobDiva-sourced row must never reach the call
                 # that can mint a profile. Structurally link_candidate_id is
@@ -1842,6 +1936,45 @@ async def _provision_batch_to_jobdiva(
                     )
                     return "failed"
 
+                first_name, last_name = split_person_name(row.get("name"))
+                # Linking never uploads a résumé (createJobApplication has no file).
+                create_kwargs: Dict[str, Any] = {"resume_text": "", "filename": "candidate_resume.txt"}
+                if link_candidate_id is None:
+                    # Nobody PAIR knows in JobDiva, so this call may create the
+                    # profile. Give it everything we hold: the full résumé (the
+                    # row's own, or one rendered from its LinkedIn profile) as a
+                    # real file, plus the address fields JobDiva's parse may miss.
+                    # Sending only a name and "(Profile sourced via PAIR)" -- in
+                    # `textfile`, which JobDiva does not store -- is what created
+                    # blank profiles (services/profile_resume.py).
+                    resume = await _provisioning_resume(
+                        row, cand_data, email=resume_email, phone=phone, refetch_budget=refetch_budget,
+                    )
+                    first_name, last_name = split_person_name(resume.name)
+                    refusal = ""
+                    if is_placeholder_name(resume.name) or not first_name:
+                        refusal = "no_usable_name"
+                    elif resume.is_blank:
+                        refusal = "no_profile_data"
+                    if refusal:
+                        logger.error("%s %s", JOBDIVA_BLANK_PROFILE_REFUSED, json.dumps({
+                            "reason": refusal, "candidate_id": cand_id, "source": row.get("source"),
+                            "job_id": jd_job_id, "name": resume.name,
+                        }, default=str))
+                        return "blank_profile_refused"
+                    document = resume_to_docx(resume)
+                    stem = _resume_file_stem(resume.name)
+                    create_kwargs = {
+                        "resume_text": resume.text,
+                        "resume_file": document,
+                        "filename": f"{stem}.docx" if document else f"{stem}.txt",
+                        "profile_fields": jobdiva_address_fields(resume.location),
+                    }
+                    logger.info(
+                        f"📄 [{label}] {cand_id} résumé for JobDiva: sections={list(resume.sections)} "
+                        f"chars={len(resume.text)} file={'docx' if document else 'txt'}"
+                    )
+
                 # With a known profile id, create_job_application_with_resume calls
                 # JobDiva's createJobApplication (attach to the existing profile —
                 # it cannot create one) and never falls back to minting a profile;
@@ -1854,8 +1987,6 @@ async def _provision_batch_to_jobdiva(
                     outcome = await jobdiva_service.create_job_application_with_resume(
                         candidate_id=link_candidate_id,
                         job_id=jd_job_id,
-                        resume_text=resume_text,
-                        filename=f"{safe_name}_Resume.txt",
                         first_name=first_name,
                         last_name=last_name,
                         email=email or "",
@@ -1864,6 +1995,7 @@ async def _provision_batch_to_jobdiva(
                         # Origin channel -> JobDiva Resume Source id, so JobDiva
                         # itself records that PAIR filed this application.
                         origin_source=str(row.get("source") or ""),
+                        **create_kwargs,
                     )
                     success, new_jd_id = outcome
                 except Exception as exc:
@@ -1873,7 +2005,11 @@ async def _provision_batch_to_jobdiva(
                 # How the application was recorded (JobDivaApplicationOutcome);
                 # a bare tuple (older fakes) is read by which endpoint must have run.
                 outcome_path = getattr(outcome, "path", None) or ("linked" if link_candidate_id else "created")
-                outcome_found_via_search = bool(getattr(outcome, "found_via_search", False))
+                # A looked-up id, or a profile JobDiva already had and matched our
+                # résumé to, is not one PAIR minted.
+                outcome_found_via_search = bool(
+                    getattr(outcome, "found_via_search", False) or getattr(outcome, "matched_existing", False)
+                )
                 # This job's application was recorded by PAIR, whichever endpoint did it.
                 job_delta = {
                     "jobdiva_application_origin": "pair",
@@ -1951,6 +2087,11 @@ async def _provision_batch_to_jobdiva(
                 results["duplicate_suspected"] += 1
             elif s == "skipped":
                 results["skipped"] += 1
+            elif s == "blank_profile_refused":
+                # Not provisioned (so re-provision retries it once the row has
+                # data), and counted apart so a batch of them is visible.
+                results["failed"] += 1
+                results["blank_profile_refused"] += 1
             else:
                 results["failed"] += 1
 
@@ -4046,6 +4187,8 @@ async def re_provision_candidates(request: ReProvisionRequest):
             "skipped": results.get("skipped", 0),
             "failed": results.get("failed", 0),
             "duplicate_suspected": results.get("duplicate_suspected", 0),
+            # Included in `failed`: rows too empty to create a JobDiva profile from.
+            "blank_profile_refused": results.get("blank_profile_refused", 0),
             "message": (
                 f"Re-provisioning complete. "
                 f"{results.get('success', 0)} created, "
