@@ -143,6 +143,11 @@ def _patch_on_demand(monkeypatch, providers):
 
     monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
     monkeypatch.setattr(core_config, "EXA_CONTACT_ENRICH_ENABLED", True)
+    # The chain tests below cover the full ZoomInfo -> Apollo -> Exa path,
+    # including Exa's phone top-up, which is off by default (see
+    # test_on_demand_exa_phone_top_up_is_off_by_default); tests of the default
+    # re-enable the restriction themselves.
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", False)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_email", providers.zi_email)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_name", providers.zi_name)
     monkeypatch.setattr(candidates_router, "_apollo_enrich_by_linkedin", providers.apollo)
@@ -603,6 +608,12 @@ def test_on_demand_phone_top_up_by_exa_can_be_switched_off(monkeypatch):
 
     assert "exa" not in providers.calls
     assert res["email"] == "jane@acme.com" and res["phone"] is None
+
+
+def test_on_demand_exa_phone_top_up_is_off_by_default():
+    """Default since 2026-09-25 (cost): an email from ZoomInfo/Apollo means no
+    paid Exa phone lookup; Exa only reaches candidates nobody else could."""
+    assert sourcing_config.EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT is True
 
 
 def test_on_demand_exa_still_reaches_the_unreachable_when_switched_off(monkeypatch):
