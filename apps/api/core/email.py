@@ -83,6 +83,23 @@ def jobdiva_job_link(job_id_numeric: str = "", jobdiva_ref: str = "") -> str:
     return f"{JOBDIVA_URL}/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid={jid}"
 
 
+def jobdiva_candidate_link(jobdiva_candidate_id: str = "") -> str:
+    """Build a JobDiva candidate-profile deep link ("" without an id).
+
+    `viewcandidate2_real.jsp` is the live profile page — the same URL the
+    rank list's "JobDiva URL" opens (apps/web/lib/jobdiva.ts). It takes the
+    person's JobDiva profile id, which is not always the row's candidate_id
+    (LinkedIn/Exa rows carry it as data.jobdiva_candidate_id).
+    """
+    cid = str(jobdiva_candidate_id or "").strip()
+    if not cid:
+        return ""
+    return (
+        f"{JOBDIVA_URL}/employers/myreports/viewcandidate2_real.jsp"
+        f"?docids=-1&candidateid={urllib.parse.quote(cid, safe='')}"
+    )
+
+
 def resolve_app_base_url(override: Optional[str] = None) -> str:
     """Prefer the caller's current frontend origin over the env default."""
     candidate = (override or "").strip().rstrip("/")
@@ -1146,16 +1163,23 @@ def notify_cross_submissions(
         prior_title = str(c.get("prior_job_title") or "")
         prior_client = str(c.get("prior_customer_name") or "")
         prior_bits = [html.escape(b) for b in (prior_ref, prior_title, prior_client) if b]
-        report_link = (
-            f"{base_url}/jobs/{prior_ref}/report?candidateId={c.get('candidate_id') or ''}"
-            if prior_ref else ""
-        )
         prior_html = " · ".join(prior_bits) or "—"
-        if report_link:
-            prior_html += (
-                f'<br><a href="{report_link}" target="_blank" '
-                f'style="color:#4f46e5;font-size:12px;text-decoration:none;">View screen report</a>'
-            )
+        # Per-candidate links sit under the name, where the rank list puts
+        # them: the screen report is the PRIOR job's (that is where the screen
+        # ran); the JobDiva link is the person's profile.
+        candidate_id = str(c.get("candidate_id") or "").strip()
+        report_link = candidate_report_link(base_url, prior_ref, candidate_id) if prior_ref and candidate_id else ""
+        profile_link = jobdiva_candidate_link(str(c.get("jobdiva_candidate_id") or ""))
+        link_bits = [
+            f'<a href="{html.escape(url, quote=True)}" target="_blank" '
+            f'style="color:#4f46e5;font-size:12px;font-weight:600;text-decoration:none;">{label}</a>'
+            for url, label in ((report_link, "Screen report"), (profile_link, "JobDiva profile"))
+            if url
+        ]
+        links_html = (
+            f'<div style="margin-top:4px;font-weight:400;">{" &middot; ".join(link_bits)}</div>'
+            if link_bits else ""
+        )
         result_label = str(c.get("screen_result") or "Pending")
         score_disp = str(c.get("screen_score_display") or "")
         result_html = _result_badge(result_label) + (
@@ -1170,7 +1194,8 @@ def notify_cross_submissions(
         rows_html.append(
             "<tr>"
             f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b;font-weight:600;vertical-align:top;">{name}'
-            f'<div style="font-size:12px;color:#64748b;font-weight:400;">{html.escape(str(c.get("headline") or ""))}</div></td>'
+            f'<div style="font-size:12px;color:#64748b;font-weight:400;">{html.escape(str(c.get("headline") or ""))}</div>'
+            f'{links_html}</td>'
             f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;vertical-align:top;">{contact_html}</td>'
             f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;vertical-align:top;">{prior_html}</td>'
             f'<td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;vertical-align:top;white-space:nowrap;">{result_html}'
@@ -1182,7 +1207,8 @@ def notify_cross_submissions(
             f"- {c.get('name') or 'Unnamed candidate'} | {' / '.join(b for b in (email_txt, phone_txt) if b) or 'no contact'} | "
             f"prior: {' · '.join(b for b in (prior_ref, prior_title, prior_client) if b) or '-'} | "
             f"screen: {result_label}{(' ' + score_disp) if score_disp else ''} on {screened or '-'} | match: {match_pct}"
-            + (f" | {report_link}" if report_link else "")
+            + (f" | screen report: {report_link}" if report_link else "")
+            + (f" | JobDiva: {profile_link}" if profile_link else "")
         )
 
     title_txt = html.escape(job_title or "this job")
