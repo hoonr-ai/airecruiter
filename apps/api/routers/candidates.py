@@ -19,6 +19,7 @@ from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, title_relevance_gate, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
+from services.profile_resume import normalize_linkedin_profile
 from services.feedback_metrics import HAS_DECISION_SQL, feedback_label, refresh_feedback_metrics_sync, submission_kind
 from services.job_attribution import stamp_job_launched_by
 from services import contact_enrichment
@@ -1556,7 +1557,10 @@ async def get_job_candidates(
                         sc.image_url,
                         sc.resume_match_percentage as match_score,
                         sc.created_at,
-                        sc.data,
+                        -- linkedin_profile (the full LinkedIn profile, ~5-10 KB)
+                        -- is only read by Launch PAIR's JobDiva provisioning;
+                        -- the list never needs it.
+                        (sc.data - 'linkedin_profile') AS data,
                         -- Employment history lives here, NOT in sc.data: the
                         -- applicant sync writes `data` before resume extraction
                         -- runs, and nothing back-fills it. Without this join the
@@ -2289,6 +2293,10 @@ async def save_candidates(
                         # Recomputed on every save, so it self-heals rows whose
                         # blob predates this and survives the upsert either way.
                         jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+                        # The full LinkedIn profile sourcing captured -- what a
+                        # JobDiva profile created at Launch PAIR is built from.
+                        # Re-normalised: bounded, whatever the browser sent.
+                        linkedin_profile = normalize_linkedin_profile(getattr(c, 'linkedin_profile', None))
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
@@ -2324,6 +2332,7 @@ async def save_candidates(
                                 "explainability": scoring["explainability"],
                                 "enhanced_info": getattr(c, 'enhanced_info', None),  # Full LLM extraction data
                                 **({"jobdiva_candidate_id": jd_profile_id} if jd_profile_id else {}),
+                                **({"linkedin_profile": linkedin_profile} if linkedin_profile else {}),
                             }),
                             "status": "sourced"
                         }
@@ -3485,7 +3494,7 @@ def _launched_candidates_sql(
                 sc.phone,
                 sc.source,
                 sc.resume_match_percentage as match_score,
-                sc.data,
+                (sc.data - 'linkedin_profile') AS data,  -- provisioning-only payload
                 la.status as engage_status,
                 la.interview_id as engage_interview_id,
                 la.created_at as engage_created_at,

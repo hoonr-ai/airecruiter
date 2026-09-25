@@ -60,6 +60,7 @@ from core.config import (
 from services import skill_embeddings
 from services import role_taxonomy
 from services import contact_enrichment
+from services.profile_resume import deep_search_profile, normalize_linkedin_profile
 from services.role_family import detect_role_family
 
 
@@ -1770,6 +1771,25 @@ class UnifiedCandidateSearch:
                                         cand.update(profile_data)
                                         if _headline and not cand.get("headline"):
                                             cand["headline"] = _headline
+                                        # The WHOLE profile (role descriptions,
+                                        # summary, languages ...) rides to
+                                        # /candidates/save so Launch PAIR can give
+                                        # JobDiva a complete résumé; the fields
+                                        # above are only what scoring reads.
+                                        _linkedin_profile = normalize_linkedin_profile(full_profile)
+                                        if _linkedin_profile:
+                                            cand["linkedin_profile"] = _linkedin_profile
+                                            # Contact the member shares on LinkedIn
+                                            # is free -- take it before any paid
+                                            # ZoomInfo / Apollo / Exa lookup runs.
+                                            _li_email, _li_phone = contact_enrichment.sanitize_agent_contact(
+                                                (_linkedin_profile.get("emails") or [""])[0],
+                                                (_linkedin_profile.get("phones") or [""])[0],
+                                            )
+                                            if _li_email and not is_placeholder_email(_li_email) and not str(cand.get("email") or "").strip():
+                                                cand["email"] = _li_email
+                                            if _li_phone and not str(cand.get("phone") or "").strip():
+                                                cand["phone"] = _li_phone
                                         # Fix: LinkedIn Recruiter search rows for 3rd-degree
                                         # connections omit the candidate name; _resolve_candidate_name
                                         # falls back to the headline (e.g. "Supply Chain Analyst | …")
@@ -2196,6 +2216,10 @@ class UnifiedCandidateSearch:
                             "sources": ["LinkedIn-DeepSearch"],
                             "skills": [],
                             "resume_text": rationale_blob,  # feeds the scorer
+                            # The person's own profile facts (title, location,
+                            # recent roles) for the JobDiva résumé -- the
+                            # rationale above is PAIR's words and never goes there.
+                            "linkedin_profile": deep_search_profile(entry),
                             "_stage": "exa_deep_search",
                             **{k: v for k, v in patch_fields.items() if v is not None},
                         }

@@ -7653,7 +7653,11 @@ function NewJobPageContent() {
           missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
           match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
           explainability: Array.isArray(c.explainability) ? c.explainability : [],
-          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
+          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null,
+          // Full LinkedIn profile captured at sourcing (experience with
+          // descriptions, education, skills, summary ...). Launch PAIR builds the
+          // JobDiva résumé from it for people JobDiva does not have yet.
+          linkedin_profile: (c.linkedin_profile && typeof c.linkedin_profile === 'object' && !Array.isArray(c.linkedin_profile)) ? c.linkedin_profile : null
         };
       });
 

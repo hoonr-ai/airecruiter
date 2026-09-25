@@ -13,7 +13,11 @@ Deviations that predate this guard are inventoried in KNOWN_UNDEFINED_FIELDS,
 exactly (a field that stops being sent must be removed from the list). They are
 fields JobDiva has been ignoring all along, so removing them from the payloads
 changes nothing on JobDiva's side -- but mapping them onto the fields the schema
-DOES define (e.g. ``phones[]``) would, and needs a live check first.
+DOES define would. updateCandidateProfile's flat ``phone`` was mapped onto
+``phones[]`` on 2026-09-25 (PhoneType per JobDiva's own updateContact docs: type
+"C" = cell, action 1 = insert) as part of the blank-profile fix; it is not yet
+verified against a live profile -- check the post-create read-back log line
+("🧾 JobDiva profile <id>: ... filling=[...]") after the first QA launch.
 """
 import asyncio
 import json
@@ -41,9 +45,6 @@ KNOWN_NOT_IN_SWAGGER: Set[str] = {
 # Fields we send that the schema does not define -- JobDiva ignores them today.
 # Nested list items are written as `field[].sub`.
 KNOWN_UNDEFINED_FIELDS: Dict[str, Set[str]] = {
-    # UpdateCandidateProfileDef has `phones: [PhoneType{action, ext, phone, type}]`,
-    # not `phone` -- so the post-create phone write has never reached JobDiva.
-    "/apiv2/jobdiva/updateCandidateProfile": {"phone"},
     # CreateCandidateProfileDef has cellphone/homephone/workphone and resumeSource.
     # (create_candidate has no callers today.)
     "/apiv2/jobdiva/createCandidate": {"phone", "candidateSource"},
@@ -280,3 +281,24 @@ def test_live_swagger_matches_snapshot():
     live = snap.extract(snap.fetch_live())
     changed = snap.diff_endpoints(ENDPOINTS, live)
     assert not changed, f"JobDiva Swagger drifted for {changed}; run scripts/jobdiva_swagger_snapshot.py"
+
+
+def test_created_profile_payloads_with_resume_file_and_address_are_schema_exact():
+    """The blank-profile fix: résumé file in `filecontent`, then the profile's
+    blank fields (phones[] + address) -- every field one the schema defines."""
+    import base64
+
+    calls = _capture(lambda s: s.create_job_application_with_resume(
+        candidate_id=None, job_id=str(JOB_ID), resume_text="Ada Lovelace\nEngineer",
+        resume_file=b"PK\x03\x04docx", filename="Ada_Lovelace_Resume.docx",
+        first_name="Ada", last_name="Lovelace", email="ada@lovelace.dev", phone="5551234567",
+        profile_fields={"city": "Jersey City", "state": "NJ", "zipCode": "07302", "countryid": "US"},
+    ))
+    create = _only(calls, "/apiv2/jobdiva/CreateJobApplicationWithResume")
+    _assert_contract("/apiv2/jobdiva/CreateJobApplicationWithResume", create["json"])
+    assert base64.b64decode(create["json"]["filecontent"]) == b"PK\x03\x04docx"
+
+    update = _only(calls, "/apiv2/jobdiva/updateCandidateProfile")
+    _assert_contract("/apiv2/jobdiva/updateCandidateProfile", update["json"])
+    assert update["json"]["phones"] == [{"phone": "5551234567", "type": "C", "action": 1}]
+    assert {"city", "state", "zipCode", "countryid"} <= set(update["json"])
