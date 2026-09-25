@@ -57,7 +57,7 @@ class _Providers:
         self.calls.append("zoominfo_email")
         return self._zi_email
 
-    async def zi_sourcing(self, full_name):
+    async def zi_sourcing(self, full_name, company=""):
         self.calls.append("zoominfo_name")
         return {}
 
@@ -416,3 +416,200 @@ def test_deep_search_rows_get_apollo_first_lookup_only_once_shown(monkeypatch):
         if ev.get("type") == "candidate" and ev["data"]["candidate_id"] == shown_id
     )
     assert candidate_idx < events.index(patches[0])
+
+
+# ---------------------------------------------------------------------------
+# ZoomInfo first, done safely (2026-09-25)
+#
+# Order everywhere: ZoomInfo -> Apollo -> (ZoomInfo by the email Apollo found)
+# -> Exa. ZoomInfo's name search used to take the top hit for the bare name if
+# its contactAccuracyScore was >= 50 -- a score of how good ZoomInfo's data is,
+# not of the match -- so a common name enriched a stranger. It now needs the
+# ONE match, scoped to the candidate's current company when known.
+# ---------------------------------------------------------------------------
+
+class _SearchResponse:
+    def __init__(self, hits, total=None, status=200):
+        self.status_code = status
+        self._payload = {
+            "data": [{"id": f"p{i}", "attributes": {"contactAccuracyScore": 90}} for i in range(hits)],
+            "meta": {"totalResults": hits if total is None else total},
+        }
+
+    def json(self):
+        return self._payload
+
+
+def _patch_zoominfo_search(monkeypatch, answers):
+    """`answers` maps companyName ('' = name only) -> (#hits in page, totalResults)."""
+    searches = []
+
+    async def _post(url, body, **kw):
+        attrs = body["data"]["attributes"]
+        searches.append(dict(attrs))
+        hits, total = answers.get(attrs.get("companyName", ""), (0, 0))
+        return _SearchResponse(hits, total)
+
+    monkeypatch.setattr(ce, "_zoominfo_authed_post", _post)
+    return searches
+
+
+def test_zoominfo_name_search_is_scoped_to_the_current_company(monkeypatch):
+    searches = _patch_zoominfo_search(monkeypatch, {"Acme Bank": (1, 1)})
+
+    person = asyncio.run(ce._zoominfo_resolve_person_id("Jane Doe", company="Acme Bank"))
+
+    assert person == "p0"
+    assert searches == [{"firstName": "Jane", "lastName": "Doe", "companyName": "Acme Bank"}]
+
+
+def test_zoominfo_never_guesses_between_namesakes(monkeypatch):
+    """The regression: 'Jane Doe' has 40 ZoomInfo records and the top one used to
+    be enriched onto our candidate."""
+    _patch_zoominfo_search(monkeypatch, {"": (25, 40)})
+
+    assert asyncio.run(ce._zoominfo_resolve_person_id("Jane Doe")) is None
+
+
+def test_zoominfo_unique_name_is_accepted_without_a_company(monkeypatch):
+    _patch_zoominfo_search(monkeypatch, {"": (1, 1)})
+
+    assert asyncio.run(ce._zoominfo_resolve_person_id("Zephyrine Quillfeather")) == "p0"
+
+
+def test_zoominfo_falls_back_to_a_unique_name_when_the_company_finds_nobody(monkeypatch):
+    searches = _patch_zoominfo_search(monkeypatch, {"Old Employer": (0, 0), "": (1, 1)})
+
+    assert asyncio.run(ce._zoominfo_resolve_person_id("Jane Doe", company="Old Employer")) == "p0"
+    assert [s.get("companyName", "") for s in searches] == ["Old Employer", ""]
+
+
+def test_zoominfo_ambiguous_even_at_the_company_is_a_miss(monkeypatch):
+    _patch_zoominfo_search(monkeypatch, {"Big Corp": (2, 2), "": (25, 300)})
+
+    assert asyncio.run(ce._zoominfo_resolve_person_id("John Smith", company="Big Corp")) is None
+
+
+def test_sourcing_chain_gives_zoominfo_the_company(monkeypatch):
+    seen = []
+
+    async def _zi_sourcing(full_name, company=""):
+        seen.append((full_name, company))
+        return {}
+
+    providers = _Providers()
+    _patch_sourcing(monkeypatch, providers)
+    monkeypatch.setattr(ce, "_zoominfo_enrich_for_sourcing", _zi_sourcing)
+
+    _source(company="Acme Bank")
+
+    assert seen == [("Jane Doe", "Acme Bank")]
+
+
+def test_on_demand_zoominfo_checks_the_email_apollo_found_before_paying_exa(monkeypatch):
+    """Apollo returns no phone on our plan. The email it found goes to ZoomInfo
+    (which can match an email) before a paid Exa phone lookup."""
+    providers = _Providers(
+        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        zi_email={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
+        exa={"ok": True, "fields": _fields(mobilePhone="+19999999999")},
+    )
+    _patch_on_demand(monkeypatch, providers)
+
+    res = _enrich()
+
+    assert providers.calls == ["zoominfo_name", "apollo", "zoominfo_email"]
+    assert "exa" not in providers.calls
+    assert res["email"] == "jane@acme.com"
+    assert res["phone"] == "+14155550100"
+    assert res["provider"] == "apollo"  # first contributor
+
+
+def test_on_demand_exa_only_after_zoominfo_misses_the_found_email_too(monkeypatch):
+    providers = _Providers(
+        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
+    )
+    _patch_on_demand(monkeypatch, providers)
+
+    _enrich()
+
+    assert providers.calls == ["zoominfo_name", "apollo", "zoominfo_email", "exa"]
+    assert providers.exa_fields == [("phone",)]
+
+
+def test_on_demand_zoominfo_name_search_gets_the_company(monkeypatch):
+    seen = []
+
+    async def _zi_name(candidate_id, full_name, company=""):
+        seen.append((full_name, company))
+        return {"ok": False}
+
+    providers = _Providers()
+    _patch_on_demand(monkeypatch, providers)
+    monkeypatch.setattr(ce, "zoominfo_enrich_by_name", _zi_name)
+
+    _enrich(company_name="Acme Bank")
+
+    assert seen == [("Jane Doe", "Acme Bank")]
+
+
+def test_current_company_of_reads_every_shape_a_row_carries():
+    assert ce.current_company_of({"company_name": "Explicit"}) == "Explicit"
+    assert ce.current_company_of({"linkedin_profile": {"experience": [
+        {"title": "Mentor", "company": "Past Co", "start": "2015", "end": "2016"},
+        {"title": "Engineer", "company": "Acme Bank", "start": "Jan 2021", "current": True},
+    ]}}) == "Acme Bank"
+    assert ce.current_company_of({"data": {"company_experience": [
+        {"company": "Globex", "title": "DE", "end_date": "2020"},
+        {"company": "Initech", "title": "Lead", "end_date": "Present"},
+    ]}}) == "Initech"
+    assert ce.current_company_of({"enhanced_info": {"company_experience": [
+        {"company": "Umbrella", "end_date": "2022"}]}}) == "Umbrella"
+    assert ce.current_company_of({"exa_recent_companies": [{"company": {"name": "Hooli"}, "end": ""}]}) == "Hooli"
+    assert ce.current_company_of({}) == ""
+    assert ce.current_company_of(None) == ""
+
+
+def test_sourcing_wrapper_passes_the_stored_employer(monkeypatch):
+    captured = {}
+
+    async def _chain(linkedin_url, jobdiva_id=None, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(ce, "enrich_contact_for_sourcing", _chain)
+    svc = UnifiedCandidateSearch()
+    cand = {
+        "id": "unipile_1", "name": "Jane Doe", "source": "LinkedIn-Unipile",
+        "profile_url": LINKEDIN, "company_experience": [{"company": "Acme Bank", "title": "DE", "end_date": "Present"}],
+    }
+    asyncio.run(svc._apply_contact_enrichment(cand, SearchCriteria(job_id="job-1"), overwrite=False))
+
+    assert captured["company"] == "Acme Bank"
+
+
+def test_on_demand_phone_top_up_by_exa_can_be_switched_off(monkeypatch):
+    """EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT: Exa only for candidates nobody
+    else could reach -- an email from Apollo means no paid phone lookup."""
+    providers = _Providers(
+        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
+    )
+    _patch_on_demand(monkeypatch, providers)
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", True)
+
+    res = _enrich()
+
+    assert "exa" not in providers.calls
+    assert res["email"] == "jane@acme.com" and res["phone"] is None
+
+
+def test_on_demand_exa_still_reaches_the_unreachable_when_switched_off(monkeypatch):
+    providers = _Providers(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+    _patch_on_demand(monkeypatch, providers)
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", True)
+
+    _enrich()
+
+    assert providers.exa_fields == [("email", "phone")]

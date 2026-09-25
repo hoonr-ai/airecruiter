@@ -531,6 +531,16 @@ EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
     "EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
+# The same restriction for the on-demand chain (Launch PAIR's "Enriching contact
+# details" and the Step-5 phone button). OFF by default: there Exa still buys the
+# PHONE for a candidate ZoomInfo and Apollo gave only an email -- PAIR screens by
+# phone first, so that phone is the main remaining Exa spend (~$0.07 + agent
+# compute per candidate). Set true to use Exa only for candidates ZoomInfo and
+# Apollo could not reach at all.
+EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
+    "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate
 # already has an email but no phone. ZoomInfo cannot match a LinkedIn URL, but it
 # CAN match an email, so this is the cheap way to fill exactly the gap that used

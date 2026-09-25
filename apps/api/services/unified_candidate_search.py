@@ -572,13 +572,10 @@ class UnifiedCandidateSearch:
         if "linkedin.com/in/" not in profile_url.lower():
             return
         source = str(cand.get("source") or "")
-        enhanced = cand.get("enhanced_info") if isinstance(cand.get("enhanced_info"), dict) else {}
-        company = str(
-            cand.get("current_company")
-            or enhanced.get("current_company")
-            or enhanced.get("company")
-            or ""
-        ).strip()
+        # Scopes the ZoomInfo name search (an unscoped name is ambiguous) and
+        # sharpens the Exa query. The LLM extraction has no `current_company`
+        # key, so this reads the stored roles too.
+        company = contact_enrichment.current_company_of(cand)
         try:
             enrich = await contact_enrichment.enrich_contact_for_sourcing(
                 profile_url,
