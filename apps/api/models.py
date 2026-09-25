@@ -211,6 +211,10 @@ class CandidateSaveRecord(BaseModel):
     # save only when it equals candidate_id -- a label-independent proof that
     # this row's id is a JobDiva profile id (see `jobdiva_profile_id`).
     jobdiva_candidate_id: Optional[str] = None
+    # The full LinkedIn profile sourcing captured (services/profile_resume.py
+    # `normalize_linkedin_profile`). Stored as data.linkedin_profile; Launch
+    # PAIR renders the JobDiva résumé from it for people JobDiva does not have.
+    linkedin_profile: Optional[Any] = None
 
 
 class CandidatesSaveRequest(BaseModel):

@@ -216,22 +216,23 @@ def test_search_candidate_profile_id_priority(jobdiva_service):
     asyncio.run(run_test())
 
 def test_update_candidate_name_fallback(jobdiva_service):
-    """Test that the name-only fallback strips email and phone when 500 occurs."""
+    """A rejected update (500 unique-constraint on email/phone) is retried with
+    fewer fields -- phones, then email -- until the name lands. The phone rides
+    in the schema's phones[] (the flat `phone` field was never in
+    UpdateCandidateProfileDef, so it never reached JobDiva)."""
     async def run_test():
         with patch("services.jobdiva.httpx.AsyncClient") as mock_client_class:
             mock_client = mock_client_class.return_value.__aenter__.return_value
-            
-            # First call fails with 500 (unique constraint error)
-            # Second call (name-only fallback) succeeds with 200
+
             mock_res_500 = MagicMock()
             mock_res_500.status_code = 500
             mock_res_500.text = "Internal Server Error"
-            
+
             mock_res_200 = MagicMock()
             mock_res_200.status_code = 200
             mock_res_200.text = "Success"
-            
-            mock_client.post = AsyncMock(side_effect=[mock_res_500, mock_res_200])
+
+            mock_client.post = AsyncMock(side_effect=[mock_res_500, mock_res_500, mock_res_200])
 
             success = await jobdiva_service._update_candidate_name(
                 token="fake_token",
@@ -241,20 +242,19 @@ def test_update_candidate_name_fallback(jobdiva_service):
                 email="conflict@email.com",
                 phone="555-0000"
             )
-            
+
             assert success is True
-            assert mock_client.post.call_count == 2
-            
-            # Verify first payload had email and phone
-            first_payload = mock_client.post.call_args_list[0].kwargs["json"]
-            assert first_payload["email"] == "conflict@email.com"
-            assert first_payload["phone"] == "555-0000"
-            
-            # Verify second payload stripped email and phone
-            second_payload = mock_client.post.call_args_list[1].kwargs["json"]
-            assert "email" not in second_payload
-            assert "phone" not in second_payload
-            assert second_payload["firstName"] == "John"
+            assert mock_client.post.call_count == 3
+
+            payloads = [c.kwargs["json"] for c in mock_client.post.call_args_list]
+            # Full update first: email + phones[] (cell, insert) + name.
+            assert payloads[0]["candidateid"] == 123
+            assert payloads[0]["email"] == "conflict@email.com"
+            assert payloads[0]["phones"] == [{"phone": "555-0000", "type": "C", "action": 1}]
+            assert "phone" not in payloads[0]
+            # Then without the phone, then name only.
+            assert "phones" not in payloads[1] and payloads[1]["email"] == "conflict@email.com"
+            assert payloads[2] == {"candidateid": 123, "firstName": "John", "lastName": "Doe"}
     asyncio.run(run_test())
 
 

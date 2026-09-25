@@ -19,6 +19,7 @@ from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, title_relevance_gate, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
+from services.profile_resume import normalize_linkedin_profile
 from services.feedback_metrics import HAS_DECISION_SQL, feedback_label, refresh_feedback_metrics_sync, submission_kind
 from services.job_attribution import stamp_job_launched_by
 from services import contact_enrichment
@@ -1556,7 +1557,10 @@ async def get_job_candidates(
                         sc.image_url,
                         sc.resume_match_percentage as match_score,
                         sc.created_at,
-                        sc.data,
+                        -- linkedin_profile (the full LinkedIn profile, ~5-10 KB)
+                        -- is only read by Launch PAIR's JobDiva provisioning;
+                        -- the list never needs it.
+                        (sc.data - 'linkedin_profile') AS data,
                         -- Employment history lives here, NOT in sc.data: the
                         -- applicant sync writes `data` before resume extraction
                         -- runs, and nothing back-fills it. Without this join the
@@ -2289,6 +2293,10 @@ async def save_candidates(
                         # Recomputed on every save, so it self-heals rows whose
                         # blob predates this and survives the upsert either way.
                         jd_profile_id = jobdiva_profile_id(c.source, c.candidate_id)
+                        # The full LinkedIn profile sourcing captured -- what a
+                        # JobDiva profile created at Launch PAIR is built from.
+                        # Re-normalised: bounded, whatever the browser sent.
+                        linkedin_profile = normalize_linkedin_profile(getattr(c, 'linkedin_profile', None))
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
@@ -2324,6 +2332,7 @@ async def save_candidates(
                                 "explainability": scoring["explainability"],
                                 "enhanced_info": getattr(c, 'enhanced_info', None),  # Full LLM extraction data
                                 **({"jobdiva_candidate_id": jd_profile_id} if jd_profile_id else {}),
+                                **({"linkedin_profile": linkedin_profile} if linkedin_profile else {}),
                             }),
                             "status": "sourced"
                         }
@@ -2665,12 +2674,13 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     """
     Enrich candidate contact details using LinkedIn URL.
 
-    Both ZoomInfo and Apollo are called on every enrichment. ZoomInfo runs first
-    (legacy enrich, plus the new OAuth Data API as a 401 fallback). Apollo runs
-    afterwards regardless of whether ZoomInfo returned data — its results are
-    merged so phone candidates from both providers are preserved. ZoomInfo data
-    wins on primary fields (mobilePhone/workPhone/workEmail/personalEmail) when
-    both providers return values for the same slot.
+    Chain (each step runs only while email or phone is still missing):
+    ZoomInfo by email → ZoomInfo by name (at the current company) → Apollo by
+    URL → ZoomInfo by the email Apollo found → Exa Agent by URL. Exa is the
+    paid fallback: it runs only after Apollo has been asked, and only for the
+    fields still missing afterwards. Earlier providers win on primary fields
+    (mobilePhone/workPhone/workEmail/personalEmail); phone candidates from all
+    of them are merged.
 
     If sourced_candidates rows already exist, updates phone/email + data blob.
     """
@@ -2721,18 +2731,21 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "updated_rows": 0,
         }
 
-    # --- Contact enrichment by reliable identifiers only (no name guessing
-    # beyond ZoomInfo's accuracy-gated ContactSearch). Order, stopping as soon
-    # as we have BOTH an email and a phone so we never spend Exa/Apollo credits
-    # needlessly:
+    # --- Contact enrichment by reliable identifiers only (no name guessing:
+    # ZoomInfo's name search is accepted only when it is unambiguous). Order,
+    # stopping as soon as we have BOTH an email and a phone so we never spend
+    # Exa/Apollo credits needlessly:
     #   1.  ZoomInfo by EMAIL - only when we already have an email (ZoomInfo
     #       cannot match by LinkedIn URL on our entitlement).
     #   1b. ZoomInfo by NAME  - for URL-only candidates with no seed email
     #       (e.g. Exa-sourced), which the by-email/by-URL steps can't reach;
-    #       accuracy-gated so it never enriches the wrong person.
+    #       scoped to the current company and accepted only as the one match,
+    #       so a name collision never enriches the wrong person.
     #   2.  Apollo by URL     - fast/cheap URL-keyed enricher; runs before Exa
     #       so most candidates short-circuit before the slow, paid Exa path.
-    #   3.  Exa Agent by URL  - slow (polls to timeout) + paid; last resort.
+    #   2b. ZoomInfo by the email Apollo found - turns it into a phone.
+    #   3.  Exa Agent by URL  - slow (polls to timeout) + paid; only for what
+    #       ZoomInfo and Apollo could not find.
     provider_used = "none"
     extracted: Dict[str, Any] = {}
     exa_contributed = False
@@ -2759,10 +2772,15 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         )
         seed_email = ""
 
-    def _have_email_and_phone() -> bool:
+    def _missing_contact() -> Tuple[str, ...]:
+        """Which of email / phone the candidate still lacks (seed + found so far)."""
         have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
         _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or extracted.get("workPhone") or "")
-        return have_email and sum(1 for ch in _p if ch.isdigit()) >= 7
+        have_phone = sum(1 for ch in _p if ch.isdigit()) >= 7
+        return tuple(field for field, have in (("email", have_email), ("phone", have_phone)) if not have)
+
+    def _have_email_and_phone() -> bool:
+        return not _missing_contact()
 
     def _merge_primary(fields: Dict[str, Any]) -> bool:
         """Fill only empty primary slots from `fields`; merge phone candidates.
@@ -2795,20 +2813,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         if _zi.get("ok") and _merge_primary(_zi.get("fields") or {}):
             zoominfo_contributed = True
 
+    # The candidate's current employer: scopes the ZoomInfo name search (an
+    # unscoped name is ambiguous) and sharpens the Exa query.
+    _row0 = existing_rows[0] if existing_rows and isinstance(existing_rows[0], dict) else {}
+    _row0_data = _json_load_safe(_row0.get("data"), {}) if _row0 else {}
+    if not isinstance(_row0_data, dict):
+        _row0_data = {}
+    candidate_company = str(
+        request.company_name or contact_enrichment.current_company_of({**_row0, "data": _row0_data}) or ""
+    ).strip()
+    candidate_name = (request.full_name or _row0.get("name") or "").strip()
+
     # 1b. ZoomInfo by NAME - the by-email step never fires for URL-only
     # candidates (no seed email), and ZoomInfo can't match by LinkedIn URL, so
     # name-based ContactSearch is the only ZoomInfo entry point for them. Runs
-    # only while we still lack email+phone; accuracy-gated inside the helper.
-    if not _have_email_and_phone():
-        _zi_name = (
-            request.full_name
-            or (existing_rows[0].get("name") if existing_rows and isinstance(existing_rows[0], dict) else "")
-            or ""
-        ).strip()
-        if _zi_name:
-            _zi_by_name = await contact_enrichment.zoominfo_enrich_by_name(candidate_id, _zi_name)
-            if _zi_by_name.get("ok") and _merge_primary(_zi_by_name.get("fields") or {}):
-                zoominfo_contributed = True
+    # only while we still lack email+phone; the helper accepts only an
+    # unambiguous match (at the candidate's company when known).
+    if not _have_email_and_phone() and candidate_name:
+        _zi_by_name = await contact_enrichment.zoominfo_enrich_by_name(
+            candidate_id, candidate_name, company=candidate_company
+        )
+        if _zi_by_name.get("ok") and _merge_primary(_zi_by_name.get("fields") or {}):
+            zoominfo_contributed = True
 
     # 2. Apollo by LinkedIn URL - fast/cheap; runs before Exa so candidates that
     #    get both email+phone here short-circuit and never reach the slow, paid
@@ -2820,37 +2846,65 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         if apollo_result.get("ok"):
             apollo_contributed = _merge_primary(apollo_result.get("fields") or {})
 
-    # 3. Exa Agent by LinkedIn URL - slow (polls to timeout) + paid; last resort.
-    if EXA_CONTACT_ENRICH_ENABLED and not _have_email_and_phone():
-        _row0 = existing_rows[0] if existing_rows else {}
-        _row0_data = _json_load_safe(_row0.get("data"), {}) if isinstance(_row0, dict) else {}
-        _row0_enh = _row0_data.get("enhanced_info") if isinstance(_row0_data, dict) else {}
-        if not isinstance(_row0_enh, dict):
-            _row0_enh = {}
-        _exa_name = (request.full_name or (_row0.get("name") if isinstance(_row0, dict) else "") or "").strip()
-        _exa_company = str(
-            request.company_name
-            or (_row0_data.get("company_name") if isinstance(_row0_data, dict) else "")
-            or (_row0_data.get("company") if isinstance(_row0_data, dict) else "")
-            or _row0_enh.get("current_company")
-            or _row0_enh.get("company")
-            or ""
-        ).strip()
-        _exa = await _exa_enrich_by_linkedin(candidate_id, linkedin_url, _exa_name, _exa_company)
+    # 2b. ZoomInfo by the email Apollo (or the name search) just found. Apollo
+    #     returns no phone on our plan, so without this a candidate Apollo found
+    #     an email for went straight to a paid Exa phone lookup; ZoomInfo can
+    #     match an email and often holds the phone.
+    zoominfo_followup_contributed = False
+    found_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip()
+    if (
+        found_email
+        and found_email.lower() != seed_email.lower()
+        and not is_placeholder_email(found_email)
+        and "phone" in _missing_contact()
+    ):
+        _zi_found = await contact_enrichment.zoominfo_enrich_by_email(candidate_id, found_email)
+        if _zi_found.get("ok"):
+            zoominfo_followup_contributed = _merge_primary(_zi_found.get("fields") or {})
+
+    # 3. Exa Agent by LinkedIn URL - slow (polls to timeout) + paid (~$0.115),
+    #    so strictly the fallback for an Apollo miss: never before Apollo has
+    #    been asked, and only for the fields Apollo left missing — the agent
+    #    bills per field it fills, so we never pay it for contact we hold.
+    exa_fields = _missing_contact()
+    # Optional stricter spend rule (off by default): Exa only for a candidate
+    # nobody else could reach -- never to top up a phone for one with an email.
+    from core import sourcing_config as _sc_ondemand
+    if (
+        exa_fields
+        and len(exa_fields) < 2
+        and getattr(_sc_ondemand, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", False)
+    ):
+        logger.info(
+            "enrich_contact: skipping paid Exa for %s — reachable already, missing only %s "
+            "(EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT)",
+            candidate_id, ",".join(exa_fields),
+        )
+        exa_fields = ()
+    if EXA_CONTACT_ENRICH_ENABLED and apollo_attempted and exa_fields:
+        _exa = await _exa_enrich_by_linkedin(
+            candidate_id, linkedin_url, candidate_name, candidate_company, fields=exa_fields
+        )
         if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}):
             exa_contributed = True
+    else:
+        exa_fields = ()
 
     # Provider attribution = first source that contributed (execution order).
     if zoominfo_contributed:
         provider_used = "zoominfo"
     elif apollo_contributed:
         provider_used = "apollo"
+    elif zoominfo_followup_contributed:
+        provider_used = "zoominfo"
     elif exa_contributed:
         provider_used = "exa"
 
     logger.info(
-        "Contact enrich providers for %s | zoominfo=%s exa=%s apollo_called=%s apollo=%s | provider=%s",
-        candidate_id, zoominfo_contributed, exa_contributed, apollo_attempted, apollo_contributed, provider_used,
+        "Contact enrich providers for %s | zoominfo=%s apollo_called=%s apollo=%s "
+        "zoominfo_by_found_email=%s exa_asked=%s exa=%s | provider=%s",
+        candidate_id, zoominfo_contributed, apollo_attempted, apollo_contributed,
+        zoominfo_followup_contributed, ",".join(exa_fields) or "-", exa_contributed, provider_used,
     )
 
     raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
@@ -3470,7 +3524,7 @@ def _launched_candidates_sql(
                 sc.phone,
                 sc.source,
                 sc.resume_match_percentage as match_score,
-                sc.data,
+                (sc.data - 'linkedin_profile') AS data,  -- provisioning-only payload
                 la.status as engage_status,
                 la.interview_id as engage_interview_id,
                 la.created_at as engage_created_at,

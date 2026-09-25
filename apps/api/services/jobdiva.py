@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import re
 import time
@@ -595,10 +596,22 @@ class JobDivaApplicationOutcome(tuple):
       that profile is unknown).
     """
 
-    def __new__(cls, success: bool, candidate_id: Any, *, path: str = "failed", found_via_search: bool = False):
+    def __new__(
+        cls,
+        success: bool,
+        candidate_id: Any,
+        *,
+        path: str = "failed",
+        found_via_search: bool = False,
+        matched_existing: bool = False,
+    ):
         obj = super().__new__(cls, (bool(success), candidate_id))
         obj.path = path
         obj.found_via_search = bool(found_via_search)
+        # created path only: JobDiva parsed the uploaded résumé and filed the
+        # application on a profile it ALREADY had (its DATECREATED is old), so
+        # PAIR did not mint it and filled only that profile's blank fields.
+        obj.matched_existing = bool(matched_existing)
         return obj
 
     @property
@@ -610,7 +623,139 @@ class JobDivaApplicationOutcome(tuple):
         return self[1]
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"JobDivaApplicationOutcome(success={self[0]}, candidate_id={self[1]!r}, path={self.path!r}, found_via_search={self.found_via_search})"
+        return (
+            f"JobDivaApplicationOutcome(success={self[0]}, candidate_id={self[1]!r}, path={self.path!r}, "
+            f"found_via_search={self.found_via_search}, matched_existing={self.matched_existing})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Profiles PAIR creates: fill what JobDiva left blank
+# ---------------------------------------------------------------------------
+
+# UpdateCandidateProfileDef.phones[] is PhoneType {phone, type, ext, action}.
+# JobDiva's own docs for the same PhoneType (updateContact): type "C" = Cell #,
+# action 1 = insertion. The flat `phone` field PAIR used to send is not in the
+# schema, so no phone ever reached a PAIR-created profile.
+JOBDIVA_PHONE_TYPE_CELL = "C"
+JOBDIVA_PHONE_ACTION_INSERT = 1
+_PROFILE_PHONE_KEYS = ["CELLPHONE", "PHONE1", "PHONE2", "PHONE3", "PHONE4", "HOMEPHONE", "WORKPHONE"]
+_ADDRESS_FIELDS = ("city", "state", "zipCode", "countryid")
+# A profile JobDiva created longer ago than this was not made by our create call:
+# the uploaded résumé matched a person JobDiva already had.
+_FRESH_PROFILE_WINDOW = timedelta(hours=12)
+
+
+def _is_pair_synthetic_email(email: str) -> bool:
+    """PAIR's per-candidate stand-in address (routers/engagement.py mints
+    ``pair-<digits>@no-email.jobdiva.local``) or JobDiva's ``Auto_…`` one."""
+    lowered = (email or "").strip().lower()
+    return lowered.startswith("auto_") or "@no-email." in lowered
+
+
+def _txt_filename(filename: str) -> str:
+    """``Ada_Lovelace_Resume.docx`` -> ``Ada_Lovelace_Resume.txt`` (JobDiva picks
+    the parser by extension, so a text upload must be named .txt)."""
+    stem = (filename or "candidate_resume").strip() or "candidate_resume"
+    if "." in stem.rsplit("/", 1)[-1]:
+        stem = stem.rsplit(".", 1)[0]
+    return f"{stem}.txt"
+
+
+def jobdiva_profile_phones(phone: str) -> List[Dict[str, Any]]:
+    """``phones[]`` for UpdateCandidateProfileDef: the number as a cell phone."""
+    number = (phone or "").strip()
+    if sum(ch.isdigit() for ch in number) < 7:
+        return []
+    return [{"phone": number, "type": JOBDIVA_PHONE_TYPE_CELL, "action": JOBDIVA_PHONE_ACTION_INSERT}]
+
+
+def jobdiva_profile_created_recently(profile: Dict[str, Any], now_et: Optional[datetime] = None) -> Optional[bool]:
+    """Whether a CandidatesProfileDetail record was created just now.
+
+    BI timestamps are naive US-Eastern wall clock. None when DATECREATED is
+    missing or unreadable (callers then assume the create call made it).
+    """
+    raw = str(get_field(profile or {}, ["DATECREATED", "dateCreated", "DATE_CREATED"]) or "").strip()
+    if not raw:
+        return None
+    created = None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M:%S"):
+        try:
+            created = datetime.strptime(raw[:19], fmt)
+            break
+        except ValueError:
+            continue
+    if created is None:
+        return None
+    if now_et is None:
+        try:
+            from zoneinfo import ZoneInfo
+
+            now_et = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        except Exception:
+            return None
+    return now_et - created <= _FRESH_PROFILE_WINDOW
+
+
+def created_profile_fill(
+    current: Optional[Dict[str, Any]],
+    *,
+    first_name: str = "",
+    last_name: str = "",
+    email: str = "",
+    phone: str = "",
+    address: Optional[Dict[str, str]] = None,
+    fresh: bool = True,
+) -> Dict[str, Any]:
+    """UpdateCandidateProfileDef fields (minus candidateid) PAIR should write
+    onto a profile its create call returned.
+
+    ``current`` is that profile as ``bi/CandidatesProfileDetail`` reads it back
+    ({} when the read failed). Only what JobDiva left blank or placeholder is
+    written -- whatever its résumé parser extracted is kept. ``fresh`` is False
+    when JobDiva filed the application on a profile it already had: then even
+    the name and country are left alone unless they are blank.
+    """
+    current = current or {}
+
+    def _cur(*keys: str) -> str:
+        return str(get_field(current, list(keys)) or "").strip()
+
+    out: Dict[str, Any] = {}
+    cur_first, cur_last = _cur("FIRSTNAME", "firstName"), _cur("LASTNAME", "lastName")
+    placeholder_name = (not cur_first and not cur_last) or "unknown" in (cur_first.lower(), cur_last.lower())
+    if (first_name or last_name) and (fresh or placeholder_name) and (cur_first, cur_last) != (first_name, last_name):
+        if first_name:
+            out["firstName"] = first_name
+        if last_name:
+            out["lastName"] = last_name
+
+    cur_email = _cur("EMAIL", "email")
+    if (
+        email
+        and not email.lower().startswith("auto_")
+        and (not cur_email or is_placeholder_email(cur_email))
+        and cur_email.lower() != email.lower()
+    ):
+        out["email"] = email
+
+    has_phone = any(sum(ch.isdigit() for ch in _cur(key)) >= 7 for key in _PROFILE_PHONE_KEYS)
+    phones = jobdiva_profile_phones(phone)
+    if phones and not has_phone:
+        out["phones"] = phones
+
+    address = address or {}
+    for field_name, keys in (("city", ("CITY",)), ("state", ("STATE",)), ("zipCode", ("ZIPCODE", "ZIP"))):
+        value = str(address.get(field_name) or "").strip()
+        if value and not _cur(*keys):
+            out[field_name] = value
+    country = str(address.get("countryid") or "").strip().upper()
+    cur_country = _cur("COUNTRY", "COUNTRYID").upper()
+    # JobDiva stamps "US" on every new profile, so a fresh profile takes ours.
+    if country and cur_country != country and (fresh or not cur_country):
+        out["countryid"] = country
+    return out
 
 
 def _get_candidate_email(data: Dict[str, Any]) -> str:
@@ -5118,6 +5263,8 @@ class JobDivaService:
         phone: str = "",
         allow_profile_creation: bool = True,
         origin_source: str = "",
+        resume_file: Optional[bytes] = None,
+        profile_fields: Optional[Dict[str, str]] = None,
     ) -> "JobDivaApplicationOutcome":
         """Record a job application for a candidate, creating a JobDiva profile
         ONLY when nobody in JobDiva matches.
@@ -5127,10 +5274,18 @@ class JobDivaService:
         * Known profile (``candidate_id`` given, or found via searchCandidateProfile)
           -> ``createJobApplication`` {candidateid, jobid}. Attaches the job to the
           existing profile; cannot create one. See ``link_candidate_to_job``.
-        * Nobody known -> ``CreateJobApplicationWithResume``. JobDiva parses the
-          resume text, mints a NEW profile ("Unknown Unknown" with an Auto_
-          placeholder email until ``_update_candidate_name`` fixes it) and returns
-          the new profile's id as the response body.
+        * Nobody known -> ``CreateJobApplicationWithResume``. JobDiva stores and
+          parses the résumé FILE, mints a NEW profile and returns its id as the
+          response body; ``_complete_created_profile`` then fills what the parse
+          left blank (name, email, ``phones[]``, city / state / zip / country
+          from ``profile_fields``).
+
+        The résumé goes in ``filecontent`` (base64): JobDiva's docs call
+        ``textfile`` only the "Alternate text resume", and every profile PAIR
+        created while sending ``filecontent: ""`` got a 0-byte résumé, an
+        ``Auto_`` email and no phone or address. ``resume_file`` is the document
+        to upload (``filename`` must carry its extension, e.g. ``.docx``);
+        without one the résumé text itself is uploaded as a ``.txt`` file.
 
         ``CreateJobApplicationWithResume`` has NO ``candidateid`` field. Its body
         schema in JobDiva's Swagger v2 (``UploadResumeAndApplyJob``) is exactly
@@ -5161,7 +5316,8 @@ class JobDivaService:
         jobdiva_candidate_id)`` -- on the link path the linked id (str); on the
         create path the int JobDiva returned, or the id ``searchCandidateProfile``
         recovers when the create response carried none (None if neither) -- and
-        carries ``.path`` / ``.found_via_search`` for provenance stamping.
+        carries ``.path`` / ``.found_via_search`` / ``.matched_existing`` for
+        provenance stamping.
         """
         resume_source_id = jobdiva_pair_resume_source_id(origin_source)
         token = await self.authenticate()
@@ -5211,7 +5367,7 @@ class JobDivaService:
             )
             return JobDivaApplicationOutcome(False, None)
 
-        # ── Nobody known in JobDiva: create a profile from the resume text.
+        # ── Nobody known in JobDiva: create a profile from the résumé.
         # This is the ONLY path that mints a JobDiva profile.
         if not allow_profile_creation:
             logger.error(
@@ -5227,55 +5383,82 @@ class JobDivaService:
         # or versioned 26-06182-v2 -> root job) instead of digit-mashing the ref.
         resolved_job_id = await self._resolve_jobdiva_job_id_or_digits(job_id)
 
-        # Build an explicit text header to guarantee JobDiva's parser correctly
-        # extracts the confirmed candidate name and contact info.
+        # The document a recruiter opens in JobDiva: the caller's file, else the
+        # résumé text as a .txt file. Never empty -- an empty `filecontent` is
+        # what made every PAIR-created profile blank.
+        document_text = resume_text or ""
+        if resume_file:
+            attempts = [(filename, resume_file)]
+            # A rejected document (4xx: format / size) is retried once as text.
+            if document_text.strip():
+                attempts.append((_txt_filename(filename), document_text.encode("utf-8")))
+        else:
+            attempts = [(_txt_filename(filename), document_text.encode("utf-8"))]
+
+        # `textfile` ("Alternate text resume") keeps an explicit contact header so
+        # JobDiva sees the confirmed name and contact wherever it reads from.
+        # PAIR's synthetic stand-in email is a lookup key, not contact info.
         header_lines = []
         if first_name or last_name:
             header_lines.append(f"Name: {first_name} {last_name}".strip())
-        if email:
+        if email and not _is_pair_synthetic_email(email):
             header_lines.append(f"Email: {email}")
         if phone:
             header_lines.append(f"Phone: {phone}")
-
+        textfile = document_text
         if header_lines:
             header_text = "\n".join(header_lines)
-            resume_text = f"{header_text}\n\n================================\n\n{resume_text}"
+            textfile = f"{header_text}\n\n================================\n\n{document_text}"
+        if not attempts[0][1].strip():
+            attempts = [(_txt_filename(filename), textfile.encode("utf-8"))]
 
-        # Exactly the UploadResumeAndApplyJob schema -- no candidateid (see docstring).
-        # `resumesource` is PAIR's configured Resume Source for this origin channel
-        # (0 when unconfigured): the JobDiva-side record of who filed the application.
-        json_payload = {
-            "filename": filename,
-            "textfile": resume_text,
-            "filecontent": "",
-            "jobid": int(resolved_job_id or 0),
-            "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
-            "resumeDate": resume_date,
-            "resumesource": int(resume_source_id or 0),
-        }
         try:
             status, res_body = None, ""
-            for attempt in range(2):
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        url,
-                        json=json_payload,
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "Accept": "application/json",
-                        }
-                    )
-                status, res_body = response.status_code, response.text
+            refreshed = False
+            for attempt_filename, attempt_bytes in attempts:
+                # Exactly the UploadResumeAndApplyJob schema -- no candidateid (see
+                # docstring). `resumesource` is PAIR's configured Resume Source for
+                # this origin channel (0 when unconfigured): the JobDiva-side record
+                # of who filed the application.
+                json_payload = {
+                    "filename": attempt_filename,
+                    "textfile": textfile,
+                    "filecontent": base64.b64encode(attempt_bytes).decode("ascii"),
+                    "jobid": int(resolved_job_id or 0),
+                    "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
+                    "resumeDate": resume_date,
+                    "resumesource": int(resume_source_id or 0),
+                }
+                while True:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(
+                            url,
+                            json=json_payload,
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "Accept": "application/json",
+                            }
+                        )
+                    status, res_body = response.status_code, response.text
+                    if status == 401 and not refreshed:
+                        refreshed = True
+                        logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
+                        token = await self.authenticate(force_refresh=True)
+                        if not token:
+                            return JobDivaApplicationOutcome(False, None)
+                        continue
+                    break
 
-                if status == 401 and attempt == 0:
-                    logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
-                    token = await self.authenticate(force_refresh=True)
-                    if not token:
-                        return JobDivaApplicationOutcome(False, None)
-                    continue
-
-                logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
-                break
+                logger.info(
+                    f"🔎 CreateJobApplicationWithResume ({attempt_filename}, {len(attempt_bytes)} bytes): "
+                    f"{status} — {res_body[:200]}"
+                )
+                # Only a 4xx rejection of the document is retried: after a 5xx or a
+                # timeout JobDiva may already have created the profile, and a second
+                # upload would mint a duplicate (re-provision looks it up first).
+                document_rejected = 400 <= int(status or 0) < 500 and status not in (401, 403, 404, 429)
+                if not document_rejected:
+                    break
 
             if status in [200, 201]:
                 try:
@@ -5313,16 +5496,24 @@ class JobDivaService:
                             )
                 logger.info(f"✅ JobDiva profile created → candidateId={new_cid}, job={job_id}")
 
-                # We injected the name into the resume header, so JobDiva's parser should
-                # extract it perfectly. We still call _update_candidate_name instantly
-                # just to guarantee the exact spelling and apply any missing fields.
-                # Only here: we edit the profiles we create, never a linked one -- a
-                # recovered id may belong to a pre-existing profile, so it is left alone.
-                if new_cid and not recovered_via_search and (first_name or last_name or email or phone):
-                    await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
+                # Fill what JobDiva's parse of the résumé left blank, and learn
+                # whether the profile is new. Only here: we edit the profiles the
+                # create call returns, never a linked one -- a recovered id may
+                # belong to a pre-existing profile, so it is left alone.
+                matched_existing = False
+                if new_cid and not recovered_via_search and (
+                    first_name or last_name or email or phone or profile_fields
+                ):
+                    fresh = await self._complete_created_profile(
+                        token, new_cid,
+                        first_name=first_name, last_name=last_name, email=email, phone=phone,
+                        address=profile_fields,
+                    )
+                    matched_existing = fresh is False
 
                 return JobDivaApplicationOutcome(
-                    True, new_cid, path="created", found_via_search=recovered_via_search
+                    True, new_cid, path="created", found_via_search=recovered_via_search,
+                    matched_existing=matched_existing,
                 )
             else:
                 logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
@@ -5330,26 +5521,110 @@ class JobDivaService:
             logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
         return JobDivaApplicationOutcome(False, None)
 
-    async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "", phone: str = "") -> bool:
-        """
-        Updates a JobDiva candidate's name, email, and phone after creation.
-        Used to fix 'Unknown Unknown' + Auto_ placeholder email created by
-        CreateJobApplicationWithResume JSON mode.
-        Endpoint: POST /apiv2/jobdiva/updateCandidateProfile
+    async def _complete_created_profile(
+        self,
+        token: str,
+        candidate_id: Any,
+        *,
+        first_name: str = "",
+        last_name: str = "",
+        email: str = "",
+        phone: str = "",
+        address: Optional[Dict[str, str]] = None,
+    ) -> Optional[bool]:
+        """Read back the profile ``CreateJobApplicationWithResume`` returned and
+        write only what JobDiva left blank (``created_profile_fill``).
 
+        Returns whether the profile is new: True (created by this call), False
+        (JobDiva matched the résumé to a profile it already had -- then only its
+        blank fields were filled) or None (the read-back failed; the profile is
+        treated as new, which is what the create call reported).
         """
-        url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
-        payload = {
-            "candidateid": candidate_id,
-            "firstName": first_name,
-            "lastName": last_name,
-        }
+        current: Dict[str, Any] = {}
+        try:
+            current = (await self.fetch_candidate_profiles_batch([str(candidate_id)])).get(str(candidate_id)) or {}
+        except Exception as exc:  # the fill must never fail the application
+            logger.warning(f"⚠️ read-back of created profile {candidate_id} failed: {exc}")
+        fresh = jobdiva_profile_created_recently(current) if current else None
+        if fresh is False:
+            logger.warning(
+                f"⚠️ JobDiva filed the application on EXISTING profile {candidate_id} "
+                f"(created {get_field(current, ['DATECREATED'])}); filling its blank fields only"
+            )
+        fields = created_profile_fill(
+            current,
+            first_name=first_name, last_name=last_name, email=email, phone=phone,
+            address=address, fresh=fresh is not False,
+        )
+        parsed = [
+            label for label, keys in (
+                ("name", ["FIRSTNAME"]), ("email", ["EMAIL"]), ("phone", _PROFILE_PHONE_KEYS),
+                ("city", ["CITY"]), ("state", ["STATE"]), ("experience", ["EXPERIENCE"]),
+                ("education", ["EDUCATION"]),
+            )
+            if any(current.get(k) for k in keys) and not (
+                label == "email" and is_placeholder_email(str(current.get("EMAIL") or ""))
+            )
+        ]
+        logger.info(
+            f"🧾 JobDiva profile {candidate_id}: read_back={'yes' if current else 'no'} "
+            f"fresh={fresh} resumes={current.get('RESUMECOUNT', '?')} parsed={parsed or '-'} "
+            f"filling={sorted(fields) or '-'}"
+        )
+        if fields:
+            await self._update_candidate_profile(token, candidate_id, fields)
+        return fresh
+
+    async def _update_candidate_name(
+        self,
+        token: str,
+        candidate_id: int,
+        first_name: str,
+        last_name: str,
+        email: str = "",
+        phone: str = "",
+        address: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """Write name, email, phone and address onto a profile PAIR created.
+
+        Unconditional (unlike ``_complete_created_profile``, which fills blanks
+        only). The phone goes in the schema's ``phones[]``; the flat ``phone``
+        PAIR used to send is not in UpdateCandidateProfileDef and never landed.
+        """
+        fields: Dict[str, Any] = {"firstName": first_name, "lastName": last_name}
         # Set real email so JobDiva doesn't keep the Auto_ placeholder
         if email and not email.lower().startswith("auto_"):
-            payload["email"] = email
-        if phone:
-            payload["phone"] = phone
-            
+            fields["email"] = email
+        phones = jobdiva_profile_phones(phone)
+        if phones:
+            fields["phones"] = phones
+        for key in _ADDRESS_FIELDS:
+            value = str((address or {}).get(key) or "").strip()
+            if value:
+                fields[key] = value
+        return await self._update_candidate_profile(token, candidate_id, fields)
+
+    async def _update_candidate_profile(self, token: str, candidate_id: Any, fields: Dict[str, Any]) -> bool:
+        """POST /apiv2/jobdiva/updateCandidateProfile with ``fields``.
+
+        A rejected update (e.g. a 500 on an email / phone another profile
+        already holds) is retried with progressively fewer fields -- address,
+        then phones, then email -- so the name at least lands and the profile is
+        never left as "Unknown Unknown". JobDiva answers a boolean, so a 2xx
+        whose body is literally ``false`` counts as a rejection too.
+        """
+        url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
+        try:
+            candidate_id = int(str(candidate_id).strip())
+        except (TypeError, ValueError):
+            logger.warning(f"⚠️ updateCandidateProfile: non-numeric candidateid {candidate_id!r}")
+            return False
+        attempts: List[Dict[str, Any]] = [dict(fields)]
+        for drop in (_ADDRESS_FIELDS, ("phones",), ("email",)):
+            smaller = {k: v for k, v in attempts[-1].items() if k not in drop}
+            if smaller and smaller != attempts[-1]:
+                attempts.append(smaller)
+
         async def _send_update(data_payload: dict, auth_token: str) -> tuple[httpx.Response, str]:
             for attempt in range(2):
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -5371,25 +5646,19 @@ class JobDivaService:
             return res, auth_token
 
         try:
-            response, token = await _send_update(payload, token)
-            logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
-            
-            # If update failed (e.g. 500 unique constraint error on email/phone),
-            # retry updating ONLY the name fields so the profile at least gets its name corrected
-            if response.status_code not in [200, 201] and (email or phone):
-                logger.warning(f"⚠️ updateCandidateProfile failed. Retrying name-only update to prevent 'Unknown Unknown' profile...")
-                fallback_payload = payload.copy()
-                fallback_payload.pop("email", None)
-                fallback_payload.pop("phone", None)
-                
-                response, token = await _send_update(fallback_payload, token)
-                logger.info(f"🔎 updateCandidateProfile name-only response: {response.status_code} — {response.text[:300]}")
-                
-            if response.status_code in [200, 201]:
-                logger.info(f"✅ Profile updated for candidateId={candidate_id}: {first_name} {last_name}")
-                return True
-            else:
-                logger.warning(f"⚠️ updateCandidateProfile failed: {response.status_code} - {response.text[:300]}")
+            for index, attempt_fields in enumerate(attempts):
+                if index:
+                    logger.warning(
+                        f"⚠️ updateCandidateProfile rejected; retrying candidateId={candidate_id} "
+                        f"with {sorted(attempt_fields)}"
+                    )
+                response, token = await _send_update({"candidateid": candidate_id, **attempt_fields}, token)
+                body = (response.text or "").strip()
+                logger.info(f"🔎 updateCandidateProfile {sorted(attempt_fields)}: {response.status_code} — {body[:300]}")
+                if response.status_code in (200, 201) and body.lower() != "false":
+                    logger.info(f"✅ Profile updated for candidateId={candidate_id}: {sorted(attempt_fields)}")
+                    return True
+            logger.warning(f"⚠️ updateCandidateProfile failed for candidateId={candidate_id}: {response.status_code} - {body[:300]}")
         except Exception as e:
             logger.warning(f"⚠️ updateCandidateProfile exception: {e}")
         return False
