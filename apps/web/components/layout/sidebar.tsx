@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -20,6 +20,7 @@ export function Sidebar() {
         // same analytics page auto-scoped to their team by the backend.
         ...(isAdmin
             ? [
+                  { label: "Dashboard", href: "/admin/dashboard", icon: Gauge, disabled: false },
                   { label: "Candidates", href: "/candidates", icon: Users, disabled: false },
                   { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
                   { label: "Recruiter Analytics", href: "/admin/recruiter-analytics", icon: UserCheck, disabled: false },
@@ -31,6 +32,7 @@ export function Sidebar() {
         // Team leads get these pages auto-scoped to their team by the backend.
         ...(!isAdmin && isTeamLead
             ? [
+                  { label: "Dashboard", href: "/admin/dashboard", icon: Gauge, disabled: false },
                   { label: "Team Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
                   { label: "Recruiter Analytics", href: "/admin/recruiter-analytics", icon: UserCheck, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
