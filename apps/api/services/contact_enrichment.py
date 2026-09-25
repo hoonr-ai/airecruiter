@@ -90,6 +90,25 @@ _EXA_CONTACT_SCHEMA = {
         }
     },
 }
+EXA_CONTACT_FIELDS = ("email", "phone")
+
+
+def _exa_contact_schema(fields: Tuple[str, ...]) -> Dict[str, Any]:
+    """``_EXA_CONTACT_SCHEMA`` narrowed to ``fields``. The agent bills per
+    contact field it fills, so a lookup for a candidate who already has an
+    email asks for the phone only (and vice versa)."""
+    contact = _EXA_CONTACT_SCHEMA["properties"]["contact"]
+    return {
+        "type": "object",
+        "properties": {
+            "contact": {
+                **{k: v for k, v in contact.items() if k != "properties"},
+                "properties": {f: contact["properties"][f] for f in fields},
+            }
+        },
+    }
+
+
 # Free/consumer mailbox domains → classify the agent's email as personal.
 _PERSONAL_EMAIL_DOMAINS = {
     "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
@@ -489,10 +508,19 @@ def sanitize_agent_contact(email: Any, phone: Any) -> Tuple[str, str]:
     return e, p
 
 
-def _build_exa_contact_query(full_name: str, company: str, linkedin_url: str) -> str:
+def _build_exa_contact_query(
+    full_name: str,
+    company: str,
+    linkedin_url: str,
+    fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
+) -> str:
     """Natural-language query for the Exa Agent contact-enrichment run."""
     who = (full_name or "").strip() or "this person"
-    parts = [f"Find the work email and phone number for {who}"]
+    wanted = " and ".join(
+        label for field, label in (("email", "work email"), ("phone", "phone number"))
+        if field in fields
+    )
+    parts = [f"Find the {wanted} for {who}"]
     company = (company or "").strip()
     if company:
         parts.append(f"at {company}")
@@ -507,21 +535,29 @@ async def exa_enrich_by_linkedin(
     linkedin_url: str,
     full_name: str = "",
     company: str = "",
+    fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
 ) -> Dict[str, Any]:
     """Enrich one person via the Exa Agent API (by LinkedIn URL). Pure async.
 
+    ``fields`` limits the lookup to the contact the caller still lacks (a
+    subset of ``EXA_CONTACT_FIELDS``) — the agent bills per field it fills.
+
     Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
     ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
-    ``EXA_CONTACT_ENRICH_ENABLED`` is off or ``EXA_API_KEY`` is missing. Bounded
-    by ``EXA_CONTACT_ENRICH_TIMEOUT_S``; all failures logged and swallowed.
+    ``EXA_CONTACT_ENRICH_ENABLED`` is off, ``EXA_API_KEY`` is missing or no
+    field is requested. Bounded by ``EXA_CONTACT_ENRICH_TIMEOUT_S``; all
+    failures logged and swallowed.
     """
     if not EXA_CONTACT_ENRICH_ENABLED:
         return {"ok": False, "message": "Exa contact enrichment disabled"}
+    wanted = tuple(f for f in EXA_CONTACT_FIELDS if f in (fields or ()))
+    if not wanted:
+        return {"ok": False, "message": "no contact fields requested"}
     if not EXA_API_KEY:
         logger.warning("Exa enrichment skipped for %s: EXA_API_KEY not configured", candidate_id)
         return {"ok": False, "message": "EXA_API_KEY not configured"}
 
-    query = _build_exa_contact_query(full_name, company, linkedin_url)
+    query = _build_exa_contact_query(full_name, company, linkedin_url, wanted)
     headers = {
         "Content-Type": "application/json",
         "x-api-key": EXA_API_KEY,
@@ -529,7 +565,7 @@ async def exa_enrich_by_linkedin(
     }
     body = {
         "query": query,
-        "outputSchema": _EXA_CONTACT_SCHEMA,
+        "outputSchema": _exa_contact_schema(wanted),
         "effort": EXA_CONTACT_ENRICH_EFFORT,
     }
 
@@ -659,48 +695,116 @@ async def _zoominfo_authed_post(
         return None
 
 
-async def _zoominfo_resolve_person_id(full_name: str) -> Optional[str]:
-    """ContactSearch by firstName + lastName, return best-match personId.
+def current_company_of(candidate: Any) -> str:
+    """The candidate's current employer from whatever the row carries: explicit
+    company fields, the LinkedIn profile captured at sourcing, the stored
+    company_experience, the LLM extraction or the deep-search recent roles.
+    "" when none of them names one. Sharpens the ZoomInfo name search and the
+    Exa contact query."""
+    if not isinstance(candidate, dict):
+        return ""
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    enhanced = next(
+        (v for v in (candidate.get("enhanced_info"), data.get("enhanced_info")) if isinstance(v, dict)), {}
+    )
+    for value in (
+        candidate.get("current_company"), candidate.get("company_name"), candidate.get("company"),
+        data.get("current_company"), data.get("company_name"), data.get("company"),
+        enhanced.get("current_company"), enhanced.get("company"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    profile = next(
+        (v for v in (candidate.get("linkedin_profile"), data.get("linkedin_profile")) if isinstance(v, dict)), {}
+    )
+    for roles in (
+        profile.get("experience"),
+        candidate.get("company_experience"), data.get("company_experience"),
+        enhanced.get("company_experience"),
+        candidate.get("exa_recent_companies"),
+    ):
+        if not isinstance(roles, list):
+            continue
+        roles = [r for r in roles if isinstance(r, dict) and str(r.get("company") or "").strip()]
+        current = [
+            r for r in roles
+            if r.get("current") or str(r.get("end") or r.get("end_date") or "").strip().lower() in ("", "present", "current")
+        ]
+        for role in current or roles:
+            company = role.get("company")
+            if isinstance(company, dict):
+                company = company.get("name")
+            if str(company or "").strip():
+                return str(company).strip()
+    return ""
+
+
+async def _zoominfo_contact_search(first: str, last: str, company: str = "") -> Optional[Dict[str, Any]]:
+    """One ContactSearch; ``{"data": [...], "total": int}`` or None on failure."""
+    attributes = {"firstName": first, "lastName": last}
+    if company:
+        attributes["companyName"] = company
+    body = {"data": {"type": "ContactSearch", "attributes": attributes}}
+    res = await _zoominfo_authed_post(ZOOMINFO_NEW_SEARCH_URL, body)
+    if res is None or res.status_code >= 400:
+        if res is not None:
+            logger.info(
+                "zoominfo ContactSearch non-2xx for %s %s (company=%s): %s",
+                first, last, company or "-", res.status_code,
+            )
+        return None
+    try:
+        body_json = res.json()
+    except ValueError:
+        return None
+    data = body_json.get("data") if isinstance(body_json, dict) else None
+    if not isinstance(data, list):
+        return None
+    meta = body_json.get("meta") if isinstance(body_json.get("meta"), dict) else {}
+    try:
+        total = int(meta.get("totalResults"))
+    except (TypeError, ValueError):
+        total = len(data)
+    return {"data": data, "total": total}
+
+
+async def _zoominfo_resolve_person_id(full_name: str, company: str = "") -> Optional[str]:
+    """ContactSearch by name, return the personId only when the match is the person.
 
     ZoomInfo doesn't accept `linkedinUrl` as a search filter (tested:
-    `PFAPI0005 / Invalid field requested`). Name-based search is the only
-    sourcing-time entry point. Returns None if we don't have both names, if
-    search returns no hits, or if the top hit's accuracy score is below
-    ``_MIN_CONTACT_ACCURACY_SCORE``.
+    `PFAPI0005 / Invalid field requested`), so a name is the only entry point --
+    and a bare name is not an identity. ``contactAccuracyScore`` rates how
+    reliable ZoomInfo's data about a record is, NOT how well it matches the
+    search, so taking the top "John Smith" enriched a stranger and put their
+    phone on our candidate. A hit is accepted only when it is the ONE match:
+
+    1. with the candidate's current ``company`` (ContactSearch ``companyName``);
+    2. else (no company, or nobody there) by name alone, unique in ZoomInfo.
+
+    Ambiguous names return None and the chain moves on to Apollo, which matches
+    by the LinkedIn URL itself. Hits below ``_MIN_CONTACT_ACCURACY_SCORE`` are
+    still skipped.
     """
     parts = _split_name(full_name)
     if not parts["first"] or not parts["last"]:
         return None
 
-    body = {
-        "data": {
-            "type": "ContactSearch",
-            "attributes": {
-                "firstName": parts["first"],
-                "lastName": parts["last"],
-            },
-        }
-    }
-    res = await _zoominfo_authed_post(ZOOMINFO_NEW_SEARCH_URL, body)
-    if res is None or res.status_code >= 400:
-        if res is not None:
+    company = (company or "").strip()
+    found = None
+    for scope in ([company, ""] if company else [""]):
+        found = await _zoominfo_contact_search(parts["first"], parts["last"], scope)
+        if found and found["data"]:
+            if found["total"] == 1:
+                break
             logger.info(
-                "zoominfo ContactSearch non-2xx for %s: %s",
-                full_name,
-                res.status_code,
+                "zoominfo ContactSearch ambiguous for %s (company=%s): %d matches — not guessing",
+                full_name, scope or "-", found["total"],
             )
+        found = None
+    if not found:
         return None
 
-    try:
-        body_json = res.json()
-    except ValueError:
-        return None
-
-    data = body_json.get("data") if isinstance(body_json, dict) else None
-    if not isinstance(data, list) or not data:
-        return None
-
-    top = data[0]
+    top = found["data"][0]
     attrs = top.get("attributes") if isinstance(top, dict) else {}
     score = (attrs or {}).get("contactAccuracyScore")
     try:
@@ -787,13 +891,14 @@ async def zoominfo_enrich_by_email(candidate_id: str, email: str) -> Dict[str, A
     return {"ok": True, "fields": fields}
 
 
-async def _zoominfo_enrich_for_sourcing(full_name: str) -> Dict[str, str]:
-    """Two-call ZoomInfo lookup for the sourcing pipeline.
+async def _zoominfo_enrich_for_sourcing(full_name: str, company: str = "") -> Dict[str, str]:
+    """Two-call ZoomInfo lookup (ContactSearch -> ContactEnrich by personId).
 
     Returns the canonical four-field dict (possibly all empty). Empty dict on
-    any miss — caller falls through to Apollo.
+    any miss -- including an ambiguous name -- and the caller falls through to
+    Apollo.
     """
-    person_id = await _zoominfo_resolve_person_id(full_name)
+    person_id = await _zoominfo_resolve_person_id(full_name, company)
     if not person_id:
         return {}
     return await _zoominfo_enrich_by_person_id(person_id)
@@ -803,24 +908,24 @@ def _has_usable_field(fields: Dict[str, Any]) -> bool:
     return any(str(fields.get(k) or "").strip() for k in ("mobilePhone", "workPhone", "workEmail", "personalEmail"))
 
 
-async def zoominfo_enrich_by_name(candidate_id: str, full_name: str) -> Dict[str, Any]:
+async def zoominfo_enrich_by_name(candidate_id: str, full_name: str, company: str = "") -> Dict[str, Any]:
     """Enrich a contact via the ZoomInfo OAuth Data API, matching by NAME.
 
     ZoomInfo cannot match by LinkedIn URL, and URL-only candidates (e.g.
     Exa-sourced) arrive with no seed email, so neither the by-URL nor the
     by-email path can reach them. Name-based ContactSearch -> personId ->
     ContactEnrich is the only ZoomInfo entry point for these. Requires both a
-    first and last name and is accuracy-gated inside ``_zoominfo_resolve_person_id``
-    (``_MIN_CONTACT_ACCURACY_SCORE``) so a name collision never enriches the
-    wrong person. Returns ``{"ok": bool, "fields"|"message": ...}`` like the
-    other provider helpers; all failures are logged and swallowed.
+    first and last name; ``_zoominfo_resolve_person_id`` accepts only an
+    unambiguous match (scoped to ``company`` when known) so a name collision
+    never enriches the wrong person. Returns ``{"ok": bool, "fields"|"message": ...}``
+    like the other provider helpers; all failures are logged and swallowed.
     """
     parts = _split_name(full_name)
     if not parts["first"] or not parts["last"]:
         return {"ok": False, "message": "need first + last name to match"}
 
     try:
-        fields = await _zoominfo_enrich_for_sourcing((full_name or "").strip())
+        fields = await _zoominfo_enrich_for_sourcing((full_name or "").strip(), (company or "").strip())
     except Exception as e:
         logger.warning("ZoomInfo enrich-by-name raised for %s: %s", candidate_id, e)
         return {"ok": False, "message": f"ZoomInfo by-name failed: {e}"}
@@ -949,7 +1054,7 @@ async def enrich_contact_for_sourcing(
         zi_fields: Dict[str, str] = {}
         if (full_name or "").strip():
             try:
-                zi_fields = await _zoominfo_enrich_for_sourcing(full_name.strip())
+                zi_fields = await _zoominfo_enrich_for_sourcing(full_name.strip(), (company or "").strip())
             except Exception as e:
                 logger.warning("contact_enrichment ZoomInfo path raised for %s: %s", job_key, e)
                 zi_fields = {}
@@ -1070,10 +1175,15 @@ async def enrich_contact_for_sourcing(
         # line for a job identical — useless for answering "which candidate did
         # Exa resolve, and which timed out?".
         exa_label = (full_name or "").strip() or linkedin_url
+        # Only what the candidate lacks — Exa bills per field it fills.
+        exa_fields = tuple(
+            field for field, have in (("email", seed_email), ("phone", seed_phone)) if not have
+        )
         try:
             async with _exa_semaphore():
                 exa_result = await exa_enrich_by_linkedin(
-                    exa_label, linkedin_url, full_name or "", company or ""
+                    exa_label, linkedin_url, full_name or "", company or "",
+                    fields=exa_fields,
                 )
         except Exception as e:
             logger.warning(

@@ -167,3 +167,56 @@ If the BI row carries none of these, layer 3's "PAIR-filed but unlinked" branch
 never fires and the stamp/email/phone/URL match carries the whole load -- which is
 sufficient once the profile id is stamped.
 
+
+## Profiles PAIR creates are never blank (2026-09-25)
+
+**Rule.** When Launch PAIR creates a JobDiva profile (a person JobDiva does not
+have -- LinkedIn-Unipile / LinkedIn-Exa / LinkedIn-DeepSearch / Dice / manual),
+the profile gets a real résumé *file* and every contact / address field PAIR
+knows. A row with nothing but a name is not created at all.
+
+### What was wrong
+
+A read-back of PAIR-created profiles (`bi/CandidatesProfileDetail` +
+`bi/ResumeDetail`) showed a 0-byte `.txt` résumé (PLAINTEXT: 3 characters),
+JobDiva's `Auto_…@jobdiva.com` email, and empty phone / city / state / zip /
+LinkedIn / experience / education. Only the name, patched on afterwards, landed.
+
+1. `CreateJobApplicationWithResume` reads the résumé from **`filecontent`**
+   (base64 file; `.pdf` / `.docx` / `.rtf` / `.txt`). Its own docs call
+   `textfile` the "Alternate text resume". PAIR sent `filecontent: ""`.
+2. For LinkedIn rows the text itself was `NAME / Email | Phone / (Profile
+   sourced via PAIR)`: their profile is structured data, never `resume_text`.
+3. The post-create phone went in a flat `phone` field that
+   `UpdateCandidateProfileDef` does not define (it has `phones[]`), so no phone
+   ever reached a PAIR-created profile; no address was ever sent.
+
+### How it works now
+
+| Step | Where |
+|---|---|
+| Sourcing keeps the whole LinkedIn profile (role descriptions, summary, education, skills, languages, projects, volunteering) as `linkedin_profile`; deep-search rows keep title / location / recent roles (never the agent's fit rationale). The save payload carries it into `sourced_candidates.data.linkedin_profile`. | `services/profile_resume.py` `normalize_linkedin_profile` / `deep_search_profile`; `unified_candidate_search.py`; `routers/candidates.py` save; `apps/web/app/jobs/new/page.tsx` |
+| The provisioner renders the résumé: the row's own résumé when it is real (JobDiva / Dice / manual), else a LinkedIn-style résumé from `linkedin_profile` → stored `company_experience` / `education` / `certifications` / `skills` → the LLM extraction → Exa's cleaned crawl text. | `build_profile_resume` |
+| Thin résumé (no work history, summary or résumé text) → one LinkedIn re-read through Unipile first. Capped per batch. | `routers/engagement.py` `_provisioning_resume`; `JOBDIVA_PROVISION_LINKEDIN_REFETCH` (default on), `JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP` (default 40) |
+| No usable name, or nothing but a name → not created. Logged as `JOBDIVA_BLANK_PROFILE_REFUSED` and counted in `blank_profile_refused` (also in `failed`, so `/engage/re-provision` retries it). | `_provision_one` |
+| The résumé is uploaded as a `.docx` in `filecontent` (`.txt` when python-docx is unavailable); a 4xx rejection of the document is retried once as `.txt`. A 5xx is **not** retried (the profile may exist; a second upload would duplicate it). | `create_job_application_with_resume` |
+| The created profile is read back and only its blank / placeholder fields are filled: name, email, `phones: [{phone, type: "C", action: 1}]`, city / state / zipCode / countryid. A read-back that shows an OLD `DATECREATED` means JobDiva matched the résumé to a profile it already had: nothing it holds is overwritten, and the outcome's `matched_existing` keeps `jobdiva_profile_origin` = `jobdiva`. | `_complete_created_profile`, `created_profile_fill` |
+
+The synthetic `pair-<digits>@no-email.jobdiva.local` lookup address still lands
+on the profile (it is the re-provision key) but never on the résumé.
+
+### Still to verify live
+
+`phones[]` with type `C` / action `1` and `countryid` as an ISO-2 code follow
+JobDiva's documented PhoneType / profile fields but have not been checked
+against a live profile (no test profiles were created in the production
+tenant). After the first QA launch, check the per-candidate log line
+`🧾 JobDiva profile <id>: read_back=yes fresh=True resumes=1 parsed=[...]
+filling=[...]` and open one created profile in JobDiva: résumé attached, phone,
+city/state present. If JobDiva rejects a field, `_update_candidate_profile`
+retries with fewer fields (address, then phones, then email) so the name always
+lands -- the log shows which attempt succeeded.
+
+Tests: `tests/test_profile_resume.py`, `tests/test_linkedin_profile_capture.py`,
+and the blank-profile sections of `tests/test_jobdiva_link_via_create_job_application.py`,
+`tests/test_jobdiva_provisioner_failsafes.py`, `tests/test_jobdiva_payload_contract.py`.
