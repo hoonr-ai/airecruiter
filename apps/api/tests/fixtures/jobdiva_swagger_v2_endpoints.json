@@ -887,6 +887,41 @@
         }
       }
     },
+    "/apiv2/jobdiva/updateCandidateSNLinks": {
+      "post": {
+        "body": {
+          "name": "UpdateSNLinksDef",
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "socialnetworks": {
+              "items": {
+                "name": "SocialNetworkType",
+                "properties": {
+                  "link": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": []
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "socialnetworks"
+          ]
+        },
+        "query": [],
+        "response_200": {
+          "type": "boolean"
+        }
+      }
+    },
     "/apiv2/jobdiva/updateJob": {
       "post": {
         "body": {
@@ -1301,6 +1336,6 @@
       }
     }
   },
-  "fetched_at": "2026-09-11",
+  "fetched_at": "2026-09-25",
   "source": "https://api.jobdiva.com/swagger?group=Version%202"
 }

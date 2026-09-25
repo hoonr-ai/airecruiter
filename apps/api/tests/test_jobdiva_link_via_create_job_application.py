@@ -628,3 +628,20 @@ def test_created_profile_fill_never_overwrites_real_values():
         current, first_name="Ada", last_name="Lovelace", email="other@real.dev", phone="5551234567",
         address={"city": "Jersey City", "state": "NJ", "zipCode": "07302", "countryid": "US"}, fresh=True,
     ) == {}
+
+
+def test_created_profile_gets_its_social_links_and_alternate_email():
+    read_back = {"ID": "777", "FIRSTNAME": "Ada", "LASTNAME": "Lovelace", "EMAIL": "ada@lovelace.dev",
+                 "LINKEDIN": "", "GITHUB": "https://github.com/someone-set-this", "DATECREATED": _now_et_str()}
+    _outcome, calls = _run(
+        _service(), _dispatch_create_flow(read_back=read_back),
+        candidate_id=None, job_id=str(JOB_ID), resume_text="r",
+        first_name="Ada", last_name="Lovelace", email="ada@lovelace.dev",
+        alternate_email="ada@acme-bank.dev",
+        social_links={"LinkedIn": "https://www.linkedin.com/in/ada", "GitHub": "https://github.com/ada"},
+    )
+    (update,) = _calls_to(calls, "updateCandidateProfile")
+    assert update["json"] == {"candidateid": 777, "alternateemail": "ada@acme-bank.dev"}
+    (links,) = _calls_to(calls, "updateCandidateSNLinks")
+    # GitHub is already set in JobDiva: only the empty LinkedIn slot is filled.
+    assert links["json"] == {"id": 777, "socialnetworks": [{"name": "LinkedIn", "link": "https://www.linkedin.com/in/ada"}]}

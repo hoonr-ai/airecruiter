@@ -707,6 +707,7 @@ def created_profile_fill(
     phone: str = "",
     address: Optional[Dict[str, str]] = None,
     fresh: bool = True,
+    alternate_email: str = "",
 ) -> Dict[str, Any]:
     """UpdateCandidateProfileDef fields (minus candidateid) PAIR should write
     onto a profile its create call returned.
@@ -732,13 +733,28 @@ def created_profile_fill(
             out["lastName"] = last_name
 
     cur_email = _cur("EMAIL", "email")
+    cur_alternate = _cur("ALTERNATEEMAIL", "alternateemail")
     if (
         email
         and not email.lower().startswith("auto_")
         and (not cur_email or is_placeholder_email(cur_email))
         and cur_email.lower() != email.lower()
+        # Already the alternate: JobDiva refused it as primary (another record
+        # holds it -- see write_profile_fill); asking again only fails again.
+        and cur_alternate.lower() != email.lower()
     ):
         out["email"] = email
+
+    alternate = (alternate_email or "").strip()
+    known = {cur_email.lower(), str(out.get("email") or email or "").lower()}
+    if (
+        alternate
+        and "@" in alternate
+        and not is_placeholder_email(alternate)
+        and (not cur_alternate or is_placeholder_email(cur_alternate))
+        and alternate.lower() not in known
+    ):
+        out["alternateemail"] = alternate
 
     has_phone = any(sum(ch.isdigit() for ch in _cur(key)) >= 7 for key in _PROFILE_PHONE_KEYS)
     phones = jobdiva_profile_phones(phone)
@@ -752,9 +768,42 @@ def created_profile_fill(
             out[field_name] = value
     country = str(address.get("countryid") or "").strip().upper()
     cur_country = _cur("COUNTRY", "COUNTRYID").upper()
-    # JobDiva stamps "US" on every new profile, so a fresh profile takes ours.
-    if country and cur_country != country and (fresh or not cur_country):
+    # JobDiva stamps "US" on every new profile, so a fresh profile -- or one whose
+    # address nobody ever entered -- takes ours.
+    address_untouched = not (_cur("CITY") or _cur("STATE") or _cur("ZIPCODE", "ZIP"))
+    if country and cur_country != country and (fresh or not cur_country or address_untouched):
         out["countryid"] = country
+    return out
+
+
+# Grep / alert marker: JobDiva refused an email because another candidate record
+# holds it -- the profile is most likely a duplicate of an existing person.
+JOBDIVA_EMAIL_HELD_ELSEWHERE = "JOBDIVA_EMAIL_HELD_ELSEWHERE"
+
+# UpdateSNLinksDef.socialnetworks[].name -> the CandidatesProfileDetail field it fills.
+JOBDIVA_SOCIAL_NETWORK_FIELDS = {
+    "LinkedIn": "LINKEDIN",
+    "GitHub": "GITHUB",
+    "StackOverflow": "STACKOVERFLOW",
+    "X": "TWITTER",
+    "Facebook": "FACEBOOK",
+    "YouTube": "YOUTUBE",
+    "Instagram": "INSTAGRAM",
+    "Professional Website": "PROFESSIONAL_WEBSITE",
+}
+
+
+def social_links_fill(current: Optional[Dict[str, Any]], links: Optional[Dict[str, str]]) -> List[Dict[str, str]]:
+    """``socialnetworks[]`` for updateCandidateSNLinks: the links PAIR knows
+    (profile_resume.jobdiva_social_links) for networks the profile has no link
+    for yet. A link someone entered in JobDiva is never replaced."""
+    current = current or {}
+    out: List[Dict[str, str]] = []
+    for name, link in (links or {}).items():
+        field = JOBDIVA_SOCIAL_NETWORK_FIELDS.get(name)
+        link = str(link or "").strip()
+        if field and link and not str(get_field(current, [field]) or "").strip():
+            out.append({"name": name, "link": link})
     return out
 
 
@@ -5265,6 +5314,8 @@ class JobDivaService:
         origin_source: str = "",
         resume_file: Optional[bytes] = None,
         profile_fields: Optional[Dict[str, str]] = None,
+        alternate_email: str = "",
+        social_links: Optional[Dict[str, str]] = None,
     ) -> "JobDivaApplicationOutcome":
         """Record a job application for a candidate, creating a JobDiva profile
         ONLY when nobody in JobDiva matches.
@@ -5278,7 +5329,8 @@ class JobDivaService:
           parses the résumé FILE, mints a NEW profile and returns its id as the
           response body; ``_complete_created_profile`` then fills what the parse
           left blank (name, email, ``phones[]``, city / state / zip / country
-          from ``profile_fields``).
+          from ``profile_fields``, ``alternate_email``) and the social links
+          (``social_links``: JobDiva network name -> URL, e.g. the LinkedIn profile).
 
         The résumé goes in ``filecontent`` (base64): JobDiva's docs call
         ``textfile`` only the "Alternate text resume", and every profile PAIR
@@ -5502,12 +5554,12 @@ class JobDivaService:
                 # belong to a pre-existing profile, so it is left alone.
                 matched_existing = False
                 if new_cid and not recovered_via_search and (
-                    first_name or last_name or email or phone or profile_fields
+                    first_name or last_name or email or phone or profile_fields or social_links
                 ):
                     fresh = await self._complete_created_profile(
                         token, new_cid,
                         first_name=first_name, last_name=last_name, email=email, phone=phone,
-                        address=profile_fields,
+                        address=profile_fields, alternate_email=alternate_email, social_links=social_links,
                     )
                     matched_existing = fresh is False
 
@@ -5521,6 +5573,157 @@ class JobDivaService:
             logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
         return JobDivaApplicationOutcome(False, None)
 
+    async def get_candidate_resume_texts(self, candidate_id: Any, max_resumes: int = 5) -> Optional[List[Dict[str, Any]]]:
+        """Every résumé JobDiva holds for a profile, newest first:
+        ``[{"resume_id", "date_created", "text"}]``.
+
+        None when ANY read fails (auth, network, a rate limit that outlasts the
+        retries): the BI résumé endpoints 429 under load, and an unreadable
+        résumé must never be mistaken for an empty one -- the backfill would
+        then upload over a profile that has a real résumé.
+        """
+        token = await self.authenticate()
+        if not token:
+            return None
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        async def _get(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Optional[Any]:
+            for attempt in range(3):
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                    continue
+                logger.warning(
+                    f"⚠️ {url.rsplit('/', 1)[-1]} {response.status_code} for candidateId={candidate_id}"
+                )
+                return None
+            return None
+
+        def _rows(payload: Any) -> List[Dict[str, Any]]:
+            rows = payload.get("data", []) if isinstance(payload, dict) else payload
+            if isinstance(rows, dict):
+                rows = [rows]
+            return [r for r in (rows or []) if isinstance(r, dict)]
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                payload = await _get(
+                    client, f"{self.api_url}/apiv2/bi/CandidateResumesDetail", {"candidateId": str(candidate_id)}
+                )
+                if payload is None:
+                    return None
+                records = sorted(_rows(payload), key=self._resume_created_timestamp, reverse=True)[:max_resumes]
+                out: List[Dict[str, Any]] = []
+                for record in records:
+                    resume_id = str(get_field(record, ["RESUMEID", "resumeId", "ID", "resume_id"]) or "")
+                    text = ""
+                    if resume_id:
+                        text_payload = await _get(
+                            client, f"{self.api_url}/apiv2/bi/ResumesTextDetail", {"resumeIds": resume_id}
+                        )
+                        if text_payload is None:
+                            return None
+                        detail = next(iter(_rows(text_payload)), {})
+                        text = str(detail.get("PLAINTEXT") or detail.get("plainText") or detail.get("text") or "")
+                    out.append({
+                        "resume_id": resume_id,
+                        "date_created": str(get_field(record, ["DATECREATED", "dateCreated"]) or ""),
+                        "text": unescape(text.strip()),
+                    })
+                return out
+        except Exception as exc:
+            logger.warning(f"⚠️ could not read résumés for candidateId={candidate_id}: {exc}")
+            return None
+
+    async def upload_resume(
+        self,
+        candidate_id: Any,
+        resume_text: str,
+        *,
+        resume_file: Optional[bytes] = None,
+        filename: str = "candidate_resume.txt",
+        origin_source: str = "",
+    ) -> Dict[str, Any]:
+        """Attach a résumé FILE to an EXISTING profile (POST /apiv2/jobdiva/uploadResume).
+
+        JobDiva's docs: with ``candidateid`` "the resume would be added under this
+        candidate" (without one it matches or creates a candidate -- never done
+        here, the id is required). Same file rules as the create path:
+        the document in ``filecontent`` (base64), ``textfile`` only the
+        alternate text; a 4xx rejection of the document is retried once as
+        .txt, a 5xx is not retried. Returns ``{"ok", "status", "filename",
+        "resume_id"}`` (``resume_id`` is JobDiva's int64 answer as text).
+        """
+        result: Dict[str, Any] = {"ok": False, "status": None, "filename": "", "resume_id": None}
+        try:
+            cid = int(str(candidate_id).strip())
+        except (TypeError, ValueError):
+            logger.error(f"❌ uploadResume: non-numeric candidateid {candidate_id!r}")
+            return result
+        document_text = resume_text or ""
+        if resume_file:
+            attempts = [(filename, resume_file)]
+            if document_text.strip():
+                attempts.append((_txt_filename(filename), document_text.encode("utf-8")))
+        elif document_text.strip():
+            attempts = [(_txt_filename(filename), document_text.encode("utf-8"))]
+        else:
+            logger.error(f"❌ uploadResume: nothing to upload for candidateId={cid}")
+            return result
+        token = await self.authenticate()
+        if not token:
+            return result
+
+        url = f"{self.api_url}/apiv2/jobdiva/uploadResume"
+        try:
+            from zoneinfo import ZoneInfo
+
+            resume_date = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %H:%M:%S")
+        except Exception:
+            resume_date = datetime.now().strftime("%m/%d/%Y %H:%M:%S")
+        refreshed = False
+        try:
+            for attempt_filename, attempt_bytes in attempts:
+                payload = {
+                    "candidateid": cid,
+                    "filename": attempt_filename,
+                    "filecontent": base64.b64encode(attempt_bytes).decode("ascii"),
+                    "textfile": document_text,
+                    "resumesource": int(jobdiva_pair_resume_source_id(origin_source) or 0),
+                    "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
+                    "resumeDate": resume_date,
+                }
+                while True:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(
+                            url, json=payload,
+                            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                        )
+                    if response.status_code == 401 and not refreshed:
+                        refreshed = True
+                        token = await self.authenticate(force_refresh=True)
+                        if not token:
+                            return result
+                        continue
+                    break
+                body = (response.text or "").strip()
+                result.update(status=response.status_code, filename=attempt_filename)
+                logger.info(
+                    f"🔎 uploadResume candidateid={cid} ({attempt_filename}, {len(attempt_bytes)} bytes): "
+                    f"{response.status_code} — {body[:200]}"
+                )
+                if response.status_code in (200, 201) and body.lower() != "false":
+                    result.update(ok=True, resume_id=body.strip('"') or None)
+                    return result
+                document_rejected = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 404, 429)
+                if not document_rejected:
+                    break
+        except Exception as exc:
+            logger.error(f"❌ uploadResume exception for candidateId={cid}: {exc}")
+        return result
+
     async def _complete_created_profile(
         self,
         token: str,
@@ -5531,9 +5734,12 @@ class JobDivaService:
         email: str = "",
         phone: str = "",
         address: Optional[Dict[str, str]] = None,
+        alternate_email: str = "",
+        social_links: Optional[Dict[str, str]] = None,
     ) -> Optional[bool]:
         """Read back the profile ``CreateJobApplicationWithResume`` returned and
-        write only what JobDiva left blank (``created_profile_fill``).
+        write only what JobDiva left blank (``created_profile_fill``,
+        ``social_links_fill``).
 
         Returns whether the profile is new: True (created by this call), False
         (JobDiva matched the résumé to a profile it already had -- then only its
@@ -5554,8 +5760,9 @@ class JobDivaService:
         fields = created_profile_fill(
             current,
             first_name=first_name, last_name=last_name, email=email, phone=phone,
-            address=address, fresh=fresh is not False,
+            address=address, fresh=fresh is not False, alternate_email=alternate_email,
         )
+        links = social_links_fill(current, social_links)
         parsed = [
             label for label, keys in (
                 ("name", ["FIRSTNAME"]), ("email", ["EMAIL"]), ("phone", _PROFILE_PHONE_KEYS),
@@ -5569,11 +5776,90 @@ class JobDivaService:
         logger.info(
             f"🧾 JobDiva profile {candidate_id}: read_back={'yes' if current else 'no'} "
             f"fresh={fresh} resumes={current.get('RESUMECOUNT', '?')} parsed={parsed or '-'} "
-            f"filling={sorted(fields) or '-'}"
+            f"filling={sorted(fields) or '-'} links={[l['name'] for l in links] or '-'}"
         )
         if fields:
-            await self._update_candidate_profile(token, candidate_id, fields)
+            await self.write_profile_fill(candidate_id, fields, current, token=token)
+        if links:
+            await self.update_candidate_social_links(candidate_id, links)
         return fresh
+
+    async def write_profile_fill(
+        self,
+        candidate_id: Any,
+        fields: Dict[str, Any],
+        current: Optional[Dict[str, Any]] = None,
+        *,
+        token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Write ``created_profile_fill`` output; returns ``{"ok", "refused",
+        "email_held_elsewhere"}``.
+
+        JobDiva keeps candidate emails unique (``ORA-00001 ...
+        IDX_TCANDIDATE_EMAIL``). An email it refuses is held by ANOTHER
+        candidate record: most likely this person was already in JobDiva and the
+        profile is a duplicate to merge. The address then goes into the
+        profile's empty alternate-email slot, so the profile still shows it and
+        a search for it finds both records.
+        """
+        token = token or await self.authenticate()
+        if not token or not fields:
+            return {"ok": bool(token) or not fields, "refused": [], "email_held_elsewhere": False}
+        refused: List[str] = []
+        ok = await self._update_candidate_profile(token, candidate_id, fields, refused=refused)
+        held_elsewhere = "email" in refused
+        if held_elsewhere:
+            logger.warning(
+                f"⚠️ {JOBDIVA_EMAIL_HELD_ELSEWHERE}: JobDiva refused the email for candidateId={candidate_id} "
+                f"-- another candidate record holds it (likely a duplicate profile to merge)"
+            )
+            alternate_free = not str(get_field(current or {}, ["ALTERNATEEMAIL", "alternateemail"]) or "").strip()
+            if alternate_free and "alternateemail" not in fields:
+                await self._update_candidate_profile(token, candidate_id, {"alternateemail": fields["email"]})
+        return {"ok": ok, "refused": refused, "email_held_elsewhere": held_elsewhere}
+
+    async def update_candidate_social_links(self, candidate_id: Any, socialnetworks: List[Dict[str, str]]) -> bool:
+        """POST /apiv2/jobdiva/updateCandidateSNLinks {id, socialnetworks: [{name, link}]}
+        -> boolean. ``name`` is one of JobDiva's social-network types
+        (``JOBDIVA_SOCIAL_NETWORK_FIELDS``). Logged and swallowed on failure."""
+        try:
+            cid = int(str(candidate_id).strip())
+        except (TypeError, ValueError):
+            logger.warning(f"⚠️ updateCandidateSNLinks: non-numeric candidate id {candidate_id!r}")
+            return False
+        links = [
+            {"name": str(l.get("name")), "link": str(l.get("link"))}
+            for l in socialnetworks or []
+            if l.get("name") in JOBDIVA_SOCIAL_NETWORK_FIELDS and str(l.get("link") or "").strip()
+        ]
+        if not links:
+            return True
+        token = await self.authenticate()
+        if not token:
+            return False
+        url = f"{self.api_url}/apiv2/jobdiva/updateCandidateSNLinks"
+        try:
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        url, json={"id": cid, "socialnetworks": links},
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    )
+                if response.status_code == 401 and attempt == 0:
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False
+                    continue
+                break
+            body = (response.text or "").strip()
+            ok = response.status_code in (200, 201) and body.lower() != "false"
+            logger.info(
+                f"🔎 updateCandidateSNLinks {cid} {[l['name'] for l in links]}: {response.status_code} — {body[:200]}"
+            )
+            return ok
+        except Exception as exc:
+            logger.warning(f"⚠️ updateCandidateSNLinks exception for {cid}: {exc}")
+            return False
 
     async def _update_candidate_name(
         self,
@@ -5604,14 +5890,24 @@ class JobDivaService:
                 fields[key] = value
         return await self._update_candidate_profile(token, candidate_id, fields)
 
-    async def _update_candidate_profile(self, token: str, candidate_id: Any, fields: Dict[str, Any]) -> bool:
+    async def _update_candidate_profile(
+        self,
+        token: str,
+        candidate_id: Any,
+        fields: Dict[str, Any],
+        refused: Optional[List[str]] = None,
+    ) -> bool:
         """POST /apiv2/jobdiva/updateCandidateProfile with ``fields``.
 
-        A rejected update (e.g. a 500 on an email / phone another profile
-        already holds) is retried with progressively fewer fields -- address,
-        then phones, then email -- so the name at least lands and the profile is
-        never left as "Unknown Unknown". JobDiva answers a boolean, so a 2xx
-        whose body is literally ``false`` counts as a rejection too.
+        Everything goes in one call first. If JobDiva rejects it (e.g. a 500 on
+        an email another profile already holds), each field group is written on
+        its own -- name (with, then without, the email), phones, address (with,
+        then without, the country) -- so one field JobDiva will not take never
+        costs the others, and the name always lands ("Unknown Unknown" is never
+        left behind). JobDiva answers a boolean, so a 2xx whose body is
+        literally ``false`` is a rejection too. Returns True when every group
+        landed (the email may have been dropped), False otherwise; the names of
+        the fields JobDiva would not take are appended to ``refused``.
         """
         url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
         try:
@@ -5619,11 +5915,9 @@ class JobDivaService:
         except (TypeError, ValueError):
             logger.warning(f"⚠️ updateCandidateProfile: non-numeric candidateid {candidate_id!r}")
             return False
-        attempts: List[Dict[str, Any]] = [dict(fields)]
-        for drop in (_ADDRESS_FIELDS, ("phones",), ("email",)):
-            smaller = {k: v for k, v in attempts[-1].items() if k not in drop}
-            if smaller and smaller != attempts[-1]:
-                attempts.append(smaller)
+        fields = {k: v for k, v in (fields or {}).items() if v not in (None, "", [])}
+        if not fields:
+            return True
 
         async def _send_update(data_payload: dict, auth_token: str) -> tuple[httpx.Response, str]:
             for attempt in range(2):
@@ -5645,26 +5939,62 @@ class JobDivaService:
                 break
             return res, auth_token
 
+        async def _write(payload_fields: Dict[str, Any]) -> bool:
+            nonlocal token
+            response, token = await _send_update({"candidateid": candidate_id, **payload_fields}, token)
+            body = (response.text or "").strip()
+            ok = response.status_code in (200, 201) and body.lower() != "false"
+            logger.info(
+                f"🔎 updateCandidateProfile {candidate_id} {sorted(payload_fields)}: "
+                f"{response.status_code} — {body[:300]}"
+            )
+            return ok
+
         try:
-            for index, attempt_fields in enumerate(attempts):
-                if index:
+            if await _write(fields):
+                logger.info(f"✅ Profile updated for candidateId={candidate_id}: {sorted(fields)}")
+                return True
+            logger.warning(
+                f"⚠️ updateCandidateProfile rejected for candidateId={candidate_id}; "
+                f"writing each field group on its own"
+            )
+            name = {k: fields[k] for k in ("firstName", "lastName") if k in fields}
+            identity = [dict(name, email=fields["email"]), name] if "email" in fields else [name]
+            address = {k: fields[k] for k in _ADDRESS_FIELDS if k in fields}
+            groups = [
+                [g for g in identity if g],
+                [{"phones": fields["phones"]}] if "phones" in fields else [],
+                [address, {k: v for k, v in address.items() if k != "countryid"}] if address else [],
+                [{"alternateemail": fields["alternateemail"]}] if "alternateemail" in fields else [],
+            ]
+            landed_all = True
+            for variants in groups:
+                variants = [v for i, v in enumerate(variants) if v and v not in variants[:i]]
+                if not variants:
+                    continue
+                for index, variant in enumerate(variants):
+                    if await _write(variant):
+                        if index:
+                            dropped = sorted(set(variants[0]) - set(variant))
+                            if refused is not None:
+                                refused.extend(dropped)
+                            logger.warning(
+                                f"⚠️ updateCandidateProfile {candidate_id}: JobDiva refused {dropped}; "
+                                f"wrote {sorted(variant)}"
+                            )
+                        break
+                else:
+                    landed_all = False
+                    if refused is not None:
+                        refused.extend(sorted(variants[0]))
                     logger.warning(
-                        f"⚠️ updateCandidateProfile rejected; retrying candidateId={candidate_id} "
-                        f"with {sorted(attempt_fields)}"
+                        f"⚠️ updateCandidateProfile could not write {sorted(variants[0])} "
+                        f"for candidateId={candidate_id}"
                     )
-                response, token = await _send_update({"candidateid": candidate_id, **attempt_fields}, token)
-                body = (response.text or "").strip()
-                logger.info(f"🔎 updateCandidateProfile {sorted(attempt_fields)}: {response.status_code} — {body[:300]}")
-                if response.status_code in (200, 201) and body.lower() != "false":
-                    logger.info(f"✅ Profile updated for candidateId={candidate_id}: {sorted(attempt_fields)}")
-                    return True
-            logger.warning(f"⚠️ updateCandidateProfile failed for candidateId={candidate_id}: {response.status_code} - {body[:300]}")
+            return landed_all
         except Exception as e:
             logger.warning(f"⚠️ updateCandidateProfile exception: {e}")
         return False
-
-
-
 
     async def get_job_applicants_detail(self, job_id: int) -> List[Dict[str, Any]]:
         """

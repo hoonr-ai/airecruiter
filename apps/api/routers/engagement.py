@@ -44,9 +44,11 @@ from services.jobdiva import (
 )
 from services.profile_resume import (
     ProfileResume,
+    alternate_email_of,
     build_profile_resume,
     is_placeholder_name,
     jobdiva_address_fields,
+    jobdiva_social_links,
     linkedin_public_identifier,
     normalize_linkedin_profile,
     resume_to_docx,
@@ -1969,6 +1971,9 @@ async def _provision_batch_to_jobdiva(
                         "resume_file": document,
                         "filename": f"{stem}.docx" if document else f"{stem}.txt",
                         "profile_fields": jobdiva_address_fields(resume.location),
+                        # Everything else the LinkedIn data can fill on the profile.
+                        "alternate_email": alternate_email_of(row, cand_data, resume_email),
+                        "social_links": jobdiva_social_links(row, cand_data),
                     }
                     logger.info(
                         f"📄 [{label}] {cand_id} résumé for JobDiva: sections={list(resume.sections)} "
@@ -4339,6 +4344,90 @@ async def jobdiva_profile_audit_repair(
         request.job_id or "ALL", repaired, user.email,
     )
     return {"success": True, "job_id": request.job_id or None, "repaired": repaired}
+
+
+class JobDivaBlankProfileBackfillRequest(BaseModel):
+    job_id: Optional[str] = None
+    jobdiva_ids: Optional[List[str]] = None
+    # Default True: report what each profile WOULD get. Pass false to write.
+    dry_run: bool = True
+    # Profiles per call (max 50), processed one at a time: JobDiva's BI résumé
+    # endpoints rate-limit hard.
+    limit: int = 10
+
+
+@router.post("/engage/jobdiva-blank-profile-backfill")
+async def jobdiva_blank_profile_backfill(
+    request: JobDivaBlankProfileBackfillRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Admin: repair JobDiva profiles Launch PAIR created blank before 2026-09-25.
+
+    Per profile (services/jobdiva_profile_backfill.py): upload the résumé PAIR
+    can build when every résumé JobDiva holds is empty, then fill only blank
+    fields -- name, email (or the alternate slot when another JobDiva record
+    holds it: a likely duplicate, reported as email_held_by_another_profile),
+    phones, city / state / zip / country, LinkedIn and other social links.
+    Nothing entered in JobDiva is overwritten; JobDiva-sourced people are never
+    touched. Dry run by default. With dry_run=false each settled profile is
+    stamped (jobdiva_backfill_checked_at), so repeated calls walk the list.
+    """
+    _require_admin(user)
+    from services.jobdiva_profile_backfill import (
+        BACKFILL_CANDIDATES_SQL,
+        BACKFILL_STAMP_SQL,
+        backfill_blank_profile,
+        settles,
+    )
+
+    limit = max(1, min(int(request.limit or 10), 50))
+    job_ids = await _audit_job_ids(request.job_id) if request.job_id else []
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(BACKFILL_CANDIDATES_SQL, {
+            "include_checked": bool(request.jobdiva_ids),
+            "jobdiva_ids": [str(i).strip() for i in request.jobdiva_ids or [] if str(i).strip()] or None,
+            "job_ids": job_ids or None,
+            "limit": limit,
+        })
+        rows = [dict(r) for r in (cur.fetchall() or [])]
+        cur.close()
+    finally:
+        conn.close()
+
+    reports: List[Dict[str, Any]] = []
+    for row in rows:
+        report = await backfill_blank_profile(row, apply=not request.dry_run)
+        reports.append(report)
+        if settles(report):
+            stamp = {"jobdiva_backfill_checked_at": _utc_now_iso(), "jobdiva_backfill_status": report["status"]}
+            conn = _get_db_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(BACKFILL_STAMP_SQL, {
+                    "delta": json.dumps(stamp), "jobdiva_id": report["jobdiva_candidate_id"],
+                })
+                conn.commit()
+                cur.close()
+            finally:
+                conn.close()
+
+    counts: Dict[str, int] = {}
+    for report in reports:
+        counts[report["status"]] = counts.get(report["status"], 0) + 1
+    logger.info(
+        "jobdiva blank-profile backfill: dry_run=%s job=%s processed=%s %s by=%s",
+        request.dry_run, request.job_id or "ALL", len(reports), counts, user.email,
+    )
+    return {
+        "success": True,
+        "dry_run": request.dry_run,
+        "processed": len(reports),
+        "statuses": counts,
+        "likely_duplicates": [r["jobdiva_candidate_id"] for r in reports if r.get("email_held_by_another_profile")],
+        "reports": reports,
+    }
 
 
 # ---------------------------------------------------------------------------

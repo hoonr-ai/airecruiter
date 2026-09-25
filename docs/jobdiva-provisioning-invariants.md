@@ -220,3 +220,46 @@ lands -- the log shows which attempt succeeded.
 Tests: `tests/test_profile_resume.py`, `tests/test_linkedin_profile_capture.py`,
 and the blank-profile sections of `tests/test_jobdiva_link_via_create_job_application.py`,
 `tests/test_jobdiva_provisioner_failsafes.py`, `tests/test_jobdiva_payload_contract.py`.
+
+### Everything else LinkedIn gives (2026-09-25)
+
+Besides name / email / phone / address, a created profile gets:
+
+- **Social links** via `POST /apiv2/jobdiva/updateCandidateSNLinks {id, socialnetworks: [{name, link}]}`
+  -- the public LinkedIn URL, plus GitHub / Stack Overflow / X / portfolio websites from the
+  LinkedIn profile and the résumé parse. `name` must be one of JobDiva's types
+  (`GET /apiv2/jobdiva/getSocialNetworkTypes`: "Professional Website", "MySpace", "LinkedIn",
+  "X", "Facebook", "YouTube", "StackOverflow", "Instagram", "GitHub"). Only empty slots are filled.
+- **Alternate email** (`alternateemail`) -- a second real address from ZoomInfo / Apollo / LinkedIn.
+- Certifications stay in the résumé: `addCertificationToCandidate` takes JobDiva catalog ids,
+  not names.
+
+**Email uniqueness.** JobDiva keeps candidate emails unique (`ORA-00001: unique constraint
+(JOBDIVA.IDX_TCANDIDATE_EMAIL)`). A refused email is held by ANOTHER candidate record -- the
+person most likely already existed and the profile is a duplicate to merge. The address then
+goes into the empty alternate-email slot and the event is logged as
+`JOBDIVA_EMAIL_HELD_ELSEWHERE`. `updateCandidateProfile` writes everything in one call and, on a
+rejection, each field group on its own (name ± email, phones, address ± country, alternate
+email), so one refused field never costs the others.
+
+**Observed live (2 backfilled profiles, 2026-09-25):** JobDiva parses the uploaded `.docx`: it
+filled the phone, email and LinkedIn link itself; `phones[]` type `C` lands in the profile's
+Mobile slot. The structured EXPERIENCE / EDUCATION arrays stayed empty for Exa-crawl résumés.
+
+## Backfill: profiles created blank before the fix
+
+`services/jobdiva_profile_backfill.py` repairs one PAIR-created profile from the row PAIR still
+holds: if every résumé JobDiva has is empty (< 50 chars), upload the built résumé as a `.docx`
+(`uploadResume` with `candidateid`), re-read the profile (JobDiva parses the file), then fill
+only what is still blank. Never touches JobDiva-sourced people or profiles recorded as
+pre-existing; never overwrites anything entered in JobDiva.
+
+- Admin page: **`/admin/jobdiva-backfill`** (URL only, not in the sidebar) -- "Dry run" lists what each
+  profile would get; "Apply" repairs exactly the profiles that dry run listed (confirm dialog).
+- Admin endpoint: `POST /api/v1/engagement/engage/jobdiva-blank-profile-backfill
+  {job_id?, jobdiva_ids?, limit (≤ 50), dry_run (default true)}`. Settled profiles are stamped
+  `data.jobdiva_backfill_checked_at` / `jobdiva_backfill_status`, so repeated calls walk the list;
+  failures (JobDiva unreadable) are not stamped and are retried. The response lists
+  `likely_duplicates` (email held by another record -- merge them in JobDiva).
+- Local script (reads DATABASE_URL): `python -m scripts.jobdiva_blank_profile_backfill
+  --jobdiva-ids <id> ... [--apply]` -- dry run by default, prints no names / emails / phones.
