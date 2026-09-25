@@ -145,11 +145,13 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 
-# ---- Exa Agent contact enrichment (primary URL-based enricher) ----
-# ZoomInfo can't match by LinkedIn URL and Apollo burns credits, so the Exa
-# Agent API (POST https://api.exa.ai/agent/runs) is our URL-keyed enricher.
-# ON by default. Billed per run (~$0.02 email + $0.07 phone + agent compute,
-# observed ~$0.115 total). Set EXA_CONTACT_ENRICH_ENABLED=false to disable.
+# ---- Exa Agent contact enrichment (paid fallback after Apollo) ----
+# The Exa Agent API (POST https://api.exa.ai/agent/runs) looks a person up by
+# LinkedIn URL. It is the LAST step of every contact chain: Apollo (also
+# URL-keyed, far cheaper) is asked first and Exa runs only for what Apollo
+# could not find. ON by default. Billed per run (~$0.02 email + $0.07 phone +
+# agent compute, observed ~$0.115 total). Set EXA_CONTACT_ENRICH_ENABLED=false
+# to disable.
 EXA_CONTACT_ENRICH_ENABLED = get_env_bool("EXA_CONTACT_ENRICH_ENABLED", True)
 # Bounded poll budget for one agent run (~10s observed at low effort), so 25s
 # leaves real completions headroom while capping the worst-case miss; this is

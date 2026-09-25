@@ -391,17 +391,33 @@ def build_people_queries(
         for role in roles[:max_queries]
     ]
 
+def agent_contact_fields_enabled() -> bool:
+    """Whether the deep-research Agent run asks for each profile's email/phone.
+
+    Off unless sourcing_config.EXA_AGENT_CONTACT_FIELDS opts in (and the
+    EXA_CONTACT_ENRICH_ENABLED master switch is on): contacts come from the
+    Apollo-first sourcing chain instead, so the agent's per-profile contact
+    tool is not billed ahead of Apollo.
+    """
+    if not EXA_CONTACT_ENRICH_ENABLED:
+        return False
+    try:
+        from core import sourcing_config as _sc
+    except Exception:
+        return False
+    return bool(getattr(_sc, "EXA_AGENT_CONTACT_FIELDS", False))
+
+
 def build_deep_research_output_schema(include_contact_fields: Optional[bool] = None) -> Dict[str, Any]:
     """Output schema for the Exa Agent deep-research run.
 
     Contact fields carry `description`s because that's what activates the
     Agent API's contact-enrichment tool (per Exa engineering) — a bare
     {"type": "string"} is NOT enough. Billable per hit (email $0.02 / phone
-    $0.07), so gated behind the same flag as the per-candidate enrichment
-    path (defaults to EXA_CONTACT_ENRICH_ENABLED).
+    $0.07), so they are left out unless agent_contact_fields_enabled().
     """
     if include_contact_fields is None:
-        include_contact_fields = EXA_CONTACT_ENRICH_ENABLED
+        include_contact_fields = agent_contact_fields_enabled()
 
     candidate_props: Dict[str, Any] = {
         "linkedin_url": {"type": "string"},
@@ -791,7 +807,7 @@ class ExaService:
         # other way around silently dropped every title after the first.
         role_text = (jd_role or "").strip() or (jd_title or "").strip()
         role_line = compose_people_query(role_text, skills, location)
-        include_contacts = EXA_CONTACT_ENRICH_ENABLED
+        include_contacts = agent_contact_fields_enabled()
         contact_clause = (
             "  5. email and phone: the candidate's best current email address "
             "and direct phone number, using your contact enrichment tooling.\n"
@@ -817,7 +833,7 @@ class ExaService:
                 "string their profile actually shows. "
             )
         location_clause = (
-            "  6. location: the candidate's CURRENT residence exactly as the "
+            f"  {6 if include_contacts else 5}. location: the candidate's CURRENT residence exactly as the "
             "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona, "
             "United States' or 'Greater Phoenix Area'). Never substitute a "
             "company HQ or a past position's city; leave empty only if the "
