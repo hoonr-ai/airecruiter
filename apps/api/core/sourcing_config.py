@@ -532,13 +532,15 @@ EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # The same restriction for the on-demand chain (Launch PAIR's "Enriching contact
-# details" and the Step-5 phone button). OFF by default: there Exa still buys the
-# PHONE for a candidate ZoomInfo and Apollo gave only an email -- PAIR screens by
-# phone first, so that phone is the main remaining Exa spend (~$0.07 + agent
-# compute per candidate). Set true to use Exa only for candidates ZoomInfo and
-# Apollo could not reach at all.
+# details" and the Step-5 phone button). ON by default since 2026-09-25 (user
+# call, to cut Exa spend): Exa is used only for candidates ZoomInfo and Apollo
+# could not reach at all, never to buy the PHONE for one they gave an email --
+# that phone top-up was the main remaining Exa spend (~$0.07 + agent compute per
+# candidate). Trade-off: PAIR screens by phone first, so those candidates now
+# launch on email unless ZoomInfo/Apollo hold a phone. Set false (e.g. in
+# apps/api/.env) to bring the Exa phone top-up back.
 EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
-    "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
+    "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate
