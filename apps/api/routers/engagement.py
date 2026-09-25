@@ -4516,7 +4516,11 @@ async def handle_creation_completed_webhook(
     webhook_secret = os.getenv("EVALUATION_WEBHOOK_SECRET")
     if webhook_secret:
         auth_header = request.headers.get("X-Webhook-Secret") or request.headers.get("Authorization") or ""
-        sig_header = request.headers.get("X-Signature") or request.headers.get("X-Hub-Signature-256")
+        sig_header = (
+            request.headers.get("X-Webhook-Signature")
+            or request.headers.get("X-Signature")
+            or request.headers.get("X-Hub-Signature-256")
+        )
         if auth_header != webhook_secret and not sig_header:
             logger.warning("creation_completed webhook rejected: missing or invalid secret/signature")
             raise HTTPException(status_code=401, detail="Unauthorized webhook")
