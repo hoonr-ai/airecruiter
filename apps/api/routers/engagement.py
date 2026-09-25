@@ -11,8 +11,11 @@ Auto-creates the engage_interview_audit table on startup.
 """
 
 import asyncio
+import hashlib
+import hmac
 import html
-from fastapi import APIRouter, Depends, HTTPException
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
@@ -2441,7 +2444,11 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
         else:
             # Send to external PAIR API
             external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews"
-            logger.info(f"📤 Sending bulk interview to {external_url}")
+            # Client-generate bulk_id so requests are idempotent and lookups succeed even if connection drops
+            client_bulk_id = str(uuid.uuid4())
+            if isinstance(payload_obj, dict):
+                payload_obj["bulk_id"] = client_bulk_id
+            logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
             response = await _post_to_pairbot(external_url, payload_obj)
 
@@ -2459,9 +2466,9 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             is_success = 200 <= response.status_code < 300
             logger.info(f"📥 PAIR API response status: {response.status_code}")
             if is_success and response.status_code == 202:
-                bulk_id = str(response_data.get("bulk_id") or "").strip()
+                bulk_id = str(response_data.get("bulk_id") or client_bulk_id).strip()
                 if not bulk_id:
-                    raise RuntimeError("Pairbot returned 202 without bulk_id")
+                    bulk_id = client_bulk_id
                 job_id_alt = str(payload_obj.get("jd", {}).get("jobdiva_id") or "")
                 # Mark processing so rank-list shows work in progress if the
                 # stream is slow; overwritten to sent/failed after creation.
@@ -2486,20 +2493,13 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 try:
                     creation_event = await _wait_for_pairbot_creation(bulk_id)
                 except Exception as wait_err:
-                    # Do not leave candidates stuck at engage_status=processing.
-                    try:
-                        _stamp_engage_status_batch(
-                            list(request.real_candidate_ids),
-                            "failed",
-                            job_id_value=str(job_id_from_payload or ""),
-                            job_id_alt=job_id_alt,
-                        )
-                    except Exception as _fail_stamp_err:
-                        logger.warning(
-                            "engage_failed_stamp_after_wait_error bulk_id=%s err=%s",
-                            bulk_id,
-                            _fail_stamp_err,
-                        )
+                    # Do NOT falsely mark everyone as failed; PAIR Bot is still creating them in the background.
+                    # Keep them as 'processing' so background reconciliation or webhook catches them.
+                    logger.warning(
+                        "engage_wait_for_creation_timeout bulk_id=%s candidates=%d: leaving as processing for async reconcile",
+                        bulk_id,
+                        len(request.real_candidate_ids),
+                    )
                     raise wait_err
                 response_data = {
                     **response_data,
@@ -4641,3 +4641,213 @@ async def applicant_origin_audit_repair(
         "success": True, "job_id": request.job_id or None, "dry_run": False,
         "origins_updated": origins_updated, "twins_deleted": twins_deleted,
     }
+
+
+async def reconcile_job_interviews(job_id: str) -> dict[str, Any]:
+    """Reconcile interviews for a job against PairBot by querying /api/interviews/by-job/{job_id}."""
+    clean_job_id = str(job_id).strip()
+    headers = get_pair_auth_headers()
+    url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/by-job/{clean_job_id}"
+    logger.info("Reconciling interviews with PairBot for job %s via %s", clean_job_id, url)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.warning("PairBot by-job lookup failed status=%s body=%s", resp.status_code, resp.text[:200])
+            return {"success": False, "reconciled": 0, "error": f"Status {resp.status_code}"}
+
+        resp_data = resp.json()
+        payload_data = resp_data.get("data") or {}
+        interviews = payload_data.get("interviews") or []
+        bulk_in_progress = payload_data.get("bulk_in_progress", False)
+        reconciled_count = 0
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                for iv in interviews:
+                    candidate_id = iv.get("source_candidate_id")
+                    interview_id = iv.get("interview_id")
+                    iv_job_id = str(iv.get("jobdiva_id") or clean_job_id).strip()
+                    if not candidate_id or not interview_id:
+                        continue
+
+                    # Update sourced_candidates if interview_id was missing
+                    # Support both clean_job_id and any alternate format returned by PairBot
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET data = jsonb_set(
+                            COALESCE(data, '{}'::jsonb),
+                            '{engage_interview_id}',
+                            to_jsonb(%s::text),
+                            true
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s
+                          AND (jobdiva_id = %s OR jobdiva_id = %s)
+                          AND (data->>'engage_interview_id' IS NULL OR data->>'engage_interview_id' = '')
+                        """,
+                        (str(interview_id), str(candidate_id), clean_job_id, iv_job_id),
+                    )
+                    if cur.rowcount > 0:
+                        reconciled_count += cur.rowcount
+                        # Backfill engage_interview_audit
+                        cur.execute(
+                            """
+                            INSERT INTO engage_interview_audit
+                                (candidate_id, jobdiva_id, interview_id, status, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (str(candidate_id), iv_job_id, str(interview_id), iv.get("status") or "processing"),
+                        )
+            conn.commit()
+        finally:
+            conn.close()
+
+        logger.info(
+            "Reconciled %d candidates for job %s (bulk_in_progress=%s)",
+            reconciled_count,
+            clean_job_id,
+            bulk_in_progress,
+        )
+        return {
+            "success": True,
+            "job_id": clean_job_id,
+            "reconciled": reconciled_count,
+            "bulk_in_progress": bulk_in_progress,
+        }
+    except Exception as e:
+        logger.error("Failed to reconcile job interviews for job %s: %s", clean_job_id, e, exc_info=True)
+        return {"success": False, "reconciled": 0, "error": str(e)}
+
+
+@router.post("/reconcile-job/{job_id}")
+async def reconcile_job_endpoint(
+    job_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Trigger background or ad-hoc reconciliation for a job's missing interview IDs."""
+    return await reconcile_job_interviews(job_id)
+
+
+class CreationCompletedWebhookPayload(BaseModel):
+    status: str
+    phase: Optional[str] = None
+    bulk_id: str
+    success: bool
+    data: Optional[List[Dict[str, Any]]] = None
+    total_created: Optional[int] = None
+    failed_interviews: Optional[List[Dict[str, Any]]] = None
+
+
+@router.post("/webhooks/creation-completed")
+async def handle_creation_completed_webhook(
+    request: Request,
+):
+    """Webhook invoked by PairBot outbox when bulk interview creation finishes."""
+    raw_body = await request.body()
+    webhook_secret = os.getenv("EVALUATION_WEBHOOK_SECRET")
+    if webhook_secret:
+        auth_header = request.headers.get("X-Webhook-Secret") or request.headers.get("Authorization") or ""
+        sig_header = (
+            request.headers.get("X-Webhook-Signature")
+            or request.headers.get("X-Signature")
+            or request.headers.get("X-Hub-Signature-256")
+            or ""
+        )
+        # Verify either shared secret auth header OR HMAC signature
+        is_secret_match = (auth_header == webhook_secret)
+        is_sig_match = False
+        if sig_header:
+            expected_mac = hmac.new(
+                webhook_secret.encode("utf-8"),
+                msg=raw_body,
+                digestmod=hashlib.sha256,
+            ).hexdigest()
+            # Support both "sha256=..." prefix and bare hex string
+            clean_sig = sig_header.split("=", 1)[-1].strip()
+            is_sig_match = hmac.compare_digest(clean_sig, expected_mac)
+
+        if not is_secret_match and not is_sig_match:
+            logger.warning("creation_completed webhook rejected: missing or invalid secret/signature")
+            raise HTTPException(status_code=401, detail="Unauthorized webhook")
+
+    try:
+        body_json = json.loads(raw_body.decode("utf-8") or "{}")
+        payload = CreationCompletedWebhookPayload(**body_json)
+    except Exception as parse_err:
+        logger.warning(f"Failed to parse creation_completed webhook payload: {parse_err}")
+        raise HTTPException(status_code=400, detail="Invalid payload JSON")
+
+    bulk_id = payload.bulk_id
+    logger.info("Received creation_completed webhook for bulk_id %s (created=%s)", bulk_id, payload.total_created)
+
+    interviews = payload.data or []
+    if not interviews:
+        return {"success": True, "message": "No interviews to sync"}
+
+    reconciled_count = 0
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            for item in interviews:
+                interview_id = item.get("interview_id") or item.get("id")
+                resume_data = item.get("full_resume_data") or {}
+                if isinstance(resume_data, str):
+                    try:
+                        resume_data = json.loads(resume_data)
+                    except Exception:
+                        resume_data = {}
+                candidate_id = resume_data.get("source_candidate_id") or item.get("candidate_id")
+                jobdiva_id = item.get("jobdiva_id")
+
+                if not interview_id or not candidate_id:
+                    continue
+
+                where_clauses = ["candidate_id = %s"]
+                where_params = [str(candidate_id)]
+
+                if jobdiva_id:
+                    where_clauses.append("jobdiva_id = %s")
+                    where_params.append(str(jobdiva_id))
+
+                where_sql = " AND ".join(where_clauses)
+                full_params = [str(interview_id)] + where_params
+
+                cur.execute(
+                    f"""
+                    UPDATE sourced_candidates
+                    SET data = jsonb_set(
+                        COALESCE(data, '{{}}'::jsonb),
+                        '{{engage_interview_id}}',
+                        to_jsonb(%s::text),
+                        true
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                    WHERE {where_sql}
+                      AND (data->>'engage_interview_id' IS NULL OR data->>'engage_interview_id' = '')
+                    """,
+                    tuple(full_params),
+                )
+                if cur.rowcount > 0:
+                    reconciled_count += cur.rowcount
+                    cur.execute(
+                        """
+                        INSERT INTO engage_interview_audit
+                            (candidate_id, jobdiva_id, interview_id, status, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (str(candidate_id), str(jobdiva_id or ""), str(interview_id), "processing"),
+                    )
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger.info("creation_completed webhook handled for bulk_id %s: reconciled %d rows", bulk_id, reconciled_count)
+    return {"success": True, "bulk_id": bulk_id, "reconciled": reconciled_count}
+
+

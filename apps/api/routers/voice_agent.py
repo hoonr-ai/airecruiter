@@ -140,6 +140,7 @@ class VoiceAgentInterviewWebhook(BaseModel):
     status: str
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
+    source_candidate_id: Optional[str] = None
     hard_filter_status: Optional[str] = None  # "passed" or "failed"
     hard_filter_needs_review: Optional[bool] = None
     needs_review_questions: Optional[List[Union[str, Dict[str, Any]]]] = None
@@ -210,13 +211,13 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
 
         status_norm = _normalized_webhook_status(payload.status)
         target_job_id = payload.jobdiva_id
-        target_candidate_id = payload.candidate_id
+        # Prefer source_candidate_id sent by PairBot; never fall back to internal candidate_id for external updates
+        target_candidate_id = payload.source_candidate_id
         
         # Update DB - similar to sync_interview_details
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 # 0. Lookup the real candidate_id and job_id from our audit logs using interview_id
-                # This ensures we don't need LiveKit to send candidate_id or jobdiva_id
                 cur.execute(
                     "SELECT candidate_id, jobdiva_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
                     (str(payload.interview_id),)
@@ -228,7 +229,10 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     target_job_id = audit_row[1]
                     logger.info(f"Webhook: Matched interview {payload.interview_id} to candidate {target_candidate_id} for job {target_job_id}")
                 else:
-                    logger.warning(f"Webhook: No audit log found for interview {payload.interview_id}")
+                    logger.warning(
+                        f"Webhook: No audit log found for interview {payload.interview_id}. "
+                        f"Falling back to payload source_candidate_id: {target_candidate_id}, job: {target_job_id}"
+                    )
 
                 # Pass logic: completed interview → pass = hard filters passed (no score threshold)
                 # Pair Bot sends 'completed' when all questions are answered.
@@ -248,10 +252,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         f"(hf={payload.hard_filter_status or 'none'}, score={payload.candidate_score})"
                     )
 
-                # 1. Update engage_interview_audit (matching interview_id)
-                # NOTE: The needs-review flags are saved into the `response` column here.
-                # The frontend readers (candidates.py) check both `payload` (initial outbound) 
-                # and `response` (webhook inbound) to reliably extract needs-review status.
+                # 1. Update or backfill engage_interview_audit (matching interview_id)
                 cur.execute(
                     """
                     UPDATE engage_interview_audit
@@ -262,6 +263,26 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     """,
                     (effective_status, json.dumps(payload.model_dump(mode="json")), str(payload.interview_id))
                 )
+                if cur.rowcount == 0 and target_candidate_id and target_job_id:
+                    # Backfill audit row if missing due to timeout on original launch
+                    logger.info(
+                        f"Webhook: Backfilling missing engage_interview_audit row for interview {payload.interview_id}"
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO engage_interview_audit
+                            (candidate_id, jobdiva_id, interview_id, status, response, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            str(target_candidate_id),
+                            str(target_job_id),
+                            str(payload.interview_id),
+                            effective_status,
+                            json.dumps(payload.model_dump(mode="json")),
+                        ),
+                    )
 
                 # 2. Update sourced_candidates.data
                 now_iso = datetime.now(timezone.utc).isoformat()
