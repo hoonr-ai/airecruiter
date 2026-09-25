@@ -12,6 +12,8 @@ import zipfile
 
 from services.profile_resume import (
     SECTION_EDUCATION,
+    alternate_email_of,
+    jobdiva_social_links,
     SECTION_EXPERIENCE,
     SECTION_PROFILE_TEXT,
     SECTION_SKILLS,
@@ -325,3 +327,33 @@ def test_public_identifier_and_profile_text_helpers():
     assert linkedin_public_identifier("https://www.linkedin.com/talent/profile/AEMAA") == ""
     assert clean_profile_text("## About\n[...]\n**Lead** engineer\n") == "About\n\nLead engineer"
     assert clean_profile_text("Planning &amp; Construction Manager") == "Planning & Construction Manager"
+
+
+def test_social_links_are_classified_by_host_for_jobdiva():
+    row = {"profile_url": "https://www.linkedin.com/in/ada-lovelace"}
+    data = {
+        "linkedin_profile": {"websites": ["https://github.com/ada", "ada.dev", "https://netflix.com/ada",
+                                          "https://stackoverflow.com/users/1", "https://www.linkedin.com/company/acme"]},
+        "urls": {"portfolio": "https://portfolio.ada.dev"},
+    }
+    assert jobdiva_social_links(row, data) == {
+        "LinkedIn": "https://www.linkedin.com/in/ada-lovelace",
+        "GitHub": "https://github.com/ada",
+        "Professional Website": "https://ada.dev",  # the first website; netflix.com is not x.com
+        "StackOverflow": "https://stackoverflow.com/users/1",
+    }
+    # A Recruiter-only link is not the person's public profile.
+    assert jobdiva_social_links({"profile_url": "https://www.linkedin.com/talent/profile/AEMAA1"}, {}) == {}
+
+
+def test_alternate_email_is_a_second_real_address():
+    data = {"zoominfo_contact_enrichment": {"workEmail": "ada@acme.dev", "personalEmail": "ada@home.dev"}}
+    assert alternate_email_of({"email": "ada@acme.dev"}, data, "ada@acme.dev") == "ada@home.dev"
+    assert alternate_email_of({"email": "ada@acme.dev"}, {}, "ada@acme.dev") == ""
+    assert alternate_email_of({}, {"linkedin_profile": {"emails": ["Auto_1@jobdiva.com", "x@y.dev"]}}, "") == "x@y.dev"
+
+
+def test_headline_that_repeats_the_name_is_not_printed_twice():
+    resume = build_profile_resume({"name": "Ada Lovelace", "headline": "ada lovelace", "source": "LinkedIn-Exa",
+                                   "location": "New York, NY"}, {})
+    assert resume.text.splitlines()[:2] == ["Ada Lovelace", "New York, NY"]

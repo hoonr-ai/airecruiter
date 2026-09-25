@@ -407,6 +407,9 @@ def test_linkedin_row_is_created_from_a_full_resume_file_and_address(harness):
         assert expected in text, expected
     assert "(Profile sourced via PAIR)" not in text
     assert call["profile_fields"] == {"city": "Jersey City", "state": "NJ", "countryid": "US"}
+    # The rest of what LinkedIn gives: the profile link for JobDiva's LinkedIn field.
+    assert call["social_links"] == {"LinkedIn": "https://www.linkedin.com/in/ada-lovelace"}
+    assert call["alternate_email"] == ""
     # A full profile needs no LinkedIn re-read.
     assert harness.reread_calls == []
 

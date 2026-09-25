@@ -221,6 +221,79 @@ def public_linkedin_url(*candidates: Any) -> str:
     return ""
 
 
+# JobDiva's social-network types (GET /apiv2/jobdiva/getSocialNetworkTypes,
+# 2026-09-25): "Professional Website", "MySpace", "LinkedIn", "X", "Facebook",
+# "YouTube", "StackOverflow", "Instagram", "GitHub". Matched on the URL's host.
+_SOCIAL_NETWORK_HOSTS = (
+    ("linkedin.com", "LinkedIn"),
+    ("github.com", "GitHub"),
+    ("stackoverflow.com", "StackOverflow"),
+    ("twitter.com", "X"),
+    ("x.com", "X"),
+    ("facebook.com", "Facebook"),
+    ("youtube.com", "YouTube"),
+    ("instagram.com", "Instagram"),
+)
+PROFESSIONAL_WEBSITE = "Professional Website"
+
+
+def _as_url(value: Any) -> str:
+    url = _line(value, 400)
+    if not url or " " in url or "." not in url or "@" in url.split("/")[0]:
+        return ""
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url.lstrip("/")
+    return url
+
+
+def jobdiva_social_links(row: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """JobDiva social-network name -> URL for every link the row carries: the
+    public LinkedIn profile, plus GitHub / portfolio / websites from the LinkedIn
+    profile and the résumé parse. Recruiter-only LinkedIn links are skipped."""
+    data = data if isinstance(data, dict) else _as_dict(row.get("data"))
+    profile = _as_dict(data.get("linkedin_profile"))
+    enhanced = _as_dict(data.get("enhanced_info")) or _as_dict(row.get("enhanced_info"))
+    urls = _as_dict(data.get("urls")) or _as_dict(enhanced.get("urls"))
+    out: Dict[str, str] = {}
+    linkedin = public_linkedin_url(
+        row.get("profile_url"), profile.get("public_profile_url"), urls.get("linkedin"), urls.get("linkedin_url"),
+    )
+    if linkedin:
+        out["LinkedIn"] = linkedin
+    for value in [*_as_list(profile.get("websites")), urls.get("github"), urls.get("portfolio"), urls.get("website")]:
+        url = _as_url(value)
+        if not url:
+            continue
+        host = urlparse(url).netloc.lower().split(":")[0]
+        name = next(
+            (label for domain, label in _SOCIAL_NETWORK_HOSTS if host == domain or host.endswith("." + domain)),
+            PROFESSIONAL_WEBSITE,
+        )
+        if name != "LinkedIn":  # only the public /in/ profile, taken above
+            out.setdefault(name, url)
+    return out
+
+
+def alternate_email_of(row: Dict[str, Any], data: Optional[Dict[str, Any]], primary: str) -> str:
+    """A second real email for the person (enrichment providers, LinkedIn, the
+    résumé parse) that differs from ``primary``; "" when there is none."""
+    from utils.email_utils import is_placeholder_email
+
+    data = data if isinstance(data, dict) else _as_dict(row.get("data"))
+    enrichment = _as_dict(data.get("zoominfo_contact_enrichment"))
+    profile = _as_dict(data.get("linkedin_profile"))
+    enhanced = _as_dict(data.get("enhanced_info")) or _as_dict(row.get("enhanced_info"))
+    primary_key = (primary or "").strip().lower()
+    for value in (
+        enrichment.get("workEmail"), enrichment.get("personalEmail"),
+        *_as_list(profile.get("emails")), enhanced.get("email"), row.get("email"),
+    ):
+        email = _line(value, 200)
+        if email and "@" in email and not is_placeholder_email(email) and email.lower() != primary_key:
+            return email
+    return ""
+
+
 def linkedin_public_identifier(url: Any) -> str:
     """``https://www.linkedin.com/in/jane-doe-123/`` -> ``jane-doe-123``."""
     public = public_linkedin_url(url)
@@ -750,6 +823,8 @@ def build_profile_resume(
     links = [u for u in [*_as_list(profile.get("websites")), urls.get("github"), urls.get("portfolio")] if _line(u, 400)]
 
     header = [name] if name else []
+    if headline and headline.casefold() == name.casefold():
+        headline = ""  # some rows carry the name in the headline column
     header += [line for line in (headline, location) if line]
     if email:
         header.append(f"Email: {email}")
