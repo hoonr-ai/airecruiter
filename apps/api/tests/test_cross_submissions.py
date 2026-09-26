@@ -190,6 +190,65 @@ def test_dnc_and_synthetic_contact_shape():
     assert c["phone"] == "5125550100"
 
 
+@pytest.mark.parametrize("source, candidate_id, blob, expected", [
+    ("JobDiva-TalentSearch", "123", {}, "123"),                                # own id IS the profile
+    ("JobDiva", "123", {"jobdiva_candidate_id": "999"}, "123"),                # own id beats a stored one
+    ("LinkedIn-Exa", "exa_linkedin.com/in/x", {"jobdiva_candidate_id": "456"}, "456"),  # profile Launch PAIR made
+    ("LinkedIn", "789", {}, ""),                                               # numeric-looking, not JobDiva
+    ("LinkedIn", "789", {"jobdiva_candidate_id": "789"}, "789"),               # emitter stamp proves it
+    ("Dice", "d1", {"jobdiva_candidate_id": "Auto_1"}, ""),                    # stored value not an id
+    ("Dice", "d1", None, ""),
+])
+def test_jobdiva_profile_id_for_follows_launch_trust_order(source, candidate_id, blob, expected):
+    assert cs.jobdiva_profile_id_for(source, candidate_id, blob) == expected
+
+
+def test_selected_candidates_carry_the_jobdiva_profile_id():
+    rows = [
+        _row(candidate_id="111", source="JobDiva-Applicants", email="a@x.com"),
+        _row(candidate_id="exa_linkedin.com/in/b", source="LinkedIn-Exa", email="b@x.com",
+             extra_blob={"jobdiva_candidate_id": "222"}),
+        _row(candidate_id="c3", source="Dice", email="c@x.com"),
+    ]
+    got = {c["candidate_id"]: c["jobdiva_candidate_id"] for c in _select(rows)}
+    assert got == {"111": "111", "exa_linkedin.com/in/b": "222", "c3": ""}
+
+
+def test_list_for_job_reads_jobdiva_profile_id_from_the_prior_row():
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.fetchone.return_value = JOB
+    cur.fetchall.return_value = [
+        {"id": 1, "candidate_id": "exa_x", "source": "LinkedIn-Exa", "prior_jobdiva_candidate_id": "555",
+         "screened_at": NOW, "match_score": 80},
+        {"id": 2, "candidate_id": "321", "source": "JobDiva", "prior_jobdiva_candidate_id": None,
+         "screened_at": NOW, "match_score": 70},  # prior row gone: a JobDiva row's own id still works
+    ]
+    with patch.object(cs, "get_db_connection", return_value=conn):
+        rows = cs.list_for_job("26-22222")
+    assert [r["jobdiva_candidate_id"] for r in rows] == ["555", "321"]
+    assert all("prior_jobdiva_candidate_id" not in r for r in rows)
+    sql = cur.execute.call_args_list[-1].args[0]
+    assert "LEFT JOIN LATERAL" in sql and "sc.jobdiva_id IN (cs.prior_jobdiva_id, cs.prior_job_id)" in sql
+
+
+def test_jobs_sharing_screen_report_matches_the_exact_prior_job():
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.fetchone.return_value = {"job_id": "1001", "jobdiva_id": "26-11111", "parent_job_id": "26-00001"}
+    cur.fetchall.return_value = [{"job_ref": "26-22222"}, {"job_ref": None}]
+    with patch.object(cs, "get_db_connection", return_value=conn):
+        refs = cs.jobs_sharing_screen_report("26-11111", "c1")
+    assert refs == ["26-22222"]
+    sql, params = cur.execute.call_args_list[-1].args
+    assert "FROM cross_submissions" in sql
+    assert params[0] == "c1"
+    assert params[1] == params[2] == ["26-11111", "1001"]  # ref + numeric id; never the parent version
+    conn.close.assert_called_once()
+
+
 def test_relevance_floor_ranking_and_cap():
     scores = {"hi": 91, "mid": 65, "low": 42, "edge": 60}
     rows = [_row(candidate_id=k, email=f"{k}@x.com") for k in scores]
@@ -405,6 +464,40 @@ def test_notify_cross_submissions_renders_rows_and_recipients():
     assert "/jobs/26-11111/report?candidateId=c1" in html_body
     assert "87%" in html_body and "80%" in html_body and "Sep 01, 2026" in html_body
     assert "Ada <Lovelace>" in plain
+
+
+def test_notify_cross_submissions_links_each_candidate_to_report_and_jobdiva_profile():
+    from core import email as email_mod
+
+    cands = [
+        {"name": "Ada", "candidate_id": "exa_linkedin.com/in/ada", "jobdiva_candidate_id": "4455",
+         "prior_jobdiva_id": "26-11111", "screen_result": "Pass", "match_score": 80},
+        {"name": "Bob", "candidate_id": "77", "jobdiva_candidate_id": "",
+         "prior_jobdiva_id": "26-11111", "screen_result": "Fail", "match_score": 70},
+    ]
+    with patch.object(email_mod, "_send", return_value=True) as send:
+        email_mod.notify_cross_submissions(
+            jobdiva_id="26-22222", job_id="2002", job_title="Data Engineer", customer_name="",
+            recruiter_emails=[], candidates=cands, app_base_url="https://pairqa.pyramidci.com",
+        )
+    _, _, html_body, plain = send.call_args.args[:4]
+    # Report link: the PRIOR job's report, candidate id URL-quoted.
+    assert 'href="https://pairqa.pyramidci.com/jobs/26-11111/report?candidateId=exa_linkedin.com%2Fin%2Fada"' in html_body
+    assert "https://pairqa.pyramidci.com/jobs/26-11111/report?candidateId=77" in html_body
+    # JobDiva link: the person's profile id (not candidate_id), only when known.
+    profile = "https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=4455"
+    assert f'href="{profile.replace("&", "&amp;")}"' in html_body
+    assert html_body.count("JobDiva profile") == 1
+    assert html_body.count("Screen report") == 2
+    assert f"JobDiva: {profile}" in plain
+    assert "screen report: https://pairqa.pyramidci.com/jobs/26-11111/report?candidateId=77" in plain
+
+
+def test_jobdiva_candidate_link_format():
+    from core import email as email_mod
+
+    assert email_mod.jobdiva_candidate_link("") == ""
+    assert email_mod.jobdiva_candidate_link(" 123 ").endswith("/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=123")
 
 
 def test_notify_cross_submissions_with_no_candidates_sends_nothing():
