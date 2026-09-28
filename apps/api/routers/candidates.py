@@ -2675,14 +2675,18 @@ _apollo_enrich_by_linkedin = contact_enrichment.apollo_enrich_by_linkedin
 # Exa Agent enrichment by LinkedIn URL (primary URL-keyed enricher).
 _exa_enrich_by_linkedin = contact_enrichment.exa_enrich_by_linkedin
 
+# Kipplo by LinkedIn URL (services/kipplo.py): the first provider of the chain.
+_kipplo_enrich_by_linkedin = contact_enrichment.kipplo_enrich_by_linkedin
+
 
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details using LinkedIn URL.
 
     Chain (each step runs only while email or phone is still missing):
-    ZoomInfo by email → ZoomInfo by name (at the current company) → Apollo by
-    URL → ZoomInfo by the email Apollo found → Exa Agent by URL. Exa is the
+    Kipplo by URL → ZoomInfo by email → ZoomInfo by name (at the current
+    company) → Apollo by URL → ZoomInfo by the email Apollo found → Exa Agent
+    by URL. Exa is the
     paid fallback: it runs only after Apollo has been asked, and only for the
     fields still missing afterwards. Earlier providers win on primary fields
     (mobilePhone/workPhone/workEmail/personalEmail); phone candidates from all
@@ -2772,6 +2776,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # ZoomInfo's name search is accepted only when it is unambiguous). Order,
     # stopping as soon as we have BOTH an email and a phone so we never spend
     # Exa/Apollo credits needlessly:
+    #   0b. Kipplo by URL     - first provider (2026-09-28); asked only for the
+    #       fields still missing, since it bills per field group it finds.
     #   1.  ZoomInfo by EMAIL - only when we already have an email (ZoomInfo
     #       cannot match by LinkedIn URL on our entitlement).
     #   1b. ZoomInfo by NAME  - for URL-only candidates with no seed email
@@ -2856,6 +2862,30 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "workPhone": "",
             "phoneCandidates": [cached["phone"]] if cached.get("phone") else [],
         })
+
+    # 0b. Kipplo by LinkedIn URL (services/kipplo.py). First provider: it
+    #     matches the URL itself, answers in ~2s, a miss is free and a hit costs
+    #     1 credit per email group / 5 for a mobile, so it is asked for exactly
+    #     what the candidate still lacks. Everything below runs only for what
+    #     Kipplo did not find — and whatever goes wrong with Kipplo (rate limit,
+    #     out of credits, rejected key, network, a bug) the rest of the chain
+    #     still runs, ending at Exa: cheapest first, but the contact is got.
+    kipplo_contributed = False
+    kipplo_filled: Tuple[str, ...] = ()
+    kipplo_outcome = "-"
+    kipplo_fields = _missing_contact()
+    if kipplo_fields:
+        try:
+            _kp = await _kipplo_enrich_by_linkedin(candidate_id, linkedin_url, fields=kipplo_fields)
+        except Exception as e:
+            logger.warning("enrich_contact: Kipplo raised for %s: %s", candidate_id, e)
+            _kp = {"ok": False, "message": f"raised {type(e).__name__}"}
+        if _kp.get("ok") and _merge_primary(_kp.get("fields") or {}):
+            kipplo_contributed = True
+            kipplo_filled = tuple(f for f in kipplo_fields if f not in _missing_contact())
+        kipplo_outcome = ",".join(kipplo_filled) or (
+            "miss" if _kp.get("ok") else str(_kp.get("message") or "failed")
+        )
 
     # 1. ZoomInfo by EMAIL (only when we have an email and still need a phone).
     if seed_email and not _have_email_and_phone():
@@ -2995,6 +3025,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # Provider attribution = first source that contributed (execution order).
     if cache_contributed:
         provider_used = "cache"
+    elif kipplo_contributed:
+        provider_used = "kipplo"
     elif zoominfo_contributed:
         provider_used = "zoominfo"
     elif apollo_contributed:
@@ -3007,11 +3039,11 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         provider_used = "exa"
 
     logger.info(
-        "Contact enrich providers for %s | zoominfo=%s apollo_called=%s apollo=%s "
+        "Contact enrich providers for %s | kipplo=%s zoominfo=%s apollo_called=%s apollo=%s "
         "zoominfo_by_found_email=%s apollo_phone=%s exa_asked=%s exa=%s | provider=%s",
-        candidate_id, zoominfo_contributed, apollo_attempted, apollo_contributed,
-        zoominfo_followup_contributed, apollo_phone_state or "-", ",".join(exa_fields) or "-",
-        exa_contributed, provider_used,
+        candidate_id, kipplo_outcome, zoominfo_contributed, apollo_attempted,
+        apollo_contributed, zoominfo_followup_contributed, apollo_phone_state or "-",
+        ",".join(exa_fields) or "-", exa_contributed, provider_used,
     )
 
     raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
@@ -3073,13 +3105,15 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         _phone_provider = "apollo"
     elif exa_contributed and "phone" in exa_fields:
         _phone_provider = "exa"
+    elif "phone" in kipplo_filled:
+        _phone_provider = "kipplo"
     else:
         _phone_provider = provider_used
     await contact_cache.record(
         linkedin_url,
         email=_new_email,
         phone=_new_phone,
-        email_provider=provider_used,
+        email_provider="kipplo" if "email" in kipplo_filled else provider_used,
         phone_provider=_phone_provider,
         missed=[f for f in exa_fields if exa_answered and f in _missing_contact()],
     )
