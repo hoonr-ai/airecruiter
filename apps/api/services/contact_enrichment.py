@@ -1,4 +1,8 @@
-"""Contact enrichment via ZoomInfo + Apollo.
+"""Contact enrichment via Kipplo, ZoomInfo, Apollo and Exa.
+
+Kipplo (services/kipplo.py, by LinkedIn URL) is the first provider in both
+chains since 2026-09-28; the ZoomInfo -> Apollo -> Exa steps below run only for
+what it did not find.
 
 Two surfaces:
 
@@ -45,6 +49,7 @@ from core.config import (
     EXA_CONTACT_ENRICH_ENABLED,
     EXA_CONTACT_ENRICH_TIMEOUT_S,
 )
+from services.kipplo import enrich_by_linkedin as kipplo_enrich_by_linkedin
 from services.zoominfo_auth import (
     ZoomInfoAuthFailed,
     ZoomInfoAuthNotConfigured,
@@ -1032,8 +1037,8 @@ async def enrich_contact_for_sourcing(
 ) -> Dict[str, Any]:
     """First-hit-wins sourcing-time enrichment.
 
-    Provider order is cheapest-useful-first, with the paid provider last:
-    ZoomInfo-by-name -> Apollo-by-URL -> ZoomInfo-by-email -> Exa Agent.
+    Provider order: Kipplo-by-URL (first since 2026-09-28) -> ZoomInfo-by-name
+    -> Apollo-by-URL -> ZoomInfo-by-email -> Exa Agent (paid, last).
 
     Returns {workEmail, personalEmail, mobilePhone, workPhone, provider_used}
     on success, or `{}` when:
@@ -1148,6 +1153,29 @@ async def enrich_contact_for_sourcing(
                     _JOB_ENRICH_COUNTERS[job_key] = used + 1  # bump once so we don't re-log every call
                 return {}
             _JOB_ENRICH_COUNTERS[job_key] = used + 1
+
+        # Kipplo first (services/kipplo.py): matches the LinkedIn URL itself and
+        # bills only the field groups it finds, so it is asked for exactly the
+        # fields this call may buy (no phone at sourcing). Outside the provider
+        # semaphore: waiting for a Kipplo rate-limit slot must not hold up the
+        # ZoomInfo/Apollo lookups of other rows.
+        if wanted:
+            kipplo_label = (full_name or "").strip() or linkedin_url
+            try:
+                kipplo_result = await kipplo_enrich_by_linkedin(kipplo_label, linkedin_url, fields=tuple(wanted))
+            except Exception as e:
+                logger.warning("contact_enrichment Kipplo path raised for %s: %s", kipplo_label, e)
+                kipplo_result = {"ok": False}
+            if kipplo_result.get("ok") and _has_usable_field(kipplo_result.get("fields") or {}):
+                fields = kipplo_result["fields"]
+                logger.info("contact_enrichment: kipplo hit for %s", job_key)
+                return {
+                    "workEmail": fields.get("workEmail", ""),
+                    "personalEmail": fields.get("personalEmail", ""),
+                    "mobilePhone": fields.get("mobilePhone", ""),
+                    "workPhone": fields.get("workPhone", ""),
+                    "provider_used": "kipplo",
+                }
 
         async with _PROVIDER_SEMAPHORE:
             # ZoomInfo requires a name (new Data API doesn't accept linkedinUrl as

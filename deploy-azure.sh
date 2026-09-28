@@ -201,6 +201,21 @@ if [ -f "$API_DIR/.env" ]; then
     else
         print_status "APP_BASE_URL matches deployed domain"
     fi
+
+    # KIPPLO_API_KEY (contact enrichment) comes from the GitHub secret of the
+    # same name via deploy.yml. Written only when the secret is set and differs,
+    # so an unset secret leaves a key added to .env by hand alone. The value is
+    # never printed.
+    if [ -n "${KIPPLO_API_KEY:-}" ]; then
+        CURRENT_KIPPLO_API_KEY=$(grep -E '^KIPPLO_API_KEY=' "$API_DIR/.env" | tail -n1 | cut -d= -f2- | tr -d '"'"'"'" ')
+        if [ "$CURRENT_KIPPLO_API_KEY" != "$KIPPLO_API_KEY" ]; then
+            sed -i '/^KIPPLO_API_KEY=/d' "$API_DIR/.env"
+            echo "KIPPLO_API_KEY=$KIPPLO_API_KEY" >> "$API_DIR/.env"
+            print_status "KIPPLO_API_KEY updated in .env from the deploy secret"
+        else
+            print_status "KIPPLO_API_KEY matches the deploy secret"
+        fi
+    fi
 else
     print_warning "API environment file not found. Please ensure .env is present in $API_DIR"
 fi
