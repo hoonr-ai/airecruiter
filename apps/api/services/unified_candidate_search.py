@@ -587,9 +587,11 @@ class UnifiedCandidateSearch:
         if not enrich:
             return
 
+        # Only a personal number becomes the candidate's phone; a work line
+        # (workPhone) is never used for outreach.
         if overwrite:
             new_email = enrich.get("workEmail") or enrich.get("personalEmail") or ""
-            new_phone = enrich.get("mobilePhone") or enrich.get("workPhone") or ""
+            new_phone = enrich.get("mobilePhone") or ""
             if new_email:
                 cand["email"] = new_email
             if new_phone:
@@ -604,7 +606,6 @@ class UnifiedCandidateSearch:
             cand["phone"] = (
                 cand.get("phone")
                 or enrich.get("mobilePhone")
-                or enrich.get("workPhone")
                 or ""
             )
         if cand.get("email") or cand.get("phone"):

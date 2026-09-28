@@ -178,24 +178,28 @@ function getCandidateLaunchEmail(candidate: any): string {
   ).trim().toLowerCase();
 }
 
+// The phone PAIR calls: the candidate's personal number only. Work lines
+// (workPhone, or a phone an earlier lookup saved from one) are never used, so
+// such a candidate is enriched at launch to find their own number.
 function getCandidateLaunchPhone(candidate: any): string {
-  return String(
-    candidate?.phone ||
-    candidate?.workPhone ||
-    candidate?.mobilePhone ||
-    candidate?.enhanced_info?.phone ||
-    candidate?.enhanced_info?.workPhone ||
-    candidate?.enhanced_info?.mobilePhone ||
-    candidate?.data?.phone ||
-    candidate?.data?.workPhone ||
-    candidate?.data?.mobilePhone ||
-    candidate?.data?.enhanced_info?.phone ||
-    candidate?.data?.enhanced_info?.workPhone ||
-    candidate?.data?.enhanced_info?.mobilePhone ||
-    candidate?.data?.zoominfo_contact_enrichment?.mobilePhone ||
-    candidate?.data?.zoominfo_contact_enrichment?.workPhone ||
-    ""
-  ).trim();
+  const enrich = candidate?.data?.zoominfo_contact_enrichment || {};
+  const digits = (value: any) => String(value || "").replace(/\D/g, "");
+  const savedWork = digits(enrich.workPhone);
+  const savedMobile = digits(enrich.mobilePhone);
+  const isSavedWorkNumber = (value: any) =>
+    !!savedWork && digits(value) === savedWork && digits(value) !== savedMobile;
+  const options = [
+    candidate?.phone,
+    candidate?.mobilePhone,
+    candidate?.enhanced_info?.phone,
+    candidate?.enhanced_info?.mobilePhone,
+    candidate?.data?.phone,
+    candidate?.data?.mobilePhone,
+    candidate?.data?.enhanced_info?.phone,
+    candidate?.data?.enhanced_info?.mobilePhone,
+    enrich.mobilePhone,
+  ];
+  return String(options.find(value => String(value || "").trim() && !isSavedWorkNumber(value)) || "").trim();
 }
 
 // Utility function to clean location_type values and filter out employment terms
@@ -8458,7 +8462,8 @@ function NewJobPageContent() {
             return;
           }
           const enriched = await res.json();
-          const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
+          // `phone` is the candidate's personal number (never a work line).
+          const nextPhone = enriched?.phone || enriched?.mobilePhone || "";
           const nextEmail = enriched?.email || "";
           const phoneSource = String(enriched?.phone_source || "").trim();
           if (nextPhone || nextEmail) {
