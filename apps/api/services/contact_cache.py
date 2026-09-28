@@ -41,14 +41,22 @@ CREATE_SQL = """
         phone_provider TEXT,
         phone_found_at TIMESTAMPTZ,
         phone_missed_at TIMESTAMPTZ,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        phone_personal BOOLEAN
     )
 """
+
+# Phones are reused only when marked personal (user 2026-09-28: "we only need
+# personal phone number"). Rows written before the marker, including the
+# backfill, were filled from mobile OR work numbers, so their phone is ignored
+# and the person is looked up again.
+MIGRATE_SQL = "ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_personal BOOLEAN"
 
 READ_SQL = """
     SELECT email, email_provider, phone, phone_provider,
            email IS NOT NULL AND email_found_at > NOW() - make_interval(days => %(hit_days)s) AS email_fresh,
-           phone IS NOT NULL AND phone_found_at > NOW() - make_interval(days => %(hit_days)s) AS phone_fresh,
+           phone IS NOT NULL AND phone_personal IS TRUE
+               AND phone_found_at > NOW() - make_interval(days => %(hit_days)s) AS phone_fresh,
            email_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_missed_recent,
            phone_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_missed_recent
     FROM contact_enrichment_cache
@@ -61,7 +69,7 @@ READ_SQL = """
 UPSERT_SQL = """
     INSERT INTO contact_enrichment_cache AS c (
         linkedin_slug, email, email_provider, email_found_at, email_missed_at,
-        phone, phone_provider, phone_found_at, phone_missed_at, updated_at
+        phone, phone_provider, phone_found_at, phone_missed_at, updated_at, phone_personal
     ) VALUES (
         %(slug)s,
         %(email)s, %(email_provider)s,
@@ -70,7 +78,8 @@ UPSERT_SQL = """
         %(phone)s, %(phone_provider)s,
         CASE WHEN %(phone)s::text IS NOT NULL THEN NOW() END,
         CASE WHEN %(phone_missed)s THEN NOW() END,
-        NOW()
+        NOW(),
+        CASE WHEN %(phone)s::text IS NOT NULL THEN TRUE END
     )
     ON CONFLICT (linkedin_slug) DO UPDATE SET
         email = COALESCE(EXCLUDED.email, c.email),
@@ -81,6 +90,7 @@ UPSERT_SQL = """
         phone_provider = CASE WHEN EXCLUDED.phone IS NOT NULL THEN EXCLUDED.phone_provider ELSE c.phone_provider END,
         phone_found_at = COALESCE(EXCLUDED.phone_found_at, c.phone_found_at),
         phone_missed_at = COALESCE(EXCLUDED.phone_missed_at, c.phone_missed_at),
+        phone_personal = CASE WHEN EXCLUDED.phone IS NOT NULL THEN TRUE ELSE c.phone_personal END,
         updated_at = NOW()
 """
 
@@ -134,6 +144,7 @@ def _ensure_table(conn) -> None:
         # concurrency-safe on its own (same pattern as unipile_account_usage).
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('contact_enrichment_cache_ddl'))")
         cur.execute(CREATE_SQL)
+        cur.execute(MIGRATE_SQL)
     conn.commit()
     _table_ready = True
     # Seed from lookups paid for before the cache existed. Once per database
@@ -210,7 +221,8 @@ async def record(
     missed: Iterable[str] = (),
 ) -> None:
     """Remember what a lookup found (and which fields a complete lookup did not
-    find). No-op when there is nothing to say. Never raises."""
+    find). ``phone`` must be the candidate's PERSONAL number: it is stored as
+    one and reused as one. No-op when there is nothing to say. Never raises."""
     slug = linkedin_slug(linkedin_url)
     if not slug or not _enabled():
         return
