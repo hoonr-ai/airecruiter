@@ -23,8 +23,9 @@ only while the candidate still lacks a phone after ZoomInfo):
      candidate's sourced_candidates rows that still lack a phone. So a phone that
      arrives after step 2 gave up is still kept for next time.
 
-Number choice (``pick_phone``): mobile > home > direct > other. The company
-switchboard (work_hq) and ``invalid_number`` are never used. Numbers Apollo flags
+Number choice (``pick_phone``): mobile > home, personal numbers only. Work direct
+dials, the company switchboard (work_hq), untyped numbers and ``invalid_number``
+are never used. Numbers Apollo flags
 on a do-not-call registry are skipped unless APOLLO_PHONE_ALLOW_DNC=true. PAIR's
 own DNC list is still enforced at Launch.
 """
@@ -51,7 +52,10 @@ WEBHOOK_PATH = "/api/webhooks/apollo/phone"
 # minutes; retries are hours at most).
 REQUEST_TTL_S = 3 * 24 * 3600
 
-_TYPE_RANK = {"mobile": 0, "cell": 0, "home": 1, "work_direct": 2, "direct": 2, "other": 3}
+# Personal numbers only (user 2026-09-28: "we only need personal phone number"):
+# mobile first, then home. Work direct dials, switchboards and untyped/"other"
+# numbers are never picked.
+_TYPE_RANK = {"mobile": 0, "cell": 0, "home": 1}
 _SKIP_TYPES = {"work_hq", "hq", "organization", "company"}
 _SKIP_STATUSES = {"invalid_number", "invalid", "no_status_invalid"}
 _DNC_CLEAR = {"", "not_found", "none", "clear", "not_on_dnc"}
@@ -227,13 +231,13 @@ def pick_phone(payload: Any, person_id: str = "") -> Tuple[str, Dict[str, Any]]:
             ptype = str(item.get("type_cd") or item.get("type") or "").strip().lower()
             status = str(item.get("status_cd") or item.get("status") or "").strip().lower()
             dnc = str(item.get("dnc_status_cd") or item.get("dnc_status") or "").strip().lower()
-            if ptype in _SKIP_TYPES or status in _SKIP_STATUSES:
+            if ptype in _SKIP_TYPES or ptype not in _TYPE_RANK or status in _SKIP_STATUSES:
                 continue
             if dnc not in _DNC_CLEAR and not allow_dnc():
                 skipped_dnc += 1
                 continue
             rank = (
-                _TYPE_RANK.get(ptype, 3),
+                _TYPE_RANK[ptype],
                 0 if status == "valid_number" else 1,
                 _CONFIDENCE_RANK.get(str(item.get("confidence_cd") or "").strip().lower(), 3),
             )

@@ -324,5 +324,10 @@ def test_backfill_runs_once_against_sql(pg):
     assert first["people"] == 2 and first["emails"] == 2 and first["phones"] == 1
     assert second is None  # the done-marker stops a re-run
     amos = asyncio.run(contact_cache.get("https://linkedin.com/in/amos"))
-    assert amos["email"] == "amos@shell.com" and amos["phone"] == "+14155550100"
+    # Backfilled phones came from mobile OR work numbers, so they are stored but
+    # never reused as the candidate's personal phone (see phone_personal).
+    assert amos["email"] == "amos@shell.com" and amos["phone"] == ""
+    with pg.cursor() as cur:
+        cur.execute("SELECT phone, phone_personal FROM contact_enrichment_cache WHERE linkedin_slug = 'amos'")
+        assert cur.fetchone() == ("+14155550100", None)
     assert asyncio.run(contact_cache.get("https://linkedin.com/in/bea"))["email"] == "bea@new.com"

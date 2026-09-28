@@ -110,6 +110,17 @@ def enabled() -> bool:
     return _truthy("KIPPLO_CONTACT_ENRICH_ENABLED", "true") and bool(api_key())
 
 
+def supported_fields() -> Tuple[str, ...]:
+    """Contact fields Kipplo is asked for (KIPPLO_CONTACT_FIELDS, default "phone").
+
+    Phone only since 2026-09-28 (user: "we only need personal phone number,
+    this is returning work info"): its email groups are mostly business
+    (work) addresses, while its cell numbers are the personal mobiles the
+    other providers rarely have. Emails come from the rest of the chain."""
+    raw = os.getenv("KIPPLO_CONTACT_FIELDS", "phone")
+    return tuple(f for f in CONTACT_FIELDS if f in {p.strip().lower() for p in raw.split(",")})
+
+
 def execute_url() -> str:
     return (os.getenv("KIPPLO_EXECUTE_URL") or DEFAULT_EXECUTE_URL).strip()
 
@@ -309,10 +320,18 @@ def _emails(items: Any) -> List[str]:
     return out
 
 
+_CELL_TYPES = {"cellphone", "cell", "mobile", "mobile_phone", "cell_phone"}
+
+
 def _phones(items: Any) -> List[str]:
+    """Personal mobiles only: a number typed as anything but a cell phone
+    (work, landline, ...) is skipped."""
     out: List[str] = []
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
+            continue
+        ptype = str(item.get("type") or "").strip().lower()
+        if ptype and ptype not in _CELL_TYPES:
             continue
         phone = _normalise_phone(item.get("phone"))
         if not phone.startswith("+"):
@@ -671,7 +690,7 @@ async def enrich_by_linkedin(
     reason = unavailable()
     if reason:
         return {"ok": False, "message": f"Kipplo unavailable: {reason}"}
-    wanted = tuple(f for f in CONTACT_FIELDS if f in (fields or ()))
+    wanted = tuple(f for f in supported_fields() if f in (fields or ()))
     if not wanted:
         return {"ok": False, "message": "no contact fields requested"}
     slug = linkedin_slug(linkedin_url)

@@ -139,7 +139,8 @@ export function PhoneIndicator({
     }
   }
 
-  // Look the phone up through the provider chain (ZoomInfo → Apollo → Exa).
+  // Look the candidate's personal phone up through the provider chain
+  // (Kipplo → ZoomInfo → Apollo → Exa).
   // Sourcing deliberately does not buy phone numbers — they are the expensive
   // half of every provider, so spending on a candidate nobody has shortlisted is
   // speculative. This button (and Launch PAIR) are the moments with real intent,
@@ -160,16 +161,16 @@ export function PhoneIndicator({
           jobdiva_id: jobdivaId,
           linkedin_url: linkedinUrl,
           source,
+          // Only the phone: this button never buys an email.
+          fields: ["phone"],
         }),
       });
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(data?.detail || `Lookup failed (${res.status})`);
 
-      // `phone` is the endpoint's already-normalised primary pick; mobile/work
-      // are the raw per-slot values it also returns, kept as fallbacks.
-      const found = String(
-        data?.phone || data?.mobilePhone || data?.workPhone || "",
-      ).trim();
+      // `phone` is the endpoint's normalised pick: the candidate's personal
+      // number. A work line (workPhone) is never offered.
+      const found = String(data?.phone || data?.mobilePhone || "").trim();
       if (!found || countDigits(found) < 7) {
         // Not an error — the providers genuinely may not hold a number. Leave
         // the field ready so the recruiter can enter one they sourced elsewhere.

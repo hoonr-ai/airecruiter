@@ -51,6 +51,7 @@ from core.config import (
     EXA_CONTACT_ENRICH_TIMEOUT_S,
 )
 from services.kipplo import enrich_by_linkedin as kipplo_enrich_by_linkedin
+from services.kipplo import supported_fields as kipplo_supported_fields
 from services.zoominfo_auth import (
     ZoomInfoAuthFailed,
     ZoomInfoAuthNotConfigured,
@@ -91,8 +92,9 @@ _EXA_CONTACT_SCHEMA = {
                     "type": "string",
                     "format": "phone",
                     "description": (
-                        "The person's best direct phone number "
-                        "(mobile preferred), including country code."
+                        "The person's own personal mobile phone number, including "
+                        "country code. Not an office, company, switchboard or "
+                        "work direct-dial number: leave empty if only those exist."
                     ),
                 },
             },
@@ -244,6 +246,10 @@ def _extract_enrichment_fields_legacy(payload: Any) -> Dict[str, str]:
 # address, so nothing downstream would reject it.
 _APOLLO_MASKED_EMAIL_MARKERS = ("not_unlocked", "notunlocked", "email_not_unlocked")
 
+# Phone types that mean the candidate's own number. Only these may become the
+# candidate's phone; work / office / direct / switchboard / untyped never do.
+_PERSONAL_PHONE_TYPES = {"mobile", "cell", "cellphone", "cell_phone", "mobile_phone", "home", "personal"}
+
 
 def _apollo_real_email(value: Any) -> str:
     """Drop Apollo's masked-email placeholders, keep genuine addresses.
@@ -322,11 +328,16 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
                 personal_email = candidate
                 break
 
+    # mobilePhone is the PERSONAL number slot (user 2026-09-28: "we only need
+    # personal phone number"): only numbers Apollo types as mobile / cell /
+    # home. Direct dials, office lines and untyped numbers are work numbers and
+    # go to workPhone, which is never used as the candidate's phone.
     mobile_phone = _first_non_empty(
         person.get("mobile_phone"),
         person.get("mobile"),
         person.get("cell_phone"),
         person.get("cell"),
+        person.get("home_phone"),
     )
     work_phone = _first_non_empty(
         person.get("sanitized_phone"),
@@ -334,7 +345,6 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         person.get("organization_phone"),
         person.get("direct_phone"),
         person.get("office_phone"),
-        person.get("home_phone"),
         person.get("phone"),
         person.get("phone_number"),
     )
@@ -349,7 +359,7 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
             if not number:
                 continue
             ptype = str(item.get("type") or "").strip().lower() if isinstance(item, dict) else ""
-            if not mobile_phone and ptype in {"mobile", "cell", "cellphone"}:
+            if not mobile_phone and ptype in _PERSONAL_PHONE_TYPES:
                 mobile_phone = number
             elif not work_phone and ptype in {"work", "office", "direct"}:
                 work_phone = number
@@ -395,14 +405,12 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     _add_phone_candidate(payload.get("phone") if isinstance(payload, dict) else "")
     _add_phone_candidate(payload.get("phone_number") if isinstance(payload, dict) else "")
 
-    # Promote only person-level numbers into the candidate's phone slots.
-    personal_candidates = [p for p in phone_candidates if p not in org_phone_keys]
-    if not mobile_phone and personal_candidates:
-        mobile_phone = personal_candidates[0]
-    if not work_phone and len(personal_candidates) > 1:
-        work_phone = personal_candidates[1]
-    elif not work_phone and personal_candidates:
-        work_phone = personal_candidates[0]
+    # An untyped person-level number is not known to be personal, so it can
+    # fill workPhone but never mobilePhone (this used to promote the first one
+    # into mobilePhone, which put direct work lines on candidates as mobiles).
+    person_numbers = [p for p in phone_candidates if p not in org_phone_keys and p != _normalise_phone(mobile_phone)]
+    if not work_phone and person_numbers:
+        work_phone = person_numbers[0]
 
     return {
         "mobilePhone": mobile_phone,
@@ -561,7 +569,7 @@ def _build_exa_contact_query(
     """Natural-language query for the Exa Agent contact-enrichment run."""
     who = (full_name or "").strip() or "this person"
     wanted = " and ".join(
-        label for field, label in (("email", "work email"), ("phone", "phone number"))
+        label for field, label in (("email", "work email"), ("phone", "personal mobile phone number"))
         if field in fields
     )
     parts = [f"Find the {wanted} for {who}"]
@@ -1199,10 +1207,11 @@ async def enrich_contact_for_sourcing(
         # ZoomInfo/Apollo lookups of other rows. Any Kipplo failure (rate limit,
         # credits, key, network) falls through to the rest of the chain, which
         # ends at Exa.
-        if wanted:
+        kipplo_fields = tuple(f for f in wanted if f in kipplo_supported_fields())
+        if kipplo_fields:
             kipplo_label = (full_name or "").strip() or linkedin_url
             try:
-                kipplo_result = await kipplo_enrich_by_linkedin(kipplo_label, linkedin_url, fields=tuple(wanted))
+                kipplo_result = await kipplo_enrich_by_linkedin(kipplo_label, linkedin_url, fields=kipplo_fields)
             except Exception as e:
                 logger.warning("contact_enrichment Kipplo path raised for %s: %s", kipplo_label, e)
                 kipplo_result = {"ok": False}
@@ -1388,7 +1397,8 @@ async def enrich_contact_for_sourcing(
     await contact_cache.record(
         linkedin_url,
         email=(result.get("workEmail") or result.get("personalEmail") or "") if result else "",
-        phone=(result.get("mobilePhone") or result.get("workPhone") or "") if result else "",
+        # Personal numbers only: the cache marks every phone it stores as personal.
+        phone=(result.get("mobilePhone") or "") if result else "",
         email_provider=provider,
         phone_provider=provider,
         missed=trace.get("exa_asked", ()) if trace.get("exa_answered") else (),

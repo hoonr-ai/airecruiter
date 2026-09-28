@@ -73,12 +73,14 @@ def test_switchboards_invalid_numbers_and_other_people_are_skipped():
         _num("+12025550101", status="invalid_number"),
         _num("+12025550102", type_cd="work_direct"),
     )
-    assert apollo_phone.pick_phone(payload, "p1")[0] == "+12025550102"
+    # The work direct dial is a work number, so nothing personal is left.
+    assert apollo_phone.pick_phone(payload, "p1") == ("", {"credits_consumed": 8, "reason": "no usable number"})
     assert apollo_phone.pick_phone(payload, "someone-else") == ("", {
         "credits_consumed": 8, "reason": "no entry for the requested person"})
 
 
 def test_mobile_beats_direct_and_confidence_breaks_ties():
+    # (a work direct dial is never picked at all, see above)
     payload = _payload(
         _num("+12025550102", type_cd="work_direct"),
         _num("+12025550103", conf="low"),

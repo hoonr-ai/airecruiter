@@ -2566,6 +2566,9 @@ class EnrichCandidateContactRequest(BaseModel):
     # per-candidate click (phone button / Rankings), which is not gated.
     trigger: Optional[str] = None
     match_score: Optional[float] = None
+    # Which contact to look for ("email", "phone"); omitted = both. The Step-5
+    # phone button sends ["phone"] so it never buys an email.
+    fields: Optional[List[str]] = None
 
 
 def _normalise_phone(raw: str) -> str:
@@ -2807,6 +2810,26 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
     # contact info — treating one as a seed short-circuits the chain before
     # Apollo/Exa ever look for a genuine address, and it can't be messaged.
+    # A phone an earlier lookup saved from a WORK number (the chain used to fall
+    # back to one when no mobile turned up) is not the candidate's own, so it
+    # does not make them reachable by phone: look for a personal number.
+    if seed_phone and existing_rows and not (request.phone or "").strip():
+        _prev = _json_load_safe(existing_rows[0].get("data"), {})
+        _prev = _prev.get("zoominfo_contact_enrichment") if isinstance(_prev, dict) else None
+        if isinstance(_prev, dict):
+            _seed_n = _normalise_phone(seed_phone)
+            if (_seed_n and _seed_n == _normalise_phone(str(_prev.get("workPhone") or ""))
+                    and _seed_n != _normalise_phone(str(_prev.get("mobilePhone") or ""))):
+                logger.info(
+                    "enrich_contact: saved phone for %s is a work number from an earlier lookup; "
+                    "looking for a personal one", candidate_id,
+                )
+                seed_phone = ""
+    requested_fields = tuple(
+        f for f in ("email", "phone")
+        if not request.fields or f in {str(x).strip().lower() for x in request.fields}
+    ) or ("email", "phone")
+
     from utils.email_utils import is_placeholder_email
     if seed_email and is_placeholder_email(seed_email):
         logger.info(
@@ -2816,11 +2839,17 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         seed_email = ""
 
     def _missing_contact() -> Tuple[str, ...]:
-        """Which of email / phone the candidate still lacks (seed + found so far)."""
+        """Which of the requested email / phone the candidate still lacks (seed +
+        found so far). Only a PERSONAL number counts as a phone (user
+        2026-09-28: "we only need personal phone number"): a work line found on
+        the way does not stop the chain looking for the candidate's own."""
         have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
-        _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or extracted.get("workPhone") or "")
+        _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or "")
         have_phone = sum(1 for ch in _p if ch.isdigit()) >= 7
-        return tuple(field for field, have in (("email", have_email), ("phone", have_phone)) if not have)
+        return tuple(
+            field for field, have in (("email", have_email), ("phone", have_phone))
+            if not have and field in requested_fields
+        )
 
     def _have_email_and_phone() -> bool:
         return not _missing_contact()
@@ -2848,6 +2877,9 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             merged.append(n)
         if merged:
             extracted["phoneCandidates"] = merged
+        personal = _normalise_phone(str(fields.get("mobilePhone") or ""))
+        if sum(1 for ch in personal if ch.isdigit()) >= 7 and personal not in extracted.setdefault("personalPhones", []):
+            extracted["personalPhones"].append(personal)
         return contributed
 
     # 0. Cache (free).
@@ -2873,7 +2905,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     kipplo_contributed = False
     kipplo_filled: Tuple[str, ...] = ()
     kipplo_outcome = "-"
-    kipplo_fields = _missing_contact()
+    kipplo_fields = tuple(f for f in _missing_contact() if f in contact_enrichment.kipplo_supported_fields())
     if kipplo_fields:
         try:
             _kp = await _kipplo_enrich_by_linkedin(candidate_id, linkedin_url, fields=kipplo_fields)
@@ -3051,43 +3083,15 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     raw_work_email = extracted.get("workEmail") or ""
     raw_personal_email = extracted.get("personalEmail") or ""
 
-    raw_phone_candidates = extracted.get("phoneCandidates") if isinstance(extracted, dict) else []
-    if not isinstance(raw_phone_candidates, list):
-        raw_phone_candidates = []
-
-    normalised_candidates: List[str] = []
-    seen_candidates = set()
-    for candidate in [raw_mobile_phone, raw_work_phone, *raw_phone_candidates]:
-        n = _normalise_phone(str(candidate or ""))
-        if not n:
-            continue
-        if sum(1 for ch in n if ch.isdigit()) < 7:
-            continue
-        if n in seen_candidates:
-            continue
-        seen_candidates.add(n)
-        normalised_candidates.append(n)
-
-    phone_candidates_top2 = normalised_candidates[:2]
-
-    mobile_phone_normalised = _normalise_phone(raw_mobile_phone)
-    work_phone_normalised = _normalise_phone(raw_work_phone)
-    if sum(1 for ch in mobile_phone_normalised if ch.isdigit()) < 7:
-        mobile_phone_normalised = ""
-    if sum(1 for ch in work_phone_normalised if ch.isdigit()) < 7:
-        work_phone_normalised = ""
-
-    phone_source = "none"
-    if mobile_phone_normalised:
-        phone_source = "mobilePhone"
-    elif work_phone_normalised:
-        phone_source = "workPhone"
-    elif phone_candidates_top2:
-        phone_source = "phoneCandidates"
-
-    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or (phone_candidates_top2[0] if phone_candidates_top2 else ""))
+    # Personal numbers only: the phone PAIR calls is the candidate's own mobile
+    # (or home) number from a provider's mobilePhone slot. A work line is still
+    # returned as workPhone for reference but never becomes the phone, and the
+    # alternatives offered are personal numbers too.
+    phone_candidates_top2 = list(extracted.get("personalPhones") or [])[:2]
+    enriched_phone = _normalise_phone(raw_mobile_phone)
     if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
         enriched_phone = ""
+    phone_source = "mobilePhone" if enriched_phone else "none"
 
     enriched_email = (
         raw_work_email

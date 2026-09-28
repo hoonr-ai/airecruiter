@@ -110,6 +110,9 @@ class _Clock:
 @pytest.fixture(autouse=True)
 def clock(monkeypatch):
     monkeypatch.setenv("KIPPLO_API_KEY", "test-key")
+    # These tests cover mechanics with emails and phones. Production asks
+    # Kipplo for personal phones only (tests/test_personal_phone_only.py).
+    monkeypatch.setenv("KIPPLO_CONTACT_FIELDS", "email,phone")
     monkeypatch.setattr(kipplo, "_unavailable_until", 0.0)
     monkeypatch.setattr(kipplo, "_unavailable_reason", "")
     monkeypatch.setattr(kipplo, "_rate_blocked_until", 0.0)
