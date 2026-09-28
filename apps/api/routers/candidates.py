@@ -2890,6 +2890,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     #    get both email+phone here short-circuit and never reach the slow, paid
     #    Exa path.
     apollo_contributed = False
+    apollo_result: Dict[str, Any] = {}
     if not _have_email_and_phone():
         apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
         apollo_attempted = True
@@ -2912,11 +2913,52 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         if _zi_found.get("ok"):
             zoominfo_followup_contributed = _merge_primary(_zi_found.get("fields") or {})
 
+    # 2c. Apollo personal phone (services/apollo_phone.py). Apollo hands out
+    #     personal / mobile numbers only through an async phone job delivered to
+    #     our webhook (8 credits per number found), so it is asked only while the
+    #     phone is still missing after ZoomInfo, and not for a person a recent
+    #     complete lookup found none for (Launch only). Waits up to
+    #     APOLLO_PHONE_WAIT_S; a number that lands later is still kept (cache +
+    #     sourced rows) for the next launch.
+    from services import apollo_phone
+    apollo_phone_contributed = False
+    apollo_phone_state = ""
+    if (
+        "phone" in _missing_contact()
+        and apollo_attempted
+        and not (honour_cached_misses and cached.get("phone_missed"))
+        and apollo_phone.reveal_available()
+    ):
+        _phone_job = await apollo_phone.request_phone(
+            candidate_id,
+            linkedin_url,
+            apollo_person_id=str(apollo_result.get("person_id") or ""),
+            jobdiva_id=request.jobdiva_id or (_row0.get("jobdiva_id") if _row0 else None),
+        )
+        apollo_phone_state = "not_started"
+        if _phone_job:
+            _got = await apollo_phone.wait_for_phone(_phone_job)
+            apollo_phone_state = _got["state"]
+            if _got.get("phone"):
+                apollo_phone_contributed = _merge_primary(
+                    {"mobilePhone": _got["phone"], "phoneCandidates": [_got["phone"]]}
+                )
+
     # 3. Exa Agent by LinkedIn URL - slow (polls to timeout) + paid (~$0.115),
     #    so strictly the fallback for an Apollo miss: never before Apollo has
     #    been asked, and only for the fields Apollo left missing — the agent
     #    bills per field it fills, so we never pay it for contact we hold.
     exa_fields = _missing_contact()
+    if (
+        apollo_phone_state == "timeout"
+        and "phone" in exa_fields
+        and not apollo_phone.exa_after_timeout()
+    ):
+        logger.info(
+            "enrich_contact: Apollo phone still pending for %s — not buying it from Exa "
+            "(APOLLO_PHONE_EXA_AFTER_TIMEOUT=false)", candidate_id,
+        )
+        exa_fields = tuple(f for f in exa_fields if f != "phone")
     # Optional stricter spend rule (off by default): Exa only for a candidate
     # nobody else could reach -- never to top up a phone for one with an email.
     from core import sourcing_config as _sc_ondemand
@@ -2959,14 +3001,17 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         provider_used = "apollo"
     elif zoominfo_followup_contributed:
         provider_used = "zoominfo"
+    elif apollo_phone_contributed:
+        provider_used = "apollo"
     elif exa_contributed:
         provider_used = "exa"
 
     logger.info(
         "Contact enrich providers for %s | zoominfo=%s apollo_called=%s apollo=%s "
-        "zoominfo_by_found_email=%s exa_asked=%s exa=%s | provider=%s",
+        "zoominfo_by_found_email=%s apollo_phone=%s exa_asked=%s exa=%s | provider=%s",
         candidate_id, zoominfo_contributed, apollo_attempted, apollo_contributed,
-        zoominfo_followup_contributed, ",".join(exa_fields) or "-", exa_contributed, provider_used,
+        zoominfo_followup_contributed, apollo_phone_state or "-", ",".join(exa_fields) or "-",
+        exa_contributed, provider_used,
     )
 
     raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
@@ -3024,12 +3069,18 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # would keep extending their TTL) and what a clean Exa answer lacked.
     _new_email = enriched_email if enriched_email and enriched_email != (cached.get("email") or "").lower() else ""
     _new_phone = enriched_phone if enriched_phone and enriched_phone != (cached.get("phone") or "") else ""
+    if apollo_phone_contributed:
+        _phone_provider = "apollo"
+    elif exa_contributed and "phone" in exa_fields:
+        _phone_provider = "exa"
+    else:
+        _phone_provider = provider_used
     await contact_cache.record(
         linkedin_url,
         email=_new_email,
         phone=_new_phone,
         email_provider=provider_used,
-        phone_provider=provider_used,
+        phone_provider=_phone_provider,
         missed=[f for f in exa_fields if exa_answered and f in _missing_contact()],
     )
 
