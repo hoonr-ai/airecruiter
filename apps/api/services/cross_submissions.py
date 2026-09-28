@@ -234,6 +234,24 @@ def screened_at_from_blob(blob: Dict[str, Any], fallback: Any = None) -> Optiona
     return parse_ts(fallback)
 
 
+def jobdiva_profile_id_for(source: Any, candidate_id: Any, blob: Optional[Dict[str, Any]]) -> str:
+    """The person's JobDiva profile id, or "" — what the JobDiva link opens.
+
+    Same trust order as Launch PAIR (``routers.engagement._resolve_link_candidate_id``):
+    a JobDiva-sourced row's own id IS the profile id and beats a stored one;
+    otherwise the profile Launch PAIR created or matched, stored on the row as
+    ``data.jobdiva_candidate_id``. A LinkedIn/Exa row's own id is never a
+    JobDiva id, and a non-numeric stored value is not one either.
+    """
+    from services.jobdiva import jobdiva_profile_id  # local: keeps this module's import light
+
+    stored = str((blob or {}).get("jobdiva_candidate_id") or "").strip()
+    own = jobdiva_profile_id(source, candidate_id, stored)
+    if own:
+        return own
+    return stored if stored.isdigit() else ""
+
+
 def format_screen_score(score: Any, total: Any) -> str:
     try:
         s = float(score)
@@ -359,6 +377,7 @@ def select_candidates(
             "phone": str(phone or "").strip(),
             "headline": row.get("headline") or "",
             "location": row.get("location") or "",
+            "jobdiva_candidate_id": jobdiva_profile_id_for(row.get("source"), row.get("candidate_id"), blob),
             "prior_job_id": str(row.get("prior_job_id") or ""),
             "prior_jobdiva_id": str(prior_ref or ""),
             "prior_job_title": row.get("prior_title") or row.get("prior_enhanced_title") or "",
@@ -610,7 +629,12 @@ def mark_notified(cur, ids: List[int]) -> None:
 
 
 def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
-    """Stored cross submissions for a job (newest/highest match first)."""
+    """Stored cross submissions for a job (newest/highest match first).
+
+    ``jobdiva_candidate_id`` is read from the prior screened row at request
+    time rather than stored here, so rows listed before the JobDiva link
+    existed get one too, and a profile Launch PAIR attached later shows up.
+    """
     conn = get_db_connection()
     try:
         with _dict_cursor(conn) as cur:
@@ -618,13 +642,24 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
             keys = job_keys(job, job_ref) if job else [job_ref]
             cur.execute(
                 """
-                SELECT id, job_id, jobdiva_id, person_key, candidate_id, source, name, email, phone, headline, location,
-                       prior_job_id, prior_jobdiva_id, prior_job_title, prior_customer_name,
-                       engage_status, screen_result, engage_score, engage_total_score, screened_at,
-                       match_score, matched_skills, missing_skills, created_at, notified_at, added_at
-                FROM cross_submissions
-                WHERE job_id = ANY(%s) OR jobdiva_id = ANY(%s)
-                ORDER BY match_score DESC, screened_at DESC
+                SELECT cs.id, cs.job_id, cs.jobdiva_id, cs.person_key, cs.candidate_id, cs.source, cs.name,
+                       cs.email, cs.phone, cs.headline, cs.location,
+                       cs.prior_job_id, cs.prior_jobdiva_id, cs.prior_job_title, cs.prior_customer_name,
+                       cs.engage_status, cs.screen_result, cs.engage_score, cs.engage_total_score, cs.screened_at,
+                       cs.match_score, cs.matched_skills, cs.missing_skills, cs.created_at, cs.notified_at, cs.added_at,
+                       prior.jobdiva_candidate_id AS prior_jobdiva_candidate_id
+                FROM cross_submissions cs
+                LEFT JOIN LATERAL (
+                    SELECT sc.data->>'jobdiva_candidate_id' AS jobdiva_candidate_id
+                    FROM sourced_candidates sc
+                    WHERE sc.jobdiva_id IN (cs.prior_jobdiva_id, cs.prior_job_id)
+                      AND sc.candidate_id = cs.candidate_id
+                      AND sc.source = cs.source
+                    ORDER BY sc.updated_at DESC NULLS LAST
+                    LIMIT 1
+                ) prior ON TRUE
+                WHERE cs.job_id = ANY(%s) OR cs.jobdiva_id = ANY(%s)
+                ORDER BY cs.match_score DESC, cs.screened_at DESC
                 """,
                 (keys, keys),
             )
@@ -632,6 +667,10 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
     finally:
         conn.close()
     for r in rows:
+        r["jobdiva_candidate_id"] = jobdiva_profile_id_for(
+            r.get("source"), r.get("candidate_id"),
+            {"jobdiva_candidate_id": r.pop("prior_jobdiva_candidate_id", None)},
+        )
         for k in ("screened_at", "created_at", "notified_at", "added_at"):
             if isinstance(r.get(k), datetime):
                 r[k] = r[k].isoformat()
@@ -642,6 +681,39 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
                 except (TypeError, ValueError):
                     pass
     return rows
+
+
+def jobs_sharing_screen_report(prior_ref: str, candidate_id: str, limit: int = 10) -> List[str]:
+    """Jobs whose cross-submission list carries ``candidate_id``'s screen from ``prior_ref``.
+
+    Each cross submission links the recruiter to the PRIOR job's screen report
+    (``/jobs/<prior ref>/report?candidateId=<id>``), but the people it is sent
+    to — the new job's team — are usually not on the prior job. The report
+    endpoint lets anyone with access to one of these jobs read that report
+    (``routers.candidates._cross_submission_report_grant``). Only the exact
+    prior job (its ref or numeric id) matches; versions of it do not.
+    """
+    conn = get_db_connection()
+    try:
+        with _dict_cursor(conn) as cur:
+            cur.execute("SET LOCAL statement_timeout = '5000ms'")
+            job = load_job(cur, prior_ref)
+            prior_keys = [str(k) for k in dict.fromkeys(
+                k for k in (prior_ref, (job or {}).get("job_id"), (job or {}).get("jobdiva_id")) if k
+            )]
+            cur.execute(
+                """
+                SELECT DISTINCT COALESCE(NULLIF(jobdiva_id, ''), job_id) AS job_ref
+                FROM cross_submissions
+                WHERE candidate_id = %s
+                  AND (prior_jobdiva_id = ANY(%s) OR prior_job_id = ANY(%s))
+                LIMIT %s
+                """,
+                (str(candidate_id), prior_keys, prior_keys, int(limit)),
+            )
+            return [str(r["job_ref"]) for r in cur.fetchall() if r.get("job_ref")]
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

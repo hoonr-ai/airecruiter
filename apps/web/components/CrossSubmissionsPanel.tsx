@@ -7,8 +7,10 @@
  * who also match this job. They are NOT on this job's candidate list — every
  * other row on the rank list is — so the panel is visually separate and each
  * row carries an action: "Add to job" copies the person into this job's pool
- * (Pending, goes through the normal Launch PAIR gate), "Screen report" opens
- * the prior job's report. Hidden entirely when the list is empty.
+ * (Pending, goes through the normal Launch PAIR gate). Under the name, as on
+ * the rank list, "Screen report" opens the prior job's report (readable by
+ * this job's recruiters through the cross submission) and "JobDiva" opens the
+ * person's JobDiva profile. Hidden entirely when the list is empty.
  *
  * Data: GET /jobs/{id}/cross-submissions (stored list, filled by the Step-5
  * search hook or by "Refresh" → POST …/run).
@@ -18,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronUp, ExternalLink, Loader2, Mail, Phone, RefreshCw, Repeat, UserPlus, Check } from "lucide-react";
 import { api, type CrossSubmission } from "@/lib/api";
+import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { getScoreBand, getScoreTone } from "@/lib/match-score";
 import { cn } from "@/lib/utils";
 
@@ -215,9 +218,10 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
             <tbody>
               {rows.map(row => {
                 const added = !!row.added_at;
-                const reportHref = row.prior_jobdiva_id
-                  ? `/jobs/${encodeURIComponent(row.prior_jobdiva_id)}/report?candidateId=${encodeURIComponent(row.candidate_id || "")}`
+                const reportHref = row.prior_jobdiva_id && row.candidate_id
+                  ? `/jobs/${encodeURIComponent(row.prior_jobdiva_id)}/report?candidateId=${encodeURIComponent(row.candidate_id)}`
                   : null;
+                const jobDivaHref = buildJobDivaCandidateUrl(row.jobdiva_candidate_id);
                 const score = screenScore(row);
                 return (
                   <tr key={row.id} className={cn("border-b border-slate-100 align-top", added && "opacity-60")}>
@@ -226,6 +230,31 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
                       {(row.headline || row.location) && (
                         <div className="text-[11px] text-slate-500 truncate max-w-[260px]">
                           {[row.headline, row.location].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
+                      {(reportHref || jobDivaHref) && (
+                        <div className="flex items-center gap-3 mt-1 text-[11px] font-medium">
+                          {reportHref && (
+                            <Link
+                              href={reportHref}
+                              target="_blank"
+                              className="inline-flex items-center gap-1 text-indigo-600 hover:underline"
+                              title="Open the PAIR screen report from the previous job"
+                            >
+                              <ExternalLink className="w-3 h-3" /> Screen report
+                            </Link>
+                          )}
+                          {jobDivaHref && (
+                            <a
+                              href={jobDivaHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-indigo-600 hover:underline"
+                              title="Open this candidate's JobDiva profile"
+                            >
+                              <ExternalLink className="w-3 h-3" /> JobDiva
+                            </a>
+                          )}
                         </div>
                       )}
                     </td>
@@ -256,16 +285,6 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
                     </td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5">
-                        {reportHref && (
-                          <Link
-                            href={reportHref}
-                            target="_blank"
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
-                            title="Open the PAIR screen report from the previous job"
-                          >
-                            <ExternalLink className="w-3 h-3" /> Screen report
-                          </Link>
-                        )}
                         <button
                           type="button"
                           onClick={() => handleAdd(row)}

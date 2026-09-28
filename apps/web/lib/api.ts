@@ -226,6 +226,8 @@ export type CrossSubmission = {
   phone: string | null;
   headline: string | null;
   location: string | null;
+  /** The person's JobDiva profile id ("" when PAIR never linked one) — not always candidate_id. */
+  jobdiva_candidate_id: string | null;
   prior_job_id: string | null;
   prior_jobdiva_id: string | null;
   prior_job_title: string | null;
