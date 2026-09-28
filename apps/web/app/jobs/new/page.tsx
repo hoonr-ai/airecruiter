@@ -2209,7 +2209,8 @@ function NewJobPageContent() {
       if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
       if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
       if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
-      if (draft.screening_level) setScreeningLevel(draft.screening_level);
+      // Treat "L1.5" as the old recommended default — now superseded by "L0.5"
+      if (draft.screening_level && draft.screening_level !== "L1.5") setScreeningLevel(draft.screening_level);
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
       if (draft.bot_introduction) {
@@ -2665,7 +2666,10 @@ function NewJobPageContent() {
       }
 
       // 5. Set default screening level from database OR to L0.5 (recommended)
-      setScreeningLevel(data.screening_level || "L0.5");
+      // Treat "L1.5" as the old recommended default — now superseded by "L0.5"
+      setScreeningLevel(
+        data.screening_level && data.screening_level !== "L1.5" ? data.screening_level : "L0.5"
+      );
 
       // 6. Set Work Authorization from JobDiva
       if (data.work_authorization) {
