@@ -15,6 +15,8 @@ unique name match, so the Exa Agent was the only step that could work -- and:
 """
 import asyncio
 
+import httpx
+
 import core.config as core_config
 from core import sourcing_config
 from services import contact_enrichment as ce
@@ -359,3 +361,149 @@ def test_launch_looks_up_eligible_rows_and_buttons_stay_ungated(monkeypatch):
     # No trigger = a deliberate click (phone button / Rankings): not gated.
     res, calls = _launch_enrich(monkeypatch, source="JobDiva-JobAgent", match_score=10)
     assert res["status"] == "success" and "apollo" in calls
+
+
+# ---------------------------------------------------------------------------
+# Exa is the last provider: a failed lookup gets one second chance
+# ---------------------------------------------------------------------------
+
+class _ExaServer:
+    """httpx.AsyncClient stand-in for the Exa Agent API: POST creates a run,
+    GET polls it. Queued answers; an Exception in a queue is raised."""
+
+    def __init__(self, creates, polls=(), keep_polling=None):
+        self.creates = list(creates)
+        self.polls = list(polls)
+        self.keep_polling = keep_polling
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        self.calls.append(("create", ""))
+        answer = self.creates.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async def get(self, url, headers=None):
+        self.calls.append(("poll", url.rsplit("/", 1)[-1]))
+        return self.polls.pop(0) if self.polls else self.keep_polling
+
+
+DONE = {"status": "completed", "output": {"structured": {"contact": {"email": "jane@acme.com"}}}}
+
+
+def _run(run_id, **fields):
+    return _Resp(200, {"id": run_id, **fields})
+
+
+def _exa(monkeypatch, creates, polls=(), keep_polling=None):
+    server = _ExaServer(creates, polls, keep_polling)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_ENABLED", True)
+    monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_RETRY", True)
+    monkeypatch.setattr(ce, "_EXA_POLL_INTERVAL_S", 0)
+    monkeypatch.setattr(ce, "_EXA_CREATE_429_BACKOFF_S", 0)
+    monkeypatch.setattr(ce.httpx, "AsyncClient", server)
+    return server
+
+
+def _lookup():
+    return asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe"))
+
+
+def test_exa_failed_run_gets_one_new_run(monkeypatch):
+    server = _exa(monkeypatch, [_run("run-1", status="failed"), _run("run-2", **DONE)])
+
+    res = _lookup()
+
+    assert res["ok"] is True and res["fields"]["workEmail"] == "jane@acme.com"
+    assert [kind for kind, _ in server.calls] == ["create", "create"]
+
+
+def test_exa_network_error_on_create_gets_one_new_run(monkeypatch):
+    server = _exa(monkeypatch, [httpx.ConnectError("boom"), _run("run-1", **DONE)])
+
+    assert _lookup()["ok"] is True
+    assert [kind for kind, _ in server.calls] == ["create", "create"]
+
+
+def test_exa_failed_poll_keeps_watching_the_same_run(monkeypatch):
+    # The run is still going (and billed): watch it again, don't pay for a new one.
+    server = _exa(monkeypatch, [_run("run-1", status="running")], polls=[_Resp(503), _run("run-1", **DONE)])
+
+    res = _lookup()
+
+    assert res["ok"] is True and res["fields"]["workEmail"] == "jane@acme.com"
+    assert server.calls == [("create", ""), ("poll", "run-1"), ("poll", "run-1")]
+
+
+def test_exa_timed_out_run_is_watched_once_more_not_bought_again(monkeypatch):
+    seen = []
+
+    async def _attempt(client, headers, body, candidate_id, run_id=""):
+        seen.append(run_id)
+        if len(seen) == 1:
+            return {"message": "Exa run timed out", "retry": "wait", "run_id": "run-1"}
+        return {"result": {"ok": True, "fields": {"workEmail": "jane@acme.com"}}}
+
+    _exa(monkeypatch, [])
+    monkeypatch.setattr(ce, "_exa_contact_attempt", _attempt)
+
+    assert _lookup()["ok"] is True
+    assert seen == ["", "run-1"]
+
+
+def test_exa_attempt_reports_a_timeout_as_wait_on_the_same_run(monkeypatch):
+    _exa(monkeypatch, [_run("run-1", status="running")], keep_polling=_run("run-1", status="running"))
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 1)
+    monkeypatch.setattr(ce, "_EXA_POLL_INTERVAL_S", 0.05)
+
+    async def _go():
+        async with ce.httpx.AsyncClient() as client:
+            return await ce._exa_contact_attempt(client, {}, {}, "c1")
+
+    outcome = asyncio.run(_go())
+
+    assert outcome == {"message": "Exa run timed out", "retry": "wait", "run_id": "run-1"}
+
+
+def test_exa_retries_only_once(monkeypatch):
+    server = _exa(monkeypatch, [_run("run-1", status="failed"), _run("run-2", status="cancelled")])
+
+    assert _lookup() == {"ok": False, "message": "Exa run cancelled"}
+    assert len(server.calls) == 2
+
+
+def test_exa_create_5xx_is_retried_but_4xx_is_not(monkeypatch):
+    server = _exa(monkeypatch, [_Resp(502, text="bad gateway"), _run("run-1", **DONE)])
+    assert _lookup()["ok"] is True and len(server.calls) == 2
+
+    server = _exa(monkeypatch, [_Resp(402, text="NO_MORE_CREDITS")])
+    assert _lookup() == {"ok": False, "message": "Exa create error (402)"}
+    assert len(server.calls) == 1
+
+
+def test_exa_clean_miss_is_an_answer_not_retried(monkeypatch):
+    server = _exa(monkeypatch, [_run("run-1", status="completed", output={"structured": {"contact": {}}})])
+
+    res = _lookup()
+
+    assert res["ok"] is True and not ce._has_usable_field(res["fields"])
+    assert len(server.calls) == 1
+
+
+def test_exa_retry_can_be_switched_off(monkeypatch):
+    server = _exa(monkeypatch, [_run("run-1", status="failed")])
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_RETRY", False)
+
+    assert _lookup() == {"ok": False, "message": "Exa run failed"}
+    assert len(server.calls) == 1

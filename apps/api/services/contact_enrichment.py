@@ -47,6 +47,7 @@ from core.config import (
     EXA_CONTACT_ENRICH_CONCURRENCY,
     EXA_CONTACT_ENRICH_EFFORT,
     EXA_CONTACT_ENRICH_ENABLED,
+    EXA_CONTACT_ENRICH_RETRY,
     EXA_CONTACT_ENRICH_TIMEOUT_S,
 )
 from services.kipplo import enrich_by_linkedin as kipplo_enrich_by_linkedin
@@ -588,8 +589,9 @@ async def exa_enrich_by_linkedin(
     Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
     ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
     ``EXA_CONTACT_ENRICH_ENABLED`` is off, ``EXA_API_KEY`` is missing or no
-    field is requested. Bounded by ``EXA_CONTACT_ENRICH_TIMEOUT_S``; all
-    failures logged and swallowed.
+    field is requested. Each attempt is bounded by ``EXA_CONTACT_ENRICH_TIMEOUT_S``
+    and a failed attempt gets one retry (``EXA_CONTACT_ENRICH_RETRY``, see
+    ``_exa_contact_attempt``); all failures logged and swallowed.
     """
     if not EXA_CONTACT_ENRICH_ENABLED:
         return {"ok": False, "message": "Exa contact enrichment disabled"}
@@ -614,6 +616,47 @@ async def exa_enrich_by_linkedin(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            outcome = await _exa_contact_attempt(client, headers, body, candidate_id)
+            if "result" not in outcome and outcome.get("retry") and EXA_CONTACT_ENRICH_RETRY:
+                # Exa is the last provider: one second chance before the
+                # candidate is left without contact (user 2026-09-28, "get the
+                # contact details at all costs"). A run that timed out or could
+                # not be polled is still going and billed either way, so it is
+                # watched again instead of paying for a second run.
+                same_run = outcome.get("run_id") if outcome["retry"] == "wait" else ""
+                logger.info(
+                    "Exa contact lookup for %s: %s; %s", candidate_id, outcome.get("message"),
+                    "waiting on the same run once more" if same_run else "retrying with one new run",
+                )
+                outcome = await _exa_contact_attempt(client, headers, body, candidate_id, run_id=same_run or "")
+    except Exception as e:
+        logger.warning("Exa agent request failed for %s: %s", candidate_id, e)
+        return {"ok": False, "message": f"Exa request failed: {e}"}
+    if "result" in outcome:
+        return outcome["result"]
+    return {"ok": False, "message": outcome.get("message") or "Exa lookup failed"}
+
+
+async def _exa_contact_attempt(
+    client: Any,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    candidate_id: str,
+    run_id: str = "",
+) -> Dict[str, Any]:
+    """Create one agent run and poll it for up to EXA_CONTACT_ENRICH_TIMEOUT_S,
+    or with ``run_id`` keep polling a run that is already going.
+
+    Returns ``{"result": <lookup result>}`` when the run completed, else
+    ``{"message", "retry", "run_id"}``: ``retry`` is "wait" (still running or the
+    poll failed: watch the same run), "new" (failed/cancelled run, 5xx/429 on
+    create, network error: a new run may work) or "" (a 4xx such as bad key or
+    no credits, which a retry would not fix).
+    """
+    try:
+        if run_id:
+            run: Dict[str, Any] = {"id": run_id}
+        else:
             # Exa caps concurrent agent runs per account and answers a burst
             # with 429 — retry a couple of times rather than lose the lookup.
             for attempt in range(3):
@@ -626,41 +669,36 @@ async def exa_enrich_by_linkedin(
                     "Exa agent create non-2xx for %s: %s %s",
                     candidate_id, r.status_code, r.text[:200],
                 )
-                return {"ok": False, "message": f"Exa create error ({r.status_code})"}
-
+                transient = r.status_code >= 500 or r.status_code == 429
+                return {"message": f"Exa create error ({r.status_code})", "retry": "new" if transient else ""}
             run = r.json()
-            run_id = run.get("id")
-            status = run.get("status")
-            final = run if status in _EXA_TERMINAL_STATES else None
+            run_id = str(run.get("id") or "")
 
-            loop = asyncio.get_event_loop()
-            deadline = loop.time() + max(1, EXA_CONTACT_ENRICH_TIMEOUT_S)
-            while final is None and loop.time() < deadline:
-                await asyncio.sleep(_EXA_POLL_INTERVAL_S)
-                g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
-                if g.status_code >= 400:
-                    logger.warning("Exa agent poll non-2xx for %s: %s", candidate_id, g.status_code)
-                    return {"ok": False, "message": f"Exa poll error ({g.status_code})"}
-                run = g.json()
-                status = run.get("status")
-                if status in _EXA_TERMINAL_STATES:
-                    final = run
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + max(1, EXA_CONTACT_ENRICH_TIMEOUT_S)
+        while run.get("status") not in _EXA_TERMINAL_STATES:
+            if loop.time() >= deadline:
+                logger.info("Exa agent run timed out for %s (>%ss)", candidate_id, EXA_CONTACT_ENRICH_TIMEOUT_S)
+                return {"message": "Exa run timed out", "retry": "wait", "run_id": run_id}
+            await asyncio.sleep(_EXA_POLL_INTERVAL_S)
+            g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
+            if g.status_code >= 400:
+                logger.warning("Exa agent poll non-2xx for %s: %s", candidate_id, g.status_code)
+                return {"message": f"Exa poll error ({g.status_code})", "retry": "wait", "run_id": run_id}
+            run = g.json()
     except Exception as e:
         logger.warning("Exa agent request failed for %s: %s", candidate_id, e)
-        return {"ok": False, "message": f"Exa request failed: {e}"}
+        return {"message": f"Exa request failed: {e}", "retry": "wait" if run_id else "new", "run_id": run_id}
 
-    if final is None:
-        logger.info("Exa agent run timed out for %s (>%ss)", candidate_id, EXA_CONTACT_ENRICH_TIMEOUT_S)
-        return {"ok": False, "message": "Exa run timed out"}
+    status = run.get("status")
     if status != "completed":
-        logger.info("Exa agent run %s for %s: %s", status, candidate_id, final.get("stopReason"))
-        return {"ok": False, "message": f"Exa run {status}"}
-
-    output = final.get("output") or {}
+        logger.info("Exa agent run %s for %s: %s", status, candidate_id, run.get("stopReason"))
+        return {"message": f"Exa run {status}", "retry": "new"}
+    output = run.get("output") or {}
     extracted = extract_exa_contact_fields(output.get("structured"))
     if not _has_usable_field(extracted):
         logger.info("Exa returned no usable contact fields for %s", candidate_id)
-    return {"ok": True, "fields": extracted}
+    return {"result": {"ok": True, "fields": extracted}}
 
 
 ZOOMINFO_NEW_SEARCH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/search"
