@@ -384,7 +384,9 @@ class _Providers:
         self.records.append(kw)
 
 
-def _on_demand(monkeypatch, providers, **req):
+def _on_demand(monkeypatch, providers, kipplo_call=None, **req):
+    """kipplo_call: None = the fake provider, "real" = the real client (feed it
+    with _serve), or any callable."""
     def _no_db():
         raise RuntimeError("no db in tests")
 
@@ -393,7 +395,8 @@ def _on_demand(monkeypatch, providers, **req):
     monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", False)
     monkeypatch.setattr(contact_cache, "get", providers.cache_get)
     monkeypatch.setattr(contact_cache, "record", providers.cache_record)
-    monkeypatch.setattr(candidates_router, "_kipplo_enrich_by_linkedin", providers.kipplo)
+    if kipplo_call != "real":
+        monkeypatch.setattr(candidates_router, "_kipplo_enrich_by_linkedin", kipplo_call or providers.kipplo)
     monkeypatch.setattr(candidates_router, "_apollo_enrich_by_linkedin", providers.apollo)
     monkeypatch.setattr(candidates_router, "_exa_enrich_by_linkedin", providers.exa)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_email", providers.zoominfo)
@@ -461,11 +464,12 @@ def test_launch_spend_policy_also_covers_kipplo(monkeypatch):
     assert providers.calls == []
 
 
-def _sourcing(monkeypatch, providers, **kw):
+def _sourcing(monkeypatch, providers, kipplo_call=None, **kw):
     monkeypatch.setenv("CONTACT_ENRICHMENT_INLINE_ENABLED", "true")
     monkeypatch.setattr(contact_cache, "get", providers.cache_get)
     monkeypatch.setattr(contact_cache, "record", providers.cache_record)
-    monkeypatch.setattr(ce, "kipplo_enrich_by_linkedin", providers.kipplo)
+    if kipplo_call != "real":
+        monkeypatch.setattr(ce, "kipplo_enrich_by_linkedin", kipplo_call or providers.kipplo)
     monkeypatch.setattr(ce, "_zoominfo_enrich_for_sourcing", providers.zoominfo_sourcing)
     monkeypatch.setattr(ce, "apollo_enrich_by_linkedin", providers.apollo)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_email", providers.zoominfo)
@@ -500,3 +504,70 @@ def test_sourcing_kipplo_miss_falls_through_to_the_old_chain(monkeypatch):
     assert providers.calls[0] == ("kipplo", ("email",))
     assert "apollo" in providers.calls
     assert res["provider_used"] == "apollo"
+
+
+# ---------------------------------------------------------------------------
+# Whatever goes wrong with Kipplo, the chain still ends at Exa
+# ---------------------------------------------------------------------------
+
+KIPPLO_FAILURES = [
+    pytest.param(lambda: _Response(429, _rate_limited("minute")), id="rate_limited"),
+    pytest.param(lambda: _Response(200, NO_CREDITS), id="out_of_credits"),
+    pytest.param(lambda: _Response(401, {"detail": {"error_code": "API_KEY_INVALID"}}), id="key_rejected"),
+    pytest.param(lambda: _Response(503, {"detail": "unavailable"}), id="server_error"),
+    pytest.param(lambda: httpx.ReadTimeout("slow"), id="timeout"),
+]
+
+
+@pytest.mark.parametrize("failure", KIPPLO_FAILURES)
+def test_on_demand_any_kipplo_failure_still_gets_the_contact_from_exa(monkeypatch, failure):
+    monkeypatch.setenv("KIPPLO_MAX_WAIT_S", "5")
+    client = _serve(monkeypatch, failure())
+    providers = _Providers(exa={"ok": True, "fields": _fields(
+        workEmail="jane@acme.com", mobilePhone="+14155550100", phoneCandidates=["+14155550100"])})
+
+    res = _on_demand(monkeypatch, providers, kipplo_call="real")
+
+    assert len(client.requests) == 1                     # Kipplo was really asked
+    assert "apollo" in providers.calls                   # cheaper steps still ran first
+    assert providers.calls[-1] == ("exa", ("email", "phone"))
+    assert res["provider"] == "exa"
+    assert res["email"] == "jane@acme.com" and res["phone"] == "+14155550100"
+
+
+@pytest.mark.parametrize("failure", KIPPLO_FAILURES)
+def test_sourcing_any_kipplo_failure_still_reaches_exa(monkeypatch, failure):
+    monkeypatch.setenv("KIPPLO_MAX_WAIT_S", "5")
+    _serve(monkeypatch, failure())
+    providers = _Providers(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+
+    res = _sourcing(monkeypatch, providers, kipplo_call="real")
+
+    assert "apollo" in providers.calls
+    assert providers.calls[-1] == ("exa", ("email",))
+    assert res["provider_used"] == "exa" and res["workEmail"] == "jane@acme.com"
+
+
+def test_on_demand_kipplo_crash_still_gets_the_contact_from_exa(monkeypatch):
+    async def _crash(*args, **kwargs):
+        raise RuntimeError("bug in the Kipplo client")
+
+    providers = _Providers(exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")})
+
+    res = _on_demand(monkeypatch, providers, kipplo_call=_crash, email="jane@acme.com")
+
+    assert providers.calls[-1] == ("exa", ("phone",))
+    assert res["status"] == "success" and res["phone"] == "+14155550100"
+
+
+def test_launch_rate_limited_kipplo_does_not_wait_out_the_minute(monkeypatch, clock):
+    """A Launch PAIR burst beyond the key's 10/min must fall through at once,
+    not queue each candidate for the rest of the minute."""
+    monkeypatch.setenv("KIPPLO_RATE_LIMIT_PER_MINUTE", "1")
+    _serve(monkeypatch, _Response(200, NO_HIT))
+    assert _lookup()["ok"] is True                      # uses the minute's only slot
+    start = clock.now
+
+    res = _lookup()                                     # next one: the slot frees in ~59s
+
+    assert res.get("rate_limited") and clock.now - start < 1

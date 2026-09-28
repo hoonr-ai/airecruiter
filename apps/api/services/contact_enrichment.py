@@ -1158,7 +1158,9 @@ async def enrich_contact_for_sourcing(
         # bills only the field groups it finds, so it is asked for exactly the
         # fields this call may buy (no phone at sourcing). Outside the provider
         # semaphore: waiting for a Kipplo rate-limit slot must not hold up the
-        # ZoomInfo/Apollo lookups of other rows.
+        # ZoomInfo/Apollo lookups of other rows. Any Kipplo failure (rate limit,
+        # credits, key, network) falls through to the rest of the chain, which
+        # ends at Exa.
         if wanted:
             kipplo_label = (full_name or "").strip() or linkedin_url
             try:

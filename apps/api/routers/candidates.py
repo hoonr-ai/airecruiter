@@ -2867,15 +2867,25 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     #     matches the URL itself, answers in ~2s, a miss is free and a hit costs
     #     1 credit per email group / 5 for a mobile, so it is asked for exactly
     #     what the candidate still lacks. Everything below runs only for what
-    #     Kipplo did not find.
+    #     Kipplo did not find — and whatever goes wrong with Kipplo (rate limit,
+    #     out of credits, rejected key, network, a bug) the rest of the chain
+    #     still runs, ending at Exa: cheapest first, but the contact is got.
     kipplo_contributed = False
     kipplo_filled: Tuple[str, ...] = ()
+    kipplo_outcome = "-"
     kipplo_fields = _missing_contact()
     if kipplo_fields:
-        _kp = await _kipplo_enrich_by_linkedin(candidate_id, linkedin_url, fields=kipplo_fields)
+        try:
+            _kp = await _kipplo_enrich_by_linkedin(candidate_id, linkedin_url, fields=kipplo_fields)
+        except Exception as e:
+            logger.warning("enrich_contact: Kipplo raised for %s: %s", candidate_id, e)
+            _kp = {"ok": False, "message": f"raised {type(e).__name__}"}
         if _kp.get("ok") and _merge_primary(_kp.get("fields") or {}):
             kipplo_contributed = True
             kipplo_filled = tuple(f for f in kipplo_fields if f not in _missing_contact())
+        kipplo_outcome = ",".join(kipplo_filled) or (
+            "miss" if _kp.get("ok") else str(_kp.get("message") or "failed")
+        )
 
     # 1. ZoomInfo by EMAIL (only when we have an email and still need a phone).
     if seed_email and not _have_email_and_phone():
@@ -3031,7 +3041,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     logger.info(
         "Contact enrich providers for %s | kipplo=%s zoominfo=%s apollo_called=%s apollo=%s "
         "zoominfo_by_found_email=%s apollo_phone=%s exa_asked=%s exa=%s | provider=%s",
-        candidate_id, ",".join(kipplo_filled) or "-", zoominfo_contributed, apollo_attempted,
+        candidate_id, kipplo_outcome, zoominfo_contributed, apollo_attempted,
         apollo_contributed, zoominfo_followup_contributed, apollo_phone_state or "-",
         ",".join(exa_fields) or "-", exa_contributed, provider_used,
     )
