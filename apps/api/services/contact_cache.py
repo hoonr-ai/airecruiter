@@ -136,6 +136,10 @@ def _ensure_table(conn) -> None:
         cur.execute(CREATE_SQL)
     conn.commit()
     _table_ready = True
+    # Seed from lookups paid for before the cache existed. Once per database
+    # (done-marker row); a failure is logged and retried on the next start.
+    from services import contact_cache_backfill
+    contact_cache_backfill.run_once(conn)
 
 
 def _get_sync(slug: str) -> Optional[Dict[str, Any]]:

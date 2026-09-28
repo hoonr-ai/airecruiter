@@ -233,3 +233,96 @@ def test_sql_roundtrip(pg):
 
     run(contact_cache.record(LINKEDIN, missed=["email"]))  # a later miss never erases a value
     assert run(contact_cache.get(LINKEDIN))["email"] == "jane@acme.com"
+
+
+# ---------------------------------------------------------------------------
+# Backfill from past paid lookups (services/contact_cache_backfill.py)
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+import json as _json
+
+from services import contact_cache_backfill as bf
+
+_NOW = _dt.datetime(2026, 9, 28, tzinfo=_dt.timezone.utc)
+
+
+def test_backfill_takes_only_provider_verified_contact():
+    rows = [
+        {   # on-demand lookup record
+            "source": "LinkedIn-Exa", "profile_url": "https://www.linkedin.com/in/amos/",
+            "email": "", "phone": "", "updated_at": _NOW,
+            "lookup": {"provider": "exa", "enriched_at": "2026-09-20T10:00:00+00:00",
+                       "workEmail": "", "personalEmail": "Amos@Gmail.com",
+                       "mobilePhone": "", "workPhone": "", "phoneCandidates": ["+1 (415) 555-0100"]},
+            "sourcing_provider": None,
+        },
+        {   # sourcing-chain hit on the row columns
+            "source": "LinkedIn-Exa", "profile_url": "https://linkedin.com/in/bea",
+            "email": "bea@acme.com", "phone": "", "updated_at": _dt.datetime(2026, 9, 1),
+            "lookup": None, "sourcing_provider": "apollo",
+        },
+        {   # no provider marker: row contact may be LLM text or typed -> ignored
+            "source": "LinkedIn-Unipile", "profile_url": "https://linkedin.com/in/cal",
+            "email": "cal@acme.com", "phone": "4155550199", "updated_at": _NOW,
+            "lookup": None, "sourcing_provider": None,
+        },
+        {   # placeholders and a cache-sourced value are not facts
+            "source": "LinkedIn-Exa", "profile_url": "https://linkedin.com/in/dee",
+            "email": "Auto_123@jobdiva.com", "phone": "12", "updated_at": _NOW,
+            "lookup": None, "sourcing_provider": "cache",
+        },
+    ]
+    people = bf.plan(rows, now=_NOW)
+
+    assert set(people) == {"amos", "bea"}
+    assert people["amos"]["email"] == "amos@gmail.com"
+    assert people["amos"]["phone"] == "+14155550100"
+    assert people["amos"]["email_provider"] == "exa"
+    assert people["bea"]["email"] == "bea@acme.com" and people["bea"]["phone"] is None
+
+
+def test_backfill_keeps_the_newest_and_drops_stale():
+    old = {"source": "LinkedIn-Exa", "profile_url": "https://linkedin.com/in/amos",
+           "email": "old@acme.com", "phone": "", "lookup": None, "sourcing_provider": "zoominfo",
+           "updated_at": _NOW - _dt.timedelta(days=30)}
+    new = {**old, "email": "new@acme.com", "sourcing_provider": "apollo",
+           "updated_at": _NOW - _dt.timedelta(days=2)}
+    stale = {**old, "profile_url": "https://linkedin.com/in/zed", "email": "zed@acme.com",
+             "updated_at": _NOW - _dt.timedelta(days=400)}
+
+    people = bf.plan([new, old, stale], now=_NOW)
+
+    assert people["amos"]["email"] == "new@acme.com"
+    assert people["amos"]["email_provider"] == "apollo"
+    assert "zed" not in people
+
+
+def test_backfill_runs_once_against_sql(pg):
+    with pg.cursor() as cur:
+        cur.execute("""CREATE TEMP TABLE sourced_candidates (
+            id SERIAL PRIMARY KEY, source TEXT, profile_url TEXT, email TEXT, phone TEXT,
+            data JSONB, updated_at TIMESTAMP DEFAULT NOW())""")
+        cur.execute(
+            "INSERT INTO sourced_candidates (source, profile_url, email, phone, data) VALUES (%s,%s,%s,%s,%s)",
+            ("LinkedIn-Exa", "https://www.linkedin.com/in/amos", "", "",
+             _json.dumps({"zoominfo_contact_enrichment": {
+                 "provider": "exa", "enriched_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                 "workEmail": "amos@shell.com", "mobilePhone": "+14155550100"}})),
+        )
+        cur.execute(
+            "INSERT INTO sourced_candidates (source, profile_url, email, phone, data) VALUES (%s,%s,%s,%s,%s)",
+            ("LinkedIn-Exa", "https://www.linkedin.com/in/bea", "bea@acme.com", "",
+             _json.dumps({"enhanced_info": {"contact_enrichment_provider": "apollo"}})),
+        )
+    # A live value already in the cache is newer than the backfill's: kept.
+    asyncio.run(contact_cache.record("https://linkedin.com/in/bea", email="bea@new.com", email_provider="exa"))
+
+    first = bf.run_once(pg)
+    second = bf.run_once(pg)
+
+    assert first["people"] == 2 and first["emails"] == 2 and first["phones"] == 1
+    assert second is None  # the done-marker stops a re-run
+    amos = asyncio.run(contact_cache.get("https://linkedin.com/in/amos"))
+    assert amos["email"] == "amos@shell.com" and amos["phone"] == "+14155550100"
+    assert asyncio.run(contact_cache.get("https://linkedin.com/in/bea"))["email"] == "bea@new.com"
