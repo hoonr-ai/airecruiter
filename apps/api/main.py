@@ -379,6 +379,7 @@ teams_router = _safe_import("teams")
 cross_submissions_router = _safe_import("cross_submissions")
 live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
+apollo_webhook_router = _safe_import("apollo_webhook")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -439,6 +440,10 @@ _mount(pair_dashboard_router, "pair_dashboard")
 # it to the backend — avoids a collision with the frontend's /campaigns pages
 # (same trick keeps job_criteria under /api/jobs/...). No nginx changes needed.
 _mount(campaigns_router, "campaigns", prefix="/api")
+# Apollo phone-reveal webhook (POST /api/webhooks/apollo/phone?token=...). Token-
+# guarded, not login-guarded: Apollo is the caller. nginx has an exact location
+# for it with its own rate zone (Apollo delivers in bursts after a big launch).
+_mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 from core.auth import auth_router
