@@ -75,6 +75,15 @@ jobs:
     needs: test-api
     if: github.ref_name == 'develop'
     runs-on: ubuntu-latest
+    # One deploy at a time per VM. Two develop merges seconds apart used to
+    # SSH in together, and one died on `git fetch --all` ("cannot lock ref")
+    # while the other rebuilt (2026-09-25, #705 + #703). A running deploy is
+    # never cancelled; a newer one waits. GitHub keeps one waiting run per
+    # group and cancels older waiting ones, which is safe here: the VM resets
+    # to origin/develop, so the newest run ships everything merged so far.
+    concurrency:
+      group: deploy-qa
+      cancel-in-progress: false
 
     environment:
       name: qa
@@ -129,6 +138,10 @@ jobs:
     if: github.ref_name == 'main'
     #if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Same rule as deploy-qa, for the PROD VM.
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
 
     environment:
       name: production
