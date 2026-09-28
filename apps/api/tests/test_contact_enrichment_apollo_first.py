@@ -86,20 +86,20 @@ def _source(**kw):
 
 
 def test_sourcing_apollo_hit_never_reaches_exa(monkeypatch):
-    providers = _Providers(apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+    providers = _Providers(apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")})
     _patch_sourcing(monkeypatch, providers)
 
     res = _source()
 
     assert res["provider_used"] == "apollo"
-    assert res["workEmail"] == "jane@acme.com"
+    assert res["personalEmail"] == "jane@gmail.com"
     assert "exa" not in providers.calls
 
 
 def test_sourcing_apollo_miss_falls_back_to_exa_after_apollo(monkeypatch):
     providers = _Providers(
         apollo={"ok": False, "message": "Apollo API error (422)"},
-        exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        exa={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")},
     )
     _patch_sourcing(monkeypatch, providers)
 
@@ -114,7 +114,7 @@ def test_sourcing_apollo_miss_falls_back_to_exa_after_apollo(monkeypatch):
 def test_sourcing_apollo_empty_match_counts_as_a_miss(monkeypatch):
     providers = _Providers(
         apollo={"ok": True, "fields": _fields()},
-        exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        exa={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")},
     )
     _patch_sourcing(monkeypatch, providers)
 
@@ -123,7 +123,7 @@ def test_sourcing_apollo_empty_match_counts_as_a_miss(monkeypatch):
 
 
 def test_sourcing_exa_asked_only_for_fields_the_candidate_lacks(monkeypatch):
-    providers = _Providers(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+    providers = _Providers(exa={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")})
     _patch_sourcing(monkeypatch, providers)
     # With the no-contact gate off, a candidate holding a phone can reach Exa —
     # which must then only be billed for the email.
@@ -164,14 +164,14 @@ def _enrich(**kw):
 
 def test_on_demand_apollo_hit_skips_exa(monkeypatch):
     providers = _Providers(
-        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone="+14155550100")}
+        apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com", mobilePhone="+14155550100")}
     )
     _patch_on_demand(monkeypatch, providers)
 
     res = _enrich()
 
     assert res["provider"] == "apollo"
-    assert res["email"] == "jane@acme.com"
+    assert res["email"] == "jane@gmail.com"
     assert res["phone"] == "+14155550100"
     assert "exa" not in providers.calls
 
@@ -179,7 +179,7 @@ def test_on_demand_apollo_hit_skips_exa(monkeypatch):
 def test_on_demand_apollo_miss_falls_back_to_exa(monkeypatch):
     providers = _Providers(
         apollo={"ok": False, "message": "Apollo API error (422)"},
-        exa={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone="+14155550100")},
+        exa={"ok": True, "fields": _fields(personalEmail="jane@gmail.com", mobilePhone="+14155550100")},
     )
     _patch_on_demand(monkeypatch, providers)
 
@@ -192,7 +192,7 @@ def test_on_demand_apollo_miss_falls_back_to_exa(monkeypatch):
 
 def test_on_demand_exa_asked_only_for_what_apollo_missed(monkeypatch):
     providers = _Providers(
-        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")},
         exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
     )
     _patch_on_demand(monkeypatch, providers)
@@ -200,7 +200,7 @@ def test_on_demand_exa_asked_only_for_what_apollo_missed(monkeypatch):
     res = _enrich()
 
     assert providers.exa_fields == [("phone",)]
-    assert res["email"] == "jane@acme.com"
+    assert res["email"] == "jane@gmail.com"
     assert res["phone"] == "+14155550100"
 
 
@@ -208,25 +208,25 @@ def test_on_demand_seed_email_means_exa_is_asked_for_the_phone_only(monkeypatch)
     providers = _Providers()
     _patch_on_demand(monkeypatch, providers)
 
-    _enrich(email="jane@acme.com")
+    _enrich(email="jane@gmail.com")
 
     assert providers.calls[-2:] == ["apollo", "exa"]
     assert providers.exa_fields == [("phone",)]
 
 
 def test_on_demand_seed_phone_plus_apollo_email_skips_exa(monkeypatch):
-    providers = _Providers(apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+    providers = _Providers(apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")})
     _patch_on_demand(monkeypatch, providers)
 
     res = _enrich(phone="+1 415 555 0100")
 
-    assert res["email"] == "jane@acme.com"
+    assert res["email"] == "jane@gmail.com"
     assert "exa" not in providers.calls
 
 
 def test_on_demand_zoominfo_hit_skips_apollo_and_exa(monkeypatch):
     providers = _Providers(
-        zi_name={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone="+14155550100")}
+        zi_name={"ok": True, "fields": _fields(personalEmail="jane@gmail.com", mobilePhone="+14155550100")}
     )
     _patch_on_demand(monkeypatch, providers)
 
@@ -361,7 +361,7 @@ def test_deep_search_rows_get_apollo_first_lookup_only_once_shown(monkeypatch):
 
     async def _fake_sourcing_chain(linkedin_url, jobdiva_id=None, **kwargs):
         lookups.append((linkedin_url, kwargs))
-        return {"workEmail": "shown@acme.com", "provider_used": "apollo"}
+        return {"personalEmail": "shown@gmail.com", "provider_used": "apollo"}
 
     monkeypatch.setattr(ce, "enrich_contact_for_sourcing", _fake_sourcing_chain)
 
@@ -415,7 +415,7 @@ def test_deep_search_rows_get_apollo_first_lookup_only_once_shown(monkeypatch):
         "type": "candidate_detail",
         "candidate_id": shown_id,
         "stage": "contact_enrichment",
-        "patch": {"email": "shown@acme.com"},
+        "patch": {"email": "shown@gmail.com"},
     }]
     candidate_idx = next(
         i for i, ev in enumerate(events)
@@ -516,7 +516,7 @@ def test_on_demand_zoominfo_checks_the_email_apollo_found_before_paying_exa(monk
     """Apollo returns no phone on our plan. The email it found goes to ZoomInfo
     (which can match an email) before a paid Exa phone lookup."""
     providers = _Providers(
-        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")},
         zi_email={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
         exa={"ok": True, "fields": _fields(mobilePhone="+19999999999")},
     )
@@ -526,14 +526,14 @@ def test_on_demand_zoominfo_checks_the_email_apollo_found_before_paying_exa(monk
 
     assert providers.calls == ["zoominfo_name", "apollo", "zoominfo_email"]
     assert "exa" not in providers.calls
-    assert res["email"] == "jane@acme.com"
+    assert res["email"] == "jane@gmail.com"
     assert res["phone"] == "+14155550100"
     assert res["provider"] == "apollo"  # first contributor
 
 
 def test_on_demand_exa_only_after_zoominfo_misses_the_found_email_too(monkeypatch):
     providers = _Providers(
-        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")},
         exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
     )
     _patch_on_demand(monkeypatch, providers)
@@ -599,7 +599,7 @@ def test_on_demand_phone_top_up_by_exa_can_be_switched_off(monkeypatch):
     """EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT: Exa only for candidates nobody
     else could reach -- an email from Apollo means no paid phone lookup."""
     providers = _Providers(
-        apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")},
+        apollo={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")},
         exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
     )
     _patch_on_demand(monkeypatch, providers)
@@ -608,7 +608,7 @@ def test_on_demand_phone_top_up_by_exa_can_be_switched_off(monkeypatch):
     res = _enrich()
 
     assert "exa" not in providers.calls
-    assert res["email"] == "jane@acme.com" and res["phone"] is None
+    assert res["email"] == "jane@gmail.com" and res["phone"] is None
 
 
 def test_on_demand_exa_phone_top_up_is_on_by_default():
@@ -619,7 +619,7 @@ def test_on_demand_exa_phone_top_up_is_on_by_default():
 
 
 def test_on_demand_exa_still_reaches_the_unreachable_when_switched_off(monkeypatch):
-    providers = _Providers(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+    providers = _Providers(exa={"ok": True, "fields": _fields(personalEmail="jane@gmail.com")})
     _patch_on_demand(monkeypatch, providers)
     monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", True)
 

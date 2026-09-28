@@ -14,6 +14,14 @@ unique name match, so the Exa Agent was the only step that could work -- and:
     buying contacts for rows the score gate then dropped.
 """
 import asyncio
+import pytest
+
+@pytest.fixture(autouse=True)
+def setup_asyncio_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield loop
+    loop.close()
 
 import core.config as core_config
 from core import sourcing_config
@@ -62,6 +70,8 @@ def test_exa_poll_budget_fits_a_phone_lookup():
 
 
 def test_contact_lookups_do_not_borrow_the_deep_search_slot(monkeypatch):
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
     monkeypatch.setattr(sourcing_config, "EXA_AGENT_CONCURRENCY", 1)
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", 3)
     monkeypatch.setattr(ce, "_EXA_SEMAPHORE", None)
@@ -187,7 +197,7 @@ def test_exa_rows_are_shown_before_their_contact_lookup(monkeypatch):
 
     async def _chain(linkedin_url, jobdiva_id=None, **kwargs):
         lookups.append((linkedin_url, kwargs))
-        return {"workEmail": "shown@acme.com", "mobilePhone": "", "provider_used": "exa"}
+        return {"personalEmail": "shown@gmail.com", "mobilePhone": "", "provider_used": "exa"}
 
     monkeypatch.setattr(ce, "enrich_contact_for_sourcing", _chain)
 
@@ -226,7 +236,7 @@ def test_exa_rows_are_shown_before_their_contact_lookup(monkeypatch):
         "type": "candidate_detail",
         "candidate_id": "exa-shown",
         "stage": "contact_enrichment",
-        "patch": {"email": "shown@acme.com"},
+        "patch": {"email": "shown@gmail.com"},
     }]
     row_idx = next(i for i, ev in enumerate(events) if ev.get("type") == "candidate")
     assert row_idx < events.index(patches[0])
@@ -269,7 +279,7 @@ def _run_pass_a(monkeypatch, rows, scores):
 
     async def _chain(linkedin_url, jobdiva_id=None, **kwargs):
         lookups.append(linkedin_url)
-        return {"workEmail": "x@acme.com", "provider_used": "apollo"}
+        return {"personalEmail": "x@gmail.com", "provider_used": "apollo"}
 
     monkeypatch.setattr(ce, "enrich_contact_for_sourcing", _chain)
     svc = UnifiedCandidateSearch()

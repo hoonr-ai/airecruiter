@@ -123,11 +123,11 @@ def test_exa_error_is_not_a_miss(monkeypatch):
 def test_provider_hit_is_recorded(monkeypatch):
     store = _Store()
     res, calls = _sourcing(monkeypatch, store, apollo={"ok": True, "fields": {
-        "workEmail": "jane@acme.com", "personalEmail": "", "mobilePhone": "", "workPhone": "",
+        "workEmail": "jane@gmail.com", "personalEmail": "", "mobilePhone": "", "workPhone": "",
     }})
 
     assert res["provider_used"] == "apollo"
-    assert store.records[-1]["email"] == "jane@acme.com"
+    assert store.records[-1]["email"] == "jane@gmail.com"
     assert store.records[-1]["email_provider"] == "apollo"
 
 
@@ -167,12 +167,12 @@ def _on_demand(monkeypatch, store, exa_fields_result=None, **req):
 
 
 def test_launch_uses_cached_email_and_buys_only_the_phone(monkeypatch):
-    store = _Store({"email": "jane@acme.com"})
+    store = _Store({"email": "jane@gmail.com"})
     res, calls = _on_demand(
         monkeypatch, store, exa_fields_result={"mobilePhone": "+14155550100"}, trigger="launch",
     )
 
-    assert res["email"] == "jane@acme.com"
+    assert res["email"] == "jane@gmail.com"
     assert res["phone"] == "+14155550100"
     assert ("exa", ("phone",)) in calls
     rec = store.records[-1]
@@ -181,11 +181,11 @@ def test_launch_uses_cached_email_and_buys_only_the_phone(monkeypatch):
 
 
 def test_launch_honours_a_cached_phone_miss_but_a_click_retries(monkeypatch):
-    store = _Store({"email": "jane@acme.com", "phone_missed": True})
+    store = _Store({"email": "jane@gmail.com", "phone_missed": True})
     _, calls = _on_demand(monkeypatch, store, trigger="launch")
     assert not any(isinstance(c, tuple) and c[0] == "exa" for c in calls)
 
-    _, calls = _on_demand(monkeypatch, _Store({"email": "jane@acme.com", "phone_missed": True}))
+    _, calls = _on_demand(monkeypatch, _Store({"email": "jane@gmail.com", "phone_missed": True}))
     assert ("exa", ("phone",)) in calls
 
 
@@ -227,12 +227,12 @@ def test_sql_roundtrip(pg):
 
     run(contact_cache.record("https://in.linkedin.com/in/Jane-Doe/", email="Jane@Acme.com", email_provider="exa"))
     got = run(contact_cache.get(LINKEDIN))
-    assert got["email"] == "jane@acme.com" and got["email_provider"] == "exa"
+    assert got["email"] == "jane@gmail.com" and got["email_provider"] == "exa"
     assert got["email_missed"] is False  # a found value beats the older miss
     assert got["phone_missed"] is True
 
     run(contact_cache.record(LINKEDIN, missed=["email"]))  # a later miss never erases a value
-    assert run(contact_cache.get(LINKEDIN))["email"] == "jane@acme.com"
+    assert run(contact_cache.get(LINKEDIN))["email"] == "jane@gmail.com"
 
 
 # ---------------------------------------------------------------------------
