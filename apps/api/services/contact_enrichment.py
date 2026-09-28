@@ -32,6 +32,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -39,6 +40,7 @@ import httpx
 from core.config import (
     APOLLO_API_KEY as _APOLLO_ENV_KEY,
     EXA_API_KEY,
+    EXA_CONTACT_ENRICH_CONCURRENCY,
     EXA_CONTACT_ENRICH_EFFORT,
     EXA_CONTACT_ENRICH_ENABLED,
     EXA_CONTACT_ENRICH_TIMEOUT_S,
@@ -58,6 +60,7 @@ EXA_AGENT_RUNS_URL = "https://api.exa.ai/agent/runs"
 EXA_AGENT_BETA = "agent-2026-05-07"
 _EXA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _EXA_POLL_INTERVAL_S = 4  # per Exa docs
+_EXA_CREATE_429_BACKOFF_S = 3.0
 # Structured output we ask the agent to fill. Only the two billable contact
 # fields (email $0.02 / phone $0.07 per run) — richer schemas just cost more.
 # The `description` on each field matters: per Exa engineering, contact-field
@@ -149,19 +152,15 @@ _JOB_EXA_COUNTERS: Dict[str, int] = {}
 # re-runs. This one is the spend ceiling.
 _JOB_EXA_LIFETIME: Dict[str, int] = {}
 
-# Exa enforces ~1/5-of-QPS concurrency on Agent runs (≥3 simultaneous runs
-# start 429ing on the default account). The sourcing fallback runs outside
+# Bound on in-flight sourcing-time Exa contact runs. The fallback runs outside
 # _PROVIDER_SEMAPHORE (its slow polling would starve the cheap chain), so it
-# gets its own bound, sized from EXA_AGENT_CONCURRENCY.
+# gets its own bound: EXA_CONTACT_ENRICH_CONCURRENCY. It used to borrow the
+# deep-search agent's EXA_AGENT_CONCURRENCY (1), which queued a job's contact
+# lookups one at a time behind each other.
 def _exa_semaphore() -> asyncio.Semaphore:
     global _EXA_SEMAPHORE
     if _EXA_SEMAPHORE is None:
-        try:
-            from core import sourcing_config as _sc
-            limit = max(1, int(getattr(_sc, "EXA_AGENT_CONCURRENCY", 1) or 1))
-        except Exception:
-            limit = 1
-        _EXA_SEMAPHORE = asyncio.Semaphore(limit)
+        _EXA_SEMAPHORE = asyncio.Semaphore(max(1, int(EXA_CONTACT_ENRICH_CONCURRENCY or 1)))
     return _EXA_SEMAPHORE
 
 _EXA_SEMAPHORE: Optional[asyncio.Semaphore] = None
@@ -408,14 +407,39 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Apollo answers 422 "insufficient credits" on EVERY call once the plan runs
+# dry. Each miss was logged at WARNING per candidate and looked like an ordinary
+# no-match, so an empty account read as "Exa rows get no contact" (Apollo is the
+# only provider that matches a LinkedIn URL). After one such reply we log it
+# loudly and skip Apollo for a cool-down instead of paying the round-trip per
+# row; the chain goes straight to its next step.
+APOLLO_NO_CREDITS_COOLDOWN_S = 600.0
+_apollo_no_credits_until = 0.0
+
+
+def _is_apollo_no_credits(status_code: int, body: str) -> bool:
+    text = (body or "").lower()
+    return status_code in (402, 422, 429) and "credit" in text and (
+        "insufficient" in text or "no more" in text or "out of" in text
+    )
+
+
+def apollo_out_of_credits() -> bool:
+    """True while Apollo is in its out-of-credits cool-down."""
+    return time.monotonic() < _apollo_no_credits_until
+
+
 async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dict[str, Any]:
     """Call Apollo's people/enrich by LinkedIn URL. Pure async, no DB writes.
 
     Returns {"ok": bool, "fields"|"message": ...}.
     """
+    global _apollo_no_credits_until
     if not APOLLO_API_KEY or APOLLO_API_KEY == "PASTE_APOLLO_API_KEY_HERE":
         logger.warning("Apollo enrichment skipped for %s: API key not configured", candidate_id)
         return {"ok": False, "message": "Apollo API key not configured"}
+    if apollo_out_of_credits():
+        return {"ok": False, "message": "Apollo out of credits"}
 
     headers = {
         "Content-Type": "application/json",
@@ -430,6 +454,16 @@ async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dic
     except Exception as e:
         logger.warning("Apollo request failed for %s: %s", candidate_id, e)
         return {"ok": False, "message": f"Apollo request failed: {str(e)}"}
+
+    if _is_apollo_no_credits(ares.status_code, ares.text):
+        _apollo_no_credits_until = time.monotonic() + APOLLO_NO_CREDITS_COOLDOWN_S
+        logger.error(
+            "Apollo is OUT OF CREDITS (%s, key source=%s): LinkedIn-URL contact "
+            "lookups fall through to paid Exa until it is topped up or "
+            "APOLLO_API_KEY is rotated; skipping Apollo for %ds",
+            ares.status_code, APOLLO_KEY_SOURCE, int(APOLLO_NO_CREDITS_COOLDOWN_S),
+        )
+        return {"ok": False, "message": "Apollo out of credits"}
 
     if ares.status_code >= 400:
         logger.warning(
@@ -571,7 +605,13 @@ async def exa_enrich_by_linkedin(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+            # Exa caps concurrent agent runs per account and answers a burst
+            # with 429 — retry a couple of times rather than lose the lookup.
+            for attempt in range(3):
+                r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+                if r.status_code != 429 or attempt == 2:
+                    break
+                await asyncio.sleep(_EXA_CREATE_429_BACKOFF_S * (attempt + 1))
             if r.status_code >= 400:
                 logger.warning(
                     "Exa agent create non-2xx for %s: %s %s",
@@ -935,6 +975,32 @@ async def zoominfo_enrich_by_name(candidate_id: str, full_name: str, company: st
     return {"ok": True, "fields": fields}
 
 
+def contact_lookup_block_reason(source: Any, match_score: Any) -> str:
+    """Why an AUTOMATED contact lookup must not spend on this candidate, or ""
+    when it may. Policy (sourcing_config.CONTACT_ENRICH_*): LinkedIn and JobDiva
+    candidates scoring at least CONTACT_ENRICH_MIN_SCORE; unscored rows are
+    eligible only for CONTACT_ENRICH_UNSCORED_OK_PREFIXES (JobDiva). Callers: sourcing (unified_candidate_search.enrich_shown_row) and
+    Launch PAIR's enrichment pass (trigger="launch" on /candidates/enrich-contact).
+    """
+    from core import sourcing_config as _sc
+
+    prefixes = tuple(getattr(_sc, "CONTACT_ENRICH_SOURCE_PREFIXES", ("LinkedIn", "JobDiva")) or ())
+    src = str(source or "").strip()
+    if prefixes and not any(src.startswith(p) for p in prefixes):
+        return f"source {src or '(none)'} is not an eligible source"
+    floor = int(getattr(_sc, "CONTACT_ENRICH_MIN_SCORE", 60))
+    try:
+        score = float(match_score)
+    except (TypeError, ValueError):
+        unscored_ok = tuple(getattr(_sc, "CONTACT_ENRICH_UNSCORED_OK_PREFIXES", ("JobDiva",)) or ())
+        if any(src.startswith(p) for p in unscored_ok):
+            return ""
+        return "candidate is unscored"
+    if score < floor:
+        return f"match score {score:g} is below {floor}"
+    return ""
+
+
 def reset_job_counter(jobdiva_id: str, *, include_lifetime: bool = False) -> None:
     """Clear the per-RUN cap counters for a job.
 
@@ -1037,173 +1103,222 @@ async def enrich_contact_for_sourcing(
     if not linkedin_url or not _LINKEDIN_PROFILE_RE.search(linkedin_url):
         return {}
 
-    job_key = (jobdiva_id or "sourcing").strip() or "sourcing"
+    # Person-level cache (services/contact_cache.py): a contact bought on any
+    # earlier job or search is reused, and a lookup that came back empty is not
+    # re-bought for CONTACT_CACHE_MISS_TTL_DAYS.
+    from services import contact_cache
 
-    async with _JOB_ENRICH_LOCK:
-        used = _JOB_ENRICH_COUNTERS.get(job_key, 0)
-        if used >= PER_JOB_CAP:
-            if used == PER_JOB_CAP:
-                logger.info("contact_enrichment: per-job cap (%d) reached for %s", PER_JOB_CAP, job_key)
-                _JOB_ENRICH_COUNTERS[job_key] = used + 1  # bump once so we don't re-log every call
-            return {}
-        _JOB_ENRICH_COUNTERS[job_key] = used + 1
+    cached = await contact_cache.get(linkedin_url)
+    wanted = [f for f, have in (("email", seed_email), ("phone", seed_phone))
+              if not have and (want_phone or f != "phone")]
+    cached_hit = {f: cached[f] for f in wanted if cached.get(f)}
+    if cached_hit:
+        email = cached_hit.get("email", "")
+        personal = bool(email) and email.rsplit("@", 1)[-1].lower() in _PERSONAL_EMAIL_DOMAINS
+        return {
+            "workEmail": "" if personal else email,
+            "personalEmail": email if personal else "",
+            "mobilePhone": cached_hit.get("phone", ""),
+            "workPhone": "",
+            "provider_used": "cache",
+        }
+    if wanted and all(cached.get(f"{f}_missed") for f in wanted):
+        logger.info(
+            "contact_enrichment: %s already looked up with no %s — not buying it again",
+            (full_name or linkedin_url), "/".join(wanted),
+        )
+        return {}
 
-    async with _PROVIDER_SEMAPHORE:
-        # ZoomInfo requires a name (new Data API doesn't accept linkedinUrl as
-        # a match input). If we don't have one, skip straight to Apollo.
-        zi_fields: Dict[str, str] = {}
-        if (full_name or "").strip():
+    # What the paid Exa step was asked and whether it answered: only a clean
+    # answer without a field counts as a cacheable miss.
+    trace: Dict[str, Any] = {}
+
+    async def _providers() -> Dict[str, Any]:
+        job_key = (jobdiva_id or "sourcing").strip() or "sourcing"
+
+        async with _JOB_ENRICH_LOCK:
+            used = _JOB_ENRICH_COUNTERS.get(job_key, 0)
+            if used >= PER_JOB_CAP:
+                if used == PER_JOB_CAP:
+                    logger.info("contact_enrichment: per-job cap (%d) reached for %s", PER_JOB_CAP, job_key)
+                    _JOB_ENRICH_COUNTERS[job_key] = used + 1  # bump once so we don't re-log every call
+                return {}
+            _JOB_ENRICH_COUNTERS[job_key] = used + 1
+
+        async with _PROVIDER_SEMAPHORE:
+            # ZoomInfo requires a name (new Data API doesn't accept linkedinUrl as
+            # a match input). If we don't have one, skip straight to Apollo.
+            zi_fields: Dict[str, str] = {}
+            if (full_name or "").strip():
+                try:
+                    zi_fields = await _zoominfo_enrich_for_sourcing(full_name.strip(), (company or "").strip())
+                except Exception as e:
+                    logger.warning("contact_enrichment ZoomInfo path raised for %s: %s", job_key, e)
+                    zi_fields = {}
+
+            if _has_usable_field(zi_fields):
+                logger.info("contact_enrichment: zoominfo hit for %s", job_key)
+                return {
+                    "workEmail": zi_fields.get("workEmail", ""),
+                    "personalEmail": zi_fields.get("personalEmail", ""),
+                    "mobilePhone": zi_fields.get("mobilePhone", ""),
+                    "workPhone": zi_fields.get("workPhone", ""),
+                    "provider_used": "zoominfo",
+                }
+
             try:
-                zi_fields = await _zoominfo_enrich_for_sourcing(full_name.strip(), (company or "").strip())
+                apollo_result = await apollo_enrich_by_linkedin(job_key, linkedin_url)
             except Exception as e:
-                logger.warning("contact_enrichment ZoomInfo path raised for %s: %s", job_key, e)
-                zi_fields = {}
+                logger.warning("contact_enrichment Apollo path raised for %s: %s", job_key, e)
+                apollo_result = {"ok": False}
 
-        if _has_usable_field(zi_fields):
-            logger.info("contact_enrichment: zoominfo hit for %s", job_key)
-            return {
-                "workEmail": zi_fields.get("workEmail", ""),
-                "personalEmail": zi_fields.get("personalEmail", ""),
-                "mobilePhone": zi_fields.get("mobilePhone", ""),
-                "workPhone": zi_fields.get("workPhone", ""),
-                "provider_used": "zoominfo",
-            }
-
-        try:
-            apollo_result = await apollo_enrich_by_linkedin(job_key, linkedin_url)
-        except Exception as e:
-            logger.warning("contact_enrichment Apollo path raised for %s: %s", job_key, e)
-            apollo_result = {"ok": False}
-
-        if apollo_result.get("ok") and _has_usable_field(apollo_result.get("fields") or {}):
-            fields = apollo_result["fields"]
-            logger.info("contact_enrichment: apollo hit for %s", job_key)
-            return {
-                "workEmail": fields.get("workEmail", ""),
-                "personalEmail": fields.get("personalEmail", ""),
-                "mobilePhone": fields.get("mobilePhone", ""),
-                "workPhone": fields.get("workPhone", ""),
-                "provider_used": "apollo",
-            }
-
-        # ZoomInfo match-by-EMAIL. Runs last among the cheap providers because it
-        # needs a seed email, but it is the RIGHT tool for the commonest gap: a
-        # candidate who has an email and is missing only a phone. ZoomInfo can't
-        # match a LinkedIn URL, but it can match an email — so this fills the
-        # exact case that used to fall through to a paid Exa run. The on-demand
-        # path has always done this; the sourcing path was missing the step.
-        # Only reachable when want_phone is True: with an email already in hand
-        # and no phone wanted, the call returned above. So this step exists purely
-        # to convert an email into a PHONE, which is why it is phone-gated.
-        seed_email_clean = seed_email if want_phone else ""
-        if seed_email_clean and getattr(_sc_cfg, "ZOOMINFO_SOURCING_EMAIL_LOOKUP", True):
-            try:
-                zi_email = await zoominfo_enrich_by_email(job_key, seed_email_clean)
-            except Exception as e:
-                logger.warning(
-                    "contact_enrichment ZoomInfo-by-email raised for %s: %s", job_key, e
-                )
-                zi_email = {"ok": False}
-            if zi_email.get("ok") and _has_usable_field(zi_email.get("fields") or {}):
-                fields = zi_email["fields"]
-                logger.info("contact_enrichment: zoominfo-by-email hit for %s", job_key)
+            if apollo_result.get("ok") and _has_usable_field(apollo_result.get("fields") or {}):
+                fields = apollo_result["fields"]
+                logger.info("contact_enrichment: apollo hit for %s", job_key)
                 return {
                     "workEmail": fields.get("workEmail", ""),
                     "personalEmail": fields.get("personalEmail", ""),
                     "mobilePhone": fields.get("mobilePhone", ""),
                     "workPhone": fields.get("workPhone", ""),
-                    "provider_used": "zoominfo_email",
+                    "provider_used": "apollo",
                 }
 
-    # Exa Agent fallback — outside the provider semaphore (it has its own
-    # slow polling loop and per-job budget; holding a ZoomInfo/Apollo slot
-    # for up to EXA_CONTACT_ENRICH_TIMEOUT_S would starve the cheap chain).
-    if include_exa:
-        _sc = _sc_cfg
-
-        if not getattr(_sc, "EXA_SOURCING_CONTACT_FALLBACK", True):
-            return {}
-
-        # Deprioritised: Exa only buys candidates we cannot otherwise reach.
-        # A candidate who already has an email or a phone is contactable, so
-        # spending ~$0.115 to complete the set is not worth it at sourcing time —
-        # the cheap providers above (including the new ZoomInfo-by-email step)
-        # get first refusal, and recruiter-initiated on-demand enrichment can
-        # still reach for Exa because that is a deliberate click.
-        if getattr(_sc, "EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT", True):
-            if seed_email or seed_phone:
-                logger.info(
-                    "contact_enrichment: skipping paid Exa for %s — candidate is "
-                    "already reachable (email=%s phone=%s); cheap providers missed "
-                    "only the remaining field",
-                    job_key, bool(seed_email), bool(seed_phone),
-                )
-                return {}
-        exa_cap = max(0, int(getattr(_sc, "EXA_SOURCING_CONTACT_CAP", 25) or 0))
-        exa_lifetime_cap = max(
-            0, int(getattr(_sc, "EXA_SOURCING_CONTACT_LIFETIME_CAP", 100) or 0)
-        )
-        async with _JOB_ENRICH_LOCK:
-            # Lifetime ceiling first — this one is not reset between runs, so it
-            # is what actually bounds spend on a job the recruiter re-searches.
-            exa_total = _JOB_EXA_LIFETIME.get(job_key, 0)
-            if exa_total >= exa_lifetime_cap:
-                if exa_total == exa_lifetime_cap:
+            # ZoomInfo match-by-EMAIL. Runs last among the cheap providers because it
+            # needs a seed email, but it is the RIGHT tool for the commonest gap: a
+            # candidate who has an email and is missing only a phone. ZoomInfo can't
+            # match a LinkedIn URL, but it can match an email — so this fills the
+            # exact case that used to fall through to a paid Exa run. The on-demand
+            # path has always done this; the sourcing path was missing the step.
+            # Only reachable when want_phone is True: with an email already in hand
+            # and no phone wanted, the call returned above. So this step exists purely
+            # to convert an email into a PHONE, which is why it is phone-gated.
+            seed_email_clean = seed_email if want_phone else ""
+            if seed_email_clean and getattr(_sc_cfg, "ZOOMINFO_SOURCING_EMAIL_LOOKUP", True):
+                try:
+                    zi_email = await zoominfo_enrich_by_email(job_key, seed_email_clean)
+                except Exception as e:
                     logger.warning(
-                        "contact_enrichment: LIFETIME Exa cap (%d runs, ~$%.2f) reached "
-                        "for %s — no further sourcing-time Exa lookups for this job; "
-                        "on-demand enrichment still works",
-                        exa_lifetime_cap, exa_lifetime_cap * 0.115, job_key,
+                        "contact_enrichment ZoomInfo-by-email raised for %s: %s", job_key, e
                     )
-                    _JOB_EXA_LIFETIME[job_key] = exa_total + 1
+                    zi_email = {"ok": False}
+                if zi_email.get("ok") and _has_usable_field(zi_email.get("fields") or {}):
+                    fields = zi_email["fields"]
+                    logger.info("contact_enrichment: zoominfo-by-email hit for %s", job_key)
+                    return {
+                        "workEmail": fields.get("workEmail", ""),
+                        "personalEmail": fields.get("personalEmail", ""),
+                        "mobilePhone": fields.get("mobilePhone", ""),
+                        "workPhone": fields.get("workPhone", ""),
+                        "provider_used": "zoominfo_email",
+                    }
+
+        # Exa Agent fallback — outside the provider semaphore (it has its own
+        # slow polling loop and per-job budget; holding a ZoomInfo/Apollo slot
+        # for up to EXA_CONTACT_ENRICH_TIMEOUT_S would starve the cheap chain).
+        if include_exa:
+            _sc = _sc_cfg
+
+            if not getattr(_sc, "EXA_SOURCING_CONTACT_FALLBACK", True):
                 return {}
-            exa_used = _JOB_EXA_COUNTERS.get(job_key, 0)
-            if exa_used >= exa_cap:
-                if exa_used == exa_cap:
+
+            # Deprioritised: Exa only buys candidates we cannot otherwise reach.
+            # A candidate who already has an email or a phone is contactable, so
+            # spending ~$0.115 to complete the set is not worth it at sourcing time —
+            # the cheap providers above (including the new ZoomInfo-by-email step)
+            # get first refusal, and recruiter-initiated on-demand enrichment can
+            # still reach for Exa because that is a deliberate click.
+            if getattr(_sc, "EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT", True):
+                if seed_email or seed_phone:
                     logger.info(
-                        "contact_enrichment: per-run Exa cap (%d) reached for %s "
-                        "(%d/%d lifetime)",
-                        exa_cap, job_key, exa_total, exa_lifetime_cap,
+                        "contact_enrichment: skipping paid Exa for %s — candidate is "
+                        "already reachable (email=%s phone=%s); cheap providers missed "
+                        "only the remaining field",
+                        job_key, bool(seed_email), bool(seed_phone),
                     )
-                    _JOB_EXA_COUNTERS[job_key] = exa_used + 1
-                return {}
-            _JOB_EXA_COUNTERS[job_key] = exa_used + 1
-            _JOB_EXA_LIFETIME[job_key] = exa_total + 1
+                    return {}
+            exa_cap = max(0, int(getattr(_sc, "EXA_SOURCING_CONTACT_CAP", 25) or 0))
+            exa_lifetime_cap = max(
+                0, int(getattr(_sc, "EXA_SOURCING_CONTACT_LIFETIME_CAP", 100) or 0)
+            )
+            async with _JOB_ENRICH_LOCK:
+                # Lifetime ceiling first — this one is not reset between runs, so it
+                # is what actually bounds spend on a job the recruiter re-searches.
+                exa_total = _JOB_EXA_LIFETIME.get(job_key, 0)
+                if exa_total >= exa_lifetime_cap:
+                    if exa_total == exa_lifetime_cap:
+                        logger.warning(
+                            "contact_enrichment: LIFETIME Exa cap (%d runs, ~$%.2f) reached "
+                            "for %s — no further sourcing-time Exa lookups for this job; "
+                            "on-demand enrichment still works",
+                            exa_lifetime_cap, exa_lifetime_cap * 0.115, job_key,
+                        )
+                        _JOB_EXA_LIFETIME[job_key] = exa_total + 1
+                    return {}
+                exa_used = _JOB_EXA_COUNTERS.get(job_key, 0)
+                if exa_used >= exa_cap:
+                    if exa_used == exa_cap:
+                        logger.info(
+                            "contact_enrichment: per-run Exa cap (%d) reached for %s "
+                            "(%d/%d lifetime)",
+                            exa_cap, job_key, exa_total, exa_lifetime_cap,
+                        )
+                        _JOB_EXA_COUNTERS[job_key] = exa_used + 1
+                    return {}
+                _JOB_EXA_COUNTERS[job_key] = exa_used + 1
+                _JOB_EXA_LIFETIME[job_key] = exa_total + 1
 
-        # Label the run by the CANDIDATE, not the job. `exa_enrich_by_linkedin`
-        # uses its first arg purely for logging, and passing job_key made every
-        # line for a job identical — useless for answering "which candidate did
-        # Exa resolve, and which timed out?".
-        exa_label = (full_name or "").strip() or linkedin_url
-        # Only what the candidate lacks — Exa bills per field it fills.
-        exa_fields = tuple(
-            field for field, have in (("email", seed_email), ("phone", seed_phone)) if not have
-        )
-        try:
-            async with _exa_semaphore():
-                exa_result = await exa_enrich_by_linkedin(
-                    exa_label, linkedin_url, full_name or "", company or "",
-                    fields=exa_fields,
+            # Label the run by the CANDIDATE, not the job. `exa_enrich_by_linkedin`
+            # uses its first arg purely for logging, and passing job_key made every
+            # line for a job identical — useless for answering "which candidate did
+            # Exa resolve, and which timed out?".
+            exa_label = (full_name or "").strip() or linkedin_url
+            # Only what the candidate lacks — Exa bills per field it fills.
+            # want_phone=False (every sourcing call) means an email is all we buy:
+            # the phone is the dear half of an Exa run ($0.07 of ~$0.095 measured
+            # 2026-09-28) and was being bought for every contactless row anyway.
+            exa_fields = tuple(
+                field for field, have in (("email", seed_email), ("phone", seed_phone))
+                if not have and (want_phone or field != "phone")
+            )
+            try:
+                async with _exa_semaphore():
+                    exa_result = await exa_enrich_by_linkedin(
+                        exa_label, linkedin_url, full_name or "", company or "",
+                        fields=exa_fields,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "contact_enrichment Exa path raised for %s (job %s): %s",
+                    exa_label, job_key, e,
                 )
-        except Exception as e:
-            logger.warning(
-                "contact_enrichment Exa path raised for %s (job %s): %s",
-                exa_label, job_key, e,
-            )
-            exa_result = {"ok": False}
+                exa_result = {"ok": False}
 
-        if exa_result.get("ok") and _has_usable_field(exa_result.get("fields") or {}):
-            fields = exa_result["fields"]
-            logger.info(
-                "contact_enrichment: exa hit for %s (job %s, %d/%d lifetime)",
-                exa_label, job_key, _JOB_EXA_LIFETIME.get(job_key, 0), exa_lifetime_cap,
-            )
-            return {
-                "workEmail": fields.get("workEmail", ""),
-                "personalEmail": fields.get("personalEmail", ""),
-                "mobilePhone": fields.get("mobilePhone", ""),
-                "workPhone": fields.get("workPhone", ""),
-                "provider_used": "exa",
-            }
+            trace["exa_asked"] = exa_fields
+            trace["exa_answered"] = bool(exa_result.get("ok"))
+            if exa_result.get("ok") and _has_usable_field(exa_result.get("fields") or {}):
+                fields = exa_result["fields"]
+                logger.info(
+                    "contact_enrichment: exa hit for %s (job %s, %d/%d lifetime)",
+                    exa_label, job_key, _JOB_EXA_LIFETIME.get(job_key, 0), exa_lifetime_cap,
+                )
+                return {
+                    "workEmail": fields.get("workEmail", ""),
+                    "personalEmail": fields.get("personalEmail", ""),
+                    "mobilePhone": fields.get("mobilePhone", ""),
+                    "workPhone": fields.get("workPhone", ""),
+                    "provider_used": "exa",
+                }
 
-    return {}
+        return {}
+
+    result = await _providers()
+    provider = (result or {}).get("provider_used", "")
+    await contact_cache.record(
+        linkedin_url,
+        email=(result.get("workEmail") or result.get("personalEmail") or "") if result else "",
+        phone=(result.get("mobilePhone") or result.get("workPhone") or "") if result else "",
+        email_provider=provider,
+        phone_provider=provider,
+        missed=trace.get("exa_asked", ()) if trace.get("exa_answered") else (),
+    )
+    return result

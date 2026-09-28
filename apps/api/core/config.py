@@ -153,10 +153,17 @@ EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 # agent compute, observed ~$0.115 total). Set EXA_CONTACT_ENRICH_ENABLED=false
 # to disable.
 EXA_CONTACT_ENRICH_ENABLED = get_env_bool("EXA_CONTACT_ENRICH_ENABLED", True)
-# Bounded poll budget for one agent run (~10s observed at low effort), so 25s
-# leaves real completions headroom while capping the worst-case miss; this is
-# the per-candidate slow path, so keeping it tight matters. Env-overridable.
-EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "25"))
+# Poll budget for one agent run. Was 25s, which threw away most PHONE lookups:
+# measured 2026-09-28 at effort=low, an email-only hit completed in 9s but a
+# phone hit took 52s. A timed-out run is still billed (we stop polling; Exa
+# keeps going), so a short budget is paying for results we discard. Sourcing
+# runs these after the row is on screen, so the wait no longer delays Step 5.
+EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "90"))
+# In-flight contact runs per worker. Separate from EXA_AGENT_CONCURRENCY (the
+# deep-search agent, default 1): with the contact lookups sharing that single
+# slot, a 25-row job queued them one at a time for minutes. Create-time 429s
+# are retried with backoff in exa_enrich_by_linkedin.
+EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "3")))
 # Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
 EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
 

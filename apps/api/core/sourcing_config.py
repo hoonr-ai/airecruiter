@@ -234,6 +234,27 @@ NO_CONTACT_COMPANIES = (
 EXTERNAL_SOURCE_MIN_SCORE = 60
 EXTERNAL_MIN_SCORE_EXEMPT_SOURCES = ("JobDiva-JobAgent", "JobDiva-Applicants")
 
+# Who automated contact enrichment may spend on (policy 2026-09-28): LinkedIn
+# sources (LinkedIn-Exa / -DeepSearch / -Unipile) and JobDiva sources missing
+# contact, at or above CONTACT_ENRICH_MIN_SCORE. Unscored LinkedIn rows are not
+# eligible; unscored JobDiva rows are (JobAgent rows are often shown N/A, and
+# the recruiter picked them), see CONTACT_ENRICH_UNSCORED_OK_PREFIXES.
+# Applies to sourcing-time lookups and to Launch PAIR's enrichment pass
+# (services/contact_enrichment.contact_lookup_block_reason); the per-candidate
+# "find phone" button is a deliberate click and is not gated.
+def _csv_env(name: str, default: str) -> tuple:
+    return tuple(p.strip() for p in _os.getenv(name, default).split(",") if p.strip())
+
+
+CONTACT_ENRICH_SOURCE_PREFIXES = _csv_env("CONTACT_ENRICH_SOURCE_PREFIXES", "LinkedIn,JobDiva")
+CONTACT_ENRICH_UNSCORED_OK_PREFIXES = _csv_env("CONTACT_ENRICH_UNSCORED_OK_PREFIXES", "JobDiva")
+try:
+    CONTACT_ENRICH_MIN_SCORE = int(
+        _os.getenv("CONTACT_ENRICH_MIN_SCORE", str(EXTERNAL_SOURCE_MIN_SCORE)).strip()
+    )
+except ValueError:
+    CONTACT_ENRICH_MIN_SCORE = EXTERNAL_SOURCE_MIN_SCORE
+
 # Hard-drop rows whose location is CONFIRMED outside the job's location
 # (state/province mismatch, or a real measured distance beyond the radius)
 # for every source except JobDiva-JobAgent / JobDiva-Applicants. Unknown or
@@ -452,15 +473,17 @@ EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() in {
 
 # Agent effort level → cost cap per 1k searches:
 #   low    → $25/1k    — fails our 4-field schema (budget too tight to scrape)
-#   medium → $100/1k   — fit_rationale lands, but follower_count + last_activity
+#   medium → $100/1k   — DEFAULT since 2026-09-28 (user call, cost: 1/5 of high).
+#                        fit_rationale lands, but follower_count + last_activity
 #                        are null on ~70% of candidates (budget_reached before
 #                        the agent reaches the LinkedIn followers section)
-#   high   → $500/1k   — DEFAULT. Reliably populates all four fields.
+#   high   → $500/1k   — reliably populates all four fields; set
+#                        EXA_AGENT_EFFORT=high to bring it back.
 #   xhigh  → $2000/1k  — overkill for our schema; reserved for one-off deep dives
 #   auto   → Exa picks (no fixed cap)
 # Also read directly by exa_service.deep_research_candidates() so a deploy
 # can be tuned without a process restart.
-EXA_AGENT_EFFORT = _os.getenv("EXA_AGENT_EFFORT", "high").strip().lower() or "high"
+EXA_AGENT_EFFORT = _os.getenv("EXA_AGENT_EFFORT", "medium").strip().lower() or "medium"
 
 # Cap on URL count placed into the Agent's `input.data` array. Larger
 # batches let the Agent share search context across profiles but increase
@@ -532,15 +555,15 @@ EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # The same restriction for the on-demand chain (Launch PAIR's "Enriching contact
-# details" and the Step-5 phone button). ON by default since 2026-09-25 (user
-# call, to cut Exa spend): Exa is used only for candidates ZoomInfo and Apollo
-# could not reach at all, never to buy the PHONE for one they gave an email --
-# that phone top-up was the main remaining Exa spend (~$0.07 + agent compute per
-# candidate). Trade-off: PAIR screens by phone first, so those candidates now
-# launch on email unless ZoomInfo/Apollo hold a phone. Set false (e.g. in
-# apps/api/.env) to bring the Exa phone top-up back.
+# details" and the Step-5 phone button). OFF again since 2026-09-28 (user: "we
+# should get personal phone numbers as well"): Apollo returns no personal phones
+# on our plan (reveal_phone_number needs a webhook), so for a candidate who has
+# an email Exa is the only source of a phone, and PAIR screens by phone first.
+# The spend is bounded by the eligibility policy (CONTACT_ENRICH_*, launch pass
+# only), and the contact cache means a person's phone is bought at most once.
+# ON between 2026-09-25 and 09-28 to cut Exa spend; set true to go back.
 EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
-    "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "true"
+    "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate

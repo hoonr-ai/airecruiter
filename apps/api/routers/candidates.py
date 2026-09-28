@@ -2560,6 +2560,12 @@ class EnrichCandidateContactRequest(BaseModel):
     company_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    # "launch" = Launch PAIR's automated enrichment pass, which is held to the
+    # spend policy (LinkedIn source + score floor, see
+    # contact_enrichment.contact_lookup_block_reason). Omitted = a deliberate
+    # per-candidate click (phone button / Rankings), which is not gated.
+    trigger: Optional[str] = None
+    match_score: Optional[float] = None
 
 
 def _normalise_phone(raw: str) -> str:
@@ -2696,7 +2702,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, candidate_id, jobdiva_id, source, name, headline, profile_url, email, phone, data
+                    SELECT id, candidate_id, jobdiva_id, source, name, headline, profile_url, email, phone, data,
+                           resume_match_percentage
                     FROM sourced_candidates
                     WHERE candidate_id = %s
                 """
@@ -2730,6 +2737,36 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "message": "LinkedIn URL not available for enrichment",
             "updated_rows": 0,
         }
+
+    if (request.trigger or "").strip().lower() == "launch":
+        _row = existing_rows[0] if existing_rows else {}
+        _row_data = _json_load_safe(_row.get("data"), {}) if _row else {}
+        _score = request.match_score
+        if _score is None and _row:
+            _score = _row.get("resume_match_percentage")
+            if _score is None and isinstance(_row_data, dict):
+                _score = _row_data.get("match_score")
+        _blocked = contact_enrichment.contact_lookup_block_reason(
+            request.source or _row.get("source"), _score
+        )
+        if _blocked:
+            logger.info("enrich_contact: launch lookup skipped for %s — %s", candidate_id, _blocked)
+            return {
+                "status": "skipped",
+                "candidate_id": candidate_id,
+                "message": f"Not eligible for automatic contact lookup: {_blocked}",
+                "phone": None,
+                "email": None,
+                "updated_rows": 0,
+            }
+
+    # Person-level cache: contact already bought for this LinkedIn profile on
+    # any job is reused before any provider is asked. A recent "looked up, not
+    # found" is honoured only for Launch PAIR's automated pass — a recruiter's
+    # click is an explicit request to try again.
+    from services import contact_cache
+    cached = await contact_cache.get(linkedin_url)
+    honour_cached_misses = (request.trigger or "").strip().lower() == "launch"
 
     # --- Contact enrichment by reliable identifiers only (no name guessing:
     # ZoomInfo's name search is accepted only when it is unambiguous). Order,
@@ -2807,6 +2844,19 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             extracted["phoneCandidates"] = merged
         return contributed
 
+    # 0. Cache (free).
+    cache_contributed = False
+    if cached.get("email") or cached.get("phone"):
+        _c_email = cached.get("email") or ""
+        _c_personal = bool(_c_email) and _c_email.rsplit("@", 1)[-1].lower() in contact_enrichment._PERSONAL_EMAIL_DOMAINS
+        cache_contributed = _merge_primary({
+            "workEmail": "" if _c_personal else _c_email,
+            "personalEmail": _c_email if _c_personal else "",
+            "mobilePhone": cached.get("phone") or "",
+            "workPhone": "",
+            "phoneCandidates": [cached["phone"]] if cached.get("phone") else [],
+        })
+
     # 1. ZoomInfo by EMAIL (only when we have an email and still need a phone).
     if seed_email and not _have_email_and_phone():
         _zi = await contact_enrichment.zoominfo_enrich_by_email(candidate_id, seed_email)
@@ -2881,17 +2931,29 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             candidate_id, ",".join(exa_fields),
         )
         exa_fields = ()
+    if honour_cached_misses and exa_fields:
+        _known_missing = tuple(f for f in exa_fields if cached.get(f"{f}_missed"))
+        if _known_missing:
+            logger.info(
+                "enrich_contact: not re-buying %s for %s — an earlier lookup found none (contact cache)",
+                ",".join(_known_missing), candidate_id,
+            )
+            exa_fields = tuple(f for f in exa_fields if f not in _known_missing)
+    exa_answered = False
     if EXA_CONTACT_ENRICH_ENABLED and apollo_attempted and exa_fields:
         _exa = await _exa_enrich_by_linkedin(
             candidate_id, linkedin_url, candidate_name, candidate_company, fields=exa_fields
         )
+        exa_answered = bool(_exa.get("ok"))
         if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}):
             exa_contributed = True
     else:
         exa_fields = ()
 
     # Provider attribution = first source that contributed (execution order).
-    if zoominfo_contributed:
+    if cache_contributed:
+        provider_used = "cache"
+    elif zoominfo_contributed:
         provider_used = "zoominfo"
     elif apollo_contributed:
         provider_used = "apollo"
@@ -2957,6 +3019,19 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     ).strip().lower()
 
     final_outcome = "enriched" if (enriched_phone or enriched_email) else "empty"
+
+    # Remember what the providers found (not the cache's own values, which
+    # would keep extending their TTL) and what a clean Exa answer lacked.
+    _new_email = enriched_email if enriched_email and enriched_email != (cached.get("email") or "").lower() else ""
+    _new_phone = enriched_phone if enriched_phone and enriched_phone != (cached.get("phone") or "") else ""
+    await contact_cache.record(
+        linkedin_url,
+        email=_new_email,
+        phone=_new_phone,
+        email_provider=provider_used,
+        phone_provider=provider_used,
+        missed=[f for f in exa_fields if exa_answered and f in _missing_contact()],
+    )
 
     logger.info(
         "Contact enrich parsed for %s | provider=%s | final_outcome=%s | apollo_attempted=%s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | phone_candidates=%s | mobile=%s | work=%s | email=%s",
