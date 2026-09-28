@@ -7467,7 +7467,7 @@ function NewJobPageContent() {
               )}
 
               <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
-                {q.category === 'role-specific' && (
+                {(q.category === 'role-specific' || (!q.category && !q.is_default && !q.is_locked)) && (
                   <span className="bg-[#f0fdf4] text-[#166534] text-[9px] font-bold px-1.5 py-0.5 rounded border border-[#bbf7d0] whitespace-nowrap mb-1">
                     role-specific
                   </span>
