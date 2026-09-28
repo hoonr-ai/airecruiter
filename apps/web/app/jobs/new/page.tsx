@@ -966,7 +966,7 @@ function NewJobPageContent() {
   const [isEnhancingTitle, setIsEnhancingTitle] = useState(false);
   const [isEditingJD, setIsEditingJD] = useState(false);
   const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>([]);
-  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
+  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L0.5");
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
@@ -2664,8 +2664,8 @@ function NewJobPageContent() {
         }
       }
 
-      // 5. Set default screening level from database OR to L1.5 (recommended)
-      setScreeningLevel(data.screening_level || "L1.5");
+      // 5. Set default screening level from database OR to L0.5 (recommended)
+      setScreeningLevel(data.screening_level || "L0.5");
 
       // 6. Set Work Authorization from JobDiva
       if (data.work_authorization) {
