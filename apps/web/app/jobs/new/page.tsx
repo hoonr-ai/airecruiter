@@ -978,7 +978,7 @@ function NewJobPageContent() {
   const [isEnhancingTitle, setIsEnhancingTitle] = useState(false);
   const [isEditingJD, setIsEditingJD] = useState(false);
   const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>([]);
-  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
+  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L0.5");
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
@@ -2731,8 +2731,8 @@ function NewJobPageContent() {
         }
       }
 
-      // 5. Set default screening level from database OR to L1.5 (recommended)
-      setScreeningLevel(data.screening_level || "L1.5");
+      // 5. Set default screening level from database OR to L0.5 (recommended)
+      setScreeningLevel(data.screening_level || "L0.5");
 
       // 6. Set Work Authorization from JobDiva
       if (data.work_authorization) {
@@ -3577,6 +3577,7 @@ function NewJobPageContent() {
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L0.5</span>
                       <span className="font-semibold text-[14px] text-slate-900">Boolean Screen</span>
+                      <span className="text-[11px] bg-[#dcfce7] text-[#166534] px-2 py-0.5 rounded-full font-semibold">Recommended</span>
                     </div>
                     <div className="flex flex-col gap-1.5 text-[12px]">
                       <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~3–5 min call</p>
@@ -3615,7 +3616,6 @@ function NewJobPageContent() {
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L1.5</span>
                       <span className="font-semibold text-[14px] text-slate-900">Standard Screen</span>
-                      <span className="text-[11px] bg-[#dcfce7] text-[#166534] px-2 py-0.5 rounded-full font-semibold">Recommended</span>
                     </div>
                     <div className="flex flex-col gap-1.5 text-[12px]">
                       <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~8–12 min call</p>
