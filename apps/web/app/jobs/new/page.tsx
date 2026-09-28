@@ -8438,6 +8438,10 @@ function NewJobPageContent() {
                   jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
                   source: c.source || undefined,
                   linkedin_url: linkedinUrl,
+                  // Held to the spend policy server-side: LinkedIn sources at
+                  // or above the score floor only (a skip returns no contact).
+                  trigger: "launch",
+                  match_score: typeof c.match_score === "number" ? c.match_score : undefined,
                 }),
               });
             } catch (enrichErr) {

@@ -2560,6 +2560,12 @@ class EnrichCandidateContactRequest(BaseModel):
     company_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    # "launch" = Launch PAIR's automated enrichment pass, which is held to the
+    # spend policy (LinkedIn source + score floor, see
+    # contact_enrichment.contact_lookup_block_reason). Omitted = a deliberate
+    # per-candidate click (phone button / Rankings), which is not gated.
+    trigger: Optional[str] = None
+    match_score: Optional[float] = None
 
 
 def _normalise_phone(raw: str) -> str:
@@ -2696,7 +2702,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
-                    SELECT id, candidate_id, jobdiva_id, source, name, headline, profile_url, email, phone, data
+                    SELECT id, candidate_id, jobdiva_id, source, name, headline, profile_url, email, phone, data,
+                           resume_match_percentage
                     FROM sourced_candidates
                     WHERE candidate_id = %s
                 """
@@ -2730,6 +2737,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "message": "LinkedIn URL not available for enrichment",
             "updated_rows": 0,
         }
+
+    if (request.trigger or "").strip().lower() == "launch":
+        _row = existing_rows[0] if existing_rows else {}
+        _row_data = _json_load_safe(_row.get("data"), {}) if _row else {}
+        _score = request.match_score
+        if _score is None and _row:
+            _score = _row.get("resume_match_percentage")
+            if _score is None and isinstance(_row_data, dict):
+                _score = _row_data.get("match_score")
+        _blocked = contact_enrichment.contact_lookup_block_reason(
+            request.source or _row.get("source"), _score
+        )
+        if _blocked:
+            logger.info("enrich_contact: launch lookup skipped for %s — %s", candidate_id, _blocked)
+            return {
+                "status": "skipped",
+                "candidate_id": candidate_id,
+                "message": f"Not eligible for automatic contact lookup: {_blocked}",
+                "phone": None,
+                "email": None,
+                "updated_rows": 0,
+            }
 
     # --- Contact enrichment by reliable identifiers only (no name guessing:
     # ZoomInfo's name search is accepted only when it is unambiguous). Order,

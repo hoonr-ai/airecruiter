@@ -32,6 +32,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -39,6 +40,7 @@ import httpx
 from core.config import (
     APOLLO_API_KEY as _APOLLO_ENV_KEY,
     EXA_API_KEY,
+    EXA_CONTACT_ENRICH_CONCURRENCY,
     EXA_CONTACT_ENRICH_EFFORT,
     EXA_CONTACT_ENRICH_ENABLED,
     EXA_CONTACT_ENRICH_TIMEOUT_S,
@@ -58,6 +60,7 @@ EXA_AGENT_RUNS_URL = "https://api.exa.ai/agent/runs"
 EXA_AGENT_BETA = "agent-2026-05-07"
 _EXA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _EXA_POLL_INTERVAL_S = 4  # per Exa docs
+_EXA_CREATE_429_BACKOFF_S = 3.0
 # Structured output we ask the agent to fill. Only the two billable contact
 # fields (email $0.02 / phone $0.07 per run) — richer schemas just cost more.
 # The `description` on each field matters: per Exa engineering, contact-field
@@ -149,19 +152,15 @@ _JOB_EXA_COUNTERS: Dict[str, int] = {}
 # re-runs. This one is the spend ceiling.
 _JOB_EXA_LIFETIME: Dict[str, int] = {}
 
-# Exa enforces ~1/5-of-QPS concurrency on Agent runs (≥3 simultaneous runs
-# start 429ing on the default account). The sourcing fallback runs outside
+# Bound on in-flight sourcing-time Exa contact runs. The fallback runs outside
 # _PROVIDER_SEMAPHORE (its slow polling would starve the cheap chain), so it
-# gets its own bound, sized from EXA_AGENT_CONCURRENCY.
+# gets its own bound: EXA_CONTACT_ENRICH_CONCURRENCY. It used to borrow the
+# deep-search agent's EXA_AGENT_CONCURRENCY (1), which queued a job's contact
+# lookups one at a time behind each other.
 def _exa_semaphore() -> asyncio.Semaphore:
     global _EXA_SEMAPHORE
     if _EXA_SEMAPHORE is None:
-        try:
-            from core import sourcing_config as _sc
-            limit = max(1, int(getattr(_sc, "EXA_AGENT_CONCURRENCY", 1) or 1))
-        except Exception:
-            limit = 1
-        _EXA_SEMAPHORE = asyncio.Semaphore(limit)
+        _EXA_SEMAPHORE = asyncio.Semaphore(max(1, int(EXA_CONTACT_ENRICH_CONCURRENCY or 1)))
     return _EXA_SEMAPHORE
 
 _EXA_SEMAPHORE: Optional[asyncio.Semaphore] = None
@@ -408,14 +407,39 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Apollo answers 422 "insufficient credits" on EVERY call once the plan runs
+# dry. Each miss was logged at WARNING per candidate and looked like an ordinary
+# no-match, so an empty account read as "Exa rows get no contact" (Apollo is the
+# only provider that matches a LinkedIn URL). After one such reply we log it
+# loudly and skip Apollo for a cool-down instead of paying the round-trip per
+# row; the chain goes straight to its next step.
+APOLLO_NO_CREDITS_COOLDOWN_S = 600.0
+_apollo_no_credits_until = 0.0
+
+
+def _is_apollo_no_credits(status_code: int, body: str) -> bool:
+    text = (body or "").lower()
+    return status_code in (402, 422, 429) and "credit" in text and (
+        "insufficient" in text or "no more" in text or "out of" in text
+    )
+
+
+def apollo_out_of_credits() -> bool:
+    """True while Apollo is in its out-of-credits cool-down."""
+    return time.monotonic() < _apollo_no_credits_until
+
+
 async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dict[str, Any]:
     """Call Apollo's people/enrich by LinkedIn URL. Pure async, no DB writes.
 
     Returns {"ok": bool, "fields"|"message": ...}.
     """
+    global _apollo_no_credits_until
     if not APOLLO_API_KEY or APOLLO_API_KEY == "PASTE_APOLLO_API_KEY_HERE":
         logger.warning("Apollo enrichment skipped for %s: API key not configured", candidate_id)
         return {"ok": False, "message": "Apollo API key not configured"}
+    if apollo_out_of_credits():
+        return {"ok": False, "message": "Apollo out of credits"}
 
     headers = {
         "Content-Type": "application/json",
@@ -430,6 +454,16 @@ async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dic
     except Exception as e:
         logger.warning("Apollo request failed for %s: %s", candidate_id, e)
         return {"ok": False, "message": f"Apollo request failed: {str(e)}"}
+
+    if _is_apollo_no_credits(ares.status_code, ares.text):
+        _apollo_no_credits_until = time.monotonic() + APOLLO_NO_CREDITS_COOLDOWN_S
+        logger.error(
+            "Apollo is OUT OF CREDITS (%s, key source=%s): LinkedIn-URL contact "
+            "lookups fall through to paid Exa until it is topped up or "
+            "APOLLO_API_KEY is rotated; skipping Apollo for %ds",
+            ares.status_code, APOLLO_KEY_SOURCE, int(APOLLO_NO_CREDITS_COOLDOWN_S),
+        )
+        return {"ok": False, "message": "Apollo out of credits"}
 
     if ares.status_code >= 400:
         logger.warning(
@@ -571,7 +605,13 @@ async def exa_enrich_by_linkedin(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+            # Exa caps concurrent agent runs per account and answers a burst
+            # with 429 — retry a couple of times rather than lose the lookup.
+            for attempt in range(3):
+                r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+                if r.status_code != 429 or attempt == 2:
+                    break
+                await asyncio.sleep(_EXA_CREATE_429_BACKOFF_S * (attempt + 1))
             if r.status_code >= 400:
                 logger.warning(
                     "Exa agent create non-2xx for %s: %s %s",
@@ -935,6 +975,32 @@ async def zoominfo_enrich_by_name(candidate_id: str, full_name: str, company: st
     return {"ok": True, "fields": fields}
 
 
+def contact_lookup_block_reason(source: Any, match_score: Any) -> str:
+    """Why an AUTOMATED contact lookup must not spend on this candidate, or ""
+    when it may. Policy (sourcing_config.CONTACT_ENRICH_*): LinkedIn and JobDiva
+    candidates scoring at least CONTACT_ENRICH_MIN_SCORE; unscored rows are
+    eligible only for CONTACT_ENRICH_UNSCORED_OK_PREFIXES (JobDiva). Callers: sourcing (unified_candidate_search.enrich_shown_row) and
+    Launch PAIR's enrichment pass (trigger="launch" on /candidates/enrich-contact).
+    """
+    from core import sourcing_config as _sc
+
+    prefixes = tuple(getattr(_sc, "CONTACT_ENRICH_SOURCE_PREFIXES", ("LinkedIn", "JobDiva")) or ())
+    src = str(source or "").strip()
+    if prefixes and not any(src.startswith(p) for p in prefixes):
+        return f"source {src or '(none)'} is not an eligible source"
+    floor = int(getattr(_sc, "CONTACT_ENRICH_MIN_SCORE", 60))
+    try:
+        score = float(match_score)
+    except (TypeError, ValueError):
+        unscored_ok = tuple(getattr(_sc, "CONTACT_ENRICH_UNSCORED_OK_PREFIXES", ("JobDiva",)) or ())
+        if any(src.startswith(p) for p in unscored_ok):
+            return ""
+        return "candidate is unscored"
+    if score < floor:
+        return f"match score {score:g} is below {floor}"
+    return ""
+
+
 def reset_job_counter(jobdiva_id: str, *, include_lifetime: bool = False) -> None:
     """Clear the per-RUN cap counters for a job.
 
@@ -1176,8 +1242,12 @@ async def enrich_contact_for_sourcing(
         # Exa resolve, and which timed out?".
         exa_label = (full_name or "").strip() or linkedin_url
         # Only what the candidate lacks — Exa bills per field it fills.
+        # want_phone=False (every sourcing call) means an email is all we buy:
+        # the phone is the dear half of an Exa run ($0.07 of ~$0.095 measured
+        # 2026-09-28) and was being bought for every contactless row anyway.
         exa_fields = tuple(
-            field for field, have in (("email", seed_email), ("phone", seed_phone)) if not have
+            field for field, have in (("email", seed_email), ("phone", seed_phone))
+            if not have and (want_phone or field != "phone")
         )
         try:
             async with _exa_semaphore():

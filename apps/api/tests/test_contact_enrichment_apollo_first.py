@@ -107,7 +107,8 @@ def test_sourcing_apollo_miss_falls_back_to_exa_after_apollo(monkeypatch):
 
     assert res["provider_used"] == "exa"
     assert providers.calls.index("apollo") < providers.calls.index("exa")
-    assert providers.exa_fields == [("email", "phone")]
+    # Sourcing (want_phone=False) buys the email only; the phone is Launch's call.
+    assert providers.exa_fields == [("email",)]
 
 
 def test_sourcing_apollo_empty_match_counts_as_a_miss(monkeypatch):
