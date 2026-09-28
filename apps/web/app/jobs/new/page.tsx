@@ -119,6 +119,16 @@ import {
   readNdjson,
 } from "@/lib/contact-lookup";
 
+/** Returns true when a question's type (scored/hard_filter/info_only) may be
+ *  changed by the recruiter. System questions (is_default or is_locked) are
+ *  always fixed so the dropdown is hidden for them.
+ *  Note: questions loaded from saved data set is_locked via resolveLockedFlag
+ *  (which also inspects question_text), so is_default not being persisted for
+ *  pre-existing rows is safe — is_locked alone covers those.
+ */
+const canEditQuestionType = (q: { category?: string; is_default?: boolean; is_locked?: boolean }): boolean =>
+  isRecruiterAddedQuestion(q.category) && !q.is_default && !q.is_locked;
+
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
 const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -7505,7 +7515,7 @@ function NewJobPageContent() {
                 />
               </div>
 
-              {isRecruiterAddedQuestion(q.category) && (
+              {canEditQuestionType(q) && (
                 <div className="w-[130px] flex-shrink-0 border-l border-slate-100 pl-3">
                   <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Question type</label>
                   <select
