@@ -164,6 +164,11 @@ EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIME
 # slot, a 25-row job queued them one at a time for minutes. Create-time 429s
 # are retried with backoff in exa_enrich_by_linkedin.
 EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "3")))
+# The same bound for the on-demand chain (Launch PAIR, the phone button), per
+# worker. Launch PAIR's grouped lookup (/candidates/enrich-contacts) runs a whole
+# group in one worker, and Exa caps active agent runs per account (50, shared
+# with production and the other apps on the key).
+EXA_ONDEMAND_CONTACT_CONCURRENCY = max(1, int(get_env_with_default("EXA_ONDEMAND_CONTACT_CONCURRENCY", "10")))
 # Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
 EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
 # Exa is the last contact provider, so a lookup that fails gets one second
