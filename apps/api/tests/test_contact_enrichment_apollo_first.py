@@ -611,10 +611,11 @@ def test_on_demand_phone_top_up_by_exa_can_be_switched_off(monkeypatch):
     assert res["email"] == "jane@acme.com" and res["phone"] is None
 
 
-def test_on_demand_exa_phone_top_up_is_off_by_default():
-    """Default since 2026-09-25 (cost): an email from ZoomInfo/Apollo means no
-    paid Exa phone lookup; Exa only reaches candidates nobody else could."""
-    assert sourcing_config.EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT is True
+def test_on_demand_exa_phone_top_up_is_on_by_default():
+    """ON 2026-09-25 (cost), OFF again 2026-09-28 (user: personal phones too):
+    Apollo returns no personal phones on our plan, so Launch PAIR buys the
+    phone from Exa for an eligible candidate who only has an email."""
+    assert sourcing_config.EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT is False
 
 
 def test_on_demand_exa_still_reaches_the_unreachable_when_switched_off(monkeypatch):
