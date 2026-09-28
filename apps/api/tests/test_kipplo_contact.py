@@ -8,6 +8,7 @@ with made-up values.
 """
 import asyncio
 import json
+import logging
 import os
 from collections import deque
 
@@ -113,6 +114,9 @@ def clock(monkeypatch):
     monkeypatch.setattr(kipplo, "_unavailable_reason", "")
     monkeypatch.setattr(kipplo, "_rate_blocked_until", 0.0)
     monkeypatch.setattr(kipplo, "_local_calls", deque())
+    monkeypatch.setattr(kipplo, "_batch_off_reason", "")
+    monkeypatch.setattr(kipplo, "_batch_verified", False)
+    monkeypatch.setattr(kipplo, "_batch_cap", 0)
     fake = _Clock()
     monkeypatch.setattr(kipplo, "_clock", fake)
     monkeypatch.setattr(kipplo, "_sleep", fake.sleep)
@@ -571,3 +575,193 @@ def test_launch_rate_limited_kipplo_does_not_wait_out_the_minute(monkeypatch, cl
     res = _lookup()                                     # next one: the slot frees in ~59s
 
     assert res.get("rate_limited") and clock.now - start < 1
+
+
+# ---------------------------------------------------------------------------
+# Batching: lookups waiting together go out as one request
+# ---------------------------------------------------------------------------
+
+JANE = {"businessemails": [{"email": "jane@acme.com", "status": "valid"}],
+        "cellnumbers": [{"phone": "+1 415-555-0100", "phone_cleaned": "14155550100", "type": "cellphone"}]}
+KNOWN_EMPTY = {"businessemails": [], "secondaryemails": [], "cellnumbers": []}
+
+
+class _Kipplo:
+    """Answers an Equals filter (one URL or a list) from a directory of known
+    profiles. ``list_mode`` makes list answers misbehave on purpose."""
+
+    def __init__(self, directory, list_mode="ok"):
+        self.directory = directory
+        self.list_mode = list_mode
+        self.requests = []
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def values(self):
+        return [r["params"]["filters"][0]["value"] for r in self.requests]
+
+    async def post(self, url, headers=None, json=None):
+        self.requests.append(json)
+        value = json["params"]["filters"][0]["value"]
+        is_list = isinstance(value, list)
+        if is_list and self.list_mode == "reject":
+            return _Response(200, {"success": False, "result": None,
+                                   "error": "Invalid filters: Filter [0]: value must be a string"})
+        urls = (value[:1] if self.list_mode == "first_only" else value) if is_list else [value]
+        slugs = [contact_cache.linkedin_slug(u) for u in urls]
+        hits = [{"_source": {"linkedinurl": f"linkedin.com/in/{s}", **self.directory[s]}}
+                for s in slugs if s in self.directory]
+        total = len(hits)
+        if is_list and self.list_mode == "cut_off":
+            hits = hits[:1]
+        if is_list and self.list_mode == "foreign":
+            hits.append({"_source": {"linkedinurl": "linkedin.com/in/a-stranger", **JANE}})
+            total += 1
+        return _Response(200, {"success": True, "credits_charged": 1.0 * len(hits) or None,
+                               "result": {"hits": {"total": {"value": total}, "hits": hits}}})
+
+
+def _gather(*lookups):
+    """Run lookups concurrently: [(slug, fields), ...] -> results in order."""
+    async def _go():
+        return await asyncio.gather(*(
+            kipplo.enrich_by_linkedin(f"cand-{slug}", f"https://www.linkedin.com/in/{slug}", fields=fields)
+            for slug, fields in lookups
+        ))
+    return asyncio.run(_go())
+
+
+EMAIL = ("email",)
+BOTH = ("email", "phone")
+
+
+def test_lookups_waiting_together_share_one_request(monkeypatch):
+    server = _Kipplo({"jane": JANE, "john": KNOWN_EMPTY})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    jane, john, ghost = _gather(("jane", BOTH), ("john", BOTH), ("ghost", BOTH))
+
+    assert server.values()[0] == [f"https://www.linkedin.com/in/{s}" for s in ("jane", "john", "ghost")]
+    assert jane["ok"] and jane["fields"]["workEmail"] == "jane@acme.com" and jane["fields"]["mobilePhone"] == "+14155550100"
+    assert john["ok"] and not ce._has_usable_field(john["fields"])
+    assert ghost["ok"] and not ce._has_usable_field(ghost["fields"])
+    # Not yet trusted: the profile the list came back without is re-asked alone once.
+    assert server.values()[1] == "https://www.linkedin.com/in/ghost"
+    assert kipplo._batch_verified and not kipplo._batch_off_reason
+
+    _gather(("jane", BOTH), ("ghost", BOTH))
+    assert len(server.requests) == 3                     # trusted now: one request, no re-check
+
+
+def test_lookups_needing_different_fields_are_not_mixed(monkeypatch):
+    server = _Kipplo({"jane": JANE, "john": KNOWN_EMPTY})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    _gather(("jane", EMAIL), ("john", ("phone",)))
+
+    asked = sorted(tuple(r["params"]["requested_optional_fields"]) for r in server.requests)
+    assert asked == [("business_emails", "secondary_emails"), ("cell_numbers",)]
+
+
+def test_each_request_carries_at_most_the_batch_size(monkeypatch):
+    monkeypatch.setenv("KIPPLO_BATCH_SIZE", "2")
+    names = ["ann", "bob", "cat", "dan", "eve"]
+    server = _Kipplo({n: KNOWN_EMPTY for n in names})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    results = _gather(*((n, EMAIL) for n in names))
+
+    assert [len(v) if isinstance(v, list) else 1 for v in server.values()] == [2, 2, 1]
+    assert all(r["ok"] for r in results)
+
+
+def test_the_same_profile_twice_is_asked_once(monkeypatch):
+    server = _Kipplo({"jane": JANE})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    first, second = _gather(("jane", EMAIL), ("jane", EMAIL))
+
+    assert server.values() == ["https://www.linkedin.com/in/jane"]
+    assert first["fields"]["workEmail"] == second["fields"]["workEmail"] == "jane@acme.com"
+
+
+def test_a_list_that_answers_only_part_switches_batching_off(monkeypatch):
+    server = _Kipplo({"ann": JANE, "bob": JANE, "cat": JANE}, list_mode="first_only")
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    results = _gather(("ann", EMAIL), ("bob", EMAIL), ("cat", EMAIL))
+
+    # bob, re-asked alone, IS known: the list lied, so cat is asked alone too.
+    assert all(r["fields"]["workEmail"] == "jane@acme.com" for r in results)
+    assert server.values()[1:] == ["https://www.linkedin.com/in/bob", "https://www.linkedin.com/in/cat"]
+    assert kipplo._batch_off_reason
+
+    _gather(("ann", EMAIL), ("bob", EMAIL))
+    assert all(isinstance(v, str) for v in server.values()[3:])   # one at a time from now on
+
+
+def test_a_rejected_list_filter_falls_back_to_single_lookups(monkeypatch):
+    server = _Kipplo({"ann": JANE, "bob": KNOWN_EMPTY}, list_mode="reject")
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    ann, bob = _gather(("ann", EMAIL), ("bob", EMAIL))
+
+    assert ann["fields"]["workEmail"] == "jane@acme.com" and bob["ok"]
+    assert isinstance(server.values()[0], list) and all(isinstance(v, str) for v in server.values()[1:])
+    assert "rejected a list filter" in kipplo._batch_off_reason
+
+
+def test_a_cut_off_answer_looks_the_rest_up(monkeypatch):
+    server = _Kipplo({"ann": JANE, "bob": JANE, "cat": JANE}, list_mode="cut_off")
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    results = _gather(("ann", EMAIL), ("bob", EMAIL), ("cat", EMAIL))
+
+    assert all(r["fields"]["workEmail"] == "jane@acme.com" for r in results)
+    assert kipplo._batch_cap == 1                        # the answer held one hit
+
+
+def test_hits_for_strangers_switch_batching_off(monkeypatch):
+    server = _Kipplo({"ann": JANE, "bob": KNOWN_EMPTY}, list_mode="foreign")
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    ann, bob = _gather(("ann", EMAIL), ("bob", EMAIL))
+
+    assert ann["fields"]["workEmail"] == "jane@acme.com" and bob["ok"]
+    assert "nobody asked for" in kipplo._batch_off_reason
+
+
+def test_out_of_credits_answers_every_waiter(monkeypatch):
+    _serve(monkeypatch, _Response(200, NO_CREDITS))
+
+    results = _gather(("ann", EMAIL), ("bob", EMAIL), ("cat", EMAIL))
+
+    assert all(r == {"ok": False, "message": "Kipplo out of credits"} for r in results)
+
+
+def test_batch_size_one_turns_batching_off(monkeypatch):
+    monkeypatch.setenv("KIPPLO_BATCH_SIZE", "1")
+    server = _Kipplo({"ann": JANE, "bob": JANE})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    _gather(("ann", EMAIL), ("bob", EMAIL))
+
+    assert server.values() == ["https://www.linkedin.com/in/ann", "https://www.linkedin.com/in/bob"]
+
+
+def test_a_batch_does_not_warn_about_each_others_profiles(monkeypatch, caplog):
+    server = _Kipplo({"ann": JANE, "bob": JANE, "cat": JANE})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    with caplog.at_level(logging.WARNING, logger="services.kipplo"):
+        results = _gather(("ann", EMAIL), ("bob", EMAIL), ("cat", EMAIL))
+
+    assert len(server.requests) == 1 and all(r["fields"]["workEmail"] for r in results)
+    assert not [r for r in caplog.records if "different LinkedIn profile" in r.getMessage()]
