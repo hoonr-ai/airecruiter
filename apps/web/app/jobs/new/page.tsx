@@ -118,8 +118,10 @@ import { logger } from "@/lib/logger";
  *  (which also inspects question_text), so is_default not being persisted for
  *  pre-existing rows is safe — is_locked alone covers those.
  */
-const canEditQuestionType = (q: { category?: string; is_default?: boolean; is_locked?: boolean }): boolean =>
-  isRecruiterAddedQuestion(q.category) && !q.is_default && !q.is_locked;
+const canEditQuestionType = (q: { category?: string; is_default?: boolean; is_locked?: boolean }): boolean => {
+  const cat = String(q.category || "").toLowerCase();
+  return (cat === "other" || cat === "custom") && !q.is_default && !q.is_locked;
+};
 
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";

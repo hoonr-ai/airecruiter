@@ -209,7 +209,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
             />
               </div>
 
-          {isRecruiterAddedQuestion(q.category) && !q.is_default && !q.is_locked && (
+          {(String(q.category || "").toLowerCase() === "custom" || String(q.category || "").toLowerCase() === "other") && !q.is_default && !q.is_locked && (
             <div className="w-[130px] flex-shrink-0 border-l border-slate-100 pl-3">
               <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Question type</label>
               <select
