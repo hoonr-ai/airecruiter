@@ -869,8 +869,8 @@ class UnifiedCandidateSearch:
             return True
 
         async def enrich_shown_row(cand: Dict[str, Any], *, overwrite: bool) -> None:
-            """Contact lookup (ZoomInfo → Apollo → paid Exa on a miss, see
-            enrich_contact_for_sourcing) for a row that is ALREADY on screen;
+            """Contact lookup (Kipplo → ZoomInfo → Apollo → paid Exa on a miss,
+            see enrich_contact_for_sourcing) for a row that is ALREADY on screen;
             whatever it finds streams as a `contact_enrichment` patch.
 
             Running after emit means the score/location/dedup gates decide who

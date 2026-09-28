@@ -166,6 +166,12 @@ EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIME
 EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "3")))
 # Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
 EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
+# Exa is the last contact provider, so a lookup that fails gets one second
+# chance: a run that timed out (or could not be polled) is watched for one more
+# timeout window, since it is billed either way; a failed/cancelled run, a 5xx
+# or a network error starts one new run. 4xx errors (key, credits) are not
+# retried. Set false to fail after the first attempt.
+EXA_CONTACT_ENRICH_RETRY = get_env_bool("EXA_CONTACT_ENRICH_RETRY", True)
 
 # ---- Cross submissions (services/cross_submissions.py) ----
 # When a recruiter sources a new job at Step 5, candidates PAIR already

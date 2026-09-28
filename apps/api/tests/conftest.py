@@ -21,3 +21,11 @@ def _block_real_db_connections(monkeypatch):
         )
 
     monkeypatch.setattr("core.db.get_db_connection", _fail, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_kipplo_calls(monkeypatch):
+    """Kipplo bills per hit and core.config loads apps/api/.env, so a key there
+    must never reach a real lookup from the suite. Kipplo tests set a fake key
+    and stub httpx themselves."""
+    monkeypatch.delenv("KIPPLO_API_KEY", raising=False)
