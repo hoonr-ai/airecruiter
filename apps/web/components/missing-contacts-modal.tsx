@@ -28,6 +28,40 @@ export interface MissingContactCandidate {
   needsEmail: boolean;
   currentPhone?: string;
   currentEmail?: string;
+  // What Launch PAIR's contact lookup found (QA review mode), shown under the
+  // fields with a "Use" button rather than filled in: QA must not reach real
+  // candidates unless a tester chooses to. `lookedUp` = a lookup answered.
+  lookedUp?: boolean;
+  foundPhone?: string;
+  foundPhoneBy?: string;
+  foundEmail?: string;
+  foundEmailBy?: string;
+}
+
+function LookupHint({
+  lookedUp,
+  found,
+  by,
+  missingLabel,
+  onUse,
+}: {
+  lookedUp?: boolean;
+  found?: string;
+  by?: string;
+  missingLabel: string;
+  onUse: () => void;
+}) {
+  if (!lookedUp) return null;
+  if (!found) return missingLabel ? <span className="text-[11px] text-slate-400">{missingLabel}</span> : null;
+  return (
+    <span className="text-[11px] text-slate-500">
+      Lookup found {found}
+      {by ? ` (${by})` : ""} ·{" "}
+      <button type="button" onClick={onUse} className="font-semibold text-indigo-600 hover:underline">
+        Use
+      </button>
+    </span>
+  );
 }
 
 function locationDisplay(c: { location?: string; work_location?: string }): string {
@@ -417,6 +451,13 @@ export function MissingContactsModal({
                             <span className="w-4 h-4" />
                           )}
                         </div>
+                        <LookupHint
+                          lookedUp={c.lookedUp}
+                          found={c.foundPhone}
+                          by={c.foundPhoneBy}
+                          missingLabel={c.currentPhone ? "" : "Lookup found no personal phone"}
+                          onUse={() => setPhones((prev) => ({ ...prev, [c.candidate_id]: c.foundPhone || "" }))}
+                        />
                         {phoneErr && <span className="text-[11px] text-rose-600">{phoneErr}</span>}
                         {!phoneErr && duplicatePhoneIds.has(c.candidate_id) && (
                           <span className="text-[11px] text-rose-600">
@@ -450,6 +491,13 @@ export function MissingContactsModal({
                             <span className="w-4 h-4" />
                           )}
                         </div>
+                        <LookupHint
+                          lookedUp={c.lookedUp}
+                          found={c.foundEmail}
+                          by={c.foundEmailBy}
+                          missingLabel={c.currentEmail ? "" : "Lookup found no email"}
+                          onUse={() => setEmails((prev) => ({ ...prev, [c.candidate_id]: c.foundEmail || "" }))}
+                        />
                         {emailErr && <span className="text-[11px] text-rose-600">{emailErr}</span>}
                         {!emailErr && duplicateEmailIds.has(c.candidate_id) && (
                           <span className="text-[11px] text-rose-600">

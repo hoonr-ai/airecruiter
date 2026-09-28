@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import time
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -46,6 +47,7 @@ from core.config import (
     EXA_API_KEY,
     EXA_CONTACT_ENRICH_CONCURRENCY,
     EXA_CONTACT_ENRICH_EFFORT,
+    EXA_ONDEMAND_CONTACT_CONCURRENCY,
     EXA_CONTACT_ENRICH_ENABLED,
     EXA_CONTACT_ENRICH_RETRY,
     EXA_CONTACT_ENRICH_TIMEOUT_S,
@@ -172,6 +174,21 @@ def _exa_semaphore() -> asyncio.Semaphore:
     return _EXA_SEMAPHORE
 
 _EXA_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+# Per event loop, so the bound never outlives the loop it was made on.
+_ONDEMAND_EXA_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def ondemand_exa_semaphore() -> asyncio.Semaphore:
+    """Bound on in-flight on-demand Exa contact runs in this worker
+    (EXA_ONDEMAND_CONTACT_CONCURRENCY)."""
+    loop = asyncio.get_running_loop()
+    sem = _ONDEMAND_EXA_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = _ONDEMAND_EXA_SEMAPHORES[loop] = asyncio.Semaphore(EXA_ONDEMAND_CONTACT_CONCURRENCY)
+    return sem
 
 _LINKEDIN_PROFILE_RE = re.compile(r"linkedin\.com/in/", re.IGNORECASE)
 

@@ -164,7 +164,7 @@ def _trip_unavailable(reason: str, fix: str, seconds: float = UNAVAILABLE_COOLDO
     _unavailable_until = _clock() + seconds
     _unavailable_reason = reason
     logger.error(
-        "Kipplo %s: skipping Kipplo contact lookups for %ds (the chain goes on to "
+        "Kipplo unavailable (%s): skipping Kipplo contact lookups for %ds (the chain goes on to "
         "ZoomInfo/Apollo/Exa); %s",
         reason, int(seconds), fix,
     )
@@ -393,6 +393,8 @@ def _contact_from_source(source: Dict[str, Any]) -> Dict[str, Any]:
 # as one request, grouped by the fields they need (nobody is billed for a group
 # they did not ask for). A batch forms while the previous one is in flight or
 # waiting for a rate-limit slot, i.e. exactly when the limit is the bottleneck.
+# Batching is per worker: Launch PAIR sends its candidates in groups
+# (/candidates/enrich-contacts) so that a group's lookups meet in one worker.
 #
 # What a list RETURNS could not be checked live (the account had no credits),
 # so a worker does not trust it until proven: after a batch it re-asks, alone,
@@ -515,10 +517,10 @@ async def _post(body: Dict[str, Any], deadline: float, label: str) -> Tuple[Opti
         or ""
     ).upper()
     if res.status_code == 401 or error_code.startswith("API_KEY"):
-        _trip_unavailable(f"rejected the API key ({error_code or res.status_code})", "fix KIPPLO_API_KEY")
+        _trip_unavailable(f"API key rejected ({error_code or res.status_code})", "fix KIPPLO_API_KEY")
         return None, {"ok": False, "message": "Kipplo API key rejected"}
     if "CREDIT" in error_code or res.status_code == 402:
-        _trip_unavailable("is out of credits", "top up the Kipplo account")
+        _trip_unavailable("out of credits", "top up the Kipplo account")
         return None, {"ok": False, "message": "Kipplo out of credits"}
     if res.status_code >= 400 or not isinstance(data, dict) or data.get("success") is False:
         error = str(data.get("error") or "") if isinstance(data, dict) else ""

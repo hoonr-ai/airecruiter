@@ -391,9 +391,9 @@ class _Providers:
         self.records.append(kw)
 
 
-def _on_demand(monkeypatch, providers, kipplo_call=None, **req):
-    """kipplo_call: None = the fake provider, "real" = the real client (feed it
-    with _serve), or any callable."""
+def _patch_chain(monkeypatch, providers, kipplo_call=None):
+    """The on-demand chain with fake providers. kipplo_call: None = the fake
+    provider, "real" = the real client (feed it with _serve), or any callable."""
     def _no_db():
         raise RuntimeError("no db in tests")
 
@@ -408,6 +408,10 @@ def _on_demand(monkeypatch, providers, kipplo_call=None, **req):
     monkeypatch.setattr(candidates_router, "_exa_enrich_by_linkedin", providers.exa)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_email", providers.zoominfo)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_name", providers.zoominfo)
+
+
+def _on_demand(monkeypatch, providers, kipplo_call=None, **req):
+    _patch_chain(monkeypatch, providers, kipplo_call)
     body = candidates_router.EnrichCandidateContactRequest(
         candidate_id="cand-1", linkedin_url=LINKEDIN, full_name="Jane Doe", **req
     )
@@ -768,3 +772,122 @@ def test_a_batch_does_not_warn_about_each_others_profiles(monkeypatch, caplog):
 
     assert len(server.requests) == 1 and all(r["fields"]["workEmail"] for r in results)
     assert not [r for r in caplog.records if "different LinkedIn profile" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Launch PAIR's grouped lookup (/candidates/enrich-contacts) and what each
+# answer says about the providers
+# ---------------------------------------------------------------------------
+
+ANA = {"cellnumbers": [{"phone": "+1 415-555-0101", "phone_cleaned": "14155550101", "type": "cellphone"}]}
+BEN = {"cellnumbers": [{"phone": "+1 415-555-0102", "phone_cleaned": "14155550102", "type": "cellphone"}]}
+
+
+def _person(slug, **kw):
+    return {"candidate_id": f"cand-{slug}", "linkedin_url": f"https://www.linkedin.com/in/{slug}",
+            "full_name": slug.title(), "source": "LinkedIn-Exa", "match_score": 80, **kw}
+
+
+def _grouped(monkeypatch, providers, people, kipplo_call="real", **req):
+    _patch_chain(monkeypatch, providers, kipplo_call)
+    body = candidates_router.EnrichCandidateContactsRequest(
+        candidates=[candidates_router.EnrichCandidateContactRequest(**p) for p in people], **req
+    )
+    return asyncio.run(candidates_router.enrich_candidate_contacts(body, user=None))["results"]
+
+
+def test_launch_group_asks_kipplo_once_for_everyone(monkeypatch):
+    monkeypatch.setenv("KIPPLO_CONTACT_FIELDS", "phone")   # production: personal phones only
+    server = _Kipplo({"ana": ANA, "ben": BEN, "cy": KNOWN_EMPTY})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+    providers = _Providers(exa={"ok": True, "fields": _fields(mobilePhone="+14155550103")})
+
+    results = _grouped(monkeypatch, providers, [
+        _person("ana", email="ana@acme.com"), _person("ben", email="ben@acme.com"),
+        _person("cy", email="cy@acme.com"),
+    ], trigger="launch")
+
+    # One request for the three (the key's limits count requests), cell numbers only.
+    assert server.values()[0] == [f"https://www.linkedin.com/in/{s}" for s in ("ana", "ben", "cy")]
+    assert server.requests[0]["params"]["requested_optional_fields"] == ["cell_numbers"]
+    assert [r["candidate_id"] for r in results] == ["cand-ana", "cand-ben", "cand-cy"]
+    ana, ben, cy = results
+    assert ana["phone"] == "+14155550101" and ana["phone_provider"] == "kipplo" and ana["lookup"]["kipplo"] == "phone"
+    assert ben["phone"] == "+14155550102" and ben["phone_provider"] == "kipplo"
+    # Kipplo had nothing for cy: the chain went on and Exa found the phone.
+    assert cy["lookup"]["kipplo"] == "miss"
+    assert cy["phone"] == "+14155550103" and cy["phone_provider"] == "exa" and cy["lookup"]["exa"] == "phone"
+    assert providers.calls.count(("exa", ("phone",))) == 1
+
+
+def test_launch_group_kipplo_out_of_credits_goes_to_exa_and_says_why(monkeypatch):
+    monkeypatch.setenv("KIPPLO_CONTACT_FIELDS", "phone")
+    client = _serve(monkeypatch, _Response(200, NO_CREDITS))
+    providers = _Providers(exa={"ok": True, "fields": _fields(mobilePhone="+14155550199")})
+
+    results = _grouped(monkeypatch, providers, [
+        _person("ana", email="ana@acme.com"), _person("ben", email="ben@acme.com"),
+    ], trigger="launch")
+
+    assert len(client.requests) == 1
+    for r in results:
+        assert "out of credits" in r["lookup"]["kipplo"]
+        assert r["phone"] == "+14155550199" and r["phone_provider"] == "exa" and r["lookup"]["exa"] == "phone"
+
+
+def test_launch_group_applies_the_spend_policy_to_each_candidate(monkeypatch):
+    monkeypatch.setenv("KIPPLO_CONTACT_FIELDS", "phone")
+    server = _Kipplo({"cy": ANA})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+    providers = _Providers()
+
+    results = _grouped(monkeypatch, providers, [
+        _person("ana", source="Dice"), _person("ben", match_score=45), _person("cy"),
+    ], trigger="launch")
+
+    assert [r["status"] for r in results] == ["skipped", "skipped", "success"]
+    assert server.values() == ["https://www.linkedin.com/in/cy"]
+    assert results[2]["phone"] == "+14155550101"
+
+
+def test_launch_group_one_failure_does_not_fail_the_others(monkeypatch):
+    class _Flaky(_Providers):
+        async def apollo(self, candidate_id, linkedin_url):
+            if candidate_id == "cand-ben":
+                raise RuntimeError("provider bug")
+            return await super().apollo(candidate_id, linkedin_url)
+
+    providers = _Flaky(exa={"ok": True, "fields": _fields(workEmail="x@acme.com")})
+
+    results = _grouped(monkeypatch, providers, [_person("ana"), _person("ben")], kipplo_call=None)
+
+    assert results[0]["status"] == "success" and results[0]["email"] == "x@acme.com"
+    assert results[1] == {"status": "error", "candidate_id": "cand-ben", "message": "lookup failed: RuntimeError"}
+
+
+def test_launch_group_size_is_bounded(monkeypatch):
+    from fastapi import HTTPException
+
+    for people in ([], [_person(f"p{i}") for i in range(candidates_router.ENRICH_CONTACTS_BATCH_MAX + 1)]):
+        body = candidates_router.EnrichCandidateContactsRequest(
+            candidates=[candidates_router.EnrichCandidateContactRequest(**p) for p in people]
+        )
+        with pytest.raises(HTTPException) as err:
+            asyncio.run(candidates_router.enrich_candidate_contacts(body, user=None))
+        assert err.value.status_code == 400
+
+
+def test_answer_names_who_found_each_field(monkeypatch):
+    monkeypatch.setenv("KIPPLO_CONTACT_FIELDS", "phone")
+    providers = _Providers(
+        kipplo={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
+        exa={"ok": True, "fields": _fields(personalEmail="jane.d@gmail.com")},
+    )
+
+    res = _on_demand(monkeypatch, providers)
+
+    assert res["phone_provider"] == "kipplo" and res["email_provider"] == "exa"
+    # The fake Apollo answers {"ok": False, "message": "no match"}.
+    assert res["lookup"] == {"cache": "-", "kipplo": "phone", "zoominfo": "-", "apollo": "no match", "exa": "email"}
+    assert providers.records[-1]["phone_provider"] == "kipplo"
+    assert providers.records[-1]["email_provider"] == "exa"
