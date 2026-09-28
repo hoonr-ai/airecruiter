@@ -262,7 +262,7 @@ class JobDraftData(BaseModel):
     ai_description: Optional[str] = None
     selected_employment_types: List[str] = []
     recruiter_emails: List[str] = []
-    screening_level: str = "L1.5"
+    screening_level: str = "L0.5"
     selected_job_boards: List[str] = []
     
     # Metadata (persisted for Step 1 UI consistency)
@@ -346,7 +346,7 @@ class CampaignData(BaseModel):
     # Common properties inherited by every child job
     recruiter_emails: List[str] = []
     selected_employment_types: List[str] = []  # W2 | 1099 | C2C | Full-Time
-    screening_level: str = "L1.5"              # L1 | L1.5 | L2 (matches JobDraftData)
+    screening_level: str = "L0.5"              # L0.5 | L1 | L1.5 | L2 (matches JobDraftData)
     recruiter_notes: Optional[str] = None
     work_authorization: Optional[str] = None
     selected_job_boards: List[str] = []

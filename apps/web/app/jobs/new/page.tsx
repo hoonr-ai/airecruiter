@@ -707,6 +707,14 @@ const looksLikeLinkedInProfile = (url?: string | null): boolean => {
   return u.includes("linkedin.com/in/");
 };
 
+/** Returns the persisted screening level, or "L0.5" when nothing is stored.
+ *  L0.5 is the new recommended default (previously L1.5).
+ *  We only fall back when the value is genuinely absent — an explicit
+ *  recruiter choice of L1.5 (Standard Screen) is preserved as-is.
+ */
+const resolveScreeningLevel = (value: string | null | undefined): ScreeningLevel =>
+  (value || "L0.5") as ScreeningLevel;
+
 export default function NewJobPage() {
   return (
     <Suspense fallback={<div>Loading...</div>}>
@@ -2209,7 +2217,7 @@ function NewJobPageContent() {
       if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
       if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
       if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
-      if (draft.screening_level) setScreeningLevel(draft.screening_level);
+      if (draft.screening_level) setScreeningLevel(resolveScreeningLevel(draft.screening_level));
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
       if (draft.bot_introduction) {
@@ -2665,7 +2673,7 @@ function NewJobPageContent() {
       }
 
       // 5. Set default screening level from database OR to L0.5 (recommended)
-      setScreeningLevel(data.screening_level || "L0.5");
+      setScreeningLevel(resolveScreeningLevel(data.screening_level));
 
       // 6. Set Work Authorization from JobDiva
       if (data.work_authorization) {
