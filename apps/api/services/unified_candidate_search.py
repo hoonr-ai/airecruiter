@@ -886,6 +886,44 @@ class UnifiedCandidateSearch:
             await queue.put({"type": "candidate", "data": cand})
             return True
 
+        async def enrich_shown_row(cand: Dict[str, Any], *, overwrite: bool) -> None:
+            """Contact lookup (ZoomInfo → Apollo → paid Exa on a miss, see
+            enrich_contact_for_sourcing) for a row that is ALREADY on screen;
+            whatever it finds streams as a `contact_enrichment` patch.
+
+            Running after emit means the score/location/dedup gates decide who
+            gets a paid lookup, and the row paints without waiting on a lookup
+            that can take most of a minute (Exa phone runs)."""
+            # Spend policy: LinkedIn sources at/above the score floor only.
+            # emit_candidate's gate lets UNSCORED rows through for display, and
+            # Unipile/Dice rows reach here too — neither may buy a lookup.
+            blocked = contact_enrichment.contact_lookup_block_reason(
+                cand.get("source"), cand.get("match_score")
+            )
+            if blocked:
+                summary["contact_lookup_skipped"] = summary.get("contact_lookup_skipped", 0) + 1
+                logger.debug("contact lookup skipped for %s: %s", cand.get("candidate_id") or cand.get("id"), blocked)
+                return
+            summary["contact_lookup_attempted"] = summary.get("contact_lookup_attempted", 0) + 1
+            before = {k: str(cand.get(k) or "").strip() for k in ("email", "phone")}
+            await self._apply_contact_enrichment(cand, criteria, overwrite=overwrite)
+            patch = {
+                k: cand[k] for k in ("email", "phone")
+                if str(cand.get(k) or "").strip() and str(cand.get(k)).strip() != before[k]
+            }
+            if not patch:
+                return
+            # The row was keyed for cross-source dedup before its contact
+            # existed; later rows for the same person must still merge into it.
+            for key in self._dedup_keys(cand):
+                dedup_owner.setdefault(key, cand)
+            await queue.put({
+                "type": "candidate_detail",
+                "candidate_id": str(cand.get("candidate_id") or cand.get("id") or ""),
+                "stage": "contact_enrichment",
+                "patch": patch,
+            })
+
         async def emit_jobdiva_agent_result(cand, source_label):
             """Stage 1 of progressive JobDiva flow: emit a minimal row from the
             agent search result so the UI can render an api_rank-ordered shimmer
@@ -1699,6 +1737,9 @@ class UnifiedCandidateSearch:
             _ext_raw = 0
             _ext_emitted = 0
             _ext_error: Optional[BaseException] = None
+            # Post-emit contact lookups; drained before this producer's SENTINEL
+            # so their patches land inside the stream.
+            ext_contact_tasks: List[asyncio.Task] = []
             try:
                 await queue.put({"type": "stage", "data": f"Searching {name}..."})
                 res = await search_method(criteria)
@@ -1951,11 +1992,12 @@ class UnifiedCandidateSearch:
                         # Sample mode: never spend paid enrichment credits on a
                         # preview row — contact info is acquired in the full
                         # run / at Launch PAIR for the rows that matter.
-                        if (is_exa_source or not has_email) and not sample_mode:
-                            await self._apply_contact_enrichment(
-                                cand, criteria, overwrite=is_exa_source
-                            )
-                        return {"status": "success", "candidate": cand}
+                        # The lookup itself runs AFTER the row is emitted (see
+                        # enrich_shown_row below): inline, it held every Exa row
+                        # off screen for the whole ZoomInfo → Apollo → Exa chain
+                        # and bought contacts for rows the score gate then dropped.
+                        needs_contact = (is_exa_source or not has_email) and not sample_mode
+                        return {"status": "success", "candidate": cand, "needs_contact": needs_contact}
 
                 process_tasks = [asyncio.create_task(_process_external_single(c)) for c in ext_candidates]
                 # Per-status drop accounting: these gates used to discard rows
@@ -1977,6 +2019,10 @@ class UnifiedCandidateSearch:
                                 continue
                             if await emit_candidate(cand, assessment):
                                 _ext_emitted += 1
+                                if result.get("needs_contact"):
+                                    ext_contact_tasks.append(asyncio.create_task(
+                                        enrich_shown_row(cand, overwrite=source_type == "LinkedIn-Exa")
+                                    ))
                 finally:
                     # An exception mid-loop can leave pool tasks in flight —
                     # cancel and drain so no work leaks past the producer.
@@ -2012,9 +2058,17 @@ class UnifiedCandidateSearch:
                     ),
                 )
                 # Signal Pass A completion so the Exa Research producer can
-                # seed its run with the URLs we just yielded.
+                # seed its run with the URLs we just yielded — before waiting
+                # on contact lookups, which Pass B does not need.
                 if name == "Exa" and exa_pass_b_should_run:
                     exa_pass_a_done.set()
+                if ext_contact_tasks:
+                    try:
+                        await asyncio.gather(*ext_contact_tasks, return_exceptions=True)
+                    finally:
+                        for _t in ext_contact_tasks:
+                            if not _t.done():
+                                _t.cancel()
                 await queue.put(SENTINEL)
 
         async def produce_exa_agent():
@@ -2042,31 +2096,6 @@ class UnifiedCandidateSearch:
             new_found = 0
             failure_reason = ""
             contact_tasks: List[asyncio.Task] = []
-
-            async def _enrich_shown_deep_row(cand: Dict[str, Any]) -> None:
-                """Apollo-first contact lookup for a deep-search row that is
-                already on screen (paid Exa only when Apollo misses — see
-                enrich_contact_for_sourcing); whatever it finds streams as a
-                patch. Runs after emit so the score/location gates decide who
-                gets a paid lookup, and so the row paints without waiting."""
-                before = {k: str(cand.get(k) or "").strip() for k in ("email", "phone")}
-                await self._apply_contact_enrichment(cand, criteria, overwrite=True)
-                patch = {
-                    k: cand[k] for k in ("email", "phone")
-                    if str(cand.get(k) or "").strip() and str(cand.get(k)).strip() != before[k]
-                }
-                if patch:
-                    # The row was keyed for cross-source dedup before its
-                    # contact existed; later rows for the same person must
-                    # still merge into it.
-                    for key in self._dedup_keys(cand):
-                        dedup_owner.setdefault(key, cand)
-                    await queue.put({
-                        "type": "candidate_detail",
-                        "candidate_id": str(cand.get("candidate_id") or cand.get("id") or ""),
-                        "stage": "contact_enrichment",
-                        "patch": patch,
-                    })
 
             try:
                 await queue.put({"type": "stage", "data": "Exa deep-search warming up..."})
@@ -2277,7 +2306,7 @@ class UnifiedCandidateSearch:
                             and str(new_cand.get("phone") or "").strip()
                         ):
                             contact_tasks.append(
-                                asyncio.create_task(_enrich_shown_deep_row(new_cand))
+                                asyncio.create_task(enrich_shown_row(new_cand, overwrite=True))
                             )
                 # Patches must land before this producer's SENTINEL closes
                 # its share of the stream.
