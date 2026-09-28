@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -103,6 +104,11 @@ interface EvaluationReport {
     audit_payload?: any;
     audit_response?: any;
   };
+  /**
+   * Set when the viewer is not on this job and reads the report through a
+   * cross submission for `job_ref` — read-only: feedback stays with this job.
+   */
+  shared_via?: { type: "cross_submission"; job_ref: string } | null;
 }
 
 const FINAL_ENGAGE_STATUSES = new Set([
@@ -341,6 +347,7 @@ export default function CandidateEvaluationReportPage() {
   }
 
   const { candidate, scores, job, pair } = data;
+  const sharedVia = data.shared_via || null;
   const feedbackType = String(candidate.feedback_type || '').trim().toLowerCase();
   const submissionType = String(candidate.submission_type || '').trim().toLowerCase();
   const isInternalSubmission = feedbackType === 'submit' && submissionType === 'internal';
@@ -461,6 +468,7 @@ export default function CandidateEvaluationReportPage() {
                   <Download className="w-4 h-4" />
                   Download PDF
                 </button>
+                {!sharedVia && (<>
                 <button 
                   onClick={() => setIntegrationModalOpen('submit')}
                   className={cn(
@@ -489,10 +497,25 @@ export default function CandidateEvaluationReportPage() {
                   <Ban className="w-4 h-4" />
                   Reject
                 </button>
+                </>)}
               </>
             )}
           </div>
         </div>
+
+        {sharedVia && (
+          <div className="flex items-start gap-3 px-4 py-3 rounded-lg border border-indigo-200 bg-indigo-50 text-[13px] text-indigo-900 no-print">
+            <Info className="w-4 h-4 mt-0.5 text-indigo-500 shrink-0" />
+            <span>
+              Shared through the cross submissions for{" "}
+              <Link href={`/jobs/${encodeURIComponent(sharedVia.job_ref)}/rankings`} className="font-semibold underline">
+                {sharedVia.job_ref}
+              </Link>
+              . This is the PAIR screen for <strong>{job.jobdiva_id || String(jobId || "")}</strong>
+              {job.title ? ` (${job.title})` : ""} — read-only; Submit and Reject stay with that job&apos;s recruiters.
+            </span>
+          </div>
+        )}
 
         {/* Candidate Details Card */}
         <div className="bg-white rounded-[12px] border border-[#e2e8f0] shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] overflow-hidden">

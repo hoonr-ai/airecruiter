@@ -4213,6 +4213,33 @@ def _verify_report_access_by_candidate(candidate_id: str, user: UserIdentity) ->
     )
 
 
+def _cross_submission_report_grant(job_ref: str, candidate_id: str, user: UserIdentity) -> Optional[str]:
+    """The job through which a cross submission shares this report with `user`, or None.
+
+    Cross submissions (services/cross_submissions.py) email and list, for a
+    NEW job, candidates PAIR screened for OTHER jobs, each linked to that
+    prior job's screen report. The new job's recruiters are usually not on
+    the prior job, so `_verify_job_access_by_id` alone 403'd those links.
+    Access to a job whose cross-submission list carries this candidate from
+    `job_ref` is a read of the report — nothing more: feedback on the prior
+    job keeps its own job-access check. Fails closed.
+    """
+    try:
+        from services.cross_submissions import jobs_sharing_screen_report
+
+        refs = jobs_sharing_screen_report(job_ref, candidate_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"evaluation-report cross-submission lookup failed for {candidate_id}@{job_ref}: {e}")
+        return None
+    for ref in refs:
+        try:
+            _verify_job_access_by_id(ref, user)
+            return ref
+        except HTTPException:
+            continue
+    return None
+
+
 @router.get("/candidates/evaluation-report")
 @router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
@@ -4237,12 +4264,27 @@ async def get_candidate_evaluation_report(
     team leads, or anyone when the job has no assignees — see
     `verify_job_access`). That is intended, but it is a visible change for
     anyone who used to open a report link while logged out.
+
+    The one other way in is a cross submission: a recruiter on a job whose
+    cross-submission list carries this candidate from `job_id` may read the
+    report (`_cross_submission_report_grant`); the response then carries
+    `shared_via` and the page hides Submit/Reject.
     """
     candidate_id = q_candidate_id or candidate_id
     if not candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
+    shared_via: Optional[str] = None
     if job_id:
-        _verify_job_access_by_id(str(job_id), user)
+        try:
+            _verify_job_access_by_id(str(job_id), user)
+        except HTTPException as denied:
+            if denied.status_code != 403:
+                raise
+            shared_via = await asyncio.to_thread(
+                _cross_submission_report_grant, str(job_id), str(candidate_id), user
+            )
+            if not shared_via:
+                raise
     else:
         # No job named — do NOT fall through unguarded. `job_id` is optional,
         # so a bare `if job_id:` guard would be skippable by simply omitting
@@ -4285,8 +4327,10 @@ async def get_candidate_evaluation_report(
                         (cand_id_str, pk_val, pk_val, job_id, job_id),
                     )
                     cand_row = cur.fetchone()
-                    if not cand_row:
-                        # Fallback: any row for this candidate
+                    if not cand_row and not shared_via:
+                        # Fallback: any row for this candidate. Not for a
+                        # cross-submission share — that grants THIS job's
+                        # screen, not whichever job the candidate is on.
                         cur.execute(
                             """
                             SELECT * FROM sourced_candidates
@@ -4731,6 +4775,8 @@ async def get_candidate_evaluation_report(
             "scores":    scores,
             "job":       job_details,
             "pair":      pair_data,
+            # Read-only access through a cross submission (see docstring).
+            "shared_via": {"type": "cross_submission", "job_ref": shared_via} if shared_via else None,
         }
 
     except HTTPException:
