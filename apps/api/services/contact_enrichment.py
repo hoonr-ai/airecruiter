@@ -482,7 +482,11 @@ async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dic
     extracted = extract_apollo_contact_fields(apollo_data)
     if not any(extracted.get(k) for k in ("mobilePhone", "workPhone", "workEmail", "personalEmail")):
         logger.info("Apollo returned no usable contact fields for %s", candidate_id)
-    return {"ok": True, "fields": extracted}
+    person = apollo_data.get("person") if isinstance(apollo_data, dict) else None
+    # Apollo's id for the matched person: lets the phone reveal
+    # (services/apollo_phone.py) target exactly this record.
+    person_id = str(person.get("id") or "") if isinstance(person, dict) else ""
+    return {"ok": True, "fields": extracted, "person_id": person_id}
 
 
 def extract_exa_contact_fields(structured: Any) -> Dict[str, Any]:
