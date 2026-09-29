@@ -182,6 +182,7 @@ export default function CandidateEvaluationReportPage() {
   // Feedback Integration States
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [otherRejectText, setOtherRejectText] = useState("");
   const [syncingCandidateId, setSyncingCandidateId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "warning" | "info" } | null>(null);
 
@@ -245,7 +246,8 @@ export default function CandidateEvaluationReportPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (candidateId && rejectReason) {
+    const finalReason = rejectReason === "__other__" ? otherRejectText?.trim() : rejectReason;
+    if (candidateId && finalReason) {
       setSyncingCandidateId(candidateId);
       try {
         const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
@@ -253,7 +255,7 @@ export default function CandidateEvaluationReportPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             feedback_type: 'Reject',
-            reason: rejectReason
+            reason: finalReason
           })
         });
 
@@ -273,7 +275,7 @@ export default function CandidateEvaluationReportPage() {
               candidate: {
                 ...prev.candidate,
                 feedback_type: 'Reject',
-                feedback_reason: rejectReason,
+                feedback_reason: finalReason,
                 feedback_at: new Date().toISOString()
               }
             };
@@ -291,6 +293,7 @@ export default function CandidateEvaluationReportPage() {
       } finally {
         setSyncingCandidateId(null);
         setRejectReason('');
+        setOtherRejectText('');
       }
     }
   };
@@ -925,7 +928,7 @@ export default function CandidateEvaluationReportPage() {
                     <select
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
+                      onChange={e => { setRejectReason(e.target.value); setOtherRejectText(''); }}
                     >
                       <option value="" disabled>Select a reason...</option>
                       <option value="Skills do not meet requirements">Skills do not meet requirements</option>
@@ -950,8 +953,24 @@ export default function CandidateEvaluationReportPage() {
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
                       <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
+                      <option value="__other__">Other (specify below)</option>
                     </select>
                   </div>
+                  {rejectReason === "__other__" && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Please specify</label>
+                      <textarea
+                        className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50 resize-none"
+                        rows={3}
+                        placeholder="Enter your rejection reason..."
+                        value={otherRejectText}
+                        onChange={e => setOtherRejectText(e.target.value)}
+                        maxLength={500}
+                        autoFocus
+                      />
+                      <p className="text-xs text-slate-400 text-right">{otherRejectText.length}/500</p>
+                    </div>
+                  )}
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <button 
@@ -963,7 +982,7 @@ export default function CandidateEvaluationReportPage() {
                   <button
                     className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold rounded-lg shadow-md transition-all disabled:opacity-50"
                     onClick={handleConfirmReject}
-                    disabled={!rejectReason || !!syncingCandidateId}
+                    disabled={!rejectReason || (rejectReason === "__other__" && !otherRejectText.trim()) || !!syncingCandidateId}
                   >
                     {syncingCandidateId ? 'Syncing...' : 'Confirm Rejection'}
                   </button>

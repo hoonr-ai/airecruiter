@@ -526,6 +526,7 @@ export default function GlobalCandidatesPage() {
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [otherRejectText, setOtherRejectText] = useState("");
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
 
   // Activity states
@@ -586,8 +587,8 @@ export default function GlobalCandidatesPage() {
   };
 
   const handleConfirmReject = async () => {
-    const trimmedReason = rejectReason?.trim() || "";
-    if (actionCandidateId && trimmedReason) {
+    const finalReason = rejectReason === "__other__" ? otherRejectText?.trim() : rejectReason?.trim();
+    if (actionCandidateId && finalReason) {
       setSyncingCandidateId(actionCandidateId);
       try {
         const c = candidates.find(cand => cand.id === actionCandidateId);
@@ -595,9 +596,9 @@ export default function GlobalCandidatesPage() {
         if (!jobRef) throw new Error("No job ID found");
         await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Reject',
-          reason: trimmedReason
+          reason: finalReason
         });
-        applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null);
+        applyLocalFeedback(actionCandidateId, 'Reject', finalReason, null);
       } catch (error) {
         console.error('Error syncing rejection:', error);
       } finally {
@@ -605,6 +606,7 @@ export default function GlobalCandidatesPage() {
         setIntegrationModalOpen(null);
         setActionCandidateId(null);
         setRejectReason('');
+        setOtherRejectText('');
       }
     }
   };
@@ -1209,6 +1211,7 @@ export default function GlobalCandidatesPage() {
                               if (val === "Reject") {
                                 setActionCandidateId(c.id);
                                 setRejectReason("");
+                                setOtherRejectText("");
                                 setIntegrationModalOpen('reject');
                               } else if (val === "Submit") {
                                 setActionCandidateId(c.id);
@@ -1358,7 +1361,7 @@ export default function GlobalCandidatesPage() {
                     <select
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
+                      onChange={e => { setRejectReason(e.target.value); setOtherRejectText(''); }}
                     >
                       <option value="" disabled>Select a reason...</option>
                       <option value="Skills do not meet requirements">Skills do not meet requirements</option>
@@ -1383,15 +1386,31 @@ export default function GlobalCandidatesPage() {
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
                       <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
+                      <option value="__other__">Other (specify below)</option>
                     </select>
                   </div>
+                  {rejectReason === "__other__" && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Please specify</label>
+                      <textarea
+                        className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50 resize-none"
+                        rows={3}
+                        placeholder="Enter your rejection reason..."
+                        value={otherRejectText}
+                        onChange={e => setOtherRejectText(e.target.value)}
+                        maxLength={500}
+                        autoFocus
+                      />
+                      <p className="text-xs text-slate-400 text-right">{otherRejectText.length}/500</p>
+                    </div>
+                  )}
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}
-                    disabled={!rejectReason || syncingCandidateId === actionCandidateId}
+                    disabled={!rejectReason || (rejectReason === "__other__" && !otherRejectText.trim()) || syncingCandidateId === actionCandidateId}
                     className="font-bold"
                   >
                     {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}

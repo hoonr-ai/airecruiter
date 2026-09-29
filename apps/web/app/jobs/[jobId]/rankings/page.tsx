@@ -553,6 +553,7 @@ export default function CandidateRankingsPage() {
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [otherRejectText, setOtherRejectText] = useState("");
 
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
@@ -584,17 +585,17 @@ export default function CandidateRankingsPage() {
   };
 
   const handleConfirmReject = async () => {
-    const trimmedReason = rejectReason?.trim() || "";
-    if (actionCandidateId && trimmedReason) {
+    const finalReason = rejectReason === "__other__" ? otherRejectText?.trim() : rejectReason?.trim();
+    if (actionCandidateId && finalReason) {
       setSyncingCandidateId(actionCandidateId);
       const rejectedAt = new Date().toISOString();
       try {
         const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
-          reason: trimmedReason
+          reason: finalReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
+        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: finalReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
         if (res?.jobdiva_sync === 'error') {
           setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
@@ -609,6 +610,7 @@ export default function CandidateRankingsPage() {
         setIntegrationModalOpen(null);
         setActionCandidateId(null);
         setRejectReason('');
+        setOtherRejectText('');
       }
     }
   };
@@ -2866,6 +2868,7 @@ export default function CandidateRankingsPage() {
                                 if (val === "Reject") {
                                   setActionCandidateId(candidate.id);
                                   setRejectReason("");
+                                  setOtherRejectText("");
                                   setIntegrationModalOpen('reject');
                                 } else if (val === "Submit") {
                                   setActionCandidateId(candidate.id);
@@ -3084,7 +3087,7 @@ export default function CandidateRankingsPage() {
                     <select
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
+                      onChange={e => { setRejectReason(e.target.value); setOtherRejectText(''); }}
                     >
                       <option value="" disabled>Select a reason...</option>
                       <option value="Skills do not meet requirements">Skills do not meet requirements</option>
@@ -3109,15 +3112,31 @@ export default function CandidateRankingsPage() {
                       <option value="Not eligible for rehire">Not eligible for rehire</option>
                       <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
                       <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
+                      <option value="__other__">Other (specify below)</option>
                     </select>
                   </div>
+                  {rejectReason === "__other__" && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Please specify</label>
+                      <textarea
+                        className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50 resize-none"
+                        rows={3}
+                        placeholder="Enter your rejection reason..."
+                        value={otherRejectText}
+                        onChange={e => setOtherRejectText(e.target.value)}
+                        maxLength={500}
+                        autoFocus
+                      />
+                      <p className="text-xs text-slate-400 text-right">{otherRejectText.length}/500</p>
+                    </div>
+                  )}
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}
-                    disabled={!rejectReason || syncingCandidateId === actionCandidateId}
+                    disabled={!rejectReason || (rejectReason === "__other__" && !otherRejectText.trim()) || syncingCandidateId === actionCandidateId}
                     className="font-bold"
                   >
                     {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}
