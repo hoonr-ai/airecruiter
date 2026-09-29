@@ -107,7 +107,7 @@ import {
   isOutreachEligibleScore,
 } from "@/lib/match-score";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
-import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
+import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion, canEditQuestionType } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 import {
@@ -119,15 +119,7 @@ import {
   readNdjson,
 } from "@/lib/contact-lookup";
 
-/** Returns true when a question's type (scored/hard_filter/info_only) may be
- *  changed by the recruiter. System questions (is_default or is_locked) are
- *  always fixed so the dropdown is hidden for them.
- *  Note: questions loaded from saved data set is_locked via resolveLockedFlag
- *  (which also inspects question_text), so is_default not being persisted for
- *  pre-existing rows is safe — is_locked alone covers those.
- */
-const canEditQuestionType = (q: { category?: string; is_default?: boolean; is_locked?: boolean }): boolean =>
-  isRecruiterAddedQuestion(q.category) && !q.is_default && !q.is_locked;
+
 
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
