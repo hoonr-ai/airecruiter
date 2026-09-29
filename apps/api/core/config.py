@@ -180,6 +180,14 @@ EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "l
 EXA_CONTACT_DEEP_EFFORT = get_env_with_default("EXA_CONTACT_DEEP_EFFORT", "medium")
 # Poll budget for one deep run (it researches longer than a low-effort run).
 EXA_CONTACT_DEEP_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_DEEP_TIMEOUT_S", "150"))
+# Exa Connect data partners attached to the deep search (user 2026-09-29: "add
+# fiber in the deep search"): Fiber.ai's B2B people database, which the agent is
+# told to look the person up in by LinkedIn URL. Live check that day: phones for
+# 2 of 3 people the normal run and the web-only deep search had both missed.
+# Billed on top of the run at $0.02 a Fiber credit (person lookup 2, phone
+# reveal 5, a miss free): ~$0.14-0.21 a deep run. Comma-separated Exa Connect
+# provider ids; empty = web search only.
+EXA_CONTACT_DEEP_DATA_SOURCES = get_env_with_default("EXA_CONTACT_DEEP_DATA_SOURCES", "fiber")
 # Exa is the last contact provider, so a lookup that fails gets one second
 # chance: a run that timed out (or could not be polled) is watched for one more
 # timeout window, since it is billed either way; a failed/cancelled run, a 5xx

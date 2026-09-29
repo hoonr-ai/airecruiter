@@ -4,7 +4,8 @@ to high cost but get the contact details at the end":
 
     contact cache -> Apollo (URL match, then the personal-phone reveal)
     -> Exa Agent normal run (EXA_CONTACT_ENRICH_EFFORT)
-    -> Exa deep search (EXA_CONTACT_DEEP_EFFORT) for whatever is still missing.
+    -> Exa deep search (EXA_CONTACT_DEEP_EFFORT, with Fiber.ai attached through
+       Exa Connect: EXA_CONTACT_DEEP_DATA_SOURCES) for whatever is still missing.
 
 Kipplo and ZoomInfo stay off unless listed in CONTACT_LOOKUP_PROVIDERS. These
 tests run with the production defaults; conftest lists every provider and
@@ -259,8 +260,9 @@ class _Resp:
         return self._payload
 
 
-def test_the_deep_search_request(monkeypatch):
-    bodies = []
+def _exa_client(bodies, answers):
+    """httpx.AsyncClient stand-in: records each create body, answers in order."""
+    answers = list(answers)
 
     class _Client:
         def __init__(self, *args, **kwargs):
@@ -274,16 +276,33 @@ def test_the_deep_search_request(monkeypatch):
 
         async def post(self, url, headers=None, json=None):
             bodies.append(json)
-            return _Resp(200, {"id": "run-1", "status": "completed",
-                               "output": {"structured": {"contact": {"phone": "+1 415 555 0100"}}}})
+            return answers.pop(0)
 
         async def get(self, url, headers=None):
             raise AssertionError("a completed run is not polled")
 
+    return _Client
+
+
+FOUND = _Resp(200, {"id": "run-1", "status": "completed",
+                    "output": {"structured": {"contact": {"phone": "+1 415 555 0100"}}}})
+
+
+def _exa_env(monkeypatch, bodies, answers):
     monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_ENABLED", True)
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_EFFORT", "low")
-    monkeypatch.setattr(ce.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_DATA_SOURCES", "fiber")
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _exa_client(bodies, answers))
+
+
+def _phone(schema):
+    return schema["properties"]["contact"]["properties"]["phone"]
+
+
+def test_the_deep_search_request(monkeypatch):
+    bodies = []
+    _exa_env(monkeypatch, bodies, [FOUND, FOUND])
 
     deep = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", "Acme", fields=("phone",), deep=True))
     normal = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", "Acme", fields=("phone",)))
@@ -294,6 +313,37 @@ def test_the_deep_search_request(monkeypatch):
     assert "search thoroughly" in bodies[0]["query"] and "search thoroughly" not in bodies[1]["query"]
     assert "personal mobile phone number" in bodies[0]["query"]
     assert list(bodies[0]["outputSchema"]["properties"]["contact"]["properties"]) == ["phone"]
+    # Fiber.ai rides along with the deep search only, and is asked for by name
+    # (an attached partner is a tool the agent MAY call).
+    assert bodies[0]["dataSources"] == [{"provider": "fiber"}]
+    assert "Fiber.ai people database" in bodies[0]["query"]
+    assert "Fiber.ai" in _phone(bodies[0]["outputSchema"])["description"]
+    assert "dataSources" not in bodies[1] and "Fiber" not in bodies[1]["query"]
+    assert "Fiber" not in _phone(bodies[1]["outputSchema"])["description"]
+    # The shared schema is not changed by the deep variant.
+    assert "Fiber" not in _phone(ce._exa_contact_schema(("phone",)))["description"]
+
+
+def test_deep_search_goes_web_only_when_exa_refuses_fiber(monkeypatch):
+    bodies = []
+    _exa_env(monkeypatch, bodies, [_Resp(400, {"error": "dataSources not available"}), FOUND])
+
+    res = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", fields=("phone",), deep=True))
+
+    assert res["ok"] and res["fields"]["mobilePhone"] == "+14155550100"
+    assert bodies[0]["dataSources"] == [{"provider": "fiber"}]
+    assert "dataSources" not in bodies[1] and "Fiber" not in bodies[1]["query"]
+    assert "search thoroughly" in bodies[1]["query"] and bodies[1]["effort"] == "medium"
+
+
+def test_deep_search_without_data_sources_when_switched_off(monkeypatch):
+    bodies = []
+    _exa_env(monkeypatch, bodies, [FOUND])
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_DATA_SOURCES", "")
+
+    asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", fields=("phone",), deep=True))
+
+    assert "dataSources" not in bodies[0] and "Fiber" not in bodies[0]["query"]
 
 
 def test_a_missing_key_is_fatal_so_no_deep_search_follows(monkeypatch):

@@ -45,6 +45,7 @@ import httpx
 from core.config import (
     APOLLO_API_KEY as _APOLLO_ENV_KEY,
     EXA_API_KEY,
+    EXA_CONTACT_DEEP_DATA_SOURCES,
     EXA_CONTACT_DEEP_EFFORT,
     EXA_CONTACT_DEEP_TIMEOUT_S,
     EXA_CONTACT_ENRICH_CONCURRENCY,
@@ -108,20 +109,35 @@ _EXA_CONTACT_SCHEMA = {
 EXA_CONTACT_FIELDS = ("email", "phone")
 
 
-def _exa_contact_schema(fields: Tuple[str, ...]) -> Dict[str, Any]:
+_FIBER_FIELD_HINT = " From Fiber.ai's contact reveal when it has one."
+
+
+def _exa_contact_schema(fields: Tuple[str, ...], via_fiber: bool = False) -> Dict[str, Any]:
     """``_EXA_CONTACT_SCHEMA`` narrowed to ``fields``. The agent bills per
     contact field it fills, so a lookup for a candidate who already has an
-    email asks for the phone only (and vice versa)."""
+    email asks for the phone only (and vice versa). ``via_fiber`` names
+    Fiber.ai in each field: an attached data partner is only a tool the agent
+    MAY call, and it reaches for it when the schema asks for its data."""
     contact = _EXA_CONTACT_SCHEMA["properties"]["contact"]
+    props = {f: dict(contact["properties"][f]) for f in fields}
+    if via_fiber:
+        for prop in props.values():
+            prop["description"] = prop["description"] + _FIBER_FIELD_HINT
     return {
         "type": "object",
         "properties": {
             "contact": {
                 **{k: v for k, v in contact.items() if k != "properties"},
-                "properties": {f: contact["properties"][f] for f in fields},
+                "properties": props,
             }
         },
     }
+
+
+def deep_data_sources() -> Tuple[str, ...]:
+    """Exa Connect providers attached to the deep search (EXA_CONTACT_DEEP_DATA_SOURCES)."""
+    raw = str(EXA_CONTACT_DEEP_DATA_SOURCES or "")
+    return tuple(dict.fromkeys(p.strip().lower() for p in raw.split(",") if p.strip()))
 
 
 # Free/consumer mailbox domains → classify the agent's email as personal.
@@ -600,9 +616,12 @@ def _build_exa_contact_query(
     linkedin_url: str,
     fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
     deep: bool = False,
+    via_fiber: bool = False,
 ) -> str:
     """Natural-language query for the Exa Agent contact-enrichment run. The
-    deep search asks for a thorough search of the sources a quick run skips."""
+    deep search asks for a thorough search of the sources a quick run skips,
+    and with Fiber.ai attached, to look the person up there (the wording of the
+    2026-09-29 live check)."""
     who = (full_name or "").strip() or "this person"
     wanted = " and ".join(
         label for field, label in (("email", "work email"), ("phone", "personal mobile phone number"))
@@ -622,6 +641,11 @@ def _build_exa_contact_query(
             "GitHub, portfolio, resume or CV pages, conference and speaker pages, publications "
             "and professional directories. Only return details that belong to this person."
         )
+        if via_fiber:
+            query += (
+                " Look this person up in the Fiber.ai people database by their LinkedIn URL "
+                "and reveal their contact details there first."
+            )
     return query
 
 
@@ -638,7 +662,10 @@ async def exa_enrich_by_linkedin(
     ``fields`` limits the lookup to the contact the caller still lacks (a
     subset of ``EXA_CONTACT_FIELDS``) — the agent bills per field it fills.
     ``deep`` = the deep search: EXA_CONTACT_DEEP_EFFORT, a thorough-search
-    query and EXA_CONTACT_DEEP_TIMEOUT_S, for what a normal run did not find.
+    query and EXA_CONTACT_DEEP_TIMEOUT_S, for what a normal run did not find,
+    with the Exa Connect partners of EXA_CONTACT_DEEP_DATA_SOURCES attached
+    (Fiber.ai by default). Should Exa refuse them (a 400), the deep search runs
+    once more on web search alone rather than not at all.
     A failure a second run would hit too (disabled, no key, a 4xx such as a
     bad key or no credits) comes back with ``fatal: True``.
 
@@ -658,22 +685,40 @@ async def exa_enrich_by_linkedin(
         logger.warning("Exa enrichment skipped for %s: EXA_API_KEY not configured", candidate_id)
         return {"ok": False, "message": "EXA_API_KEY not configured", "fatal": True}
 
-    query = _build_exa_contact_query(full_name, company, linkedin_url, wanted, deep=deep)
     timeout_s = EXA_CONTACT_DEEP_TIMEOUT_S if deep else EXA_CONTACT_ENRICH_TIMEOUT_S
     headers = {
         "Content-Type": "application/json",
         "x-api-key": EXA_API_KEY,
         "Exa-Beta": EXA_AGENT_BETA,
     }
-    body = {
-        "query": query,
-        "outputSchema": _exa_contact_schema(wanted),
-        "effort": EXA_CONTACT_DEEP_EFFORT if deep else EXA_CONTACT_ENRICH_EFFORT,
-    }
+    sources = deep_data_sources() if deep else ()
+
+    def _body(with_sources: bool) -> Dict[str, Any]:
+        via_fiber = with_sources and "fiber" in sources
+        body: Dict[str, Any] = {
+            "query": _build_exa_contact_query(
+                full_name, company, linkedin_url, wanted, deep=deep, via_fiber=via_fiber
+            ),
+            "outputSchema": _exa_contact_schema(wanted, via_fiber=via_fiber),
+            "effort": EXA_CONTACT_DEEP_EFFORT if deep else EXA_CONTACT_ENRICH_EFFORT,
+        }
+        if with_sources and sources:
+            body["dataSources"] = [{"provider": p} for p in sources]
+        return body
+
+    body = _body(with_sources=True)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
+            if sources and outcome.get("status") == 400:
+                logger.warning(
+                    "Exa refused the deep search's data sources (%s) for %s: %s; "
+                    "deep search on web search alone",
+                    ",".join(sources), candidate_id, outcome.get("detail") or "",
+                )
+                body = _body(with_sources=False)
+                outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
             if "result" not in outcome and outcome.get("retry") and EXA_CONTACT_ENRICH_RETRY:
                 # Exa is the last provider: one second chance before the
                 # candidate is left without contact (user 2026-09-28, "get the
@@ -734,7 +779,12 @@ async def _exa_contact_attempt(
                     candidate_id, r.status_code, r.text[:200],
                 )
                 transient = r.status_code >= 500 or r.status_code == 429
-                return {"message": f"Exa create error ({r.status_code})", "retry": "new" if transient else ""}
+                return {
+                    "message": f"Exa create error ({r.status_code})",
+                    "retry": "new" if transient else "",
+                    "status": r.status_code,
+                    "detail": (r.text or "")[:200],
+                }
             run = r.json()
             run_id = str(run.get("id") or "")
 
