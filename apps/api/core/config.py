@@ -178,8 +178,15 @@ EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "l
 # $0.10 a run (the effort the user picked for the deep sourcing search; high =
 # $0.50), plus $0.02 per email / $0.07 per phone it finds. "off" disables it.
 EXA_CONTACT_DEEP_EFFORT = get_env_with_default("EXA_CONTACT_DEEP_EFFORT", "medium")
-# Poll budget for one deep run (it researches longer than a low-effort run).
-EXA_CONTACT_DEEP_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_DEEP_TIMEOUT_S", "150"))
+# Poll budget for one deep run (it researches longer than a low-effort run;
+# QA 2026-09-29 saw 14s-3.5min with Fiber attached). One window, no second:
+# a run still going after it is watched in the background instead
+# (EXA_LATE_RESULT_WAIT_S), so the Launch pass is not held up by it.
+EXA_CONTACT_DEEP_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_DEEP_TIMEOUT_S", "240"))
+# How long a run we stopped waiting for is still watched in the background:
+# it is billed anyway, so what it finds goes to the contact cache and the
+# candidate's sourced rows for the next Launch / phone click. 0 = off.
+EXA_LATE_RESULT_WAIT_S = int(get_env_with_default("EXA_LATE_RESULT_WAIT_S", "600"))
 # Exa Connect data partners attached to the deep search (user 2026-09-29: "add
 # fiber in the deep search"): Fiber.ai's B2B people database, which the agent is
 # told to look the person up in by LinkedIn URL. Live check that day: phones for

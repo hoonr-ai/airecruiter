@@ -43,6 +43,7 @@ class _Chain:
     def __init__(self, apollo=None, exa=None, deep=None, cached=None):
         self.calls = []
         self.records = []
+        self.wait_retry = []
         self._apollo = apollo or {"ok": True, "fields": _fields()}
         self._exa = exa or {"ok": True, "fields": _fields()}
         self._deep = deep or {"ok": True, "fields": _fields()}
@@ -65,8 +66,9 @@ class _Chain:
         return self._apollo
 
     async def exa(self, candidate_id, linkedin_url, full_name="", company="",
-                  fields=ce.EXA_CONTACT_FIELDS, deep=False):
+                  fields=ce.EXA_CONTACT_FIELDS, deep=False, wait_retry=True):
         self.calls.append(("exa_deep" if deep else "exa", tuple(fields)))
+        self.wait_retry.append(wait_retry)
         return self._deep if deep else self._exa
 
     async def cache_get(self, url):
@@ -353,3 +355,225 @@ def test_a_missing_key_is_fatal_so_no_deep_search_follows(monkeypatch):
     res = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, fields=("phone",)))
 
     assert res == {"ok": False, "message": "EXA_API_KEY not configured", "fatal": True}
+
+
+# ---------------------------------------------------------------------------
+# QA 2026-09-29: contacts found but never shown (slow deep searches, a whole
+# group waiting for its slowest candidate, lost create answers)
+# ---------------------------------------------------------------------------
+
+def test_a_slow_normal_run_is_not_waited_on_twice_when_the_deep_search_follows(monkeypatch):
+    watched = []
+    monkeypatch.setattr(ce, "watch_late_exa_run", lambda run_id, url, **kw: watched.append((run_id, kw["provider"])))
+    chain = _Chain(
+        exa={"ok": False, "message": "Exa run timed out", "run_id": "run-normal"},
+        deep={"ok": False, "message": "Exa run timed out", "run_id": "run-deep"},
+    )
+
+    _on_demand(monkeypatch, chain)
+
+    assert chain.wait_retry == [False, False]
+    assert watched == [("run-normal", "exa"), ("run-deep", "exa_deep")]
+
+
+def test_with_the_deep_search_off_the_normal_run_keeps_its_second_window(monkeypatch):
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_EFFORT", "off")
+    chain = _Chain()
+
+    _on_demand(monkeypatch, chain)
+
+    assert chain.wait_retry == [True]
+
+
+class _Req:
+    def __init__(self, accept):
+        self.headers = {"accept": accept}
+
+
+def _stream(monkeypatch, chain, people, slow=None, **req):
+    """Run the grouped endpoint with Accept: application/x-ndjson; returns the
+    parsed lines. ``slow`` = {candidate_id: seconds} delays those lookups."""
+    import json as _json
+
+    real_impl = candidates_router._enrich_candidate_contact_impl
+
+    async def _impl(candidate_id, item):
+        await asyncio.sleep((slow or {}).get(candidate_id, 0))
+        return await real_impl(candidate_id, item)
+
+    monkeypatch.setattr(candidates_router, "_enrich_candidate_contact_impl", _impl)
+    monkeypatch.setattr(candidates_router, "ENRICH_STREAM_PING_S", 0.02)
+
+    def _no_db():
+        raise RuntimeError("no db in tests")
+
+    monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
+    monkeypatch.setattr(contact_cache, "get", chain.cache_get)
+    monkeypatch.setattr(contact_cache, "record", chain.cache_record)
+    monkeypatch.setattr(candidates_router, "_apollo_enrich_by_linkedin", chain.apollo)
+    monkeypatch.setattr(candidates_router, "_exa_enrich_by_linkedin", chain.exa)
+    body = candidates_router.EnrichCandidateContactsRequest(
+        candidates=[candidates_router.EnrichCandidateContactRequest(**p) for p in people], **req
+    )
+
+    async def _go():
+        res = await candidates_router.enrich_candidate_contacts(
+            body, http_request=_Req("application/x-ndjson"), user=None
+        )
+        lines = []
+        async for chunk in res.body_iterator:
+            lines.append(_json.loads(chunk))
+        return res, lines
+
+    return asyncio.run(_go())
+
+
+def _person(slug, **kw):
+    return {"candidate_id": f"cand-{slug}", "linkedin_url": f"https://www.linkedin.com/in/{slug}",
+            "full_name": slug.title(), **kw}
+
+
+def test_grouped_lookups_stream_each_result_as_it_ends(monkeypatch):
+    chain = _Chain(exa={"ok": True, "fields": _fields(workEmail="x@acme.com", mobilePhone="+14155550100")})
+
+    res, lines = _stream(monkeypatch, chain, [_person("ann"), _person("bob")], slow={"cand-ann": 0.1})
+
+    assert res.media_type == "application/x-ndjson"
+    assert res.headers["x-accel-buffering"] == "no"
+    results = [line for line in lines if "index" in line]
+    # bob finished first and was not held back by ann's slower lookup.
+    assert [r["index"] for r in results] == [1, 0]
+    assert all(r["result"]["phone"] == "+14155550100" for r in results)
+    assert any(line.get("ping") for line in lines)      # the wait kept the connection alive
+    assert lines[-1] == {"done": True}
+
+
+def test_grouped_lookups_finish_even_if_the_caller_goes_away(monkeypatch):
+    chain = _Chain(exa={"ok": True, "fields": _fields(mobilePhone="+14155550100")})
+    real_impl = candidates_router._enrich_candidate_contact_impl
+
+    async def _impl(candidate_id, item):
+        await asyncio.sleep(0.05 if candidate_id == "cand-ann" else 0)
+        return await real_impl(candidate_id, item)
+
+    def _no_db():
+        raise RuntimeError("no db in tests")
+
+    monkeypatch.setattr(candidates_router, "_enrich_candidate_contact_impl", _impl)
+    monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
+    monkeypatch.setattr(contact_cache, "get", chain.cache_get)
+    monkeypatch.setattr(contact_cache, "record", chain.cache_record)
+    monkeypatch.setattr(candidates_router, "_apollo_enrich_by_linkedin", chain.apollo)
+    monkeypatch.setattr(candidates_router, "_exa_enrich_by_linkedin", chain.exa)
+    body = candidates_router.EnrichCandidateContactsRequest(
+        candidates=[candidates_router.EnrichCandidateContactRequest(**p) for p in (_person("ann"), _person("bob"))]
+    )
+
+    async def _go():
+        res = await candidates_router.enrich_candidate_contacts(
+            body, http_request=_Req("application/x-ndjson"), user=None
+        )
+        it = res.body_iterator
+        first = await it.__anext__()          # bob's answer
+        await it.aclose()                     # the browser tab closes
+        await asyncio.sleep(0.2)              # ann's lookup keeps going
+        return first
+
+    first = asyncio.run(_go())
+
+    assert b'"index": 1' in first
+    assert len(chain.records) == 2            # both lookups ran to the end and were kept
+
+
+def test_a_lost_create_answer_is_picked_up_not_bought_again(monkeypatch):
+    import httpx as _httpx
+
+    query = ce._build_exa_contact_query("Jane Doe", "", LINKEDIN, ("phone",))
+    posts = []
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            posts.append(json)
+            raise _httpx.ReadTimeout("create answered late")
+
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/agent/runs"):
+                return _Resp(200, {"data": [
+                    {"id": "run-old", "status": "completed", "request": {"query": "another person"}},
+                    {"id": "run-7", "status": "completed", "request": {"query": query},
+                     "output": {"structured": {"contact": {"phone": "+1 415 555 0100"}}}},
+                ]})
+            raise AssertionError(f"unexpected poll {url}")
+
+    monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_ENABLED", True)
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _Client)
+
+    res = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", fields=("phone",)))
+
+    assert res["ok"] and res["fields"]["mobilePhone"] == "+14155550100"
+    assert len(posts) == 1                    # no second paid run
+
+
+def test_wait_retry_false_hands_back_the_run_still_going(monkeypatch):
+    async def _attempt(client, headers, body, candidate_id, run_id="", timeout_s=None):
+        return {"message": "Exa run timed out", "retry": "wait", "run_id": "run-9"}
+
+    monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_ENABLED", True)
+    monkeypatch.setattr(ce, "_exa_contact_attempt", _attempt)
+
+    res = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, fields=("phone",), deep=True, wait_retry=False))
+
+    assert res == {"ok": False, "message": "Exa run timed out", "run_id": "run-9"}
+
+
+def test_a_late_deep_result_is_kept_for_the_next_lookup(monkeypatch):
+    polls = [
+        _Resp(200, {"id": "run-9", "status": "running"}),
+        _Resp(200, {"id": "run-9", "status": "completed",
+                    "output": {"structured": {"contact": {"phone": "+1 415 555 0100"}}}}),
+    ]
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            return polls.pop(0)
+
+    records, fills = [], []
+
+    async def _record(url, **kw):
+        records.append(kw)
+
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(ce, "_EXA_LATE_POLL_S", 0)
+    monkeypatch.setattr(ce, "EXA_LATE_RESULT_WAIT_S", 60)
+    monkeypatch.setattr(contact_cache, "record", _record)
+    monkeypatch.setattr(ce, "_fill_sourced_rows_sync", fills.append)
+
+    got = asyncio.run(ce.keep_late_exa_result(
+        "run-9", LINKEDIN, candidate_id="cand-1", jobdiva_id="26-1", fields=("phone",), provider="exa_deep",
+    ))
+
+    assert got == {"email": "", "phone": "+14155550100"}
+    assert records == [{"email": "", "phone": "+14155550100", "email_provider": "exa_deep",
+                        "phone_provider": "exa_deep", "deep_missed": []}]
+    assert fills == [{"email": None, "phone": "+14155550100", "candidate_id": "cand-1", "jobdiva_id": "26-1"}]
+

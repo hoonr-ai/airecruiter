@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
@@ -3064,13 +3064,21 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     exa_outcome = "-"
     exa_stop = False  # a failure the deep run would hit too (no key, a 4xx)
     normal_fields = tuple(f for f in exa_fields if f not in deep_first) if EXA_CONTACT_ENRICH_ENABLED else ()
+    deep_follows = contact_enrichment.exa_deep_enabled()
+    _late = {"candidate_id": candidate_id, "jobdiva_id": request.jobdiva_id or (_row0.get("jobdiva_id") if _row0 else None)}
     if normal_fields:
         async with contact_enrichment.ondemand_exa_semaphore():
             _exa = await _exa_enrich_by_linkedin(
-                candidate_id, linkedin_url, candidate_name, candidate_company, fields=normal_fields
+                candidate_id, linkedin_url, candidate_name, candidate_company, fields=normal_fields,
+                # A normal run that runs out of time is not waited on twice when
+                # the deep search follows; it is watched in the background.
+                **({"wait_retry": False} if deep_follows else {}),
             )
         exa_answered = bool(_exa.get("ok"))
         exa_stop = bool(_exa.get("fatal"))
+        contact_enrichment.watch_late_exa_run(
+            str(_exa.get("run_id") or ""), linkedin_url, fields=normal_fields, provider="exa", **_late
+        )
         if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}, "exa"):
             exa_contributed = True
         exa_outcome = ",".join(f for f in normal_fields if f not in _missing_contact()) or (
@@ -3082,15 +3090,20 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     deep_answered = False
     exa_deep_contributed = False
     exa_deep_outcome = "-"
-    if EXA_CONTACT_ENRICH_ENABLED and contact_enrichment.exa_deep_enabled() and not exa_stop:
+    if EXA_CONTACT_ENRICH_ENABLED and deep_follows and not exa_stop:
         deep_fields = tuple(f for f in exa_fields if f in _missing_contact())
     if deep_fields:
         async with contact_enrichment.ondemand_exa_semaphore():
             _deep = await _exa_enrich_by_linkedin(
                 candidate_id, linkedin_url, candidate_name, candidate_company,
-                fields=deep_fields, deep=True,
+                fields=deep_fields, deep=True, wait_retry=False,
             )
         deep_answered = bool(_deep.get("ok"))
+        # Still going after EXA_CONTACT_DEEP_TIMEOUT_S: what it finds is kept
+        # for the next Launch / phone click instead of being thrown away.
+        contact_enrichment.watch_late_exa_run(
+            str(_deep.get("run_id") or ""), linkedin_url, fields=deep_fields, provider="exa_deep", **_late
+        )
         if _deep.get("ok") and _merge_primary(_deep.get("fields") or {}, "exa_deep"):
             exa_deep_contributed = True
         exa_deep_outcome = ",".join(f for f in deep_fields if f not in _missing_contact()) or (
@@ -3301,6 +3314,13 @@ async def enrich_candidate_contact(
 
 
 ENRICH_CONTACTS_BATCH_MAX = 25
+# While no lookup of a streamed group has finished, a ping line this often keeps
+# the connection from idling out (a deep search can take minutes).
+ENRICH_STREAM_PING_S = 10.0
+# The grouped endpoint's lookups run as tasks of their own, so a caller that
+# goes away does not cancel them (they still keep what they find). Strong
+# references: a task only weakly referenced by the loop could vanish mid-run.
+_LOOKUP_TASKS: set = set()
 
 
 class EnrichCandidateContactsRequest(BaseModel):
@@ -3314,6 +3334,7 @@ class EnrichCandidateContactsRequest(BaseModel):
 @router.post("/candidates/enrich-contacts")
 async def enrich_candidate_contacts(
     request: EnrichCandidateContactsRequest,
+    http_request: Request = None,
     user: UserIdentity = Depends(get_current_user),
 ):
     """Contact lookup for several candidates in one call: Launch PAIR's
@@ -3322,8 +3343,17 @@ async def enrich_candidate_contacts(
     their Kipplo lookups can go out together as one request when list lookups
     are on (KIPPLO_BATCH_SIZE > 1: services/kipplo.py batches lookups waiting at
     the same time; off while our integration answers one profile per request).
-    Answers ``{"results": [...]}`` in request order, each shaped like the single
-    endpoint's answer; one candidate failing does not fail the others.
+    One candidate failing does not fail the others.
+
+    Answer: ``{"results": [...]}`` in request order, each shaped like the single
+    endpoint's answer, or with ``Accept: application/x-ndjson`` a stream (QA
+    2026-09-29: a group waited minutes for its slowest deep search with nothing
+    on screen, and a dropped connection lost everything the group had found):
+    one line ``{"index": i, "result": {...}}`` per candidate as soon as its
+    lookup ends, ``{"ping": true}`` every ENRICH_STREAM_PING_S while none has,
+    then ``{"done": true}``. The lookups run as tasks of their own, so if the
+    caller goes away they still finish and keep what they find (contact cache,
+    sourced rows) for the next Launch or phone click.
     """
     items = list(request.candidates or [])
     if not items:
@@ -3350,7 +3380,38 @@ async def enrich_candidate_contacts(
             logger.warning("enrich_contacts: lookup failed for %s: %s", candidate_id, e)
             return {"status": "error", "candidate_id": candidate_id, "message": f"lookup failed: {type(e).__name__}"}
 
-    return {"results": list(await asyncio.gather(*(_one(i) for i in items)))}
+    tasks: List[asyncio.Task] = []
+    for item in items:
+        task = asyncio.ensure_future(_one(item))
+        _LOOKUP_TASKS.add(task)
+        task.add_done_callback(_LOOKUP_TASKS.discard)
+        tasks.append(task)
+
+    accept = (http_request.headers.get("accept") or "").lower() if http_request is not None else ""
+    if "application/x-ndjson" not in accept:
+        return {"results": list(await asyncio.gather(*(asyncio.shield(t) for t in tasks)))}
+
+    async def _lines():
+        index_of = {task: i for i, task in enumerate(tasks)}
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, timeout=ENRICH_STREAM_PING_S, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                yield b'{"ping": true}\n'
+                continue
+            for task in sorted(done, key=index_of.get):
+                line = {"index": index_of[task], "result": task.result()}
+                yield (json.dumps(line, default=str) + "\n").encode()
+        yield b'{"done": true}\n'
+
+    return StreamingResponse(
+        _lines(),
+        media_type="application/x-ndjson",
+        # nginx must pass each line on as it comes, not buffer the answer.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.patch("/candidates/{candidate_id:path}/phone")
