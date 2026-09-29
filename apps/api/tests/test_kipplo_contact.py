@@ -113,6 +113,10 @@ def clock(monkeypatch):
     # These tests cover mechanics with emails and phones. Production asks
     # Kipplo for personal phones only (tests/test_personal_phone_only.py).
     monkeypatch.setenv("KIPPLO_CONTACT_FIELDS", "email,phone")
+    # List lookups (batching) are covered with batching on; production has it
+    # off while the integration answers one profile per request
+    # (test_by_default_each_profile_is_its_own_request).
+    monkeypatch.setenv("KIPPLO_BATCH_SIZE", "10")
     monkeypatch.setattr(kipplo, "_unavailable_until", 0.0)
     monkeypatch.setattr(kipplo, "_unavailable_reason", "")
     monkeypatch.setattr(kipplo, "_rate_blocked_until", 0.0)
@@ -891,3 +895,30 @@ def test_answer_names_who_found_each_field(monkeypatch):
     assert res["lookup"] == {"cache": "-", "kipplo": "phone", "zoominfo": "-", "apollo": "no match", "exa": "email"}
     assert providers.records[-1]["phone_provider"] == "kipplo"
     assert providers.records[-1]["email_provider"] == "exa"
+
+
+def test_by_default_each_profile_is_its_own_request(monkeypatch):
+    # Probed 2026-09-29: the integration answers at most one hit per request
+    # ("size (10) exceeds maximum allowed (1)"), so lists stay off by default.
+    monkeypatch.delenv("KIPPLO_BATCH_SIZE")
+    server = _Kipplo({"jane": JANE, "john": KNOWN_EMPTY})
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    jane, john, ghost = _gather(("jane", BOTH), ("john", BOTH), ("ghost", BOTH))
+
+    assert sorted(server.values()) == [f"https://www.linkedin.com/in/{s}" for s in ("ghost", "jane", "john")]
+    assert jane["fields"]["mobilePhone"] == "+14155550100"
+    assert john["ok"] and ghost["ok"]
+
+
+def test_a_one_hit_answer_caps_batches_at_one(monkeypatch):
+    # What batching on meets today: 3 profiles asked, all known, 1 hit back.
+    server = _Kipplo({"ann": JANE, "bob": KNOWN_EMPTY, "cat": KNOWN_EMPTY}, list_mode="cut_off")
+    monkeypatch.setattr(kipplo.httpx, "AsyncClient", server)
+
+    ann, bob, cat = _gather(("ann", BOTH), ("bob", BOTH), ("cat", BOTH))
+
+    assert kipplo._batch_cap == 1
+    assert len(server.values()) == 3                     # the list, then the two it left out
+    assert all(r["ok"] for r in (ann, bob, cat)) and ann["fields"]["workEmail"] == "jane@acme.com"
+

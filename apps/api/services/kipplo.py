@@ -35,13 +35,15 @@ Failures, all fail-open (the chain moves on to the next provider):
     per API key in the Kipplo portal. The API runs 8 uvicorn workers, so calls are
     paced by a limiter shared through Postgres (``kipplo_rate_calls``), with an
     in-process limiter as the fallback when the DB is unavailable. The limits count
-    requests, so lookups waiting at the same time share one request (up to
-    KIPPLO_BATCH_SIZE profiles; see "Lookup" below).
+    requests, and our integration answers at most ONE profile per request, so
+    each lookup is a request of its own (see "Lookup" below).
 
 Accuracy check (2026-09-28, 34 JobDiva applicants with candidate-provided contact):
 every record was for exactly the LinkedIn profile asked for; 4 of 9 cell numbers
 equalled the candidate's own number, the other 5 were different numbers; contact
-found for 11 of 34.
+found for 11 of 34. Live again 2026-09-29 on the paid plan (10 JobDiva candidates
+with a phone, cell numbers asked): 8 profiles known, 1 personal cell found (not
+the candidate's JobDiva number), 5 credits.
 """
 from __future__ import annotations
 
@@ -141,8 +143,10 @@ def min_interval_s() -> float:
 
 def max_wait_s() -> float:
     """How long one lookup may wait for a rate-limit slot before the chain moves
-    on without Kipplo."""
-    return max(0.0, _float_env("KIPPLO_MAX_WAIT_S", 20.0))
+    on without Kipplo. Launch PAIR looks up 20 candidates at a time (two groups
+    of 10) and Kipplo takes one request a second, so the last of them waits
+    about 20s for its slot."""
+    return max(0.0, _float_env("KIPPLO_MAX_WAIT_S", 30.0))
 
 
 # ---------------------------------------------------------------------------
@@ -396,20 +400,28 @@ def _contact_from_source(source: Dict[str, Any]) -> Dict[str, Any]:
 # Batching is per worker: Launch PAIR sends its candidates in groups
 # (/candidates/enrich-contacts) so that a group's lookups meet in one worker.
 #
-# What a list RETURNS could not be checked live (the account had no credits),
-# so a worker does not trust it until proven: after a batch it re-asks, alone,
-# one profile the batch came back without. If that single lookup knows the
-# profile, list lookups are switched off for the worker (ERROR logged) and the
-# rest are looked up one at a time; if not, lists are trusted from then on. A
-# rejected list filter, a cut-off answer (more matches than hits) or hits for
-# profiles nobody asked about fall back the same way.
+# OFF by default (KIPPLO_BATCH_SIZE=1) since the live check on 2026-09-29: our
+# integration returns at most one hit per request (a list of 9 known profiles
+# came back with 1 hit of 8 matches, and asking for more is refused: "size (10)
+# exceeds maximum allowed (1)"), so a list costs a request and still leaves
+# the rest to be asked one at a time. Set KIPPLO_BATCH_SIZE=10 once Kipplo
+# raises the integration's maximum result size.
+#
+# With batching on, a worker does not trust a list until proven: after a batch
+# it re-asks, alone, one profile the batch came back without. If that single
+# lookup knows the profile, list lookups are switched off for the worker (ERROR
+# logged) and the rest are looked up one at a time; if not, lists are trusted
+# from then on. A rejected list filter, a cut-off answer (more matches than
+# hits, which is what the one-hit limit produces) or hits for profiles nobody
+# asked about fall back the same way.
 
 RATE_LIMITED = {"ok": False, "message": "Kipplo rate limited", "rate_limited": True}
 
 
 def batch_size() -> int:
-    """Profiles per request (KIPPLO_BATCH_SIZE, default 10; 1 = no batching)."""
-    return max(1, int(_float_env("KIPPLO_BATCH_SIZE", 10)))
+    """Profiles per request (KIPPLO_BATCH_SIZE, default 1 = no batching: the
+    integration answers one profile per request; see above)."""
+    return max(1, int(_float_env("KIPPLO_BATCH_SIZE", 1)))
 
 
 def batch_window_s() -> float:

@@ -3279,12 +3279,11 @@ async def enrich_candidate_contacts(
     """Contact lookup for several candidates in one call: Launch PAIR's
     enrichment pass. Each runs the same chain as /candidates/enrich-contact
     (same spend policy with trigger="launch"), all at once in this worker, so
-    their Kipplo lookups go out together as one request (services/kipplo.py
-    batches lookups waiting at the same time; the key's limits count requests).
-    Sent one by one, they landed on different workers and cost a request each,
-    which the 10-a-minute limit could not keep up with, so most fell through to
-    Exa. Answers ``{"results": [...]}`` in request order, each shaped like the
-    single endpoint's answer; one candidate failing does not fail the others.
+    their Kipplo lookups can go out together as one request when list lookups
+    are on (KIPPLO_BATCH_SIZE > 1: services/kipplo.py batches lookups waiting at
+    the same time; off while our integration answers one profile per request).
+    Answers ``{"results": [...]}`` in request order, each shaped like the single
+    endpoint's answer; one candidate failing does not fail the others.
     """
     items = list(request.candidates or [])
     if not items:
