@@ -13,7 +13,7 @@ import React, { useRef, useState, useEffect } from "react";
 import { GripVertical, Plus, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TemplateQuestion } from "@/lib/campaigns";
-import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
+import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion, canEditQuestionType } from "@/hooks/use-question-moderation";
 import { getQuestionFilterType } from "@/lib/utils";
 import { QuestionFilterBadge } from "@/components/QuestionFilterBadge";
 
@@ -209,7 +209,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
             />
               </div>
 
-          {(String(q.category || "").toLowerCase() === "custom" || String(q.category || "").toLowerCase() === "other") && !q.is_default && !q.is_locked && (
+          {canEditQuestionType(q) && (
             <div className="w-[130px] flex-shrink-0 border-l border-slate-100 pl-3">
               <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Question type</label>
               <select

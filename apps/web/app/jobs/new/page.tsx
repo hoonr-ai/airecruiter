@@ -107,21 +107,11 @@ import {
   isOutreachEligibleScore,
 } from "@/lib/match-score";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
-import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
+import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion, canEditQuestionType } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
-/** Returns true when a question's type (scored/hard_filter/info_only) may be
- *  changed by the recruiter. System questions (is_default or is_locked) are
- *  always fixed so the dropdown is hidden for them.
- *  Note: questions loaded from saved data set is_locked via resolveLockedFlag
- *  (which also inspects question_text), so is_default not being persisted for
- *  pre-existing rows is safe — is_locked alone covers those.
- */
-const canEditQuestionType = (q: { category?: string; is_default?: boolean; is_locked?: boolean }): boolean => {
-  const cat = String(q.category || "").toLowerCase();
-  return (cat === "other" || cat === "custom") && !q.is_default && !q.is_locked;
-};
+
 
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
@@ -7467,7 +7457,7 @@ function NewJobPageContent() {
               )}
 
               <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
-                {(q.category === 'role-specific' || (!q.category && !q.is_default && !q.is_locked)) && (
+                {q.category === 'role-specific' && (
                   <span className="bg-[#f0fdf4] text-[#166534] text-[9px] font-bold px-1.5 py-0.5 rounded border border-[#bbf7d0] whitespace-nowrap mb-1">
                     role-specific
                   </span>
