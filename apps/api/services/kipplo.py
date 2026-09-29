@@ -1,4 +1,7 @@
-"""Kipplo contact lookup by LinkedIn URL: the FIRST provider in every contact chain.
+"""Kipplo contact lookup by LinkedIn URL: the first provider of both contact
+chains WHEN "kipplo" is listed in CONTACT_LOOKUP_PROVIDERS. Off by default since
+2026-09-29 (user: "make it for apollo and exa only", after the paid-plan check
+found a personal cell for 1 of 10 candidates).
 
 User 2026-09-28: "Kipplo can be now the first source", and the chains go
 cheapest to most expensive. At $0.011-0.0135 a credit on the paid plans

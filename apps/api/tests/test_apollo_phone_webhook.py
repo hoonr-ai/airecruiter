@@ -453,8 +453,14 @@ def test_no_phone_job_when_unavailable_or_known_missing(monkeypatch):
     _, calls = _chain(monkeypatch, reveal=False, trigger="launch")
     assert not any(isinstance(c, tuple) and c[0] == "apollo_phone" for c in calls)
 
-    _, calls = _chain(monkeypatch, cached={"phone_missed": True}, trigger="launch")
+    # The whole chain (through the Exa deep search) found no phone lately.
+    _, calls = _chain(monkeypatch, cached={"phone_missed": True, "phone_deep_missed": True}, trigger="launch")
     assert not any(isinstance(c, tuple) and c[0] == "apollo_phone" for c in calls)
+
+    # Only the normal Exa run missed: Apollo (billed only for a number it finds)
+    # is asked again before the deep search.
+    _, calls = _chain(monkeypatch, cached={"phone_missed": True}, trigger="launch")
+    assert any(isinstance(c, tuple) and c[0] == "apollo_phone" for c in calls)
 
 
 def test_no_phone_job_when_the_phone_is_already_known(monkeypatch):

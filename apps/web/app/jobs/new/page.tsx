@@ -1115,12 +1115,10 @@ function NewJobPageContent() {
   // only safeguard: nginx still enforces the real ceiling.
   const BATCH_LAUNCH_DELAY_MS = 350;
 
-  // Launch PAIR's contact lookups (Kipplo → ZoomInfo → Apollo → Exa, run
-  // server-side) go out in groups of LAUNCH_ENRICH_GROUP_SIZE per call to
-  // /candidates/enrich-contacts, LAUNCH_ENRICH_GROUP_CONCURRENCY calls at a
-  // time. A group runs in one API worker, so its Kipplo lookups can share one
-  // request when the API has list lookups on (KIPPLO_BATCH_SIZE, off while
-  // Kipplo answers one profile per request).
+  // Launch PAIR's contact lookups (Apollo → Exa → Exa deep search, cheapest
+  // first, run server-side) go out in groups of LAUNCH_ENRICH_GROUP_SIZE per
+  // call to /candidates/enrich-contacts, LAUNCH_ENRICH_GROUP_CONCURRENCY calls
+  // at a time: 20 candidates in flight, each running the whole ladder.
   const LAUNCH_ENRICH_GROUP_SIZE = 10;
   const LAUNCH_ENRICH_GROUP_CONCURRENCY = 2;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
@@ -8321,7 +8319,7 @@ function NewJobPageContent() {
     setIsEnrichingContacts(true);
     try {
       // QA with the Override toggle ON: the contact lookups below run exactly
-      // as in production (Kipplo → ZoomInfo → Apollo → Exa), but nothing
+      // as in production (Apollo → Exa → Exa deep search), but nothing
       // launches from this pass — every selected candidate then opens in the
       // review modal, showing what was found, to confirm or override before
       // anything fires. (The toggle used to skip the lookups as well, so QA
@@ -11168,7 +11166,7 @@ return (
       }
       description={
         missingContactsReviewMode
-          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. What the contact lookup found (Kipplo, ZoomInfo, Apollo, Exa) is shown under each field."
+          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. What the contact lookup found (Apollo, Exa, Exa deep search) is shown under each field."
           : undefined
       }
       primaryLabel={

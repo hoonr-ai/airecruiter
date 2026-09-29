@@ -235,6 +235,46 @@ def test_sql_roundtrip(pg):
     assert run(contact_cache.get(LINKEDIN))["email"] == "jane@acme.com"
 
 
+def test_sql_deep_search_misses(pg):
+    run = asyncio.run
+    run(contact_cache.record(LINKEDIN, missed=["phone"]))
+    got = run(contact_cache.get(LINKEDIN))
+    assert got["phone_missed"] and not got["phone_deep_missed"]   # next Launch: straight to deep
+
+    run(contact_cache.record(LINKEDIN, deep_missed=["phone"]))
+    got = run(contact_cache.get(LINKEDIN))
+    assert got["phone_missed"] and got["phone_deep_missed"]       # the whole chain missed
+
+    run(contact_cache.record(LINKEDIN, phone="+14155550100", phone_provider="exa_deep"))
+    got = run(contact_cache.get(LINKEDIN))
+    assert got["phone"] == "+14155550100" and got["phone_provider"] == "exa_deep"
+    assert not got["phone_missed"] and not got["phone_deep_missed"]  # a found value wins
+
+
+def test_sql_migration_adds_the_deep_miss_columns():
+    try:
+        conn = psycopg2.connect(_DSN, connect_timeout=2)
+    except Exception:
+        pytest.skip("no Postgres reachable (set LAUNCH_REPORT_TEST_DSN)")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TEMP TABLE contact_enrichment_cache (
+                linkedin_slug TEXT PRIMARY KEY, email TEXT, email_provider TEXT,
+                email_found_at TIMESTAMPTZ, email_missed_at TIMESTAMPTZ, phone TEXT,
+                phone_provider TEXT, phone_found_at TIMESTAMPTZ, phone_missed_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+            cur.execute(contact_cache.MIGRATE_SQL)
+            cur.execute(contact_cache.MIGRATE_SQL)  # idempotent
+            cur.execute("""SELECT column_name FROM information_schema.columns
+                           WHERE table_name = 'contact_enrichment_cache'
+                             AND table_schema LIKE 'pg_temp%%'""")
+            cols = {r[0] for r in cur.fetchall()}
+        assert {"phone_personal", "email_deep_missed_at", "phone_deep_missed_at"} <= cols
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Backfill from past paid lookups (services/contact_cache_backfill.py)
 # ---------------------------------------------------------------------------

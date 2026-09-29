@@ -449,7 +449,7 @@ def test_exa_failed_poll_keeps_watching_the_same_run(monkeypatch):
 def test_exa_timed_out_run_is_watched_once_more_not_bought_again(monkeypatch):
     seen = []
 
-    async def _attempt(client, headers, body, candidate_id, run_id=""):
+    async def _attempt(client, headers, body, candidate_id, run_id="", timeout_s=None):
         seen.append(run_id)
         if len(seen) == 1:
             return {"message": "Exa run timed out", "retry": "wait", "run_id": "run-1"}
@@ -488,7 +488,8 @@ def test_exa_create_5xx_is_retried_but_4xx_is_not(monkeypatch):
     assert _lookup()["ok"] is True and len(server.calls) == 2
 
     server = _exa(monkeypatch, [_Resp(402, text="NO_MORE_CREDITS")])
-    assert _lookup() == {"ok": False, "message": "Exa create error (402)"}
+    # fatal: a deep search would hit the same 4xx, so the chain does not try one.
+    assert _lookup() == {"ok": False, "message": "Exa create error (402)", "fatal": True}
     assert len(server.calls) == 1
 
 

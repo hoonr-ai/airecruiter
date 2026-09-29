@@ -45,6 +45,8 @@ import httpx
 from core.config import (
     APOLLO_API_KEY as _APOLLO_ENV_KEY,
     EXA_API_KEY,
+    EXA_CONTACT_DEEP_EFFORT,
+    EXA_CONTACT_DEEP_TIMEOUT_S,
     EXA_CONTACT_ENRICH_CONCURRENCY,
     EXA_CONTACT_ENRICH_EFFORT,
     EXA_ONDEMAND_CONTACT_CONCURRENCY,
@@ -189,6 +191,21 @@ def ondemand_exa_semaphore() -> asyncio.Semaphore:
     if sem is None:
         sem = _ONDEMAND_EXA_SEMAPHORES[loop] = asyncio.Semaphore(EXA_ONDEMAND_CONTACT_CONCURRENCY)
     return sem
+
+
+def lookup_provider_enabled(name: str) -> bool:
+    """Whether the contact lookups ask provider ``name`` (kipplo, zoominfo,
+    apollo, exa): sourcing_config.CONTACT_LOOKUP_PROVIDERS, default apollo + exa."""
+    from core import sourcing_config as _sc
+
+    listed = getattr(_sc, "CONTACT_LOOKUP_PROVIDERS", ("apollo", "exa")) or ()
+    return name.strip().lower() in {str(p).strip().lower() for p in listed}
+
+
+def exa_deep_enabled() -> bool:
+    """Whether a field the normal Exa run did not find gets a deep search
+    (EXA_CONTACT_DEEP_EFFORT, "off" disables)."""
+    return str(EXA_CONTACT_DEEP_EFFORT or "").strip().lower() not in {"", "off", "none", "false", "0"}
 
 _LINKEDIN_PROFILE_RE = re.compile(r"linkedin\.com/in/", re.IGNORECASE)
 
@@ -582,8 +599,10 @@ def _build_exa_contact_query(
     company: str,
     linkedin_url: str,
     fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
+    deep: bool = False,
 ) -> str:
-    """Natural-language query for the Exa Agent contact-enrichment run."""
+    """Natural-language query for the Exa Agent contact-enrichment run. The
+    deep search asks for a thorough search of the sources a quick run skips."""
     who = (full_name or "").strip() or "this person"
     wanted = " and ".join(
         label for field, label in (("email", "work email"), ("phone", "personal mobile phone number"))
@@ -596,7 +615,14 @@ def _build_exa_contact_query(
     url = (linkedin_url or "").strip()
     if url:
         parts.append(f". LinkedIn: {url}")
-    return " ".join(parts).replace(" .", ".")
+    query = " ".join(parts).replace(" .", ".")
+    if deep:
+        query += (
+            ". A quick lookup found nothing, so search thoroughly: the person's own website, "
+            "GitHub, portfolio, resume or CV pages, conference and speaker pages, publications "
+            "and professional directories. Only return details that belong to this person."
+        )
+    return query
 
 
 async def exa_enrich_by_linkedin(
@@ -605,11 +631,16 @@ async def exa_enrich_by_linkedin(
     full_name: str = "",
     company: str = "",
     fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
+    deep: bool = False,
 ) -> Dict[str, Any]:
     """Enrich one person via the Exa Agent API (by LinkedIn URL). Pure async.
 
     ``fields`` limits the lookup to the contact the caller still lacks (a
     subset of ``EXA_CONTACT_FIELDS``) — the agent bills per field it fills.
+    ``deep`` = the deep search: EXA_CONTACT_DEEP_EFFORT, a thorough-search
+    query and EXA_CONTACT_DEEP_TIMEOUT_S, for what a normal run did not find.
+    A failure a second run would hit too (disabled, no key, a 4xx such as a
+    bad key or no credits) comes back with ``fatal: True``.
 
     Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
     ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
@@ -619,15 +650,16 @@ async def exa_enrich_by_linkedin(
     ``_exa_contact_attempt``); all failures logged and swallowed.
     """
     if not EXA_CONTACT_ENRICH_ENABLED:
-        return {"ok": False, "message": "Exa contact enrichment disabled"}
+        return {"ok": False, "message": "Exa contact enrichment disabled", "fatal": True}
     wanted = tuple(f for f in EXA_CONTACT_FIELDS if f in (fields or ()))
     if not wanted:
         return {"ok": False, "message": "no contact fields requested"}
     if not EXA_API_KEY:
         logger.warning("Exa enrichment skipped for %s: EXA_API_KEY not configured", candidate_id)
-        return {"ok": False, "message": "EXA_API_KEY not configured"}
+        return {"ok": False, "message": "EXA_API_KEY not configured", "fatal": True}
 
-    query = _build_exa_contact_query(full_name, company, linkedin_url, wanted)
+    query = _build_exa_contact_query(full_name, company, linkedin_url, wanted, deep=deep)
+    timeout_s = EXA_CONTACT_DEEP_TIMEOUT_S if deep else EXA_CONTACT_ENRICH_TIMEOUT_S
     headers = {
         "Content-Type": "application/json",
         "x-api-key": EXA_API_KEY,
@@ -636,12 +668,12 @@ async def exa_enrich_by_linkedin(
     body = {
         "query": query,
         "outputSchema": _exa_contact_schema(wanted),
-        "effort": EXA_CONTACT_ENRICH_EFFORT,
+        "effort": EXA_CONTACT_DEEP_EFFORT if deep else EXA_CONTACT_ENRICH_EFFORT,
     }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            outcome = await _exa_contact_attempt(client, headers, body, candidate_id)
+            outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
             if "result" not in outcome and outcome.get("retry") and EXA_CONTACT_ENRICH_RETRY:
                 # Exa is the last provider: one second chance before the
                 # candidate is left without contact (user 2026-09-28, "get the
@@ -653,13 +685,18 @@ async def exa_enrich_by_linkedin(
                     "Exa contact lookup for %s: %s; %s", candidate_id, outcome.get("message"),
                     "waiting on the same run once more" if same_run else "retrying with one new run",
                 )
-                outcome = await _exa_contact_attempt(client, headers, body, candidate_id, run_id=same_run or "")
+                outcome = await _exa_contact_attempt(
+                    client, headers, body, candidate_id, run_id=same_run or "", timeout_s=timeout_s
+                )
     except Exception as e:
         logger.warning("Exa agent request failed for %s: %s", candidate_id, e)
         return {"ok": False, "message": f"Exa request failed: {e}"}
     if "result" in outcome:
         return outcome["result"]
-    return {"ok": False, "message": outcome.get("message") or "Exa lookup failed"}
+    failed = {"ok": False, "message": outcome.get("message") or "Exa lookup failed"}
+    if outcome.get("retry") == "":
+        failed["fatal"] = True
+    return failed
 
 
 async def _exa_contact_attempt(
@@ -668,9 +705,11 @@ async def _exa_contact_attempt(
     body: Dict[str, Any],
     candidate_id: str,
     run_id: str = "",
+    timeout_s: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Create one agent run and poll it for up to EXA_CONTACT_ENRICH_TIMEOUT_S,
-    or with ``run_id`` keep polling a run that is already going.
+    """Create one agent run and poll it for up to ``timeout_s`` (default
+    EXA_CONTACT_ENRICH_TIMEOUT_S), or with ``run_id`` keep polling a run that
+    is already going.
 
     Returns ``{"result": <lookup result>}`` when the run completed, else
     ``{"message", "retry", "run_id"}``: ``retry`` is "wait" (still running or the
@@ -699,11 +738,12 @@ async def _exa_contact_attempt(
             run = r.json()
             run_id = str(run.get("id") or "")
 
+        budget = EXA_CONTACT_ENRICH_TIMEOUT_S if timeout_s is None else timeout_s
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + max(1, EXA_CONTACT_ENRICH_TIMEOUT_S)
+        deadline = loop.time() + max(1, budget)
         while run.get("status") not in _EXA_TERMINAL_STATES:
             if loop.time() >= deadline:
-                logger.info("Exa agent run timed out for %s (>%ss)", candidate_id, EXA_CONTACT_ENRICH_TIMEOUT_S)
+                logger.info("Exa agent run timed out for %s (>%ss)", candidate_id, budget)
                 return {"message": "Exa run timed out", "retry": "wait", "run_id": run_id}
             await asyncio.sleep(_EXA_POLL_INTERVAL_S)
             g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
@@ -1100,8 +1140,11 @@ async def enrich_contact_for_sourcing(
 ) -> Dict[str, Any]:
     """First-hit-wins sourcing-time enrichment.
 
-    Provider order: Kipplo-by-URL (first since 2026-09-28) -> ZoomInfo-by-name
-    -> Apollo-by-URL -> ZoomInfo-by-email -> Exa Agent (paid, last).
+    Provider order: Kipplo-by-URL -> ZoomInfo-by-name -> Apollo-by-URL ->
+    ZoomInfo-by-email -> Exa Agent (paid, last), each only when listed in
+    sourcing_config.CONTACT_LOOKUP_PROVIDERS (default since 2026-09-29: Apollo
+    and Exa only). No Exa deep search here: sourcing buys emails for rows the
+    recruiter has not picked yet; the deep search is Launch PAIR's.
 
     Returns {workEmail, personalEmail, mobilePhone, workPhone, provider_used}
     on success, or `{}` when:
@@ -1225,7 +1268,7 @@ async def enrich_contact_for_sourcing(
         # credits, key, network) falls through to the rest of the chain, which
         # ends at Exa.
         kipplo_fields = tuple(f for f in wanted if f in kipplo_supported_fields())
-        if kipplo_fields:
+        if kipplo_fields and lookup_provider_enabled("kipplo"):
             kipplo_label = (full_name or "").strip() or linkedin_url
             try:
                 kipplo_result = await kipplo_enrich_by_linkedin(kipplo_label, linkedin_url, fields=kipplo_fields)
@@ -1247,7 +1290,7 @@ async def enrich_contact_for_sourcing(
             # ZoomInfo requires a name (new Data API doesn't accept linkedinUrl as
             # a match input). If we don't have one, skip straight to Apollo.
             zi_fields: Dict[str, str] = {}
-            if (full_name or "").strip():
+            if (full_name or "").strip() and lookup_provider_enabled("zoominfo"):
                 try:
                     zi_fields = await _zoominfo_enrich_for_sourcing(full_name.strip(), (company or "").strip())
                 except Exception as e:
@@ -1264,11 +1307,13 @@ async def enrich_contact_for_sourcing(
                     "provider_used": "zoominfo",
                 }
 
-            try:
-                apollo_result = await apollo_enrich_by_linkedin(job_key, linkedin_url)
-            except Exception as e:
-                logger.warning("contact_enrichment Apollo path raised for %s: %s", job_key, e)
-                apollo_result = {"ok": False}
+            apollo_result: Dict[str, Any] = {"ok": False}
+            if lookup_provider_enabled("apollo"):
+                try:
+                    apollo_result = await apollo_enrich_by_linkedin(job_key, linkedin_url)
+                except Exception as e:
+                    logger.warning("contact_enrichment Apollo path raised for %s: %s", job_key, e)
+                    apollo_result = {"ok": False}
 
             if apollo_result.get("ok") and _has_usable_field(apollo_result.get("fields") or {}):
                 fields = apollo_result["fields"]
@@ -1291,7 +1336,11 @@ async def enrich_contact_for_sourcing(
             # and no phone wanted, the call returned above. So this step exists purely
             # to convert an email into a PHONE, which is why it is phone-gated.
             seed_email_clean = seed_email if want_phone else ""
-            if seed_email_clean and getattr(_sc_cfg, "ZOOMINFO_SOURCING_EMAIL_LOOKUP", True):
+            if (
+                seed_email_clean
+                and getattr(_sc_cfg, "ZOOMINFO_SOURCING_EMAIL_LOOKUP", True)
+                and lookup_provider_enabled("zoominfo")
+            ):
                 try:
                     zi_email = await zoominfo_enrich_by_email(job_key, seed_email_clean)
                 except Exception as e:
@@ -1313,7 +1362,7 @@ async def enrich_contact_for_sourcing(
         # Exa Agent fallback — outside the provider semaphore (it has its own
         # slow polling loop and per-job budget; holding a ZoomInfo/Apollo slot
         # for up to EXA_CONTACT_ENRICH_TIMEOUT_S would starve the cheap chain).
-        if include_exa:
+        if include_exa and lookup_provider_enabled("exa"):
             _sc = _sc_cfg
 
             if not getattr(_sc, "EXA_SOURCING_CONTACT_FALLBACK", True):

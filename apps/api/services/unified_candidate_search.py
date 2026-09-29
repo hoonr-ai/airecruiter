@@ -526,11 +526,9 @@ class UnifiedCandidateSearch:
         *,
         overwrite: bool,
     ) -> None:
-        """In-line ZoomInfo → Apollo contact enrichment for one candidate.
-
-        ZoomInfo→Apollo is the source of truth for sourced contact info; the
-        precedence (ZoomInfo first, Apollo fallback) lives inside
-        ``contact_enrichment.enrich_contact_for_sourcing``. Gated by
+        """In-line contact enrichment for one candidate (Apollo → Exa by
+        default; the providers and their order live inside
+        ``contact_enrichment.enrich_contact_for_sourcing``). Gated by
         CONTACT_ENRICHMENT_INLINE_ENABLED and capped at PER_JOB_CAP inside the
         helper.
 
@@ -870,8 +868,8 @@ class UnifiedCandidateSearch:
             return True
 
         async def enrich_shown_row(cand: Dict[str, Any], *, overwrite: bool) -> None:
-            """Contact lookup (Kipplo → ZoomInfo → Apollo → paid Exa on a miss,
-            see enrich_contact_for_sourcing) for a row that is ALREADY on screen;
+            """Contact lookup (Apollo → paid Exa on a miss, emails only; see
+            enrich_contact_for_sourcing) for a row that is ALREADY on screen;
             whatever it finds streams as a `contact_enrichment` patch.
 
             Running after emit means the score/location/dedup gates decide who
