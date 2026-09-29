@@ -7,6 +7,7 @@ import {
   inGroups,
   isKipploIssue,
   mostCommon,
+  readNdjson,
 } from "./contact-lookup.ts";
 
 test("groups candidates for one call each, the last group shorter", () => {
@@ -63,3 +64,33 @@ test("most common issue, ties alphabetical", () => {
   assert.deepEqual(mostCommon({ b: 1, a: 1 }), { key: "a", count: 1 });
   assert.equal(mostCommon({}), null);
 });
+
+// Hands out one chunk per read, then closes (or fails, like a dropped connection).
+function streamOf(chunks: string[], failAfter = false): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const queue = [...chunks];
+  return new ReadableStream({
+    pull(controller) {
+      const next = queue.shift();
+      if (next !== undefined) controller.enqueue(encoder.encode(next));
+      else if (failAfter) controller.error(new TypeError("network error"));
+      else controller.close();
+    },
+  });
+}
+
+test("streamed lookup lines are handed over one by one, split anywhere", async () => {
+  const seen: unknown[] = [];
+  await readNdjson(
+    streamOf(['{"index": 1, "res', 'ult": {"phone": "+1"}}\n{"ping": true}\n\n', 'not json\n{"done": true}']),
+    (v) => seen.push(v),
+  );
+  assert.deepEqual(seen, [{ index: 1, result: { phone: "+1" } }, { ping: true }, { done: true }]);
+});
+
+test("a broken stream rejects after delivering what came before", async () => {
+  const seen: unknown[] = [];
+  await assert.rejects(readNdjson(streamOf(['{"index": 0, "result": {}}\n'], true), (v) => seen.push(v)));
+  assert.deepEqual(seen, [{ index: 0, result: {} }]);
+});
+

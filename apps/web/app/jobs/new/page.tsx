@@ -116,6 +116,7 @@ import {
   inGroups,
   isKipploIssue,
   mostCommon,
+  readNdjson,
 } from "@/lib/contact-lookup";
 
 /** Returns true when a question's type (scored/hard_filter/info_only) may be
@@ -1134,11 +1135,13 @@ function NewJobPageContent() {
   const BATCH_LAUNCH_DELAY_MS = 350;
 
   // Launch PAIR's contact lookups (Apollo → Exa → Exa deep search with
-  // Fiber.ai, cheapest first, run server-side) go out in groups of LAUNCH_ENRICH_GROUP_SIZE per
-  // call to /candidates/enrich-contacts, LAUNCH_ENRICH_GROUP_CONCURRENCY calls
-  // at a time: 20 candidates in flight, each running the whole ladder.
-  const LAUNCH_ENRICH_GROUP_SIZE = 10;
-  const LAUNCH_ENRICH_GROUP_CONCURRENCY = 2;
+  // Fiber.ai, cheapest first, run server-side) go out in groups of
+  // LAUNCH_ENRICH_GROUP_SIZE per call to /candidates/enrich-contacts,
+  // LAUNCH_ENRICH_GROUP_CONCURRENCY calls at a time: 20 candidates in flight.
+  // Each call streams its results as they come (a deep search can take
+  // minutes), so small groups keep one slow lookup from holding up many.
+  const LAUNCH_ENRICH_GROUP_SIZE = 5;
+  const LAUNCH_ENRICH_GROUP_CONCURRENCY = 4;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
@@ -8494,13 +8497,17 @@ function NewJobPageContent() {
       // One retry on rate-limit/gateway pushback (429/503) or a network blip —
       // at 250 candidates these transients otherwise dump whole cohorts into
       // "enrichment failed" and then the needs-info modal.
-      const postWithRetry = async (url: string, payload: unknown): Promise<Response | null> => {
+      const postWithRetry = async (
+        url: string,
+        payload: unknown,
+        extraHeaders: Record<string, string> = {},
+      ): Promise<Response | null> => {
         let res: Response | null = null;
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
             res = await authFetch(url, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: { "Content-Type": "application/json", ...extraHeaders },
               body: JSON.stringify(payload),
             });
           } catch (enrichErr) {
@@ -8539,20 +8546,43 @@ function NewJobPageContent() {
         }
       };
 
-      // A group is looked up in one call, so it runs in one API worker and its
-      // Kipplo lookups share one request (see LAUNCH_ENRICH_GROUP_SIZE).
+      // A group is looked up in one call (one API worker). The answer streams
+      // one line per candidate as its lookup ends, so each contact reaches
+      // the screen when it is found instead of when the group's slowest deep
+      // search is done; pings keep the connection open meanwhile. A stream
+      // that breaks is not re-sent: the server finishes those lookups anyway
+      // and keeps what it finds for the next Launch.
       let groupedLookupUnavailable = false;
       const enrichGroup = async (group: EnrichItem[]) => {
         if (!groupedLookupUnavailable) {
+          const answered = new Set<number>();
+          const take = (index: number, answer: EnrichAnswer) => {
+            if (!Number.isInteger(index) || index < 0 || index >= group.length || answered.has(index)) return;
+            answered.add(index);
+            applyEnrichResult(group[index], answer);
+          };
           try {
-            const res = await postWithRetry(`${API_BASE}/candidates/enrich-contacts`, {
-              candidates: group.map(enrichRequest),
-            });
+            const res = await postWithRetry(
+              `${API_BASE}/candidates/enrich-contacts`,
+              { candidates: group.map(enrichRequest) },
+              { Accept: "application/x-ndjson" },
+            );
             if (res && res.ok) {
-              const body = await res.json();
-              const results: EnrichAnswer[] = Array.isArray(body?.results) ? body.results : [];
-              const byId = new Map(results.map(r => [String(r?.candidate_id || ""), r]));
-              group.forEach((item, i) => applyEnrichResult(item, byId.get(item.id) || results[i]));
+              if ((res.headers.get("content-type") || "").includes("ndjson") && res.body) {
+                try {
+                  await readNdjson(res.body, (line) => {
+                    const msg = line as { index?: number; result?: EnrichAnswer };
+                    if (typeof msg?.index === "number" && msg.result !== undefined) take(msg.index, msg.result);
+                  });
+                } catch {
+                  // Connection dropped mid-stream: what arrived is applied.
+                }
+              } else {
+                const body = await res.json();
+                const results: EnrichAnswer[] = Array.isArray(body?.results) ? body.results : [];
+                results.forEach((r, i) => take(i, r));
+              }
+              group.forEach((item, i) => { if (!answered.has(i)) applyEnrichResult(item, null); });
               return;
             }
             if (!res || (res.status !== 404 && res.status !== 405)) {
@@ -8562,7 +8592,7 @@ function NewJobPageContent() {
             // An API from before the grouped endpoint: one call per candidate.
             groupedLookupUnavailable = true;
           } catch {
-            group.forEach(item => applyEnrichResult(item, null));
+            group.forEach((item, i) => { if (!answered.has(i)) applyEnrichResult(item, null); });
             return;
           }
         }
@@ -8651,10 +8681,11 @@ function NewJobPageContent() {
       }
 
       if (qaReview) {
-        // Review instead of launch: hand over to the modal. Its fields keep the
-        // candidate's own contact as before; what the lookup found is shown
-        // under them with a "Use" button, never filled in, so a QA launch only
-        // reaches a real candidate when a tester picks their found contact.
+        // Review instead of launch: hand over to the modal with each field
+        // filled from the lookup where it found something (user 2026-09-29:
+        // "the contact details are still not coming up"), marked with who
+        // found it; the candidate's own contact otherwise. Testers override
+        // the real details with test contacts before launching from QA.
         setLaunchProgress(initialLaunchProgress);
         const reviewList: MissingContactCandidate[] = [];
         for (const c of candidates) {
@@ -8669,8 +8700,8 @@ function NewJobPageContent() {
             jobdiva_id: enrichJobdivaId ? String(enrichJobdivaId) : undefined,
             needsPhone: true,
             needsEmail: true,
-            currentPhone: getCandidateLaunchPhone(c),
-            currentEmail: getCandidateLaunchEmail(c),
+            currentPhone: contactOverrides[id]?.phone || getCandidateLaunchPhone(c),
+            currentEmail: contactOverrides[id]?.email || getCandidateLaunchEmail(c),
             lookedUp: lookedUpIds.has(id),
             foundPhone: contactOverrides[id]?.phone,
             foundPhoneBy: contactProviderLabel(foundBy[id]?.phone),
@@ -8682,7 +8713,7 @@ function NewJobPageContent() {
           showToast("No candidates available to launch.", "info");
           return;
         }
-        setPendingLaunchOverrides({});
+        setPendingLaunchOverrides(contactOverrides);
         setMissingContactCandidates(reviewList);
         setMissingContactsReviewMode(true);
         setMissingContactsOpen(true);
@@ -11184,7 +11215,7 @@ return (
       }
       description={
         missingContactsReviewMode
-          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. What the contact lookup found (Apollo, Exa, Exa deep search with Fiber.ai) is shown under each field."
+          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. Fields are filled in with what the contact lookup found (Apollo, Exa, Exa deep search with Fiber.ai): those are the candidate's real details, so replace them with test contacts if the candidate should not be reached."
           : undefined
       }
       primaryLabel={

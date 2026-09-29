@@ -54,6 +54,7 @@ from core.config import (
     EXA_CONTACT_ENRICH_ENABLED,
     EXA_CONTACT_ENRICH_RETRY,
     EXA_CONTACT_ENRICH_TIMEOUT_S,
+    EXA_LATE_RESULT_WAIT_S,
 )
 from services.kipplo import enrich_by_linkedin as kipplo_enrich_by_linkedin
 from services.kipplo import supported_fields as kipplo_supported_fields
@@ -72,6 +73,7 @@ EXA_AGENT_RUNS_URL = "https://api.exa.ai/agent/runs"
 EXA_AGENT_BETA = "agent-2026-05-07"
 _EXA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _EXA_POLL_INTERVAL_S = 4  # per Exa docs
+_EXA_LATE_POLL_S = 15      # background watch of a run we stopped waiting for
 _EXA_CREATE_429_BACKOFF_S = 3.0
 # Structured output we ask the agent to fill. Only the two billable contact
 # fields (email $0.02 / phone $0.07 per run) — richer schemas just cost more.
@@ -656,6 +658,7 @@ async def exa_enrich_by_linkedin(
     company: str = "",
     fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
     deep: bool = False,
+    wait_retry: bool = True,
 ) -> Dict[str, Any]:
     """Enrich one person via the Exa Agent API (by LinkedIn URL). Pure async.
 
@@ -667,7 +670,10 @@ async def exa_enrich_by_linkedin(
     (Fiber.ai by default). Should Exa refuse them (a 400), the deep search runs
     once more on web search alone rather than not at all.
     A failure a second run would hit too (disabled, no key, a 4xx such as a
-    bad key or no credits) comes back with ``fatal: True``.
+    bad key or no credits) comes back with ``fatal: True``; a run still going
+    when we stop waiting comes back with its ``run_id`` (see
+    watch_late_exa_run). ``wait_retry=False``: a run that runs out of time is
+    not watched for a second window (the caller has a next step).
 
     Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
     ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
@@ -709,7 +715,7 @@ async def exa_enrich_by_linkedin(
     body = _body(with_sources=True)
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
             if sources and outcome.get("status") == 400:
                 logger.warning(
@@ -719,7 +725,12 @@ async def exa_enrich_by_linkedin(
                 )
                 body = _body(with_sources=False)
                 outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
-            if "result" not in outcome and outcome.get("retry") and EXA_CONTACT_ENRICH_RETRY:
+            if (
+                "result" not in outcome
+                and outcome.get("retry")
+                and EXA_CONTACT_ENRICH_RETRY
+                and (wait_retry or outcome["retry"] != "wait")
+            ):
                 # Exa is the last provider: one second chance before the
                 # candidate is left without contact (user 2026-09-28, "get the
                 # contact details at all costs"). A run that timed out or could
@@ -741,7 +752,129 @@ async def exa_enrich_by_linkedin(
     failed = {"ok": False, "message": outcome.get("message") or "Exa lookup failed"}
     if outcome.get("retry") == "":
         failed["fatal"] = True
+    if outcome.get("retry") == "wait" and outcome.get("run_id"):
+        failed["run_id"] = outcome["run_id"]
     return failed
+
+
+async def _find_started_run(client: Any, headers: Dict[str, str], query: str) -> Optional[Dict[str, Any]]:
+    """The newest run with exactly this query (a create whose answer was lost),
+    or None. The query names the person and their LinkedIn URL, so a match is
+    a lookup of the same person."""
+    if not query:
+        return None
+    for attempt in range(2):
+        try:
+            g = await client.get(EXA_AGENT_RUNS_URL, headers=headers, params={"limit": 50})
+            if g.status_code < 400:
+                for run in (g.json() or {}).get("data") or []:
+                    if ((run.get("request") or {}).get("query") or "") == query and run.get("status") not in {"failed", "cancelled"}:
+                        return run
+        except Exception as e:
+            logger.info("Exa run list failed while looking for a started run: %s", e)
+        if attempt == 0:
+            await asyncio.sleep(2)
+    return None
+
+
+# Runs we stopped waiting for are billed anyway: watched in the background so
+# what they find is kept (contact cache + the candidate's sourced rows missing
+# that field) for the next Launch or phone click. Strong references: a task
+# only weakly referenced by the loop could vanish mid-run.
+_LATE_WATCHES: set = set()
+
+LATE_FILL_SQL = """
+    UPDATE sourced_candidates
+    SET phone = CASE WHEN COALESCE(phone, '') = '' AND %(phone)s::text IS NOT NULL THEN %(phone)s ELSE phone END,
+        email = CASE WHEN COALESCE(email, '') = '' AND %(email)s::text IS NOT NULL THEN %(email)s ELSE email END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE candidate_id = %(candidate_id)s
+      AND (%(jobdiva_id)s::text IS NULL OR jobdiva_id = %(jobdiva_id)s)
+      AND ((COALESCE(phone, '') = '' AND %(phone)s::text IS NOT NULL)
+           OR (COALESCE(email, '') = '' AND %(email)s::text IS NOT NULL))
+"""
+
+
+def _fill_sourced_rows_sync(params: Dict[str, Any]) -> None:
+    from core import db as _db
+
+    conn = _db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(LATE_FILL_SQL, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def keep_late_exa_result(
+    run_id: str,
+    linkedin_url: str,
+    *,
+    candidate_id: str = "",
+    jobdiva_id: Optional[str] = None,
+    fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
+    provider: str = "exa",
+) -> Dict[str, Any]:
+    """Watch a run we stopped waiting for, up to EXA_LATE_RESULT_WAIT_S, and
+    keep what it finds. Returns the extracted fields ({} if nothing). Never raises."""
+    from services import contact_cache
+
+    headers = {"Content-Type": "application/json", "x-api-key": EXA_API_KEY, "Exa-Beta": EXA_AGENT_BETA}
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max(0, EXA_LATE_RESULT_WAIT_S)
+    run: Dict[str, Any] = {}
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            while loop.time() < deadline:
+                await asyncio.sleep(_EXA_LATE_POLL_S)
+                g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
+                if g.status_code == 404:
+                    return {}
+                if g.status_code >= 400:
+                    continue
+                run = g.json() or {}
+                if run.get("status") in _EXA_TERMINAL_STATES:
+                    break
+    except Exception as e:
+        logger.info("Exa late watch of run %s ended: %s", run_id, e)
+        return {}
+    if run.get("status") != "completed":
+        return {}
+    extracted = extract_exa_contact_fields((run.get("output") or {}).get("structured"))
+    email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "") if "email" in fields else ""
+    phone = str(extracted.get("mobilePhone") or "") if "phone" in fields else ""
+    missed = [f for f, got in (("email", email), ("phone", phone)) if f in fields and not got]
+    await contact_cache.record(
+        linkedin_url, email=email, phone=phone, email_provider=provider, phone_provider=provider,
+        **({"deep_missed": missed} if provider == "exa_deep" else {"missed": missed}),
+    )
+    if (email or phone) and candidate_id:
+        try:
+            await asyncio.to_thread(_fill_sourced_rows_sync, {
+                "email": email or None, "phone": phone or None,
+                "candidate_id": candidate_id, "jobdiva_id": jobdiva_id or None,
+            })
+        except Exception as e:
+            logger.warning("Exa late result for %s not written to sourced rows: %s", candidate_id, e)
+    logger.info(
+        "Exa late result kept for %s (run %s, %s): %s",
+        candidate_id or linkedin_url, run_id, provider,
+        ",".join(f for f, got in (("email", email), ("phone", phone)) if got) or "nothing",
+    )
+    return {"email": email, "phone": phone}
+
+
+def watch_late_exa_run(run_id: str, linkedin_url: str, **kw: Any) -> None:
+    """Start keep_late_exa_result in the background (no-op without a run id)."""
+    if not run_id or EXA_LATE_RESULT_WAIT_S <= 0:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(keep_late_exa_result(run_id, linkedin_url, **kw))
+    except RuntimeError:
+        return
+    _LATE_WATCHES.add(task)
+    task.add_done_callback(_LATE_WATCHES.discard)
 
 
 async def _exa_contact_attempt(
@@ -763,16 +896,34 @@ async def _exa_contact_attempt(
     no credits, which a retry would not fix).
     """
     try:
+        found_run: Optional[Dict[str, Any]] = None
         if run_id:
             run: Dict[str, Any] = {"id": run_id}
         else:
             # Exa caps concurrent agent runs per account and answers a burst
             # with 429 — retry a couple of times rather than lose the lookup.
             for attempt in range(3):
-                r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+                try:
+                    r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+                except httpx.TimeoutException:
+                    # Seen on QA 2026-09-29: the run was started but the answer
+                    # to the create call never came, and a second run was bought
+                    # 30s later. Look the started run up (listing is free).
+                    found_run = await _find_started_run(client, headers, str(body.get("query") or ""))
+                    if found_run is None:
+                        raise
+                    logger.info(
+                        "Exa agent create answered late for %s: watching run %s",
+                        candidate_id, found_run.get("id"),
+                    )
+                    break
                 if r.status_code != 429 or attempt == 2:
                     break
                 await asyncio.sleep(_EXA_CREATE_429_BACKOFF_S * (attempt + 1))
+        if found_run is not None:
+            run = found_run
+            run_id = str(run.get("id") or "")
+        elif not run_id:
             if r.status_code >= 400:
                 logger.warning(
                     "Exa agent create non-2xx for %s: %s %s",
