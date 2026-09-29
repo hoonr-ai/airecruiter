@@ -3017,9 +3017,11 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     #    fields still missing (the agent bills per field it fills, so we never
     #    pay it for contact we hold): first the normal run
     #    (EXA_CONTACT_ENRICH_EFFORT, ~$0.025 a run), then, for whatever it did
-    #    not find, the deep search (EXA_CONTACT_DEEP_EFFORT, ~$0.10 a run: a
-    #    longer, thorough-search run). User 2026-09-29: "if we are not able to
-    #    get it then we do deep search ... get the contact details at the end".
+    #    not find, the deep search (EXA_CONTACT_DEEP_EFFORT, a longer,
+    #    thorough-search run with Fiber.ai's people database attached,
+    #    ~$0.14-0.21 a run). User 2026-09-29: "if we are not able to get it then
+    #    we do deep search ... get the contact details at the end", "add fiber
+    #    in the deep search".
     exa_fields = _missing_contact() if contact_enrichment.lookup_provider_enabled("exa") else ()
     if (
         apollo_phone_state == "timeout"
