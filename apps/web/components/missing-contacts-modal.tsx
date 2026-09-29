@@ -28,9 +28,9 @@ export interface MissingContactCandidate {
   needsEmail: boolean;
   currentPhone?: string;
   currentEmail?: string;
-  // What Launch PAIR's contact lookup found (QA review mode), shown under the
-  // fields with a "Use" button rather than filled in: QA must not reach real
-  // candidates unless a tester chooses to. `lookedUp` = a lookup answered.
+  // What Launch PAIR's contact lookup found (QA review mode): the field is
+  // filled with it and marked with who found it; if the tester types over
+  // it, a "Use" button puts it back. `lookedUp` = a lookup answered.
   lookedUp?: boolean;
   foundPhone?: string;
   foundPhoneBy?: string;
@@ -42,17 +42,22 @@ function LookupHint({
   lookedUp,
   found,
   by,
+  value,
   missingLabel,
   onUse,
 }: {
   lookedUp?: boolean;
   found?: string;
   by?: string;
+  value: string;
   missingLabel: string;
   onUse: () => void;
 }) {
   if (!lookedUp) return null;
   if (!found) return missingLabel ? <span className="text-[11px] text-slate-400">{missingLabel}</span> : null;
+  if (value.trim() === found.trim()) {
+    return <span className="text-[11px] text-emerald-700">Found by {by || "the contact lookup"}</span>;
+  }
   return (
     <span className="text-[11px] text-slate-500">
       Lookup found {found}
@@ -455,6 +460,7 @@ export function MissingContactsModal({
                           lookedUp={c.lookedUp}
                           found={c.foundPhone}
                           by={c.foundPhoneBy}
+                          value={phoneVal}
                           missingLabel={c.currentPhone ? "" : "Lookup found no personal phone"}
                           onUse={() => setPhones((prev) => ({ ...prev, [c.candidate_id]: c.foundPhone || "" }))}
                         />
@@ -495,6 +501,7 @@ export function MissingContactsModal({
                           lookedUp={c.lookedUp}
                           found={c.foundEmail}
                           by={c.foundEmailBy}
+                          value={emailVal}
                           missingLabel={c.currentEmail ? "" : "Lookup found no email"}
                           onUse={() => setEmails((prev) => ({ ...prev, [c.candidate_id]: c.foundEmail || "" }))}
                         />

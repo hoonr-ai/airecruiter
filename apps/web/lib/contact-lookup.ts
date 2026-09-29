@@ -64,3 +64,40 @@ export function mostCommon(counts: Record<string, number>): { key: string; count
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
   return top ? { key: top[0], count: top[1] } : null;
 }
+
+/**
+ * Read a newline-delimited JSON stream (the grouped lookup's answer with
+ * Accept: application/x-ndjson), calling onLine for each parsed line as it
+ * arrives. Blank or unparseable lines are skipped. Rejects if the stream
+ * breaks; whatever was delivered before that has already been handed over.
+ */
+export async function readNdjson(
+  body: ReadableStream<Uint8Array>,
+  onLine: (value: unknown) => void,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const emit = (line: string) => {
+    const text = line.trim();
+    if (!text) return;
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return;
+    }
+    onLine(value);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    lines.forEach(emit);
+  }
+  buffer += decoder.decode();
+  emit(buffer);
+}
+
