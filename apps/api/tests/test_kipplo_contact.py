@@ -892,7 +892,8 @@ def test_answer_names_who_found_each_field(monkeypatch):
 
     assert res["phone_provider"] == "kipplo" and res["email_provider"] == "exa"
     # The fake Apollo answers {"ok": False, "message": "no match"}.
-    assert res["lookup"] == {"cache": "-", "kipplo": "phone", "zoominfo": "-", "apollo": "no match", "exa": "email"}
+    assert res["lookup"] == {"cache": "-", "kipplo": "phone", "zoominfo": "-", "apollo": "no match",
+                             "exa": "email", "exa_deep": "-"}
     assert providers.records[-1]["phone_provider"] == "kipplo"
     assert providers.records[-1]["email_provider"] == "exa"
 

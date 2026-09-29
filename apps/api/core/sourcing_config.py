@@ -255,6 +255,16 @@ try:
 except ValueError:
     CONTACT_ENRICH_MIN_SCORE = EXTERNAL_SOURCE_MIN_SCORE
 
+# Which providers the contact lookups ask (user 2026-09-29: "make it for apollo
+# and exa only", cheapest first, "but get the contact details at the end").
+# The order is fixed in code, cheapest first: kipplo, zoominfo, apollo, exa
+# (exa = the normal agent run, then the deep search for what it missed, see
+# EXA_CONTACT_DEEP_EFFORT). Kipplo and ZoomInfo are kept in the code; list them
+# here to bring them back. Applies to both chains:
+# contact_enrichment.enrich_contact_for_sourcing and
+# routers/candidates._enrich_candidate_contact_impl.
+CONTACT_LOOKUP_PROVIDERS = _csv_env("CONTACT_LOOKUP_PROVIDERS", "apollo,exa")
+
 # Hard-drop rows whose location is CONFIRMED outside the job's location
 # (state/province mismatch, or a real measured distance beyond the radius)
 # for every source except JobDiva-JobAgent / JobDiva-Applicants. Unknown or

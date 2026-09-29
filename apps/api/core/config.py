@@ -171,6 +171,15 @@ EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_EN
 EXA_ONDEMAND_CONTACT_CONCURRENCY = max(1, int(get_env_with_default("EXA_ONDEMAND_CONTACT_CONCURRENCY", "10")))
 # Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
 EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
+# Exa deep search for contact (user 2026-09-29: "if we are not able to get it
+# then we do deep search"): when the normal run above finds nothing for a field,
+# one more agent run at this effort, told to search thoroughly, for the fields
+# still missing. Launch PAIR and the phone button only (not sourcing). medium =
+# $0.10 a run (the effort the user picked for the deep sourcing search; high =
+# $0.50), plus $0.02 per email / $0.07 per phone it finds. "off" disables it.
+EXA_CONTACT_DEEP_EFFORT = get_env_with_default("EXA_CONTACT_DEEP_EFFORT", "medium")
+# Poll budget for one deep run (it researches longer than a low-effort run).
+EXA_CONTACT_DEEP_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_DEEP_TIMEOUT_S", "150"))
 # Exa is the last contact provider, so a lookup that fails gets one second
 # chance: a run that timed out (or could not be polled) is watched for one more
 # timeout window, since it is billed either way; a failed/cancelled run, a 5xx

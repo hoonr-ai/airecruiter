@@ -1,13 +1,14 @@
 // Launch PAIR's contact lookup on Step 5: how candidates are grouped per call
 // and how the answers are summed up for the recruiter. The lookups run
-// server-side (/candidates/enrich-contacts: Kipplo → ZoomInfo → Apollo → Exa);
-// each answer names who found the phone / the email and what Kipplo said.
+// server-side (/candidates/enrich-contacts: Apollo → Exa → Exa deep search,
+// cheapest first); each answer names who found the phone / the email.
 
 const PROVIDER_LABELS: Record<string, string> = {
   kipplo: "Kipplo",
   zoominfo: "ZoomInfo",
   apollo: "Apollo",
   exa: "Exa",
+  exa_deep: "Exa deep search",
   cache: "saved",
 };
 
