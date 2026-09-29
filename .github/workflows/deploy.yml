@@ -106,6 +106,8 @@ jobs:
           # to the new one. Removed automatically by deploy-azure.sh after the
           # date below - delete these two vars once it lapses.
           LEGACY_DOMAIN: qacurate.hoonr.ai
+          # Contact enrichment key; deploy-azure.sh writes it to apps/api/.env when set.
+          KIPPLO_API_KEY: ${{ secrets.KIPPLO_API_KEY }}
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << EOF
             set -e
@@ -115,6 +117,7 @@ jobs:
             export DOMAIN_NAME="$DOMAIN_NAME"
             export LEGACY_DOMAIN="$LEGACY_DOMAIN"
             export LEGACY_REDIRECT_UNTIL="$LEGACY_REDIRECT_UNTIL"
+            export KIPPLO_API_KEY="$KIPPLO_API_KEY"
             bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
           EOF
 
@@ -164,6 +167,8 @@ jobs:
           # to the new one. Removed automatically by deploy-azure.sh after the
           # date below - delete these two vars once it lapses.
           LEGACY_DOMAIN: curate.hoonr.ai
+          # Contact enrichment key; deploy-azure.sh writes it to apps/api/.env when set.
+          KIPPLO_API_KEY: ${{ secrets.KIPPLO_API_KEY }}
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << EOF
             set -e
@@ -173,6 +178,7 @@ jobs:
             export DOMAIN_NAME="$DOMAIN_NAME"
             export LEGACY_DOMAIN="$LEGACY_DOMAIN"
             export LEGACY_REDIRECT_UNTIL="$LEGACY_REDIRECT_UNTIL"
+            export KIPPLO_API_KEY="$KIPPLO_API_KEY"
             bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
           EOF
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
@@ -2566,6 +2566,9 @@ class EnrichCandidateContactRequest(BaseModel):
     # per-candidate click (phone button / Rankings), which is not gated.
     trigger: Optional[str] = None
     match_score: Optional[float] = None
+    # Which contact to look for ("email", "phone"); omitted = both. The Step-5
+    # phone button sends ["phone"] so it never buys an email.
+    fields: Optional[List[str]] = None
 
 
 def _normalise_phone(raw: str) -> str:
@@ -2675,18 +2678,21 @@ _apollo_enrich_by_linkedin = contact_enrichment.apollo_enrich_by_linkedin
 # Exa Agent enrichment by LinkedIn URL (primary URL-keyed enricher).
 _exa_enrich_by_linkedin = contact_enrichment.exa_enrich_by_linkedin
 
+# Kipplo by LinkedIn URL (services/kipplo.py): the first provider of the chain.
+_kipplo_enrich_by_linkedin = contact_enrichment.kipplo_enrich_by_linkedin
+
 
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details using LinkedIn URL.
 
-    Chain (each step runs only while email or phone is still missing):
-    ZoomInfo by email → ZoomInfo by name (at the current company) → Apollo by
-    URL → ZoomInfo by the email Apollo found → Exa Agent by URL. Exa is the
-    paid fallback: it runs only after Apollo has been asked, and only for the
-    fields still missing afterwards. Earlier providers win on primary fields
-    (mobilePhone/workPhone/workEmail/personalEmail); phone candidates from all
-    of them are merged.
+    Chain, cheapest first, each step only for what is still missing: contact
+    cache → Apollo by URL → Apollo personal phone → Exa Agent (normal run) →
+    Exa deep search. That is the default (user 2026-09-29: "make it for apollo
+    and exa only"); Kipplo (first) and ZoomInfo (by email / name / the email
+    Apollo found) run only when listed in CONTACT_LOOKUP_PROVIDERS. Earlier
+    providers win on primary fields (mobilePhone/workPhone/workEmail/
+    personalEmail); phone candidates from all of them are merged.
 
     If sourced_candidates rows already exist, updates phone/email + data blob.
     """
@@ -2770,19 +2776,23 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
 
     # --- Contact enrichment by reliable identifiers only (no name guessing:
     # ZoomInfo's name search is accepted only when it is unambiguous). Order,
-    # stopping as soon as we have BOTH an email and a phone so we never spend
-    # Exa/Apollo credits needlessly:
-    #   1.  ZoomInfo by EMAIL - only when we already have an email (ZoomInfo
-    #       cannot match by LinkedIn URL on our entitlement).
-    #   1b. ZoomInfo by NAME  - for URL-only candidates with no seed email
-    #       (e.g. Exa-sourced), which the by-email/by-URL steps can't reach;
-    #       scoped to the current company and accepted only as the one match,
-    #       so a name collision never enriches the wrong person.
-    #   2.  Apollo by URL     - fast/cheap URL-keyed enricher; runs before Exa
-    #       so most candidates short-circuit before the slow, paid Exa path.
-    #   2b. ZoomInfo by the email Apollo found - turns it into a phone.
-    #   3.  Exa Agent by URL  - slow (polls to timeout) + paid; only for what
-    #       ZoomInfo and Apollo could not find.
+    # cheapest first, stopping as soon as we have BOTH an email and a phone so
+    # we never spend credits needlessly. Steps marked * run only when their
+    # provider is listed in CONTACT_LOOKUP_PROVIDERS (default "apollo,exa"):
+    #   0b.* Kipplo by URL    - asked only for the fields still missing, since
+    #        it bills per field group it finds.
+    #   1.*  ZoomInfo by EMAIL - only when we already have an email (ZoomInfo
+    #        cannot match by LinkedIn URL on our entitlement).
+    #   1b.* ZoomInfo by NAME - for URL-only candidates with no seed email;
+    #        scoped to the current company and accepted only as the one match,
+    #        so a name collision never enriches the wrong person.
+    #   2.   Apollo by URL    - fast/cheap URL-keyed enricher.
+    #   2b.* ZoomInfo by the email Apollo found - turns it into a phone.
+    #   2c.  Apollo personal phone (webhook reveal).
+    #   3.   Exa Agent by URL - slow + paid; only for what is still missing:
+    #        the normal run, then the deep search for what it did not find.
+    zoominfo_on = contact_enrichment.lookup_provider_enabled("zoominfo")
+    apollo_on = contact_enrichment.lookup_provider_enabled("apollo")
     provider_used = "none"
     extracted: Dict[str, Any] = {}
     exa_contributed = False
@@ -2801,6 +2811,26 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
     # contact info — treating one as a seed short-circuits the chain before
     # Apollo/Exa ever look for a genuine address, and it can't be messaged.
+    # A phone an earlier lookup saved from a WORK number (the chain used to fall
+    # back to one when no mobile turned up) is not the candidate's own, so it
+    # does not make them reachable by phone: look for a personal number.
+    if seed_phone and existing_rows and not (request.phone or "").strip():
+        _prev = _json_load_safe(existing_rows[0].get("data"), {})
+        _prev = _prev.get("zoominfo_contact_enrichment") if isinstance(_prev, dict) else None
+        if isinstance(_prev, dict):
+            _seed_n = _normalise_phone(seed_phone)
+            if (_seed_n and _seed_n == _normalise_phone(str(_prev.get("workPhone") or ""))
+                    and _seed_n != _normalise_phone(str(_prev.get("mobilePhone") or ""))):
+                logger.info(
+                    "enrich_contact: saved phone for %s is a work number from an earlier lookup; "
+                    "looking for a personal one", candidate_id,
+                )
+                seed_phone = ""
+    requested_fields = tuple(
+        f for f in ("email", "phone")
+        if not request.fields or f in {str(x).strip().lower() for x in request.fields}
+    ) or ("email", "phone")
+
     from utils.email_utils import is_placeholder_email
     if seed_email and is_placeholder_email(seed_email):
         logger.info(
@@ -2810,16 +2840,26 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         seed_email = ""
 
     def _missing_contact() -> Tuple[str, ...]:
-        """Which of email / phone the candidate still lacks (seed + found so far)."""
+        """Which of the requested email / phone the candidate still lacks (seed +
+        found so far). Only a PERSONAL number counts as a phone (user
+        2026-09-28: "we only need personal phone number"): a work line found on
+        the way does not stop the chain looking for the candidate's own."""
         have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
-        _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or extracted.get("workPhone") or "")
+        _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or "")
         have_phone = sum(1 for ch in _p if ch.isdigit()) >= 7
-        return tuple(field for field, have in (("email", have_email), ("phone", have_phone)) if not have)
+        return tuple(
+            field for field, have in (("email", have_email), ("phone", have_phone))
+            if not have and field in requested_fields
+        )
 
     def _have_email_and_phone() -> bool:
         return not _missing_contact()
 
-    def _merge_primary(fields: Dict[str, Any]) -> bool:
+    # Which provider filled each primary slot: the response reports who found
+    # the phone and the email, and the cache records it.
+    filled_by: Dict[str, str] = {}
+
+    def _merge_primary(fields: Dict[str, Any], provider: str) -> bool:
         """Fill only empty primary slots from `fields`; merge phone candidates.
 
         Returns True if it filled any primary field (so the caller can record
@@ -2829,6 +2869,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
             if fields.get(key) and not extracted.get(key):
                 extracted[key] = fields[key]
+                filled_by[key] = provider
                 contributed = True
         existing = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
         incoming = fields.get("phoneCandidates") if isinstance(fields.get("phoneCandidates"), list) else []
@@ -2842,6 +2883,9 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             merged.append(n)
         if merged:
             extracted["phoneCandidates"] = merged
+        personal = _normalise_phone(str(fields.get("mobilePhone") or ""))
+        if sum(1 for ch in personal if ch.isdigit()) >= 7 and personal not in extracted.setdefault("personalPhones", []):
+            extracted["personalPhones"].append(personal)
         return contributed
 
     # 0. Cache (free).
@@ -2855,12 +2899,36 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "mobilePhone": cached.get("phone") or "",
             "workPhone": "",
             "phoneCandidates": [cached["phone"]] if cached.get("phone") else [],
-        })
+        }, "cache")
+
+    # 0b. Kipplo by LinkedIn URL (services/kipplo.py). First provider: it
+    #     matches the URL itself, answers in ~2s, a miss is free and a hit costs
+    #     1 credit per email group / 5 for a mobile, so it is asked for exactly
+    #     what the candidate still lacks. Everything below runs only for what
+    #     Kipplo did not find — and whatever goes wrong with Kipplo (rate limit,
+    #     out of credits, rejected key, network, a bug) the rest of the chain
+    #     still runs, ending at Exa: cheapest first, but the contact is got.
+    kipplo_contributed = False
+    kipplo_filled: Tuple[str, ...] = ()
+    kipplo_outcome = "-"
+    kipplo_fields = tuple(f for f in _missing_contact() if f in contact_enrichment.kipplo_supported_fields())
+    if kipplo_fields and contact_enrichment.lookup_provider_enabled("kipplo"):
+        try:
+            _kp = await _kipplo_enrich_by_linkedin(candidate_id, linkedin_url, fields=kipplo_fields)
+        except Exception as e:
+            logger.warning("enrich_contact: Kipplo raised for %s: %s", candidate_id, e)
+            _kp = {"ok": False, "message": f"raised {type(e).__name__}"}
+        if _kp.get("ok") and _merge_primary(_kp.get("fields") or {}, "kipplo"):
+            kipplo_contributed = True
+            kipplo_filled = tuple(f for f in kipplo_fields if f not in _missing_contact())
+        kipplo_outcome = ",".join(kipplo_filled) or (
+            "miss" if _kp.get("ok") else str(_kp.get("message") or "failed")
+        )
 
     # 1. ZoomInfo by EMAIL (only when we have an email and still need a phone).
-    if seed_email and not _have_email_and_phone():
+    if zoominfo_on and seed_email and not _have_email_and_phone():
         _zi = await contact_enrichment.zoominfo_enrich_by_email(candidate_id, seed_email)
-        if _zi.get("ok") and _merge_primary(_zi.get("fields") or {}):
+        if _zi.get("ok") and _merge_primary(_zi.get("fields") or {}, "zoominfo"):
             zoominfo_contributed = True
 
     # The candidate's current employer: scopes the ZoomInfo name search (an
@@ -2879,22 +2947,23 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # name-based ContactSearch is the only ZoomInfo entry point for them. Runs
     # only while we still lack email+phone; the helper accepts only an
     # unambiguous match (at the candidate's company when known).
-    if not _have_email_and_phone() and candidate_name:
+    if zoominfo_on and not _have_email_and_phone() and candidate_name:
         _zi_by_name = await contact_enrichment.zoominfo_enrich_by_name(
             candidate_id, candidate_name, company=candidate_company
         )
-        if _zi_by_name.get("ok") and _merge_primary(_zi_by_name.get("fields") or {}):
+        if _zi_by_name.get("ok") and _merge_primary(_zi_by_name.get("fields") or {}, "zoominfo"):
             zoominfo_contributed = True
 
     # 2. Apollo by LinkedIn URL - fast/cheap; runs before Exa so candidates that
     #    get both email+phone here short-circuit and never reach the slow, paid
     #    Exa path.
     apollo_contributed = False
-    if not _have_email_and_phone():
+    apollo_result: Dict[str, Any] = {}
+    if apollo_on and not _have_email_and_phone():
         apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
         apollo_attempted = True
         if apollo_result.get("ok"):
-            apollo_contributed = _merge_primary(apollo_result.get("fields") or {})
+            apollo_contributed = _merge_primary(apollo_result.get("fields") or {}, "apollo")
 
     # 2b. ZoomInfo by the email Apollo (or the name search) just found. Apollo
     #     returns no phone on our plan, so without this a candidate Apollo found
@@ -2903,20 +2972,67 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     zoominfo_followup_contributed = False
     found_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip()
     if (
-        found_email
+        zoominfo_on
+        and found_email
         and found_email.lower() != seed_email.lower()
         and not is_placeholder_email(found_email)
         and "phone" in _missing_contact()
     ):
         _zi_found = await contact_enrichment.zoominfo_enrich_by_email(candidate_id, found_email)
         if _zi_found.get("ok"):
-            zoominfo_followup_contributed = _merge_primary(_zi_found.get("fields") or {})
+            zoominfo_followup_contributed = _merge_primary(_zi_found.get("fields") or {}, "zoominfo")
 
-    # 3. Exa Agent by LinkedIn URL - slow (polls to timeout) + paid (~$0.115),
-    #    so strictly the fallback for an Apollo miss: never before Apollo has
-    #    been asked, and only for the fields Apollo left missing — the agent
-    #    bills per field it fills, so we never pay it for contact we hold.
-    exa_fields = _missing_contact()
+    # 2c. Apollo personal phone (services/apollo_phone.py). Apollo hands out
+    #     personal / mobile numbers only through an async phone job delivered to
+    #     our webhook (8 credits per number found), so it is asked only while the
+    #     phone is still missing, and not for a person a recent complete lookup
+    #     (through the Exa deep search) found none for (Launch only). Waits up to
+    #     APOLLO_PHONE_WAIT_S; a number that lands later is still kept (cache +
+    #     sourced rows) for the next launch.
+    from services import apollo_phone
+    apollo_phone_contributed = False
+    apollo_phone_state = ""
+    if (
+        "phone" in _missing_contact()
+        and apollo_attempted
+        and not (honour_cached_misses and cached.get("phone_deep_missed"))
+        and apollo_phone.reveal_available()
+    ):
+        _phone_job = await apollo_phone.request_phone(
+            candidate_id,
+            linkedin_url,
+            apollo_person_id=str(apollo_result.get("person_id") or ""),
+            jobdiva_id=request.jobdiva_id or (_row0.get("jobdiva_id") if _row0 else None),
+        )
+        apollo_phone_state = "not_started"
+        if _phone_job:
+            _got = await apollo_phone.wait_for_phone(_phone_job)
+            apollo_phone_state = _got["state"]
+            if _got.get("phone"):
+                apollo_phone_contributed = _merge_primary(
+                    {"mobilePhone": _got["phone"], "phoneCandidates": [_got["phone"]]}, "apollo"
+                )
+
+    # 3. Exa Agent by LinkedIn URL - the paid end of the ladder, only for the
+    #    fields still missing (the agent bills per field it fills, so we never
+    #    pay it for contact we hold): first the normal run
+    #    (EXA_CONTACT_ENRICH_EFFORT, ~$0.025 a run), then, for whatever it did
+    #    not find, the deep search (EXA_CONTACT_DEEP_EFFORT, a longer,
+    #    thorough-search run with Fiber.ai's people database attached,
+    #    ~$0.14-0.21 a run). User 2026-09-29: "if we are not able to get it then
+    #    we do deep search ... get the contact details at the end", "add fiber
+    #    in the deep search".
+    exa_fields = _missing_contact() if contact_enrichment.lookup_provider_enabled("exa") else ()
+    if (
+        apollo_phone_state == "timeout"
+        and "phone" in exa_fields
+        and not apollo_phone.exa_after_timeout()
+    ):
+        logger.info(
+            "enrich_contact: Apollo phone still pending for %s — not buying it from Exa "
+            "(APOLLO_PHONE_EXA_AFTER_TIMEOUT=false)", candidate_id,
+        )
+        exa_fields = tuple(f for f in exa_fields if f != "phone")
     # Optional stricter spend rule (off by default): Exa only for a candidate
     # nobody else could reach -- never to top up a phone for one with an email.
     from core import sourcing_config as _sc_ondemand
@@ -2931,42 +3047,95 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             candidate_id, ",".join(exa_fields),
         )
         exa_fields = ()
+    # Recent misses (Launch only; a recruiter's click tries again): a deep
+    # search that found nothing lately is not re-bought, and after a normal run
+    # that found nothing the lookup goes straight to the deep search.
+    deep_first: Tuple[str, ...] = ()
     if honour_cached_misses and exa_fields:
-        _known_missing = tuple(f for f in exa_fields if cached.get(f"{f}_missed"))
-        if _known_missing:
+        _deep_missed = tuple(f for f in exa_fields if cached.get(f"{f}_deep_missed"))
+        if _deep_missed:
             logger.info(
-                "enrich_contact: not re-buying %s for %s — an earlier lookup found none (contact cache)",
-                ",".join(_known_missing), candidate_id,
+                "enrich_contact: not re-buying %s for %s — an earlier deep search found none (contact cache)",
+                ",".join(_deep_missed), candidate_id,
             )
-            exa_fields = tuple(f for f in exa_fields if f not in _known_missing)
+            exa_fields = tuple(f for f in exa_fields if f not in _deep_missed)
+        deep_first = tuple(f for f in exa_fields if cached.get(f"{f}_missed"))
     exa_answered = False
-    if EXA_CONTACT_ENRICH_ENABLED and apollo_attempted and exa_fields:
-        _exa = await _exa_enrich_by_linkedin(
-            candidate_id, linkedin_url, candidate_name, candidate_company, fields=exa_fields
-        )
+    exa_outcome = "-"
+    exa_stop = False  # a failure the deep run would hit too (no key, a 4xx)
+    normal_fields = tuple(f for f in exa_fields if f not in deep_first) if EXA_CONTACT_ENRICH_ENABLED else ()
+    deep_follows = contact_enrichment.exa_deep_enabled()
+    _late = {"candidate_id": candidate_id, "jobdiva_id": request.jobdiva_id or (_row0.get("jobdiva_id") if _row0 else None)}
+    if normal_fields:
+        async with contact_enrichment.ondemand_exa_semaphore():
+            _exa = await _exa_enrich_by_linkedin(
+                candidate_id, linkedin_url, candidate_name, candidate_company, fields=normal_fields,
+                # A normal run that runs out of time is not waited on twice when
+                # the deep search follows; it is watched in the background.
+                **({"wait_retry": False} if deep_follows else {}),
+            )
         exa_answered = bool(_exa.get("ok"))
-        if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}):
+        exa_stop = bool(_exa.get("fatal"))
+        contact_enrichment.watch_late_exa_run(
+            str(_exa.get("run_id") or ""), linkedin_url, fields=normal_fields, provider="exa", **_late
+        )
+        if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}, "exa"):
             exa_contributed = True
-    else:
-        exa_fields = ()
+        exa_outcome = ",".join(f for f in normal_fields if f not in _missing_contact()) or (
+            "miss" if exa_answered else str(_exa.get("message") or "failed")
+        )
+
+    # 3b. Exa deep search for what the normal run did not find.
+    deep_fields: Tuple[str, ...] = ()
+    deep_answered = False
+    exa_deep_contributed = False
+    exa_deep_outcome = "-"
+    if EXA_CONTACT_ENRICH_ENABLED and deep_follows and not exa_stop:
+        deep_fields = tuple(f for f in exa_fields if f in _missing_contact())
+    if deep_fields:
+        async with contact_enrichment.ondemand_exa_semaphore():
+            _deep = await _exa_enrich_by_linkedin(
+                candidate_id, linkedin_url, candidate_name, candidate_company,
+                fields=deep_fields, deep=True, wait_retry=False,
+            )
+        deep_answered = bool(_deep.get("ok"))
+        # Still going after EXA_CONTACT_DEEP_TIMEOUT_S: what it finds is kept
+        # for the next Launch / phone click instead of being thrown away.
+        contact_enrichment.watch_late_exa_run(
+            str(_deep.get("run_id") or ""), linkedin_url, fields=deep_fields, provider="exa_deep", **_late
+        )
+        if _deep.get("ok") and _merge_primary(_deep.get("fields") or {}, "exa_deep"):
+            exa_deep_contributed = True
+        exa_deep_outcome = ",".join(f for f in deep_fields if f not in _missing_contact()) or (
+            "miss" if deep_answered else str(_deep.get("message") or "failed")
+        )
 
     # Provider attribution = first source that contributed (execution order).
     if cache_contributed:
         provider_used = "cache"
+    elif kipplo_contributed:
+        provider_used = "kipplo"
     elif zoominfo_contributed:
         provider_used = "zoominfo"
     elif apollo_contributed:
         provider_used = "apollo"
     elif zoominfo_followup_contributed:
         provider_used = "zoominfo"
+    elif apollo_phone_contributed:
+        provider_used = "apollo"
     elif exa_contributed:
         provider_used = "exa"
+    elif exa_deep_contributed:
+        provider_used = "exa_deep"
 
     logger.info(
-        "Contact enrich providers for %s | zoominfo=%s apollo_called=%s apollo=%s "
-        "zoominfo_by_found_email=%s exa_asked=%s exa=%s | provider=%s",
-        candidate_id, zoominfo_contributed, apollo_attempted, apollo_contributed,
-        zoominfo_followup_contributed, ",".join(exa_fields) or "-", exa_contributed, provider_used,
+        "Contact enrich providers for %s | kipplo=%s zoominfo=%s apollo_called=%s apollo=%s "
+        "zoominfo_by_found_email=%s apollo_phone=%s exa_asked=%s exa=%s exa_deep_asked=%s "
+        "exa_deep=%s | provider=%s",
+        candidate_id, kipplo_outcome, zoominfo_contributed, apollo_attempted,
+        apollo_contributed, zoominfo_followup_contributed, apollo_phone_state or "-",
+        ",".join(normal_fields) or "-", exa_outcome, ",".join(deep_fields) or "-",
+        exa_deep_outcome, provider_used,
     )
 
     raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
@@ -2974,43 +3143,15 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     raw_work_email = extracted.get("workEmail") or ""
     raw_personal_email = extracted.get("personalEmail") or ""
 
-    raw_phone_candidates = extracted.get("phoneCandidates") if isinstance(extracted, dict) else []
-    if not isinstance(raw_phone_candidates, list):
-        raw_phone_candidates = []
-
-    normalised_candidates: List[str] = []
-    seen_candidates = set()
-    for candidate in [raw_mobile_phone, raw_work_phone, *raw_phone_candidates]:
-        n = _normalise_phone(str(candidate or ""))
-        if not n:
-            continue
-        if sum(1 for ch in n if ch.isdigit()) < 7:
-            continue
-        if n in seen_candidates:
-            continue
-        seen_candidates.add(n)
-        normalised_candidates.append(n)
-
-    phone_candidates_top2 = normalised_candidates[:2]
-
-    mobile_phone_normalised = _normalise_phone(raw_mobile_phone)
-    work_phone_normalised = _normalise_phone(raw_work_phone)
-    if sum(1 for ch in mobile_phone_normalised if ch.isdigit()) < 7:
-        mobile_phone_normalised = ""
-    if sum(1 for ch in work_phone_normalised if ch.isdigit()) < 7:
-        work_phone_normalised = ""
-
-    phone_source = "none"
-    if mobile_phone_normalised:
-        phone_source = "mobilePhone"
-    elif work_phone_normalised:
-        phone_source = "workPhone"
-    elif phone_candidates_top2:
-        phone_source = "phoneCandidates"
-
-    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or (phone_candidates_top2[0] if phone_candidates_top2 else ""))
+    # Personal numbers only: the phone PAIR calls is the candidate's own mobile
+    # (or home) number from a provider's mobilePhone slot. A work line is still
+    # returned as workPhone for reference but never becomes the phone, and the
+    # alternatives offered are personal numbers too.
+    phone_candidates_top2 = list(extracted.get("personalPhones") or [])[:2]
+    enriched_phone = _normalise_phone(raw_mobile_phone)
     if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
         enriched_phone = ""
+    phone_source = "mobilePhone" if enriched_phone else "none"
 
     enriched_email = (
         raw_work_email
@@ -3019,6 +3160,26 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     ).strip().lower()
 
     final_outcome = "enriched" if (enriched_phone or enriched_email) else "empty"
+    phone_provider = filled_by.get("mobilePhone", "") if enriched_phone else ""
+    email_provider = (
+        filled_by.get("workEmail" if raw_work_email else "personalEmail", "") if enriched_email else ""
+    )
+    # Per-provider answer: the fields it filled, "miss" (answered, nothing
+    # new), "-" (not asked: nothing left to find by then) or why it failed.
+    if apollo_contributed or apollo_phone_contributed:
+        _apollo_outcome = "found"
+    elif apollo_attempted:
+        _apollo_outcome = "miss" if apollo_result.get("ok") else str(apollo_result.get("message") or "failed")
+    else:
+        _apollo_outcome = "-"
+    lookup = {
+        "cache": "found" if cache_contributed else "-",
+        "kipplo": kipplo_outcome,
+        "zoominfo": "found" if (zoominfo_contributed or zoominfo_followup_contributed) else "-",
+        "apollo": _apollo_outcome,
+        "exa": exa_outcome,
+        "exa_deep": exa_deep_outcome,
+    }
 
     # Remember what the providers found (not the cache's own values, which
     # would keep extending their TTL) and what a clean Exa answer lacked.
@@ -3028,9 +3189,10 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         linkedin_url,
         email=_new_email,
         phone=_new_phone,
-        email_provider=provider_used,
-        phone_provider=provider_used,
-        missed=[f for f in exa_fields if exa_answered and f in _missing_contact()],
+        email_provider=email_provider or provider_used,
+        phone_provider=phone_provider or provider_used,
+        missed=[f for f in normal_fields if exa_answered and f in _missing_contact()],
+        deep_missed=[f for f in deep_fields if deep_answered and f in _missing_contact()],
     )
 
     logger.info(
@@ -3062,7 +3224,11 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         data_blob["zoominfo_contact_enrichment"] = {
                             "linkedin_url": linkedin_url,
                             "provider": provider_used,
+                            "phone_provider": phone_provider or None,
+                            "email_provider": email_provider or None,
+                            "lookup": lookup,
                             "exa_contributed": exa_contributed,
+                            "exa_deep_contributed": exa_deep_contributed,
                             "workPhone": extracted.get("workPhone"),
                             "mobilePhone": extracted.get("mobilePhone"),
                             "phoneCandidates": phone_candidates_top2,
@@ -3100,6 +3266,11 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "candidate_id": candidate_id,
         "linkedin_url": linkedin_url,
         "provider": provider_used,
+        # Who found the phone / the email ("" = not found), and what each
+        # provider answered: Launch PAIR sums these up for the recruiter.
+        "phone_provider": phone_provider or None,
+        "email_provider": email_provider or None,
+        "lookup": lookup,
         "phone_source": phone_source,
         "phone": enriched_phone or None,
         "phoneCandidates": phone_candidates_top2,
@@ -3140,6 +3311,107 @@ async def enrich_candidate_contact(
 ):
     """Path variant of the above. Same billable-spend reasoning applies."""
     return await _enrich_candidate_contact_impl(candidate_id, request)
+
+
+ENRICH_CONTACTS_BATCH_MAX = 25
+# While no lookup of a streamed group has finished, a ping line this often keeps
+# the connection from idling out (a deep search can take minutes).
+ENRICH_STREAM_PING_S = 10.0
+# The grouped endpoint's lookups run as tasks of their own, so a caller that
+# goes away does not cancel them (they still keep what they find). Strong
+# references: a task only weakly referenced by the loop could vanish mid-run.
+_LOOKUP_TASKS: set = set()
+
+
+class EnrichCandidateContactsRequest(BaseModel):
+    # Defaults for every candidate that does not set its own.
+    jobdiva_id: Optional[str] = None
+    trigger: Optional[str] = None
+    fields: Optional[List[str]] = None
+    candidates: List[EnrichCandidateContactRequest] = []
+
+
+@router.post("/candidates/enrich-contacts")
+async def enrich_candidate_contacts(
+    request: EnrichCandidateContactsRequest,
+    http_request: Request = None,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Contact lookup for several candidates in one call: Launch PAIR's
+    enrichment pass. Each runs the same chain as /candidates/enrich-contact
+    (same spend policy with trigger="launch"), all at once in this worker, so
+    their Kipplo lookups can go out together as one request when list lookups
+    are on (KIPPLO_BATCH_SIZE > 1: services/kipplo.py batches lookups waiting at
+    the same time; off while our integration answers one profile per request).
+    One candidate failing does not fail the others.
+
+    Answer: ``{"results": [...]}`` in request order, each shaped like the single
+    endpoint's answer, or with ``Accept: application/x-ndjson`` a stream (QA
+    2026-09-29: a group waited minutes for its slowest deep search with nothing
+    on screen, and a dropped connection lost everything the group had found):
+    one line ``{"index": i, "result": {...}}`` per candidate as soon as its
+    lookup ends, ``{"ping": true}`` every ENRICH_STREAM_PING_S while none has,
+    then ``{"done": true}``. The lookups run as tasks of their own, so if the
+    caller goes away they still finish and keep what they find (contact cache,
+    sourced rows) for the next Launch or phone click.
+    """
+    items = list(request.candidates or [])
+    if not items:
+        raise HTTPException(status_code=400, detail="candidates is required")
+    if len(items) > ENRICH_CONTACTS_BATCH_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at most {ENRICH_CONTACTS_BATCH_MAX} candidates per call",
+        )
+    defaults = {"jobdiva_id": request.jobdiva_id, "trigger": request.trigger, "fields": request.fields}
+
+    async def _one(item: EnrichCandidateContactRequest) -> Dict[str, Any]:
+        candidate_id = str(item.candidate_id or "").strip()
+        if not candidate_id:
+            return {"status": "error", "candidate_id": "", "message": "candidate_id is required"}
+        item = item.model_copy(update={
+            k: v for k, v in defaults.items() if v is not None and getattr(item, k) is None
+        })
+        try:
+            return await _enrich_candidate_contact_impl(candidate_id, item)
+        except HTTPException as e:
+            return {"status": "error", "candidate_id": candidate_id, "message": str(e.detail)}
+        except Exception as e:
+            logger.warning("enrich_contacts: lookup failed for %s: %s", candidate_id, e)
+            return {"status": "error", "candidate_id": candidate_id, "message": f"lookup failed: {type(e).__name__}"}
+
+    tasks: List[asyncio.Task] = []
+    for item in items:
+        task = asyncio.ensure_future(_one(item))
+        _LOOKUP_TASKS.add(task)
+        task.add_done_callback(_LOOKUP_TASKS.discard)
+        tasks.append(task)
+
+    accept = (http_request.headers.get("accept") or "").lower() if http_request is not None else ""
+    if "application/x-ndjson" not in accept:
+        return {"results": list(await asyncio.gather(*(asyncio.shield(t) for t in tasks)))}
+
+    async def _lines():
+        index_of = {task: i for i, task in enumerate(tasks)}
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, timeout=ENRICH_STREAM_PING_S, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                yield b'{"ping": true}\n'
+                continue
+            for task in sorted(done, key=index_of.get):
+                line = {"index": index_of[task], "result": task.result()}
+                yield (json.dumps(line, default=str) + "\n").encode()
+        yield b'{"done": true}\n'
+
+    return StreamingResponse(
+        _lines(),
+        media_type="application/x-ndjson",
+        # nginx must pass each line on as it comes, not buffer the answer.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.patch("/candidates/{candidate_id:path}/phone")

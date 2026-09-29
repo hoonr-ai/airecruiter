@@ -110,6 +110,14 @@ import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
+import {
+  contactProviderLabel,
+  describeContactsFound,
+  inGroups,
+  isKipploIssue,
+  mostCommon,
+  readNdjson,
+} from "@/lib/contact-lookup";
 
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
@@ -178,24 +186,28 @@ function getCandidateLaunchEmail(candidate: any): string {
   ).trim().toLowerCase();
 }
 
+// The phone PAIR calls: the candidate's personal number only. Work lines
+// (workPhone, or a phone an earlier lookup saved from one) are never used, so
+// such a candidate is enriched at launch to find their own number.
 function getCandidateLaunchPhone(candidate: any): string {
-  return String(
-    candidate?.phone ||
-    candidate?.workPhone ||
-    candidate?.mobilePhone ||
-    candidate?.enhanced_info?.phone ||
-    candidate?.enhanced_info?.workPhone ||
-    candidate?.enhanced_info?.mobilePhone ||
-    candidate?.data?.phone ||
-    candidate?.data?.workPhone ||
-    candidate?.data?.mobilePhone ||
-    candidate?.data?.enhanced_info?.phone ||
-    candidate?.data?.enhanced_info?.workPhone ||
-    candidate?.data?.enhanced_info?.mobilePhone ||
-    candidate?.data?.zoominfo_contact_enrichment?.mobilePhone ||
-    candidate?.data?.zoominfo_contact_enrichment?.workPhone ||
-    ""
-  ).trim();
+  const enrich = candidate?.data?.zoominfo_contact_enrichment || {};
+  const digits = (value: any) => String(value || "").replace(/\D/g, "");
+  const savedWork = digits(enrich.workPhone);
+  const savedMobile = digits(enrich.mobilePhone);
+  const isSavedWorkNumber = (value: any) =>
+    !!savedWork && digits(value) === savedWork && digits(value) !== savedMobile;
+  const options = [
+    candidate?.phone,
+    candidate?.mobilePhone,
+    candidate?.enhanced_info?.phone,
+    candidate?.enhanced_info?.mobilePhone,
+    candidate?.data?.phone,
+    candidate?.data?.mobilePhone,
+    candidate?.data?.enhanced_info?.phone,
+    candidate?.data?.enhanced_info?.mobilePhone,
+    enrich.mobilePhone,
+  ];
+  return String(options.find(value => String(value || "").trim() && !isSavedWorkNumber(value)) || "").trim();
 }
 
 // Utility function to clean location_type values and filter out employment terms
@@ -1104,19 +1116,23 @@ function NewJobPageContent() {
   // only safeguard: nginx still enforces the real ceiling.
   const BATCH_LAUNCH_DELAY_MS = 350;
 
-  // Bounded concurrency for the Launch PAIR contact-enrichment pass. Each
-  // candidate's enrich-contact call runs the ZoomInfo→Apollo→Exa chain
-  // server-side; doing them one-at-a-time made the modal crawl for minutes, so
-  // we overlap up to N at once. Keep modest to stay under provider rate limits.
-  const LAUNCH_ENRICH_CONCURRENCY = 6;
+  // Launch PAIR's contact lookups (Apollo → Exa → Exa deep search with
+  // Fiber.ai, cheapest first, run server-side) go out in groups of
+  // LAUNCH_ENRICH_GROUP_SIZE per call to /candidates/enrich-contacts,
+  // LAUNCH_ENRICH_GROUP_CONCURRENCY calls at a time: 20 candidates in flight.
+  // Each call streams its results as they come (a deep search can take
+  // minutes), so small groups keep one slow lookup from holding up many.
+  const LAUNCH_ENRICH_GROUP_SIZE = 5;
+  const LAUNCH_ENRICH_GROUP_CONCURRENCY = 4;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
   const [pendingLaunchOverrides, setPendingLaunchOverrides] = useState<Record<string, { phone?: string; email?: string }>>({});
-  // QA-only safety toggle. When ON (default), Launch PAIR opens the manual
-  // mobile/email override modal for every candidate (current QA behavior).
-  // When OFF, Launch PAIR behaves exactly like production (auto-enrich +
-  // launch for everyone). Has no effect outside QA (gated by IS_QA_ENV).
+  // QA-only safety toggle. When ON (default), Launch PAIR looks contacts up
+  // like production, then, instead of launching, opens the mobile/email
+  // override modal for every candidate, showing what the lookup found. When
+  // OFF, Launch PAIR behaves exactly like production (look up + launch for
+  // everyone). Has no effect outside QA (gated by IS_QA_ENV).
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
@@ -8305,42 +8321,13 @@ function NewJobPageContent() {
 
     setIsEnrichingContacts(true);
     try {
-      if (IS_QA_ENV && qaOverrideEnabled) {
-        // QA mode with Override toggle ON: skip ZoomInfo auto-enrichment and
-        // the immediate launch path. Open the contact modal for EVERY selected
-        // candidate so QA can review and override mobile / email before
-        // anything fires. With Override OFF, fall through to the production
-        // path below (auto-enrich + launch for everyone).
-        const reviewList: MissingContactCandidate[] = [];
-        const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
-        for (const c of candidates) {
-          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-          if (!id || !selectedCandidates.has(id) || hardFilterSkipIds.has(id)) continue;
-          const currentPhone = getCandidateLaunchPhone(c);
-          const currentEmail = getCandidateLaunchEmail(c);
-          reviewList.push({
-            candidate_id: id,
-            name: getCandidateDisplayName(c) || c.name || "Unnamed",
-            headline: c.title || c.headline || "",
-            location: c.location || "",
-            source: c.source || "",
-            jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
-            needsPhone: true,
-            needsEmail: true,
-            currentPhone,
-            currentEmail,
-          });
-        }
-        if (reviewList.length === 0) {
-          showToast("No candidates available to launch.", "info");
-          return;
-        }
-        setPendingLaunchOverrides({});
-        setMissingContactCandidates(reviewList);
-        setMissingContactsReviewMode(true);
-        setMissingContactsOpen(true);
-        return;
-      }
+      // QA with the Override toggle ON: the contact lookups below run exactly
+      // as in production (Apollo → Exa → Exa deep search), but nothing
+      // launches from this pass — every selected candidate then opens in the
+      // review modal, showing what was found, to confirm or override before
+      // anything fires. (The toggle used to skip the lookups as well, so QA
+      // never exercised them.) With Override OFF, QA behaves like production.
+      const qaReview = IS_QA_ENV && qaOverrideEnabled;
 
       const candidatesMissingContact = candidates.filter(c => {
         const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
@@ -8354,28 +8341,64 @@ function NewJobPageContent() {
       // Open the progress modal upfront so the recruiter sees enrichment
       // streaming. runLaunchPair will flip phase to "launching" and fill in
       // the per-batch list once enrichment is done.
-      setLaunchProgress({
-        ...initialLaunchProgress,
-        open: true,
-        phase: candidatesMissingContact.length > 0 ? "enriching" : "launching",
-        totalCandidates: Math.max(0, selectedCandidates.size - hardFilterSkipIds.size),
-        batchSize: LAUNCH_BATCH_SIZE,
-        enrichTotal: candidatesMissingContact.length,
-        hardFilterSkipped: hardFilterSkipIds.size,
-        hardFilterSkippedNames,
-      });
+      if (candidatesMissingContact.length > 0 || !qaReview) {
+        setLaunchProgress({
+          ...initialLaunchProgress,
+          open: true,
+          phase: candidatesMissingContact.length > 0 ? "enriching" : "launching",
+          totalCandidates: Math.max(0, selectedCandidates.size - hardFilterSkipIds.size),
+          batchSize: LAUNCH_BATCH_SIZE,
+          enrichTotal: candidatesMissingContact.length,
+          hardFilterSkipped: hardFilterSkipIds.size,
+          hardFilterSkippedNames,
+        });
+      }
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
       let enrichedCount = 0;
-      let enrichedMobileCount = 0;
-      let enrichedWorkPhoneCount = 0;
       let missingLinkedInCount = 0;
       let enrichFailedCount = 0;
       let noContactFoundCount = 0;
+      let notEligibleCount = 0;
+      // Who found what, and why Kipplo gave nothing (out of credits, no key,
+      // rate limited...), from each answer's phone_provider / email_provider /
+      // lookup: the summary shows whether the cheap provider is doing the work.
+      const phoneFoundBy: Record<string, number> = {};
+      const emailFoundBy: Record<string, number> = {};
+      const kipploIssues: Record<string, number> = {};
+      const foundBy: Record<string, { phone?: string; email?: string }> = {};
+      const lookedUpIds = new Set<string>();
 
-      const enrichOne = async (c: (typeof candidatesMissingContact)[number]) => {
+      type EnrichCounter =
+        | "enrichSucceeded"
+        | "enrichAlreadyReachable"
+        | "enrichMissingLinkedIn"
+        | "enrichNoContact"
+        | "enrichFailed";
+      const bumpEnrich = (field: EnrichCounter) =>
+        setLaunchProgress(prev => ({ ...prev, enrichDone: prev.enrichDone + 1, [field]: prev[field] + 1 }));
+
+      type EnrichItem = {
+        c: (typeof candidatesMissingContact)[number];
+        id: string;
+        linkedinUrl: string;
+        launchableNow: boolean;
+      };
+      // One candidate's answer from /candidates/enrich-contact(s).
+      type EnrichAnswer = {
+        status?: string;
+        candidate_id?: string;
+        phone?: string | null;
+        mobilePhone?: string | null;
+        email?: string | null;
+        phone_provider?: string | null;
+        email_provider?: string | null;
+        lookup?: Record<string, string>;
+      } | null | undefined;
+      const toLookUp: EnrichItem[] = [];
+      for (const c of candidatesMissingContact) {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id) return;
+        if (!id) continue;
 
         const linkedinUrlCandidates = [
           c.profile_url,
@@ -8399,128 +8422,196 @@ function NewJobPageContent() {
 
         if (!linkedinUrl) {
           if (launchableNow) {
-            setLaunchProgress(prev => ({
-              ...prev,
-              enrichDone: prev.enrichDone + 1,
-              enrichAlreadyReachable: prev.enrichAlreadyReachable + 1,
-            }));
+            bumpEnrich("enrichAlreadyReachable");
           } else {
             missingLinkedInCount += 1;
-            setLaunchProgress(prev => ({
-              ...prev,
-              enrichDone: prev.enrichDone + 1,
-              enrichMissingLinkedIn: prev.enrichMissingLinkedIn + 1,
-            }));
+            bumpEnrich("enrichMissingLinkedIn");
           }
+          continue;
+        }
+        toLookUp.push({ c, id, linkedinUrl, launchableNow });
+      }
+
+      const applyEnrichResult = (item: EnrichItem, enriched: EnrichAnswer) => {
+        if (!enriched || enriched.status === "error") {
+          enrichFailedCount += 1;
+          bumpEnrich("enrichFailed");
           return;
         }
-
-        try {
-          // One retry on rate-limit/gateway pushback (429/503) or a network
-          // blip — at 250 candidates these transients otherwise dump whole
-          // cohorts into "enrichment failed" and then the needs-info modal.
-          let res: Response | null = null;
-          for (let enrichAttempt = 1; enrichAttempt <= 2; enrichAttempt++) {
-            try {
-              res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  candidate_id: id,
-                  jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
-                  source: c.source || undefined,
-                  linkedin_url: linkedinUrl,
-                  // Held to the spend policy server-side: LinkedIn sources at
-                  // or above the score floor only (a skip returns no contact).
-                  trigger: "launch",
-                  match_score: typeof c.match_score === "number" ? c.match_score : undefined,
-                }),
-              });
-            } catch (enrichErr) {
-              if (!isNetworkFetchError(enrichErr) || enrichAttempt === 2) throw enrichErr;
-              res = null;
-            }
-            if (res && res.status !== 429 && res.status !== 503) break;
-            if (enrichAttempt === 2) break;
-            const retryAfter = Number(res?.headers.get("Retry-After"));
-            await new Promise(resolve =>
-              setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500),
-            );
+        if (enriched.status === "success") lookedUpIds.add(item.id);
+        const kipplo = String(enriched?.lookup?.kipplo || "");
+        if (isKipploIssue(kipplo)) {
+          kipploIssues[kipplo] = (kipploIssues[kipplo] || 0) + 1;
+        }
+        // `phone` is the candidate's personal number (never a work line).
+        const nextPhone = enriched?.phone || enriched?.mobilePhone || "";
+        const nextEmail = enriched?.email || "";
+        if (nextPhone || nextEmail) {
+          contactOverrides[item.id] = {
+            phone: nextPhone || undefined,
+            email: nextEmail || undefined,
+          };
+          enrichedCount += 1;
+          foundBy[item.id] = {};
+          if (nextPhone) {
+            const by = String(enriched?.phone_provider || "other");
+            phoneFoundBy[by] = (phoneFoundBy[by] || 0) + 1;
+            foundBy[item.id].phone = by;
           }
-
-          if (!res || !res.ok) {
-            enrichFailedCount += 1;
-            setLaunchProgress(prev => ({
-              ...prev,
-              enrichDone: prev.enrichDone + 1,
-              enrichFailed: prev.enrichFailed + 1,
-            }));
-            return;
+          if (nextEmail) {
+            const by = String(enriched?.email_provider || "other");
+            emailFoundBy[by] = (emailFoundBy[by] || 0) + 1;
+            foundBy[item.id].email = by;
           }
-          const enriched = await res.json();
-          const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
-          const nextEmail = enriched?.email || "";
-          const phoneSource = String(enriched?.phone_source || "").trim();
-          if (nextPhone || nextEmail) {
-            contactOverrides[id] = {
-              phone: nextPhone || undefined,
-              email: nextEmail || undefined,
-            };
-            enrichedCount += 1;
-            if (phoneSource === "mobilePhone") {
-              enrichedMobileCount += 1;
-            } else if (phoneSource === "workPhone") {
-              enrichedWorkPhoneCount += 1;
-            }
-            setLaunchProgress(prev => ({
-              ...prev,
-              enrichDone: prev.enrichDone + 1,
-              enrichSucceeded: prev.enrichSucceeded + 1,
-            }));
-          } else if (launchableNow) {
-            // Enrichment found nothing new, but the candidate already has a
-            // usable phone or email — still launchable, not a miss.
-            setLaunchProgress(prev => ({
-              ...prev,
-              enrichDone: prev.enrichDone + 1,
-              enrichAlreadyReachable: prev.enrichAlreadyReachable + 1,
-            }));
-          } else {
-            noContactFoundCount += 1;
-            setLaunchProgress(prev => ({
-              ...prev,
-              enrichDone: prev.enrichDone + 1,
-              enrichNoContact: prev.enrichNoContact + 1,
-            }));
-          }
-        } catch {
-          // Best-effort enrichment; keep launch flow moving.
-          enrichFailedCount += 1;
-          setLaunchProgress(prev => ({
-            ...prev,
-            enrichDone: prev.enrichDone + 1,
-            enrichFailed: prev.enrichFailed + 1,
-          }));
+          bumpEnrich("enrichSucceeded");
+        } else if (item.launchableNow) {
+          // Enrichment found nothing new, but the candidate already has a
+          // usable phone or email — still launchable, not a miss.
+          bumpEnrich("enrichAlreadyReachable");
+        } else {
+          // "skipped" = held back by the spend policy (source / score floor).
+          if (enriched?.status === "skipped") notEligibleCount += 1;
+          else noContactFoundCount += 1;
+          bumpEnrich("enrichNoContact");
         }
       };
 
-      // Bounded concurrency pool instead of one-at-a-time. "Missing LinkedIn"
-      // candidates resolve instantly; the win is overlapping the network-bound
-      // calls. Counters/contactOverrides mutate synchronously between awaits
-      // (atomic in single-threaded JS) and setLaunchProgress uses the functional
-      // updater, so concurrent updates are safe. Pool drains via a shared cursor.
-      let enrichCursor = 0;
-      const enrichWorker = async () => {
-        while (enrichCursor < candidatesMissingContact.length) {
-          await enrichOne(candidatesMissingContact[enrichCursor++]);
+      // One retry on rate-limit/gateway pushback (429/503) or a network blip —
+      // at 250 candidates these transients otherwise dump whole cohorts into
+      // "enrichment failed" and then the needs-info modal.
+      const postWithRetry = async (
+        url: string,
+        payload: unknown,
+        extraHeaders: Record<string, string> = {},
+      ): Promise<Response | null> => {
+        let res: Response | null = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            res = await authFetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...extraHeaders },
+              body: JSON.stringify(payload),
+            });
+          } catch (enrichErr) {
+            if (!isNetworkFetchError(enrichErr) || attempt === 2) throw enrichErr;
+            res = null;
+          }
+          if (res && res.status !== 429 && res.status !== 503) break;
+          if (attempt === 2) break;
+          const retryAfter = Number(res?.headers.get("Retry-After"));
+          await new Promise(resolve =>
+            setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500),
+          );
+        }
+        return res;
+      };
+
+      const enrichJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
+      const enrichRequest = (item: EnrichItem) => ({
+        candidate_id: item.id,
+        jobdiva_id: enrichJobdivaId,
+        source: item.c.source || undefined,
+        linkedin_url: item.linkedinUrl,
+        // Held to the spend policy server-side: LinkedIn/JobDiva sources at or
+        // above the score floor only (a skip returns no contact).
+        trigger: "launch",
+        match_score: typeof item.c.match_score === "number" ? item.c.match_score : undefined,
+      });
+
+      const enrichOne = async (item: EnrichItem) => {
+        try {
+          const res = await postWithRetry(`${API_BASE}/candidates/enrich-contact`, enrichRequest(item));
+          applyEnrichResult(item, res && res.ok ? await res.json() : null);
+        } catch {
+          // Best-effort enrichment; keep launch flow moving.
+          applyEnrichResult(item, null);
+        }
+      };
+
+      // A group is looked up in one call (one API worker). The answer streams
+      // one line per candidate as its lookup ends, so each contact reaches
+      // the screen when it is found instead of when the group's slowest deep
+      // search is done; pings keep the connection open meanwhile. A stream
+      // that breaks is not re-sent: the server finishes those lookups anyway
+      // and keeps what it finds for the next Launch.
+      let groupedLookupUnavailable = false;
+      const enrichGroup = async (group: EnrichItem[]) => {
+        if (!groupedLookupUnavailable) {
+          const answered = new Set<number>();
+          const take = (index: number, answer: EnrichAnswer) => {
+            if (!Number.isInteger(index) || index < 0 || index >= group.length || answered.has(index)) return;
+            answered.add(index);
+            applyEnrichResult(group[index], answer);
+          };
+          try {
+            const res = await postWithRetry(
+              `${API_BASE}/candidates/enrich-contacts`,
+              { candidates: group.map(enrichRequest) },
+              { Accept: "application/x-ndjson" },
+            );
+            if (res && res.ok) {
+              if ((res.headers.get("content-type") || "").includes("ndjson") && res.body) {
+                try {
+                  await readNdjson(res.body, (line) => {
+                    const msg = line as { index?: number; result?: EnrichAnswer };
+                    if (typeof msg?.index === "number" && msg.result !== undefined) take(msg.index, msg.result);
+                  });
+                } catch {
+                  // Connection dropped mid-stream: what arrived is applied.
+                }
+              } else {
+                const body = await res.json();
+                const results: EnrichAnswer[] = Array.isArray(body?.results) ? body.results : [];
+                results.forEach((r, i) => take(i, r));
+              }
+              group.forEach((item, i) => { if (!answered.has(i)) applyEnrichResult(item, null); });
+              return;
+            }
+            if (!res || (res.status !== 404 && res.status !== 405)) {
+              group.forEach(item => applyEnrichResult(item, null));
+              return;
+            }
+            // An API from before the grouped endpoint: one call per candidate.
+            groupedLookupUnavailable = true;
+          } catch {
+            group.forEach((item, i) => { if (!answered.has(i)) applyEnrichResult(item, null); });
+            return;
+          }
+        }
+        for (const item of group) await enrichOne(item);
+      };
+
+      const groups = inGroups(toLookUp, LAUNCH_ENRICH_GROUP_SIZE);
+      // Counters/contactOverrides mutate synchronously between awaits (atomic
+      // in single-threaded JS) and setLaunchProgress uses the functional
+      // updater, so concurrent groups are safe. Pool drains via a shared cursor.
+      let groupCursor = 0;
+      const groupWorker = async () => {
+        while (groupCursor < groups.length) {
+          await enrichGroup(groups[groupCursor++]);
         }
       };
       await Promise.all(
-        Array.from(
-          { length: Math.min(LAUNCH_ENRICH_CONCURRENCY, candidatesMissingContact.length) },
-          enrichWorker,
-        ),
+        Array.from({ length: Math.min(LAUNCH_ENRICH_GROUP_CONCURRENCY, groups.length) }, groupWorker),
       );
+
+      const phonesFound = Object.values(phoneFoundBy).reduce((a, b) => a + b, 0);
+      const emailsFound = Object.values(emailFoundBy).reduce((a, b) => a + b, 0);
+      if (toLookUp.length > 0) {
+        trackEvent("job_wizard_step5_launch_contact_lookup", {
+          step: 5,
+          looked_up: toLookUp.length,
+          found: enrichedCount,
+          phones_found: phonesFound,
+          emails_found: emailsFound,
+          phone_found_by: phoneFoundBy,
+          email_found_by: emailFoundBy,
+          kipplo_issues: kipploIssues,
+          not_eligible: notEligibleCount,
+          failed: enrichFailedCount,
+          qa_review: qaReview,
+        });
+      }
 
       if (enrichedCount > 0) {
         setCandidates(prev => prev.map(c => {
@@ -8533,12 +8624,17 @@ function NewJobPageContent() {
             email: override.email || c.email,
           };
         }));
-        const parts = [
-          `${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}`,
-          enrichedMobileCount > 0 ? `${enrichedMobileCount} mobile` : "",
-          enrichedWorkPhoneCount > 0 ? `${enrichedWorkPhoneCount} work phone` : "",
-        ].filter(Boolean);
-        showToast(`ZoomInfo enriched: ${parts.join(" · ")}.`, "success");
+        showToast(
+          `Contact lookup found ${describeContactsFound(phoneFoundBy, emailFoundBy)} for ${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}.`,
+          "success",
+        );
+      }
+      const kipploIssue = mostCommon(kipploIssues);
+      if (kipploIssue) {
+        showToast(
+          `Kipplo gave no result for ${kipploIssue.count} candidate${kipploIssue.count === 1 ? "" : "s"} (${kipploIssue.key}); the other providers were asked instead.`,
+          "info",
+        );
       }
 
       const unresolvedMissing = candidatesMissingContact.filter(c => {
@@ -8554,13 +8650,56 @@ function NewJobPageContent() {
         showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing both phone and email after enrichment.`, "info");
       }
 
-      if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
+      if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0 || notEligibleCount > 0) {
         const bits = [
           missingLinkedInCount > 0 ? `${missingLinkedInCount} missing LinkedIn URL` : "",
           noContactFoundCount > 0 ? `${noContactFoundCount} still missing phone & email` : "",
+          notEligibleCount > 0
+            ? `${notEligibleCount} not looked up (below ${AUTO_LAUNCH_MIN_SCORE}% or an ineligible source)`
+            : "",
           enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
         ].filter(Boolean);
         showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
+      }
+
+      if (qaReview) {
+        // Review instead of launch: hand over to the modal with each field
+        // filled from the lookup where it found something (user 2026-09-29:
+        // "the contact details are still not coming up"), marked with who
+        // found it; the candidate's own contact otherwise. Testers override
+        // the real details with test contacts before launching from QA.
+        setLaunchProgress(initialLaunchProgress);
+        const reviewList: MissingContactCandidate[] = [];
+        for (const c of candidates) {
+          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+          if (!id || !selectedCandidates.has(id) || hardFilterSkipIds.has(id)) continue;
+          reviewList.push({
+            candidate_id: id,
+            name: getCandidateDisplayName(c) || c.name || "Unnamed",
+            headline: c.title || c.headline || "",
+            location: c.location || "",
+            source: c.source || "",
+            jobdiva_id: enrichJobdivaId ? String(enrichJobdivaId) : undefined,
+            needsPhone: true,
+            needsEmail: true,
+            currentPhone: contactOverrides[id]?.phone || getCandidateLaunchPhone(c),
+            currentEmail: contactOverrides[id]?.email || getCandidateLaunchEmail(c),
+            lookedUp: lookedUpIds.has(id),
+            foundPhone: contactOverrides[id]?.phone,
+            foundPhoneBy: contactProviderLabel(foundBy[id]?.phone),
+            foundEmail: contactOverrides[id]?.email,
+            foundEmailBy: contactProviderLabel(foundBy[id]?.email),
+          });
+        }
+        if (reviewList.length === 0) {
+          showToast("No candidates available to launch.", "info");
+          return;
+        }
+        setPendingLaunchOverrides(contactOverrides);
+        setMissingContactCandidates(reviewList);
+        setMissingContactsReviewMode(true);
+        setMissingContactsOpen(true);
+        return;
       }
 
       // DNC re-check after enrichment: a candidate without a phone in search
@@ -10498,8 +10637,8 @@ function NewJobPageContent() {
                     onClick={() => setQaOverrideEnabled(v => !v)}
                     className="flex items-center gap-2 select-none"
                     title={qaOverrideEnabled
-                      ? "Override ON — manual mobile/email entry modal for every candidate (QA behavior)"
-                      : "Override OFF — launches for everyone like production"}
+                      ? "Override ON — contacts are looked up and shown, then you confirm or override each candidate's mobile/email before launch (QA behavior)"
+                      : "Override OFF — looks up contacts and launches for everyone like production"}
                   >
                     <span className="text-[12px] font-semibold text-slate-600">Override</span>
                     <span
@@ -11058,7 +11197,7 @@ return (
       }
       description={
         missingContactsReviewMode
-          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching."
+          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. Fields are filled in with what the contact lookup found (Apollo, Exa, Exa deep search with Fiber.ai): those are the candidate's real details, so replace them with test contacts if the candidate should not be reached."
           : undefined
       }
       primaryLabel={

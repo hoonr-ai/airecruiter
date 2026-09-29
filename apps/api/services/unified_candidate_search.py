@@ -526,11 +526,9 @@ class UnifiedCandidateSearch:
         *,
         overwrite: bool,
     ) -> None:
-        """In-line ZoomInfo → Apollo contact enrichment for one candidate.
-
-        ZoomInfo→Apollo is the source of truth for sourced contact info; the
-        precedence (ZoomInfo first, Apollo fallback) lives inside
-        ``contact_enrichment.enrich_contact_for_sourcing``. Gated by
+        """In-line contact enrichment for one candidate (Apollo → Exa by
+        default; the providers and their order live inside
+        ``contact_enrichment.enrich_contact_for_sourcing``). Gated by
         CONTACT_ENRICHMENT_INLINE_ENABLED and capped at PER_JOB_CAP inside the
         helper.
 
@@ -587,9 +585,11 @@ class UnifiedCandidateSearch:
         if not enrich:
             return
 
+        # Only a personal number becomes the candidate's phone; a work line
+        # (workPhone) is never used for outreach.
         if overwrite:
             new_email = enrich.get("workEmail") or enrich.get("personalEmail") or ""
-            new_phone = enrich.get("mobilePhone") or enrich.get("workPhone") or ""
+            new_phone = enrich.get("mobilePhone") or ""
             if new_email:
                 cand["email"] = new_email
             if new_phone:
@@ -604,7 +604,6 @@ class UnifiedCandidateSearch:
             cand["phone"] = (
                 cand.get("phone")
                 or enrich.get("mobilePhone")
-                or enrich.get("workPhone")
                 or ""
             )
         if cand.get("email") or cand.get("phone"):
@@ -869,7 +868,7 @@ class UnifiedCandidateSearch:
             return True
 
         async def enrich_shown_row(cand: Dict[str, Any], *, overwrite: bool) -> None:
-            """Contact lookup (ZoomInfo → Apollo → paid Exa on a miss, see
+            """Contact lookup (Apollo → paid Exa on a miss, emails only; see
             enrich_contact_for_sourcing) for a row that is ALREADY on screen;
             whatever it finds streams as a `contact_enrichment` patch.
 

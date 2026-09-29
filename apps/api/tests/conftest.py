@@ -21,3 +21,24 @@ def _block_real_db_connections(monkeypatch):
         )
 
     monkeypatch.setattr("core.db.get_db_connection", _fail, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_kipplo_calls(monkeypatch):
+    """Kipplo bills per hit and core.config loads apps/api/.env, so a key there
+    must never reach a real lookup from the suite. Kipplo tests set a fake key
+    and stub httpx themselves."""
+    monkeypatch.delenv("KIPPLO_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _contact_chain_with_every_provider(monkeypatch):
+    """Most contact-chain tests cover the mechanics of every provider, so they
+    run with all four listed and without the Exa deep search. Production asks
+    Apollo and Exa only, deep search on (CONTACT_LOOKUP_PROVIDERS,
+    EXA_CONTACT_DEEP_EFFORT); tests/test_contact_ladder.py covers that."""
+    from core import sourcing_config
+    from services import contact_enrichment
+
+    monkeypatch.setattr(sourcing_config, "CONTACT_LOOKUP_PROVIDERS", ("kipplo", "zoominfo", "apollo", "exa"))
+    monkeypatch.setattr(contact_enrichment, "EXA_CONTACT_DEEP_EFFORT", "off")

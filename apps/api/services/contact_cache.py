@@ -7,8 +7,11 @@ already come back empty. This table remembers, per LinkedIn profile:
 
   - the email / phone a provider found, and which provider (a hit, reused for
     CONTACT_CACHE_HIT_TTL_DAYS);
-  - that a COMPLETE lookup found no email / phone (a miss, honoured for
-    CONTACT_CACHE_MISS_TTL_DAYS so the paid step is not re-bought).
+  - that a lookup found no email / phone (a miss, honoured for
+    CONTACT_CACHE_MISS_TTL_DAYS so the paid step is not re-bought): a miss of
+    the normal Exa run (``*_missed_at``) sends the next Launch straight to the
+    deep search, and a miss of the deep search (``*_deep_missed_at``, the end
+    of the chain) is not re-bought at all.
 
 Only provider-found values are written, never the contact a row arrived with
 (LLM-extracted profile text is unreliable). A miss is recorded only when the
@@ -41,16 +44,34 @@ CREATE_SQL = """
         phone_provider TEXT,
         phone_found_at TIMESTAMPTZ,
         phone_missed_at TIMESTAMPTZ,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        phone_personal BOOLEAN,
+        email_deep_missed_at TIMESTAMPTZ,
+        phone_deep_missed_at TIMESTAMPTZ
     )
+"""
+
+# Phones are reused only when marked personal (user 2026-09-28: "we only need
+# personal phone number"). Rows written before the marker, including the
+# backfill, were filled from mobile OR work numbers, so their phone is ignored
+# and the person is looked up again.
+# Deep-search misses (2026-09-29): a miss recorded before the deep search
+# existed is a normal-run miss, so the next Launch still tries the deep search.
+MIGRATE_SQL = """
+    ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_personal BOOLEAN;
+    ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS email_deep_missed_at TIMESTAMPTZ;
+    ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_deep_missed_at TIMESTAMPTZ
 """
 
 READ_SQL = """
     SELECT email, email_provider, phone, phone_provider,
            email IS NOT NULL AND email_found_at > NOW() - make_interval(days => %(hit_days)s) AS email_fresh,
-           phone IS NOT NULL AND phone_found_at > NOW() - make_interval(days => %(hit_days)s) AS phone_fresh,
+           phone IS NOT NULL AND phone_personal IS TRUE
+               AND phone_found_at > NOW() - make_interval(days => %(hit_days)s) AS phone_fresh,
            email_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_missed_recent,
-           phone_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_missed_recent
+           phone_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_missed_recent,
+           email_deep_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_deep_missed_recent,
+           phone_deep_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_deep_missed_recent
     FROM contact_enrichment_cache
     WHERE linkedin_slug = %(slug)s
 """
@@ -61,7 +82,8 @@ READ_SQL = """
 UPSERT_SQL = """
     INSERT INTO contact_enrichment_cache AS c (
         linkedin_slug, email, email_provider, email_found_at, email_missed_at,
-        phone, phone_provider, phone_found_at, phone_missed_at, updated_at
+        phone, phone_provider, phone_found_at, phone_missed_at, updated_at, phone_personal,
+        email_deep_missed_at, phone_deep_missed_at
     ) VALUES (
         %(slug)s,
         %(email)s, %(email_provider)s,
@@ -70,7 +92,10 @@ UPSERT_SQL = """
         %(phone)s, %(phone_provider)s,
         CASE WHEN %(phone)s::text IS NOT NULL THEN NOW() END,
         CASE WHEN %(phone_missed)s THEN NOW() END,
-        NOW()
+        NOW(),
+        CASE WHEN %(phone)s::text IS NOT NULL THEN TRUE END,
+        CASE WHEN %(email_deep_missed)s THEN NOW() END,
+        CASE WHEN %(phone_deep_missed)s THEN NOW() END
     )
     ON CONFLICT (linkedin_slug) DO UPDATE SET
         email = COALESCE(EXCLUDED.email, c.email),
@@ -81,6 +106,9 @@ UPSERT_SQL = """
         phone_provider = CASE WHEN EXCLUDED.phone IS NOT NULL THEN EXCLUDED.phone_provider ELSE c.phone_provider END,
         phone_found_at = COALESCE(EXCLUDED.phone_found_at, c.phone_found_at),
         phone_missed_at = COALESCE(EXCLUDED.phone_missed_at, c.phone_missed_at),
+        phone_personal = CASE WHEN EXCLUDED.phone IS NOT NULL THEN TRUE ELSE c.phone_personal END,
+        email_deep_missed_at = COALESCE(EXCLUDED.email_deep_missed_at, c.email_deep_missed_at),
+        phone_deep_missed_at = COALESCE(EXCLUDED.phone_deep_missed_at, c.phone_deep_missed_at),
         updated_at = NOW()
 """
 
@@ -134,6 +162,7 @@ def _ensure_table(conn) -> None:
         # concurrency-safe on its own (same pattern as unipile_account_usage).
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('contact_enrichment_cache_ddl'))")
         cur.execute(CREATE_SQL)
+        cur.execute(MIGRATE_SQL)
     conn.commit()
     _table_ready = True
     # Seed from lookups paid for before the cache existed. Once per database
@@ -171,13 +200,15 @@ def _record_sync(params: Dict[str, Any]) -> None:
 
 def empty() -> Dict[str, Any]:
     return {"email": "", "phone": "", "email_provider": "", "phone_provider": "",
-            "email_missed": False, "phone_missed": False}
+            "email_missed": False, "phone_missed": False,
+            "email_deep_missed": False, "phone_deep_missed": False}
 
 
 async def get(linkedin_url: Any) -> Dict[str, Any]:
     """What we already know about this person. Always returns the full shape
-    (see ``empty``); ``*_missed`` is True only for a recent miss with no fresh
-    value."""
+    (see ``empty``); ``*_missed`` is True for a recent miss (normal run or deep
+    search) with no fresh value, ``*_deep_missed`` only for a recent deep-search
+    miss."""
     out = empty()
     slug = linkedin_slug(linkedin_url)
     if not slug or not _enabled():
@@ -195,8 +226,10 @@ async def get(linkedin_url: Any) -> Dict[str, Any]:
     if row.get("phone_fresh"):
         out["phone"] = str(row.get("phone") or "")
         out["phone_provider"] = str(row.get("phone_provider") or "")
-    out["email_missed"] = bool(row.get("email_missed_recent")) and not out["email"]
-    out["phone_missed"] = bool(row.get("phone_missed_recent")) and not out["phone"]
+    for f in ("email", "phone"):
+        deep = bool(row.get(f"{f}_deep_missed_recent")) and not out[f]
+        out[f"{f}_deep_missed"] = deep
+        out[f"{f}_missed"] = deep or (bool(row.get(f"{f}_missed_recent")) and not out[f])
     return out
 
 
@@ -208,9 +241,12 @@ async def record(
     email_provider: str = "",
     phone_provider: str = "",
     missed: Iterable[str] = (),
+    deep_missed: Iterable[str] = (),
 ) -> None:
-    """Remember what a lookup found (and which fields a complete lookup did not
-    find). No-op when there is nothing to say. Never raises."""
+    """Remember what a lookup found, which fields the normal Exa run answered
+    without (``missed``) and which the deep search did (``deep_missed``).
+    ``phone`` must be the candidate's PERSONAL number: it is stored as one and
+    reused as one. No-op when there is nothing to say. Never raises."""
     slug = linkedin_slug(linkedin_url)
     if not slug or not _enabled():
         return
@@ -221,9 +257,12 @@ async def record(
     if sum(1 for ch in phone if ch.isdigit()) < 7:
         phone = ""
     missed = set(missed or ())
+    deep_missed = set(deep_missed or ())
     email_missed = "email" in missed and not email
     phone_missed = "phone" in missed and not phone
-    if not (email or phone or email_missed or phone_missed):
+    email_deep_missed = "email" in deep_missed and not email
+    phone_deep_missed = "phone" in deep_missed and not phone
+    if not (email or phone or email_missed or phone_missed or email_deep_missed or phone_deep_missed):
         return
     params = {
         "slug": slug,
@@ -233,6 +272,8 @@ async def record(
         "phone": phone or None,
         "phone_provider": (phone_provider or None) if phone else None,
         "phone_missed": phone_missed,
+        "email_deep_missed": email_deep_missed,
+        "phone_deep_missed": phone_deep_missed,
     }
     try:
         await asyncio.to_thread(_record_sync, params)
