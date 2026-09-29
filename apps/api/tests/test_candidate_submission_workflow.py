@@ -319,9 +319,9 @@ async def test_save_candidate_feedback_custom_reject(monkeypatch):
     )
 
     assert res["status"] == "success"
-    assert res["action_string"] == "PAIR Reject"
+    assert res["action_string"] == "PAIR Reject - Other"
     assert len(jobdiva_calls) == 1
-    assert jobdiva_calls[0]["action"] == "PAIR Reject"
+    assert jobdiva_calls[0]["action"] == "PAIR Reject - Other"
     assert "Reason: Candidate was rude in interview" in jobdiva_calls[0]["note_text"]
 
 
