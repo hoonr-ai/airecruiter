@@ -5208,7 +5208,7 @@ async def save_candidate_feedback(
             "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
             "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
-        action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
+        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
     
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
@@ -5364,11 +5364,15 @@ async def save_candidate_feedback(
         logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
         jobdiva_result = {"status": "success"}
     else:
+        note_content = f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
+        if request.feedback_type == "Reject" and action_string == "PAIR Reject" and request.reason:
+            note_content = f"Reason: {html.escape(request.reason)}<br><br>{note_content}"
+
         jobdiva_result = await jobdiva_service.create_candidate_note(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            note_text=note_content,
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
 
