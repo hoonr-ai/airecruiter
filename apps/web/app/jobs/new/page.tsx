@@ -1118,10 +1118,9 @@ function NewJobPageContent() {
   // Launch PAIR's contact lookups (Kipplo → ZoomInfo → Apollo → Exa, run
   // server-side) go out in groups of LAUNCH_ENRICH_GROUP_SIZE per call to
   // /candidates/enrich-contacts, LAUNCH_ENRICH_GROUP_CONCURRENCY calls at a
-  // time. A group runs in one API worker, so its Kipplo lookups share one
-  // request: the Kipplo key allows 10 requests a minute, which one call per
-  // candidate (spread over the workers) could not keep up with. Group size =
-  // Kipplo's batch size (KIPPLO_BATCH_SIZE).
+  // time. A group runs in one API worker, so its Kipplo lookups can share one
+  // request when the API has list lookups on (KIPPLO_BATCH_SIZE, off while
+  // Kipplo answers one profile per request).
   const LAUNCH_ENRICH_GROUP_SIZE = 10;
   const LAUNCH_ENRICH_GROUP_CONCURRENCY = 2;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
