@@ -41,6 +41,14 @@ test("names who found the phones and emails, most first", () => {
   assert.equal(describeContactsFound({}, {}), "");
 });
 
+test("deep-search finds are named apart from the normal Exa run", () => {
+  assert.equal(
+    describeContactsFound({ exa: 2, exa_deep: 1, apollo: 1 }, {}),
+    "4 phones (Exa 2, Apollo 1, Exa deep search 1)",
+  );
+  assert.equal(contactProviderLabel("exa_deep"), "Exa deep search");
+});
+
 test("unknown providers keep their own name", () => {
   assert.equal(contactProviderLabel("other"), "other");
   assert.equal(contactProviderLabel("zoominfo"), "ZoomInfo");
