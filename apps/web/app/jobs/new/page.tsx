@@ -1133,8 +1133,8 @@ function NewJobPageContent() {
   // only safeguard: nginx still enforces the real ceiling.
   const BATCH_LAUNCH_DELAY_MS = 350;
 
-  // Launch PAIR's contact lookups (Apollo → Exa → Exa deep search, cheapest
-  // first, run server-side) go out in groups of LAUNCH_ENRICH_GROUP_SIZE per
+  // Launch PAIR's contact lookups (Apollo → Exa → Exa deep search with
+  // Fiber.ai, cheapest first, run server-side) go out in groups of LAUNCH_ENRICH_GROUP_SIZE per
   // call to /candidates/enrich-contacts, LAUNCH_ENRICH_GROUP_CONCURRENCY calls
   // at a time: 20 candidates in flight, each running the whole ladder.
   const LAUNCH_ENRICH_GROUP_SIZE = 10;
@@ -11184,7 +11184,7 @@ return (
       }
       description={
         missingContactsReviewMode
-          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. What the contact lookup found (Apollo, Exa, Exa deep search) is shown under each field."
+          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching. What the contact lookup found (Apollo, Exa, Exa deep search with Fiber.ai) is shown under each field."
           : undefined
       }
       primaryLabel={
