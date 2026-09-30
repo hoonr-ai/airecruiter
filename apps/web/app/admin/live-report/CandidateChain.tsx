@@ -168,7 +168,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
 
   return (
     <div
-      className={`grid h-16 grid-cols-[180px_1fr_160px_140px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
+      className={`grid h-16 grid-cols-[170px_1fr_150px_160px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
         candidate.is_stuck ? "lr-row-stuck bg-amber-50/15" : "bg-white"
       }`}
     >
@@ -297,7 +297,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
       </div>
 
       {/* ── COL 3: HISTORY LOGS (Sub-div with scroll actions annotated by phase) ── */}
-      <div className="flex items-center overflow-x-auto lr-scroll gap-1.5 justify-start pl-1 max-w-full py-1">
+      <div className="flex items-center overflow-x-auto lr-scroll gap-1.5 justify-start pl-1 min-w-0 py-1">
         {events.length > 0 ? (
           events.map((evt, idx) => {
             const isEmail = evt.type.includes("email") || evt.subtype === "email";
@@ -355,10 +355,10 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
       </div>
 
       {/* ── COL 4: ACTION / CTA (Badge / Voicemail Button) ───────────── */}
-      <div className="flex items-center justify-end pr-1">
+      <div className="flex items-center justify-end min-w-0 pr-1">
         {outcome ? (
           <span
-            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors ${
+            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium shadow-2xs transition-colors ${
               TONE_BADGE[outcome.tone] || TONE_BADGE.neutral
             }`}
           >
