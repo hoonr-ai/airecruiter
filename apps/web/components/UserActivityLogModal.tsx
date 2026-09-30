@@ -24,6 +24,7 @@ import {
   Info
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { CallRecordings } from "@/components/CallRecordings";
 import { shouldShowQuestionsCompleted } from "@/lib/activityTimeline";
 
 import { normalizeToUtcDate } from "@/lib/date";
@@ -229,6 +230,7 @@ export function UserActivityLogModal({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-8 py-6">
+          <CallRecordings interviewId={interviewId} open={isOpen} />
           {loading ? (
             <div className="flex flex-col items-center justify-center py-20 space-y-4">
               <div className="w-10 h-10 border-4 border-indigo-600/20 border-t-indigo-600 rounded-full animate-spin" />
