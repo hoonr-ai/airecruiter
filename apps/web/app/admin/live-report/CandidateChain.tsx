@@ -168,7 +168,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
 
   return (
     <div
-      className={`grid h-16 grid-cols-[150px_1fr_170px_150px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
+      className={`grid h-16 grid-cols-[180px_1fr_160px_140px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
         candidate.is_stuck ? "lr-row-stuck bg-amber-50/15" : "bg-white"
       }`}
     >
@@ -177,40 +177,54 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
         <p className="truncate text-sm font-semibold tracking-tight text-slate-900">
           {candidate.name}
         </p>
-        <p className="truncate text-xs text-slate-500 mt-0.5">
+        <div className="truncate text-xs text-slate-500 mt-0.5">
           {passed ? (
-            <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded text-[11px]">
-              <Check size={11} className="text-emerald-600 shrink-0" /> Passed{scoreLabel ? ` · ${scoreLabel}` : ""}
+            <span
+              className="inline-flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded text-[11px] max-w-full truncate"
+              title={scoreLabel ? `Passed · ${scoreLabel}` : "Passed"}
+            >
+              <Check size={11} className="text-emerald-600 shrink-0" />
+              <span className="truncate">
+                Passed{candidate.overall_score != null ? ` · ${Math.round(candidate.overall_score)}%` : ""}
+              </span>
             </span>
           ) : failedTerminal ? (
-            <span className="inline-flex items-center gap-1 font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.2 rounded text-[11px]">
-              <AlertTriangle size={11} className="text-rose-600 shrink-0" /> Failed{reasonLabel ? ` · ${reasonLabel}` : ""}
+            <span
+              className="inline-flex items-center gap-1 font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded text-[11px] max-w-full truncate"
+              title={reasonLabel ? `Failed · ${reasonLabel}` : "Failed"}
+            >
+              <AlertTriangle size={11} className="text-rose-600 shrink-0" />
+              <span className="truncate">
+                Failed{reasonLabel ? ` · ${reasonLabel}` : ""}
+              </span>
             </span>
           ) : candidate.is_stuck ? (
-            <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
-              <Hourglass size={11} className="text-amber-600 shrink-0" /> stuck · {stuckDetail}
+            <span className="inline-flex items-center gap-1 text-amber-700 font-medium truncate max-w-full">
+              <Hourglass size={11} className="text-amber-600 shrink-0" />
+              <span className="truncate">stuck · {stuckDetail}</span>
             </span>
           ) : candidate.awaiting_retry || nextAttemptLabel ? (
             <span
-              className="inline-flex items-center gap-1 text-slate-600"
+              className="inline-flex items-center gap-1 text-slate-600 truncate max-w-full"
               title={
                 candidate.next_attempt_at
                   ? `Next scheduled attempt: ${new Date(candidate.next_attempt_at).toLocaleString()}`
                   : "Waiting on a scheduled attempt"
               }
             >
-              <Clock size={11} className="text-slate-400 shrink-0" /> waiting{nextAttemptLabel ? ` · next ${nextAttemptLabel}` : ""}
+              <Clock size={11} className="text-slate-400 shrink-0" />
+              <span className="truncate">waiting{nextAttemptLabel ? ` · ${nextAttemptLabel}` : ""}</span>
             </span>
           ) : unknownPhase ? (
-            <span className="text-slate-400" title={`Unrecognized phase: ${candidate.phase}`}>
-              unknown phase · {candidate.phase}
+            <span className="text-slate-400 truncate max-w-full" title={`Unrecognized phase: ${candidate.phase}`}>
+              {candidate.phase}
             </span>
           ) : (
-            <span className="text-slate-600 font-medium capitalize">
-              In Progress · {CHAIN_STOPS[reached]?.short || candidate.outreach_status || "Phase 1"}
+            <span className="text-slate-600 font-medium capitalize truncate max-w-full">
+              {CHAIN_STOPS[reached]?.short || candidate.outreach_status || "In Progress"}
             </span>
           )}
-        </p>
+        </div>
       </div>
 
       {/* ── COL 2: PROGRESS PIPELINE (Horizontal Stepper Track 1 to 6) ── */}
