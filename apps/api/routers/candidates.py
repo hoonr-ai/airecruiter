@@ -364,6 +364,28 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         except (TypeError, ValueError):
             within_miles = 25
 
+        additional_locations = []
+        if locations and len(locations) > 1:
+            for loc in locations[1:]:
+                v = loc.get("value", "")
+                if v:
+                    loc_rad = 25
+                    try:
+                        r = "".join(ch for ch in str(loc.get("radius") or "") if ch.isdigit())
+                        if r:
+                            loc_rad = max(1, min(100, int(r)))
+                    except ValueError:
+                        logger.debug(
+                            "_build_resume_matching_criteria: could not parse radius %r for location %r; "
+                            "using default 25mi",
+                            loc.get("radius"),
+                            v,
+                        )
+                    additional_locations.append({"value": v, "within_miles": loc_rad})
+
+        # Clamp primary radius to 1-100.
+        within_miles = max(1, min(100, within_miles))
+
         max_experience_years = None
         raw_max_years = sourcing_filters.get("maxExperienceYears")
         try:
@@ -396,6 +418,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             companies=sourcing_filters.get("companies") or [],
             resume_match_filters=resume_match_filters,
             location=primary_location,
+            additional_locations=additional_locations,
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             min_experience_years=min_experience_years,
@@ -769,10 +792,36 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
 
         # Canonicalize location: top-level `location` is authoritative.
         location = ""
+        additional_locations: list = []
         if request.location:
             location = request.location
         elif request.locations:
             location = request.locations[0].value
+
+        # Multi-location: carry all request.locations entries whose normalized
+        # value differs from the resolved primary location. This avoids the
+        # locations[1:] slice causing a silent drop when request.location differs
+        # from locations[0].value, or a duplicate when they match.
+        import re as _re
+
+        def _norm(s: str) -> str:
+            return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+        primary_key = _norm(location)
+        if request.locations:
+            for loc in request.locations:
+                loc_value = str(loc.value or "").strip()
+                if not loc_value or _norm(loc_value) == primary_key:
+                    continue
+                loc_radius = 25
+                if loc.radius:
+                    digits = "".join(ch for ch in str(loc.radius) if ch.isdigit())
+                    if digits:
+                        loc_radius = min(100, max(1, int(digits)))
+                additional_locations.append({
+                    "value": loc_value,
+                    "within_miles": loc_radius,
+                })
 
         # Work arrangement: request wins; else read monitored_jobs so Remote
         # jobs skip the commute-radius constraint even when the caller
@@ -860,6 +909,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
             location=location,
+            additional_locations=additional_locations,
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             companies=companies,
@@ -1054,6 +1104,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    additional_locations=additional_locations,
                     location_type=location_type or "Unspecified",
                     within_miles=within_miles,
                     companies=request.companies or [],

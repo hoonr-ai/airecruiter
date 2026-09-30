@@ -6,7 +6,7 @@ import math
 import os
 import re
 import time
-from typing import List, Dict, Any, Optional, Sequence, Tuple
+from typing import List, Dict, Any, Callable, Optional, Sequence, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
 from pydantic import BaseModel, Field, model_validator
 
@@ -297,6 +297,17 @@ _off_search_family: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
+class LocationEntry(BaseModel):
+    """Typed entry for an additional sourcing location."""
+    value: str
+    within_miles: int = 25
+
+
+# Maximum number of additional locations accepted per request to cap
+# provider fan-out and protect latency and quota.
+_MAX_LOCATIONS: int = 5
+
+
 class SearchCriteria(BaseModel):
     job_id: str
     title_criteria: List[Dict[str, Any]] = []
@@ -305,6 +316,11 @@ class SearchCriteria(BaseModel):
     resume_match_filters: List[Dict[str, Any]] = []
     location: str = ""
     within_miles: int = 25
+    # Multi-location sourcing: additional locations beyond the primary.
+    # Each entry has "value" (location string) and optionally "within_miles".
+    # The location filter passes if the candidate is near ANY location.
+    # Capped at _MAX_LOCATIONS entries to prevent unbounded provider fan-out.
+    additional_locations: List[LocationEntry] = []
     # Job work arrangement ("Remote" | "Hybrid" | "Onsite" | "Unspecified").
     # Remote jobs skip the commute-radius constraint entirely (any US
     # location passes; non-US is still dropped).
@@ -2858,6 +2874,84 @@ class UnifiedCandidateSearch:
                 titles=title_pull_variants,
             )
 
+            # Multi-location: also search each additional location and merge.
+            # Cap to _MAX_LOCATIONS entries to prevent unbounded fan-out.
+            additional_locs = criteria.additional_locations[:_MAX_LOCATIONS]
+
+            async def _search_one_loc(
+                loc_entry: LocationEntry,
+            ) -> tuple[List[Dict[str, Any]], bool]:
+                """Run a single-location TalentSearch; returns (candidates, ok)."""
+                loc_value = str(loc_entry.value or "").strip()
+                loc_miles = max(1, min(100, int(loc_entry.within_miles)))
+                alt_criteria = criteria.model_copy(update={
+                    "location": loc_value,
+                    "within_miles": loc_miles,
+                    "additional_locations": [],
+                })
+                # Build a per-location boolean WITHOUT the multi-location OR
+                # clause so the text filter doesn't conflict with the geo radius.
+                loc_boolean = (
+                    criteria.boolean_string
+                    or self._build_boolean_string(alt_criteria, dialect="jobdiva")
+                )
+                alt_countries, alt_states, alt_geo_zip = self._resolve_jobdiva_geo(alt_criteria)
+                if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+                    alt_geo_zip = ""
+                    alt_states = []
+                try:
+                    cands = await self.jobdiva_service.search_candidates(
+                        skills=list(criteria.skill_criteria or []),
+                        location=loc_value,
+                        page=1,
+                        limit=max_total,
+                        job_id=None,
+                        boolean_string=loc_boolean,
+                        recent_days=criteria.recent_days,
+                        require_resume=getattr(criteria, "require_resume", True),
+                        countries=alt_countries,
+                        states=alt_states,
+                        page_number=0,
+                        zip_code=alt_geo_zip,
+                        within_miles=loc_miles,
+                        titles=title_pull_variants,
+                    )
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Multi-location TalentSearch for '{loc_value}' returned "
+                        f"{len(cands)} candidate(s)",
+                    )
+                    return cands, True
+                except Exception as loc_err:
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Multi-location search failed for '{loc_value}': {loc_err}",
+                    )
+                    return [], False
+
+            if additional_locs:
+                # Bounded concurrency: at most 3 parallel location calls.
+                _loc_sem = asyncio.Semaphore(3)
+
+                async def _guarded(loc: LocationEntry):
+                    async with _loc_sem:
+                        return await _search_one_loc(loc)
+
+                loc_results = await asyncio.gather(
+                    *[_guarded(loc) for loc in additional_locs]
+                )
+                partial_failures = 0
+                for loc_cands, ok in loc_results:
+                    all_candidates.extend(loc_cands)
+                    if not ok:
+                        partial_failures += 1
+                if partial_failures:
+                    self._log_stage(
+                        "TalentSearch",
+                        f"{partial_failures}/{len(additional_locs)} additional-location "
+                        "searches failed (partial results returned)",
+                    )
+
             self._log_stage(
                 "TalentSearch",
                 f"TalentSearch returned {len(all_candidates)} candidate(s) "
@@ -3594,7 +3688,23 @@ class UnifiedCandidateSearch:
             if is_jobdiva:
                 parts.append("IN {US}")
         elif criteria.location:
-            add_unique(parts, seen_must, quote(criteria.location), criteria.location)
+            # Multi-location: combine primary + additional locations as OR in
+            # the boolean string. For JobDiva TalentSearch the per-location loop
+            # in _search_jobdiva_talent_search already passes geo/zip params per
+            # location, so the combined text clause is intentionally omitted in
+            # those calls (alt_criteria has additional_locations=[]). This path
+            # only fires for the fallback single-criteria call and non-JobDiva
+            # dialects where a text OR is the only way to express multi-location.
+            loc_parts = [criteria.location]
+            for loc in criteria.additional_locations:
+                v = str(loc.value or "").strip()
+                if v and v not in loc_parts:
+                    loc_parts.append(v)
+            if len(loc_parts) == 1:
+                add_unique(parts, seen_must, quote(criteria.location), criteria.location)
+            else:
+                loc_clause = "(" + " OR ".join(quote(lp) for lp in loc_parts) + ")"
+                parts.append(loc_clause)
 
         boolean_string = " AND ".join(part for part in parts if part and part != "()") or "*"
         if exclude_terms:
@@ -3884,6 +3994,38 @@ class UnifiedCandidateSearch:
             return self._country_display_name(country)
         return self._scope_location_to_country(criteria.location, country)
 
+    def _location_criteria_variants(self, criteria: SearchCriteria) -> List[SearchCriteria]:
+        """Return one independent query criterion per selected location.
+
+        External providers accept one structured location per request.  A
+        combined ``New York OR Menlo Park`` string is not a portable geo query,
+        so fan out instead and merge/deduplicate the provider results.
+        Capped at _MAX_LOCATIONS total variants to protect latency and quota.
+        """
+        all_entries: List[LocationEntry] = []
+        if str(criteria.location or "").strip():
+            all_entries.append(LocationEntry(value=criteria.location, within_miles=criteria.within_miles))
+        all_entries.extend(criteria.additional_locations)
+
+        # Cap total locations
+        all_entries = all_entries[:_MAX_LOCATIONS]
+
+        variants: List[SearchCriteria] = []
+        seen = set()
+        for entry in all_entries:
+            value = str(entry.value or "").strip()
+            key = self._normalize_term(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            miles = max(1, min(100, int(entry.within_miles)))
+            variants.append(criteria.model_copy(update={
+                "location": value,
+                "within_miles": miles,
+                "additional_locations": [],
+            }))
+        return variants or [criteria]
+
     def _scope_location_to_country(self, location: Any, country_code: str) -> str:
         """Append the job's country name to a location string when no country
         is already named, so downstream services (Exa, Dice, Vetted, Unipile)
@@ -3975,6 +4117,65 @@ class UnifiedCandidateSearch:
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
     ) -> Tuple[bool, str, Optional[float]]:
+        """Multi-location wrapper: try primary location, then each
+        additional location. Returns the best (closest) match."""
+        additional = criteria.additional_locations
+        if not criteria.location and not additional:
+            return True, "no_location_requirement", None
+
+        # Try primary location first.
+        if criteria.location:
+            ok, reason, distance = self._single_location_match_verdict(candidate, criteria)
+            # If within radius for primary, return immediately.
+            if ok and reason not in ("outside_radius_soft_keep", "geocode_unavailable_keep",
+                                     "candidate_location_missing_keep"):
+                return ok, reason, distance
+        else:
+            ok, reason, distance = True, "no_primary_location", None
+
+        # Try each additional location — build a temporary criteria with
+        # the additional location's value and radius. Return the closest
+        # match found across all locations.
+        best_ok, best_reason, best_distance = ok, reason, distance
+        for loc_entry in additional:
+            loc_value = str(loc_entry.value or "").strip()
+            if not loc_value:
+                continue
+            loc_miles = max(1, min(100, int(loc_entry.within_miles)))
+            # Build a shallow copy of criteria with this location.
+            alt_criteria = criteria.model_copy(update={
+                "location": loc_value,
+                "within_miles": loc_miles,
+                "additional_locations": [],  # prevent recursion
+            })
+            alt_ok, alt_reason, alt_distance = self._single_location_match_verdict(
+                candidate, alt_criteria
+            )
+            # If within radius for this location, return immediately.
+            if alt_ok and alt_reason not in ("outside_radius_soft_keep",
+                                              "geocode_unavailable_keep",
+                                              "candidate_location_missing_keep"):
+                return alt_ok, f"multi_loc_{alt_reason}", alt_distance
+            # When alt_distance is None the zip-index lookup failed for this
+            # location; we skip updating best so a soft-keep on another
+            # location (with a known distance) is preferred over an unknown one.
+            # This is intentional: known distances rank above unknowns.
+            if alt_distance is not None:
+                if best_distance is None or (
+                    isinstance(alt_distance, (int, float))
+                    and isinstance(best_distance, (int, float))
+                    and alt_distance < best_distance
+                ):
+                    best_ok, best_reason, best_distance = alt_ok, alt_reason, alt_distance
+
+        return best_ok, best_reason, best_distance
+
+    def _single_location_match_verdict(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> Tuple[bool, str, Optional[float]]:
+        """Check candidate against a single location from criteria."""
         if not criteria.location:
             return True, "no_location_requirement", None
 
@@ -4181,7 +4382,13 @@ class UnifiedCandidateSearch:
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
-        return bool(normalized_location)
+        if normalized_location:
+            return True
+        # Multi-location: enforce if any additional location is set.
+        for loc in criteria.additional_locations:
+            if str(loc.value or "").strip():
+                return True
+        return False
 
     def _parse_location(self, value: Any) -> Dict[str, str]:
         state_aliases = {
@@ -6457,7 +6664,15 @@ class UnifiedCandidateSearch:
         for company in criteria.companies:
             add_terms("companies", "must", [company])
         if self._should_enforce_location(criteria):
-            add_terms("location", "must", [criteria.location])
+            all_loc_values = []
+            if criteria.location:
+                all_loc_values.append(criteria.location)
+            for loc in criteria.additional_locations:
+                v = str(loc.value or "").strip()
+                if v and v not in all_loc_values:
+                    all_loc_values.append(v)
+            if all_loc_values:
+                add_terms("location", "must", all_loc_values)
 
         # PR-B: lift Certifications + Education filters from the Step-4
         # rubric into pre-screen. Other categories (skill / title /
@@ -7489,7 +7704,39 @@ class UnifiedCandidateSearch:
             logger.warning(f"client-employee filter skipped ({source_label}): {exc}")
             return candidates
 
+    async def _fan_out_multi_location_search(
+        self,
+        criteria: SearchCriteria,
+        single_loc_fn: Callable,
+        source_type: str,
+    ) -> Dict[str, Any]:
+        """Fan out a single-location search function over all location variants.
+
+        Uses asyncio.gather with bounded concurrency (3 parallel calls) to
+        protect latency and provider quota. Deduplicates the merged results.
+        Capped at _MAX_LOCATIONS total variants.
+        """
+        variants = self._location_criteria_variants(criteria)
+        _sem = asyncio.Semaphore(3)
+
+        async def _guarded(variant: SearchCriteria) -> Dict[str, Any]:
+            async with _sem:
+                return await single_loc_fn(variant)
+
+        results = await asyncio.gather(*[_guarded(v) for v in variants])
+        merged: List[Dict[str, Any]] = []
+        for r in results:
+            merged.extend(r.get("candidates") or [])
+        return {
+            "candidates": self._deduplicate_candidates(merged),
+            "source_type": source_type,
+        }
+
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_linkedin, "LinkedIn-Unipile"
+            )
         try:
             # Unipile expects skills as a list of dicts. Carry each term's real
             # rubric priority (Must Have vs Preferred) so the Unipile layer can
@@ -7705,6 +7952,10 @@ class UnifiedCandidateSearch:
         return False
 
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_dice, "Dice"
+            )
         try:
             # Structured criteria feed natural-language queries (one role per
             # search — Exa doesn't parse boolean syntax). Only the recruiter-
@@ -7730,6 +7981,10 @@ class UnifiedCandidateSearch:
             return {"candidates": [], "source_type": "Dice"}
 
     async def _search_vetted(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_vetted, "VettedDB"
+            )
         try:
             candidates = await self.vetted_service.search_candidates(
                 skills=criteria.sourcing_skill_values(),
@@ -7742,6 +7997,10 @@ class UnifiedCandidateSearch:
             return {"candidates": [], "source_type": "VettedDB"}
 
     async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_exa, "LinkedIn-Exa"
+            )
         try:
             # Floor at 30 so the Exa Research Pass B has a meaningful seed-URL
             # sample even when the recruiter's page_size is small, and cap at

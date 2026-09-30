@@ -6228,6 +6228,7 @@ function NewJobPageContent() {
       resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
+      locations: sourceLocations.map(l => ({ value: l.value, radius: l.radius })),
       // Work arrangement — Remote jobs skip the commute-radius constraint
       // server-side (backend also falls back to monitored_jobs.location_type
       // when omitted; sending it saves that lookup and handles unsaved jobs).
