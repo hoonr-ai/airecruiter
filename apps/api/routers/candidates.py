@@ -364,6 +364,14 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         except (TypeError, ValueError):
             within_miles = 25
 
+        max_experience_years = None
+        raw_max_years = sourcing_filters.get("maxExperienceYears")
+        try:
+            if raw_max_years is not None and int(raw_max_years) > 0:
+                max_experience_years = int(raw_max_years)
+        except (TypeError, ValueError):
+            max_experience_years = None
+
         return SearchCriteria(
             job_id=str(resolved_job_ref),
             title_criteria=title_criteria,
@@ -375,6 +383,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             min_experience_years=min_experience_years,
+            max_experience_years=max_experience_years,
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
@@ -849,6 +858,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                 else bool(request.include_relocation_candidates)
             ),
             min_experience_years=request.min_experience_years,
+            max_experience_years=getattr(request, "max_experience_years", None),
             jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
             jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
             # Placeholder customer values carry no client signal — skip them.
@@ -1038,6 +1048,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     recent_days=request.recent_days,
                     require_resume=require_resume,
                     min_experience_years=request.min_experience_years,
+                    max_experience_years=getattr(request, "max_experience_years", None),
                     jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
                     jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
                 )

@@ -328,6 +328,7 @@ class SearchCriteria(BaseModel):
     require_resume: bool = True
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
+    max_experience_years: Optional[int] = None
     # JobDiva tranche controls. Initial search uses offset=0/batch=150; the
     # "Search more" action uses offset=150/batch=150 to append the next page.
     jobdiva_offset: int = 0
@@ -1819,6 +1820,8 @@ class UnifiedCandidateSearch:
                         # Drops candidates whose headline / abstract / resume
                         # snippet shows fewer years than the configured floor.
                         if self._candidate_below_min_years_pre_llm(cand, criteria):
+                            return {"status": "failed_filter"}
+                        if self._candidate_above_max_years_pre_llm(cand, criteria):
                             return {"status": "failed_filter"}
 
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
@@ -4800,16 +4803,27 @@ class UnifiedCandidateSearch:
         # heuristic default (which JobDiva can populate as a constant
         # like 4 from title alone, killing real candidates pre-LLM).
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if enforce_years and min_years > 0:
+        max_years = getattr(criteria, "max_experience_years", None)
+        
+        if enforce_years:
             years = float(profile.get("years_of_experience") or 0)
-            if 0 < years < min_years:
-                return {
-                    "passes": False,
-                    "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
-                    "matched": self._dedupe_terms(matched),
-                    "excluded": self._dedupe_terms(excluded),
-                    "min_years_failure": True,
-                }
+            if years > 0:
+                if min_years > 0 and years < min_years:
+                    return {
+                        "passes": False,
+                        "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
+                        "matched": self._dedupe_terms(matched),
+                        "excluded": self._dedupe_terms(excluded),
+                        "min_years_failure": True,
+                    }
+                if max_years is not None and int(max_years) > 0 and years > int(max_years):
+                    return {
+                        "passes": False,
+                        "missing": [f"YOE: maximum {int(max_years)} years (resume shows {int(years)})"],
+                        "matched": self._dedupe_terms(matched),
+                        "excluded": self._dedupe_terms(excluded),
+                        "max_years_failure": True,
+                    }
 
         if self._should_enforce_location(criteria):
             location_ok, reason, distance = self._location_match_verdict(candidate, criteria)
@@ -6225,6 +6239,37 @@ class UnifiedCandidateSearch:
         years = self._heuristic_years_from_text(haystack)
         return 0 < years < min_years
 
+    def _candidate_above_max_years_pre_llm(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> bool:
+        """Cheap regex check before LLM enrichment runs.
+        
+        True only when the candidate's headline / abstract / resume_text
+        head contains a parseable years number AND that number is above
+        `criteria.max_experience_years`.
+        """
+        from core import sourcing_config
+        if sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK:
+            source = str(candidate.get("source") or "").lower()
+            if source.startswith("jobdiva"):
+                return False
+
+        max_years = getattr(criteria, "max_experience_years", None)
+        if max_years is None or int(max_years) <= 0:
+            return False
+        max_years = int(max_years)
+
+        haystack = " ".join([
+            str(candidate.get("headline") or ""),
+            str(candidate.get("title") or ""),
+            str(candidate.get("abstract") or ""),
+            str(candidate.get("resume_text") or "")[:1500],
+        ])
+        years = self._heuristic_years_from_text(haystack)
+        return years > max_years
+
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
         """Collect match dimensions for PRE-SCREENING.
 
@@ -6660,6 +6705,18 @@ class UnifiedCandidateSearch:
                             ),
                         )
                         return {"status": "failed_filter", "candidate": None}
+                    
+                    if self._candidate_above_max_years_pre_llm(candidate, criteria):
+                        counters.setdefault("pre_llm_skipped_max_years", 0)
+                        counters["pre_llm_skipped_max_years"] += 1
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s reason=above_max_years_pre_llm threshold=%s" % (
+                                candidate_id,
+                                int(criteria.max_experience_years or 0),
+                            ),
+                        )
+                        return {"status": "failed_filter", "candidate": None}
 
                     if criteria.bypass_screening:
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
@@ -7044,6 +7101,19 @@ class UnifiedCandidateSearch:
                             ),
                         )
                         await _keep("kept_min_years")
+                        return
+
+                    if self._candidate_above_max_years_pre_llm(candidate, criteria):
+                        counters.setdefault("pre_llm_skipped_max_years", 0)
+                        counters["pre_llm_skipped_max_years"] += 1
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s reason=above_max_years_pre_llm threshold=%s (kept, scored)" % (
+                                cid,
+                                int(criteria.max_experience_years or 0),
+                            ),
+                        )
+                        await _keep("kept_max_years")
                         return
 
                     if criteria.bypass_screening:

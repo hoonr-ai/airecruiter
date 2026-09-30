@@ -143,6 +143,7 @@ class CandidateSearchRequest(BaseModel):
     require_resume: Optional[bool] = None
     include_relocation_candidates: Optional[bool] = None
     min_experience_years: Optional[int] = None
+    max_experience_years: Optional[int] = None
     jobdiva_offset: int = 0
     jobdiva_batch_size: int = 150
     # Optional hiring client / account name. When omitted the backend reads
@@ -399,6 +400,7 @@ class JobDescription(BaseModel):
     content: str
     required_skills: List[str] = []
     min_experience_years: int = 0
+    max_experience_years: Optional[int] = None
 
 # =====================================================
 # RONAK SKILLS INTEGRATION MODELS  
