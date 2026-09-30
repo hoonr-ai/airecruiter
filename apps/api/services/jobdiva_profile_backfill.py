@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, Optional
+from services import jobdiva_rate_limit as _bi_rate_limit
 
 from services.jobdiva import (
     created_profile_fill,
@@ -130,7 +131,7 @@ async def backfill_blank_profile(
     if data.get("jobdiva_profile_origin") == "jobdiva":
         return {**report, "status": "skipped_preexisting_profile"}
 
-    profiles = await service.fetch_candidate_profiles_batch([jd_id])
+    profiles = await service.fetch_candidate_profiles_batch([jd_id], priority=_bi_rate_limit.BACKGROUND)
     current = (profiles or {}).get(jd_id) or {}
     if not current:
         return {**report, "status": "failed_profile_not_readable"}
@@ -199,7 +200,7 @@ async def backfill_blank_profile(
         if upload_ok:
             # JobDiva may have parsed fields out of the new résumé: fill only
             # what is STILL blank.
-            reread = (await service.fetch_candidate_profiles_batch([jd_id])) or {}
+            reread = (await service.fetch_candidate_profiles_batch([jd_id], priority=_bi_rate_limit.BACKGROUND)) or {}
             current = reread.get(jd_id) or current
             fill, links = _plan_fill(current)
             report["fill_fields"] = sorted(fill)

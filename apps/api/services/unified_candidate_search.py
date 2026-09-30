@@ -7,6 +7,7 @@ import os
 import re
 import time
 from typing import List, Dict, Any, Optional, Sequence, Tuple
+from services import jobdiva_rate_limit as _bi_rate_limit
 from pydantic import BaseModel
 
 from services.jobdiva import JobDivaService
@@ -2457,14 +2458,16 @@ class UnifiedCandidateSearch:
                     continue
 
                 try:
+                    # Background: yields to live searches at the shared
+                    # JobDiva BI limiter (services/jobdiva_rate_limit).
                     detail_map = await self.jobdiva_service._fetch_candidate_details_batch(
-                        token, page_ids
+                        token, page_ids, priority=_bi_rate_limit.BACKGROUND
                     )
                     notes_actions_map = await self.jobdiva_service._fetch_candidate_notes_action_types_batch(
-                        token, page_ids
+                        token, page_ids, priority=_bi_rate_limit.BACKGROUND
                     )
                     quals_map = await self.jobdiva_service._fetch_candidate_qualifications_batch(
-                        token, page_ids
+                        token, page_ids, priority=_bi_rate_limit.BACKGROUND
                     )
                     # Reset backoff on success.
                     backoff_s = 5.0

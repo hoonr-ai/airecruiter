@@ -2028,76 +2028,127 @@ function NewJobPageContent() {
   // LinkedIn URL we haven't yet resolved to /candidates/open-to-work-statuses
   // and patch candidates whose status flips from "PENDING" to true/false.
   // Stops automatically once nothing is pending.
-  useEffect(() => {
-    const pendingUrls: string[] = [];
+  //
+  // Keyed on the pending URL set, not the whole `candidates` array: that
+  // array changes on every streamed result, selection and poll answer, and
+  // each change used to fire an immediate poll and reset the attempt cap, so
+  // one tab sent bursts of polls and nginx 503'd them (incident 2026-09-29,
+  // docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Attempts, last-poll
+  // time and backoff live in refs so a re-run keeps the cadence instead of
+  // restarting it.
+  const otwPendingKey = useMemo(() => {
+    const urls = new Set<string>();
     for (const c of candidates) {
       const url = (c as any).profile_url || "";
       const otw = (c as any).open_to_work;
       if (!url || !String(url).toLowerCase().includes("linkedin.com")) continue;
       if (otw === true || otw === false) continue;
-      pendingUrls.push(String(url));
+      urls.add(String(url));
     }
-    if (pendingUrls.length === 0) return;
+    return Array.from(urls).sort().join("\n");
+  }, [candidates]);
+  const otwAttemptsRef = useRef(0);
+  const otwLastPollAtRef = useRef(0);
+  const otwDelayRef = useRef(5000);
+  const otwSeenUrlsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!otwPendingKey) {
+      // Nothing pending (all resolved, or given up): forget this round so a
+      // later search that returns the same URLs gets a fresh attempt budget
+      // instead of hitting the cap and being marked false straight away.
+      otwAttemptsRef.current = 0;
+      otwDelayRef.current = 5000;
+      otwSeenUrlsRef.current = new Set();
+      return;
+    }
+    const pendingUrls = otwPendingKey.split("\n");
+
+    // Cap at 24 polls (~2 min) so a stuck backend never spins the chip
+    // forever. Only URLs we haven't polled for yet (a new search) restart it.
+    const BASE_DELAY_MS = 5000;
+    const MAX_DELAY_MS = 40000;
+    const MAX_ATTEMPTS = 24;
+    if (pendingUrls.some((u) => !otwSeenUrlsRef.current.has(u))) {
+      otwAttemptsRef.current = 0;
+      otwDelayRef.current = BASE_DELAY_MS;
+    }
+    for (const u of pendingUrls) otwSeenUrlsRef.current.add(u);
 
     let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const giveUp = () => {
+      setCandidates((prev: any[]) =>
+        prev.map((c) => {
+          const u = (c as any).profile_url || "";
+          const otw = (c as any).open_to_work;
+          if (!u || !String(u).toLowerCase().includes("linkedin.com")) return c;
+          if (otw === true || otw === false) return c;
+          return { ...c, open_to_work: false };
+        })
+      );
+    };
+
     const poll = async () => {
+      if (otwAttemptsRef.current >= MAX_ATTEMPTS) {
+        giveUp();
+        return;
+      }
+      otwAttemptsRef.current += 1;
+      otwLastPollAtRef.current = Date.now();
       try {
         const resp = await authFetch(`${API_BASE}/candidates/open-to-work-statuses`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ links: pendingUrls }),
         });
-        if (!resp.ok) return;
-        const json = await resp.json();
-        const cache = (json && json.openToWorkStatusCache) || {};
-        const resolved: Record<string, boolean> = {};
-        for (const u of pendingUrls) {
-          const v = cache[u];
-          if (v === true || v === false) resolved[u] = v;
+        if (cancelled) return;
+        if (!resp.ok) {
+          // 503 from nginx's limiter or any other failure: back off
+          // 5s → 10s → 20s → 40s instead of retrying at the normal rate.
+          otwDelayRef.current = Math.min(otwDelayRef.current * 2, MAX_DELAY_MS);
+        } else {
+          otwDelayRef.current = BASE_DELAY_MS;
+          const json = await resp.json();
+          const cache = (json && json.openToWorkStatusCache) || {};
+          const resolved: Record<string, boolean> = {};
+          for (const u of pendingUrls) {
+            const v = cache[u];
+            if (v === true || v === false) resolved[u] = v;
+          }
+          if (cancelled) return;
+          if (Object.keys(resolved).length > 0) {
+            // Changes otwPendingKey, which re-runs this effect; the refs
+            // above carry the schedule over, so no extra poll fires.
+            setCandidates((prev: any[]) =>
+              prev.map((c) => {
+                const u = (c as any).profile_url || "";
+                if (u && Object.prototype.hasOwnProperty.call(resolved, u)) {
+                  return { ...c, open_to_work: resolved[u] };
+                }
+                return c;
+              })
+            );
+            return;
+          }
         }
-        if (cancelled || Object.keys(resolved).length === 0) return;
-        setCandidates((prev: any[]) =>
-          prev.map((c) => {
-            const u = (c as any).profile_url || "";
-            if (u && Object.prototype.hasOwnProperty.call(resolved, u)) {
-              return { ...c, open_to_work: resolved[u] };
-            }
-            return c;
-          })
-        );
       } catch {
-        // network blip — next interval will retry
+        // network blip — back off like a failed response
+        otwDelayRef.current = Math.min(otwDelayRef.current * 2, MAX_DELAY_MS);
       }
+      if (!cancelled) timeoutId = setTimeout(poll, otwDelayRef.current);
     };
 
-    // Immediate first poll, then every 5s. Hoonrai uses 5s; matches actor latency.
-    // Cap at 24 polls (~2 min) so a stuck backend never spins the chip forever.
-    let attempts = 0;
-    const MAX_ATTEMPTS = 24;
-    poll();
-    attempts += 1;
-    const intervalId = setInterval(() => {
-      if (attempts >= MAX_ATTEMPTS) {
-        clearInterval(intervalId);
-        setCandidates((prev: any[]) =>
-          prev.map((c) => {
-            const u = (c as any).profile_url || "";
-            const otw = (c as any).open_to_work;
-            if (!u || !String(u).toLowerCase().includes("linkedin.com")) return c;
-            if (otw === true || otw === false) return c;
-            return { ...c, open_to_work: false };
-          })
-        );
-        return;
-      }
-      attempts += 1;
-      poll();
-    }, 5000);
+    // Resume the existing cadence: poll immediately only if the last poll
+    // was at least one delay ago (e.g. first time pending URLs appear).
+    const sinceLast = Date.now() - otwLastPollAtRef.current;
+    timeoutId = setTimeout(poll, Math.max(0, otwDelayRef.current - sinceLast));
     return () => {
       cancelled = true;
-      clearInterval(intervalId);
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     };
-  }, [candidates]);
+  }, [otwPendingKey]);
 
   const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
     setToast({ message, type });
