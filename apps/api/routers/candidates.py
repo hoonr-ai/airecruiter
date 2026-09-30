@@ -373,10 +373,18 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
                     try:
                         r = "".join(ch for ch in str(loc.get("radius") or "") if ch.isdigit())
                         if r:
-                            loc_rad = int(r)
+                            loc_rad = max(1, min(100, int(r)))
                     except ValueError:
-                        pass
+                        logger.debug(
+                            "_build_resume_matching_criteria: could not parse radius %r for location %r; "
+                            "using default 25mi",
+                            loc.get("radius"),
+                            v,
+                        )
                     additional_locations.append({"value": v, "within_miles": loc_rad})
+
+        # Clamp primary radius to 1-100.
+        within_miles = max(1, min(100, within_miles))
 
         return SearchCriteria(
             job_id=str(resolved_job_ref),
@@ -765,11 +773,20 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         elif request.locations:
             location = request.locations[0].value
 
-        # Multi-location: carry remaining locations beyond the primary.
-        if request.locations and len(request.locations) > 1:
-            for loc in request.locations[1:]:
+        # Multi-location: carry all request.locations entries whose normalized
+        # value differs from the resolved primary location. This avoids the
+        # locations[1:] slice causing a silent drop when request.location differs
+        # from locations[0].value, or a duplicate when they match.
+        import re as _re
+
+        def _norm(s: str) -> str:
+            return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+        primary_key = _norm(location)
+        if request.locations:
+            for loc in request.locations:
                 loc_value = str(loc.value or "").strip()
-                if not loc_value:
+                if not loc_value or _norm(loc_value) == primary_key:
                     continue
                 loc_radius = 25
                 if loc.radius:
