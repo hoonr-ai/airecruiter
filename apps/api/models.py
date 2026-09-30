@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, root_validator
 from typing import List, Optional, Any, Dict, Literal
 
 class Skill(BaseModel):
@@ -146,6 +146,15 @@ class CandidateSearchRequest(BaseModel):
     max_experience_years: Optional[int] = None
     jobdiva_offset: int = 0
     jobdiva_batch_size: int = 150
+
+    @root_validator(skip_on_failure=True)
+    def experience_years_form_a_valid_range(cls, values):
+        """Reject an inverted YOE range instead of silently returning no rows."""
+        minimum = values.get("min_experience_years")
+        maximum = values.get("max_experience_years")
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("min_experience_years cannot exceed max_experience_years")
+        return values
     # Optional hiring client / account name. When omitted the backend reads
     # customer_name from monitored_jobs. Powers the "Same client / industry"
     # scoring dimension and the currently-employed-by-client veto.
@@ -458,4 +467,3 @@ class CandidateFeedbackRequest(BaseModel):
     submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
     manager_email: Optional[str] = None
     recruiter_notes: Optional[str] = None
-

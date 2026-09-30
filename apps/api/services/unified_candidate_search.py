@@ -8,7 +8,7 @@ import re
 import time
 from typing import List, Dict, Any, Optional, Sequence, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
-from pydantic import BaseModel
+from pydantic import BaseModel, root_validator
 
 from services.jobdiva import JobDivaService
 from utils.email_utils import is_placeholder_email
@@ -329,6 +329,15 @@ class SearchCriteria(BaseModel):
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
     max_experience_years: Optional[int] = None
+
+    @root_validator(skip_on_failure=True)
+    def experience_years_form_a_valid_range(cls, values):
+        """Keep saved/re-score criteria from creating an impossible YOE range."""
+        minimum = values.get("min_experience_years")
+        maximum = values.get("max_experience_years")
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("min_experience_years cannot exceed max_experience_years")
+        return values
     # JobDiva tranche controls. Initial search uses offset=0/batch=150; the
     # "Search more" action uses offset=150/batch=150 to append the next page.
     jobdiva_offset: int = 0
@@ -1076,6 +1085,27 @@ class UnifiedCandidateSearch:
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
+            # A selected experience range is an explicit recruiter constraint,
+            # unlike the normal JobDiva relevance gate (which intentionally
+            # remains advisory).  Do not let JOBDIVA_BYPASS_PASS_GATE leak an
+            # enriched candidate outside that range back into Step 5.
+            range_failure = (
+                assessment.get("min_years_failure")
+                or assessment.get("max_years_failure")
+            ) if isinstance(assessment, dict) else False
+            if range_failure:
+                self._log_stage(
+                    "ExperienceGate",
+                    f"dropping candidate_id={cid} outside configured experience range",
+                )
+                if not as_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "experience_years_out_of_range"},
+                    })
+                return False
             if not assessment.get("passes") and location_reason in {"non_us_candidate"}:
                 distance = cand.get("distance_miles")
                 self._log_stage(
@@ -1863,11 +1893,32 @@ class UnifiedCandidateSearch:
                             cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
                             cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
+                        cand["experience_years"] = (
+                            cand["enhanced_info"].get("years_of_experience")
+                            or cand.get("experience_years")
+                        )
                         # Résumé is final for residence (see
                         # _apply_resume_location): an explicitly stated
                         # résumé location replaces the profile's; the profile
                         # value only stands when the résumé is silent.
                         self._apply_resume_location(cand)
+                        # The heuristic gate above is only an early cost saver.
+                        # Once enrichment has extracted total YOE, enforce the
+                        # requested range against that authoritative value.
+                        range_assessment = self._filter_assessment(
+                            cand, criteria, enforce_years=True
+                        )
+                        if (
+                            range_assessment.get("min_years_failure")
+                            or range_assessment.get("max_years_failure")
+                        ):
+                            self._log_stage(
+                                "ExperienceGate",
+                                "dropping candidate_id=%s outside configured experience range" % (
+                                    cand.get("candidate_id") or cand.get("id"),
+                                ),
+                            )
+                            return {"status": "failed_experience_range"}
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 

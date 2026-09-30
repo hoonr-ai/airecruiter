@@ -9096,6 +9096,9 @@ function NewJobPageContent() {
                           ? Math.max(0, Math.min(40, parsed))
                           : null;
                         setMinExperienceYears(clamped);
+                        if (clamped !== null && maxExperienceYears !== null && clamped > maxExperienceYears) {
+                          setMaxExperienceYears(clamped);
+                        }
                       }}
                       placeholder="any"
                       className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
@@ -9121,6 +9124,9 @@ function NewJobPageContent() {
                           ? Math.max(0, Math.min(40, parsed))
                           : null;
                         setMaxExperienceYears(clamped);
+                        if (clamped !== null && minExperienceYears !== null && clamped < minExperienceYears) {
+                          setMinExperienceYears(clamped);
+                        }
                       }}
                       placeholder="any"
                       className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
