@@ -75,6 +75,7 @@ export function AssessModal({
   const [copied, setCopied] = useState(false);
   const [stopOutreachOpen, setStopOutreachOpen] = useState(false);
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
+  const [recordingsUnavailable, setRecordingsUnavailable] = useState(false);
 
   useEffect(() => {
     if (open && interviewId) {
@@ -84,6 +85,8 @@ export function AssessModal({
     if (!open) {
       setData(null);
       setError(null);
+      setRecordings([]);
+      setRecordingsUnavailable(false);
     }
   }, [open, interviewId]);
 
@@ -91,15 +94,22 @@ export function AssessModal({
   // break the rest of the assessment.
   const fetchRecordings = async () => {
     setRecordings([]);
+    setRecordingsUnavailable(false);
     try {
       const response = await authFetch(
         `${API_BASE}/api/v1/engagement/interviews/${interviewId}/recordings`
       );
-      if (!response.ok) return;
+      if (!response.ok) {
+        console.warn("Call recordings request failed:", response.status);
+        setRecordingsUnavailable(true);
+        return;
+      }
       const result = await response.json();
       setRecordings(result.recordings || []);
-    } catch {
-      /* no recordings shown */
+      setRecordingsUnavailable(Boolean(result.unavailable));
+    } catch (err) {
+      console.warn("Call recordings request failed:", err);
+      setRecordingsUnavailable(true);
     }
   };
 
@@ -525,6 +535,11 @@ export function AssessModal({
 
             {/* ===== TAB 3: Transcript ===== */}
             <TabsContent value="transcript" className="px-6 pb-6 mt-0">
+              {recordingsUnavailable && (
+                <p className="pt-4 text-[11px] text-slate-400 font-semibold">
+                  Call recordings are temporarily unavailable.
+                </p>
+              )}
               {recordings.length > 0 && (
                 <div className="pt-4 space-y-3">
                   <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide flex items-center gap-1.5">
@@ -537,7 +552,15 @@ export function AssessModal({
                         {recordings.length > 1 ? `Recording ${idx + 1} · ` : ""}
                         {new Date(rec.started_at || rec.recorded_at).toLocaleString()}
                       </p>
-                      <audio controls preload="none" src={rec.url.startsWith("/") ? `${API_BASE}${rec.url}` : rec.url} className="w-full h-9" />
+                      <audio
+                        controls
+                        preload="none"
+                        aria-label={`Call recording ${idx + 1}`}
+                        src={rec.url.startsWith("/") ? `${API_BASE}${rec.url}` : rec.url}
+                        className="w-full h-9"
+                      >
+                        Your browser does not support audio playback.
+                      </audio>
                     </div>
                   ))}
                 </div>

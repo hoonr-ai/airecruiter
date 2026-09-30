@@ -11,17 +11,23 @@ sanitised to `[A-Za-z0-9._-]`. Recordings only reach S3 when pair-bot runs
 with ENVIRONMENT=production, so the lookup is disabled everywhere else.
 """
 
+import functools
 import logging
 import os
 import re
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-PRESIGN_TTL_SECONDS = 3600
+# Short-lived: the modal asks for fresh links every time it opens.
+PRESIGN_TTL_SECONDS = 900
+LISTING_CACHE_SECONDS = 60
 _UNSAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-_client = None
+_listing_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+_listing_lock = threading.Lock()
 
 
 def _bucket() -> str:
@@ -36,13 +42,11 @@ def is_enabled() -> bool:
     return os.getenv("ENVIRONMENT", "").strip().lower() == "production" and bool(_bucket())
 
 
+@functools.lru_cache(maxsize=1)
 def _s3():
-    global _client
-    if _client is None:
-        import boto3  # imported lazily: only production needs it
+    import boto3  # imported lazily: only production needs it
 
-        _client = boto3.client("s3", region_name=os.getenv("AWS_REGION") or None)
-    return _client
+    return boto3.client("s3", region_name=os.getenv("AWS_REGION") or None)
 
 
 def _part(value: Any) -> str:
@@ -78,46 +82,87 @@ def _session_prefixes(
     return [f"{_prefix()}{d}/{jd}/{shard}/{session_id}" for d in days]
 
 
-def find_recordings(
-    sessions: List[Dict[str, Any]], jobdiva_id: Optional[str], fallback_day: Optional[date] = None
+def _list_session_objects(s3, bucket: str, prefix: str, session_id: int) -> List[Dict[str, Any]]:
+    """Objects of one session under `prefix` (ends with the session id).
+
+    The listing is by bare prefix, so the key's file name is checked to keep
+    session 607 from matching 6074: it must be `{id}.ogg` or `{id}_{job}.ogg`.
+    """
+    name_re = re.compile(rf"^{session_id}(?:_[^/]*)?\.ogg$")
+    objects = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if name_re.match(obj["Key"].rsplit("/", 1)[-1]):
+                objects.append(obj)
+    return objects
+
+
+def _find_keys(
+    sessions: List[Dict[str, Any]], jobdiva_id: Optional[str], fallback_day: Optional[date]
 ) -> List[Dict[str, Any]]:
-    """Recordings for the given PAIR sessions ({id, started_at}), oldest first."""
+    cache_key = (
+        tuple((str(x.get("id")), str(x.get("started_at"))) for x in sessions),
+        jobdiva_id,
+        fallback_day,
+    )
+    now = time.monotonic()
+    with _listing_lock:
+        hit = _listing_cache.get(cache_key)
+        if hit and now - hit[0] < LISTING_CACHE_SECONDS:
+            return hit[1]
+
     s3 = _s3()
     bucket = _bucket()
-    found: List[Dict[str, Any]] = []
+    found: Dict[str, Dict[str, Any]] = {}
     for session in sessions:
         try:
             session_id = int(session["id"])
         except (KeyError, TypeError, ValueError):
             continue
         for prefix in _session_prefixes(session_id, jobdiva_id, session.get("started_at"), fallback_day):
-            # `{session_id}_` / `{session_id}.` so session 607 never matches 6074.
-            for delim in ("_", "."):
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix + delim)
-                for obj in resp.get("Contents", []):
-                    found.append(
-                        {
-                            "key": obj["Key"],
-                            "session_id": session_id,
-                            "size": obj["Size"],
-                            "recorded_at": obj["LastModified"].isoformat(),
-                            "started_at": session.get("started_at"),
-                        }
-                    )
-    found.sort(key=lambda r: (r["started_at"] or "", r["recorded_at"]))
-    seen = set()
-    unique = []
-    for rec in found:
-        if rec["key"] not in seen:
-            seen.add(rec["key"])
-            unique.append(rec)
-    for rec in unique:
-        rec["url"] = s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": bucket, "Key": rec["key"], "ResponseContentType": "audio/ogg"},
-            ExpiresIn=PRESIGN_TTL_SECONDS,
+            for obj in _list_session_objects(s3, bucket, prefix, session_id):
+                found[obj["Key"]] = {
+                    "key": obj["Key"],
+                    "session_id": session_id,
+                    "size": obj["Size"],
+                    "recorded_at": obj["LastModified"].isoformat(),
+                    "started_at": session.get("started_at"),
+                }
+    result = sorted(found.values(), key=lambda r: (r["started_at"] or "", r["recorded_at"]))
+    with _listing_lock:
+        if len(_listing_cache) > 256:
+            _listing_cache.clear()
+        _listing_cache[cache_key] = (now, result)
+    return result
+
+
+def find_recordings(
+    sessions: List[Dict[str, Any]], jobdiva_id: Optional[str], fallback_day: Optional[date] = None
+) -> Dict[str, Any]:
+    """Recordings for the given PAIR sessions ({id, started_at}), oldest first.
+
+    Returns {"recordings": [...], "unavailable": bool}. S3 failures (missing
+    credentials, AccessDenied, throttling) are logged and reported as
+    `unavailable` rather than raised, so a recordings outage never looks like
+    a failure of the API itself.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        recordings = [dict(r) for r in _find_keys(sessions, jobdiva_id, fallback_day)]
+        s3 = _s3()
+        for rec in recordings:
+            rec["url"] = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": _bucket(), "Key": rec["key"], "ResponseContentType": "audio/ogg"},
+                ExpiresIn=PRESIGN_TTL_SECONDS,
+            )
+        return {"recordings": recordings, "unavailable": False}
+    except (BotoCoreError, ClientError) as exc:
+        logger.error(
+            "S3 recordings lookup failed (bucket=%s prefix=%s): %s", _bucket(), _prefix(), exc
         )
-    return unique
+        return {"recordings": [], "unavailable": True}
 
 
 def mock_enabled() -> bool:

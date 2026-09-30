@@ -3664,40 +3664,53 @@ async def get_mock_recording():
     return Response(content=call_recordings.mock_wav(), media_type="audio/wav")
 
 
+def _recording_audit_row(interview_id: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT jobdiva_id, created_at
+                FROM engage_interview_audit
+                WHERE interview_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (interview_id,),
+            )
+            return cur.fetchone()
+
+
 @router.get("/interviews/{interview_id}/recordings")
-async def get_interview_recordings(interview_id: str):
+async def get_interview_recordings(
+    interview_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Call recordings (S3) of an interview, with presigned playback URLs.
 
-    Disabled unless ENVIRONMENT=production and S3_RECORDINGS_BUCKET is set,
-    matching when pair-bot uploads recordings.
+    Requires a signed-in user and only serves interviews Curate itself
+    launched (present in engage_interview_audit). Disabled unless
+    ENVIRONMENT=production and S3_RECORDINGS_BUCKET is set, matching when
+    pair-bot uploads recordings.
     """
     from services import call_recordings
 
     if not call_recordings.is_enabled():
         if call_recordings.mock_enabled():
-            return {"success": True, "enabled": True, "recordings": call_recordings.mock_recordings()}
-        return {"success": True, "enabled": False, "recordings": []}
+            return {
+                "success": True,
+                "enabled": True,
+                "unavailable": False,
+                "recordings": call_recordings.mock_recordings(),
+            }
+        return {"success": True, "enabled": False, "unavailable": False, "recordings": []}
 
     try:
-        jobdiva_id = None
-        fallback_day = None
-        with get_db_connection() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT jobdiva_id, created_at
-                    FROM engage_interview_audit
-                    WHERE interview_id = %s
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (interview_id,),
-                )
-                row = cur.fetchone()
-        if row:
-            jobdiva_id = (row.get("jobdiva_id") or "").strip() or None
-            created = row.get("created_at")
-            fallback_day = created.date() if created else None
+        row = await asyncio.to_thread(_recording_audit_row, interview_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Interview not found")
+        jobdiva_id = (row.get("jobdiva_id") or "").strip() or None
+        created = row.get("created_at")
+        fallback_day = created.date() if created else None
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.get(
@@ -3714,10 +3727,12 @@ async def get_interview_recordings(interview_id: str):
             if isinstance(s, dict)
         ]
 
-        recordings = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             call_recordings.find_recordings, sessions, jobdiva_id, fallback_day
         )
-        return {"success": True, "enabled": True, "recordings": recordings}
+        return {"success": True, "enabled": True, **result}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ recordings lookup failed for interview {interview_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not load call recordings")
