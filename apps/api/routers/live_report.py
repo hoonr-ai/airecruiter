@@ -137,9 +137,9 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
 
 @router.get("/api/analytics/live-report/launches")
 async def get_live_report_launches(
-    search: str | None = None,
-    jobdiva_id: str | None = None,
-    limit: int = 100,
+    search: Optional[str] = Query(None, max_length=100, description="Optional search term matching job title, JobDiva ID, bulk ID"),
+    jobdiva_id: Optional[str] = Query(None, max_length=50, description="Filter launches by specific JobDiva job ID"),
+    limit: int = Query(100, ge=1, le=500, description="Max launches to return (between 1 and 500)"),
     user: UserIdentity = Depends(get_current_user),
 ):
     """Fetch bulk launches, with optional search, isolated so recruiters only see their launched jobs."""

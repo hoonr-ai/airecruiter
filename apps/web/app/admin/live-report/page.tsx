@@ -91,8 +91,7 @@ export default function LiveReportPage() {
       const isPassed =
         event.status === "passed" ||
         event.phase === "pass" ||
-        event.type === "evaluation_completed" ||
-        event.type === "interview_completed";
+        event.terminalReason === "passed";
       const tone: "good" | "critical" | "neutral" = isFailed
         ? "critical"
         : isPassed
@@ -147,7 +146,9 @@ export default function LiveReportPage() {
   const [searchLaunchTerm, setSearchLaunchTerm] = useState<string>("");
   const [debouncedSearch, setDebouncedSearch] = useState<string>("");
   const [isDropdownOpen, setIsDropdownOpen] = useState<boolean>(false);
+  const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchSeqRef = useRef<number>(0);
 
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -161,6 +162,7 @@ export default function LiveReportPage() {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsDropdownOpen(false);
+        setHighlightedIndex(-1);
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
@@ -197,68 +199,91 @@ export default function LiveReportPage() {
       return null;
     }
 
+    const isOutcomePassed = event.status === "passed" || p === "pass";
+
     let action = t;
-    if (t.includes("interview_started")) action = "Interview Started";
-    else if (t.includes("interview_completed") || t.includes("evaluation_completed")) action = "Passed Interview";
-    else if (t.includes("interview_partial")) action = "Interview Partial";
-    else if (t.includes("voice_pipeline")) {
+    if (t.includes("interview_started")) {
+      action = "Interview Started";
+    } else if (t.includes("interview_completed")) {
+      action = isOutcomePassed ? "Passed Interview" : "Interview Completed";
+    } else if (t.includes("evaluation_completed")) {
+      action = isOutcomePassed ? "Passed Evaluation" : "Evaluation Completed";
+    } else if (t.includes("interview_partial")) {
+      action = "Interview Partial";
+    } else if (t.includes("voice_pipeline")) {
       action = st.includes("hangup") || event.status?.includes("hangup") ? "Call Ended (Hangup)" : "Voice Call Completed";
     } else if (t.includes("email_sms") || (t.includes("email") && t.includes("sms"))) {
       action = "Email & SMS Sent";
-    } else if (t.includes("email")) action = "Email Sent";
-    else if (t.includes("sms")) action = "SMS Sent";
-    else if (t.includes("call")) action = "Call Placed";
+    } else if (t.includes("email")) {
+      action = "Email Sent";
+    } else if (t.includes("sms")) {
+      action = "SMS Sent";
+    } else if (t.includes("call")) {
+      action = "Call Placed";
+    }
 
     const subject = event.name || (event.interviewId ? `#${event.interviewId}` : "Candidate");
-    const statusText = event.status === "failed" ? " [Failed]" : event.status === "passed" ? " [Passed]" : "";
+    const statusText = event.status === "failed" ? " [Failed]" : isOutcomePassed ? " [Passed]" : "";
     return `${subject} (${phaseName}): ${action}${statusText}`;
   }, []);
 
-  // Fetch launch list and health stats
-  const fetchLaunchesAndHealth = useCallback(async (searchQuery?: string) => {
+  // Fetch health stats separately so search doesn't trigger unrelated health calls
+  const fetchHealth = useCallback(async () => {
     try {
-      const [launchesData, healthData] = await Promise.allSettled([
-        api.liveReport.getLaunches({ search: searchQuery, limit: 100 }),
-        api.liveReport.getHealth(),
-      ]);
+      const healthData = await api.liveReport.getHealth();
+      setHealth(healthData);
+    } catch (err) {
+      console.warn("Failed to load live report health data:", err);
+    }
+  }, []);
 
-      if (launchesData.status === "fulfilled") {
-        setLaunchesError(null);
-        const list = Array.isArray(launchesData.value)
-          ? launchesData.value
-          : launchesData.value?.launches || [];
-        setLaunches(list);
-        if (list.length > 0) {
-          setSelectedBulkId((prev) => {
-            if (prev && list.some((l: any) => l.bulk_id === prev)) return prev;
-            return list[0].bulk_id;
-          });
-        }
-      } else {
-        console.error("Failed to load live report launches:", launchesData.reason);
-        if (isNotFoundError(launchesData.reason)) {
-          setLaunchesError(LIVE_REPORT_PROD_ONLY_MESSAGE);
-        } else {
-          setLaunchesError("Unable to load launches. Please check API connection and retry.");
-        }
-      }
+  // Fetch launch list with stale-response guard
+  const fetchLaunches = useCallback(async (searchQuery?: string) => {
+    const currentSeq = ++searchSeqRef.current;
+    try {
+      const launchesData = await api.liveReport.getLaunches({
+        search: searchQuery || undefined,
+        limit: 100,
+      });
 
-      if (healthData.status === "fulfilled") {
-        setHealth(healthData.value);
-      }
+      // Discard if a newer search was dispatched
+      if (currentSeq !== searchSeqRef.current) return;
+
+      setLaunchesError(null);
+      const list: LaunchListItem[] = Array.isArray(launchesData)
+        ? launchesData
+        : launchesData?.launches || [];
+      setLaunches(list);
+
+      // Only auto-select default bulk ID on initial mount when nothing is selected
+      setSelectedBulkId((prev) => {
+        if (prev) return prev;
+        return list.length > 0 ? list[0].bulk_id : null;
+      });
     } catch (err: any) {
-      console.error("Failed to load live report initial data:", err);
+      if (currentSeq !== searchSeqRef.current) return;
+      console.error("Failed to load live report launches:", err);
       if (isNotFoundError(err)) {
         setLaunchesError(LIVE_REPORT_PROD_ONLY_MESSAGE);
       } else {
-        setLaunchesError("Failed to communicate with the analytics service.");
+        setLaunchesError("Unable to load launches. Please check API connection and retry.");
       }
     }
   }, []);
 
+  // Fetch health on mount and every 30 seconds
   useEffect(() => {
-    fetchLaunchesAndHealth(debouncedSearch);
-  }, [fetchLaunchesAndHealth, debouncedSearch]);
+    if (isAdmin || isTeamLead) {
+      fetchHealth();
+      const interval = setInterval(fetchHealth, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [isAdmin, isTeamLead, fetchHealth]);
+
+  // Fetch launches when debounced search term changes
+  useEffect(() => {
+    fetchLaunches(debouncedSearch);
+  }, [fetchLaunches, debouncedSearch]);
 
   // Reset feed when user switches launches
   useEffect(() => {
@@ -274,6 +299,8 @@ export default function LiveReportPage() {
       rawTs: string;
       text: string;
       critical: boolean;
+      tone?: "good" | "critical" | "neutral";
+      key: string;
     }> = [];
 
     for (const job of snapshot.jobs) {
@@ -293,9 +320,8 @@ export default function LiveReportPage() {
           const isPassed =
             evt.status === "passed" ||
             evt.phase === "pass" ||
-            evt.type === "evaluation_completed" ||
-            evt.type === "interview_completed" ||
-            cand.phase === "pass" && (evt.type.includes("evaluation") || evt.type.includes("interview"));
+            cand.terminal_reason === "passed" ||
+            (cand.phase === "pass" && (evt.type.includes("evaluation") || evt.type.includes("interview")));
           const tone: "good" | "critical" | "neutral" = isFailed
             ? "critical"
             : isPassed
@@ -314,6 +340,7 @@ export default function LiveReportPage() {
             text: formatted,
             critical: isFailed,
             tone,
+            key: `${cand.interview_id}-${evt.type}-${evt.ts || feedIdCounterRef.current}`,
           });
         }
       }
@@ -324,13 +351,13 @@ export default function LiveReportPage() {
     if (allRecentEvents.length > 0) {
       setFeed((prev) => {
         if (prev.length === 0) {
-          return allRecentEvents.slice(0, 30).map(({ rawTs, ...item }) => item);
+          return allRecentEvents.slice(0, 30).map(({ rawTs, key, ...item }) => item);
         }
         // Merge missing events from snapshot if any arrived while feed was active
         const existingTexts = new Set(prev.map((p) => p.text));
         const newItems = allRecentEvents
           .filter((item) => !existingTexts.has(item.text))
-          .map(({ rawTs, ...item }) => item);
+          .map(({ rawTs, key, ...item }) => item);
         if (newItems.length === 0) return prev;
         return [...newItems, ...prev].slice(0, 50);
       });
@@ -359,7 +386,7 @@ export default function LiveReportPage() {
           </div>
           <button
             type="button"
-            onClick={() => fetchLaunchesAndHealth()}
+            onClick={() => fetchLaunches(debouncedSearch)}
             className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-700 text-white font-medium transition-colors"
           >
             Retry
@@ -394,7 +421,7 @@ export default function LiveReportPage() {
 
         {/* Controls */}
         <div className="flex flex-wrap items-center gap-3">
-          {/* Unified Searchable Launch Combobox */}
+            {/* Unified Searchable Launch Combobox */}
           <div className="relative w-80 sm:w-96" ref={dropdownRef}>
             <div
               className={`flex items-center gap-2 border rounded-lg px-2.5 py-1.5 bg-white shadow-xs cursor-text transition-all ${
@@ -410,16 +437,52 @@ export default function LiveReportPage() {
                 role="combobox"
                 aria-expanded={isDropdownOpen}
                 aria-haspopup="listbox"
+                aria-controls="live-report-launches-listbox"
+                aria-activedescendant={
+                  highlightedIndex >= 0 && launches[highlightedIndex]
+                    ? `launch-option-${launches[highlightedIndex].bulk_id}`
+                    : undefined
+                }
                 value={searchLaunchTerm}
                 onFocus={() => setIsDropdownOpen(true)}
                 onKeyDown={(e) => {
                   if (e.key === "Escape") {
                     setIsDropdownOpen(false);
+                    setHighlightedIndex(-1);
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    if (!isDropdownOpen) {
+                      setIsDropdownOpen(true);
+                      setHighlightedIndex(0);
+                    } else {
+                      setHighlightedIndex((prev) =>
+                        prev < launches.length - 1 ? prev + 1 : 0
+                      );
+                    }
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    if (!isDropdownOpen) {
+                      setIsDropdownOpen(true);
+                      setHighlightedIndex(launches.length - 1);
+                    } else {
+                      setHighlightedIndex((prev) =>
+                        prev > 0 ? prev - 1 : launches.length - 1
+                      );
+                    }
+                  } else if (e.key === "Enter") {
+                    if (isDropdownOpen && highlightedIndex >= 0 && launches[highlightedIndex]) {
+                      e.preventDefault();
+                      setSelectedBulkId(launches[highlightedIndex].bulk_id);
+                      setIsDropdownOpen(false);
+                      setSearchLaunchTerm("");
+                      setHighlightedIndex(-1);
+                    }
                   }
                 }}
                 onChange={(e) => {
                   setSearchLaunchTerm(e.target.value);
                   setIsDropdownOpen(true);
+                  setHighlightedIndex(0);
                 }}
                 placeholder={
                   selectedLaunch
@@ -434,6 +497,7 @@ export default function LiveReportPage() {
                   onClick={(e) => {
                     e.stopPropagation();
                     setSearchLaunchTerm("");
+                    setHighlightedIndex(-1);
                   }}
                   className="text-slate-400 hover:text-slate-600 p-0.5 rounded"
                   title="Clear search"
@@ -448,6 +512,7 @@ export default function LiveReportPage() {
                 onClick={(e) => {
                   e.stopPropagation();
                   setIsDropdownOpen((prev) => !prev);
+                  setHighlightedIndex(-1);
                 }}
               />
             </div>
@@ -455,26 +520,35 @@ export default function LiveReportPage() {
             {/* Floating Dropdown Results */}
             {isDropdownOpen && (
               <div
+                id="live-report-launches-listbox"
                 role="listbox"
+                aria-label="Available campaign launches"
                 className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-72 overflow-y-auto divide-y divide-slate-100 animate-in fade-in zoom-in-95 duration-100"
               >
                 {launches.length > 0 ? (
-                  launches.map((l) => {
+                  launches.map((l, idx) => {
                     const isSelected = l.bulk_id === selectedBulkId;
+                    const isHighlighted = idx === highlightedIndex;
                     const jobTitle = l.titles?.[0] || "Untitled Job";
                     const jobDivaId = l.jobdiva_ids?.[0];
                     return (
-                      <button
+                      <div
                         key={l.bulk_id}
-                        type="button"
+                        id={`launch-option-${l.bulk_id}`}
+                        role="option"
+                        aria-selected={isSelected}
+                        onMouseEnter={() => setHighlightedIndex(idx)}
                         onClick={() => {
                           setSelectedBulkId(l.bulk_id);
                           setIsDropdownOpen(false);
                           setSearchLaunchTerm("");
+                          setHighlightedIndex(-1);
                         }}
-                        className={`w-full text-left px-3 py-2.5 transition-colors flex items-center justify-between gap-3 text-xs ${
-                          isSelected
-                            ? "bg-indigo-50/70 text-indigo-950 font-medium"
+                        className={`w-full text-left px-3 py-2.5 transition-colors flex items-center justify-between gap-3 text-xs cursor-pointer ${
+                          isHighlighted
+                            ? "bg-indigo-50/90 text-indigo-950 font-medium"
+                            : isSelected
+                            ? "bg-indigo-50/40 text-indigo-900"
                             : "hover:bg-slate-50 text-slate-800"
                         }`}
                       >
@@ -502,7 +576,7 @@ export default function LiveReportPage() {
                         {isSelected && (
                           <div className="h-2 w-2 rounded-full bg-indigo-600 shrink-0" />
                         )}
-                      </button>
+                      </div>
                     );
                   })
                 ) : (
@@ -652,13 +726,12 @@ export default function LiveReportPage() {
 
             <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs divide-y divide-slate-50">
               {feed.map((item) => {
-                const isPassed = item.tone === "good" || item.text.includes("[Passed]") || item.text.includes("Passed");
-                const isFailed = item.critical || item.tone === "critical" || item.text.includes("[Failed]") || item.text.includes("Failed");
-                const textColor = isFailed
-                  ? "text-rose-600 font-medium"
-                  : isPassed
-                  ? "text-emerald-600 font-medium"
-                  : "text-slate-700";
+                const textColor =
+                  item.tone === "critical"
+                    ? "text-rose-600 font-medium"
+                    : item.tone === "good"
+                    ? "text-emerald-600 font-medium"
+                    : "text-slate-700";
 
                 return (
                   <div key={item.id} className="pt-2 first:pt-0 flex items-start justify-between gap-2">

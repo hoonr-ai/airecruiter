@@ -1,6 +1,6 @@
 "use client";
 
-import React, { memo, useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Mail,
@@ -93,7 +93,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
 
   // If candidate is in a terminal phase (pass, fail, outreach_failed, completed),
   // find the highest phase that was actually reached/attempted, rather than blindly defaulting to 4.
-  const reached = (() => {
+  const reached = useMemo(() => {
     if (!isTerminal) {
       return phaseToStopIndex(candidate.phase);
     }
@@ -112,7 +112,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
     }
     // If no phase events were logged, default to 0 (contact check)
     return maxIndex;
-  })();
+  }, [candidate.phase, candidate.event_counts_by_phase, candidate.events, isTerminal]);
   const outcome = candidate.call_outcome ? OUTCOME_META[candidate.call_outcome] : null;
   const unknownPhase = !isKnownPhase(candidate.phase);
   const idle = candidate.idle_minutes;
