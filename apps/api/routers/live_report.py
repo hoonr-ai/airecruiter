@@ -143,19 +143,25 @@ async def get_live_report_launches(
     user: UserIdentity = Depends(get_current_user),
 ):
     """Fetch bulk launches, with optional search, isolated so recruiters only see their launched jobs."""
+    # When called directly in unit tests without FastAPI dependency resolution,
+    # parameters default to the Query() field object. Extract real values cleanly:
+    clean_search: Optional[str] = search if isinstance(search, str) else None
+    clean_jobdiva_id: Optional[str] = jobdiva_id if isinstance(jobdiva_id, str) else None
+    clean_limit: int = limit if isinstance(limit, int) else 100
+
     base_target = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
-    params = {"limit": str(limit)}
-    if search:
-        params["search"] = search
-    if jobdiva_id:
-        params["jobdiva_id"] = jobdiva_id
+    params = {"limit": str(clean_limit)}
+    if clean_search:
+        params["search"] = clean_search
+    if clean_jobdiva_id:
+        params["jobdiva_id"] = clean_jobdiva_id
 
     # If Recruiter / Team Lead, scope accessible jobs before querying PairBot
     if not user.is_admin:
         accessible_ids = _get_user_accessible_jobdiva_ids(user)
         if not accessible_ids:
             return {"launches": [], "retention_days": 14}
-        if jobdiva_id and jobdiva_id.strip() not in accessible_ids:
+        if clean_jobdiva_id and clean_jobdiva_id.strip() not in accessible_ids:
             return {"launches": [], "retention_days": 14}
         params["accessible_jobdiva_ids"] = ",".join(sorted(accessible_ids))
 
