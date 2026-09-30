@@ -655,7 +655,7 @@ export default function LiveReportPage() {
       )}
 
       {/* Main Grid: Job Blocks on Left, Event Feed on Right */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-stretch">
         {/* Job Blocks (3 columns) */}
         <div className="xl:col-span-3 space-y-4">
           <h2 className="text-sm font-semibold text-slate-900 flex items-center justify-between">
@@ -691,19 +691,24 @@ export default function LiveReportPage() {
         </div>
 
         {/* Event Feed & Anomalies (1 column) */}
-        <div className="xl:col-span-1 space-y-4">
-          {/* Anomalies Banner if any */}
+        <div className="xl:col-span-1 flex flex-col gap-4 min-w-0 max-w-full h-full max-h-[580px]">
+          {/* Anomalies Banner - Displayed strictly when detected */}
           {snapshot?.anomalies && snapshot.anomalies.length > 0 && (
-            <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5">
-              <div className="flex items-center gap-2 text-xs font-semibold text-amber-900 mb-2">
-                <AlertTriangle className="h-4 w-4 text-amber-600" />
-                <span>Detected Anomalies ({snapshot.anomalies.length})</span>
+            <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5 shadow-xs shrink-0 min-w-0 max-w-full overflow-hidden flex flex-col max-h-44">
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-amber-900 mb-2 shrink-0">
+                <div className="flex items-center gap-1.5 min-w-0 truncate">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                  <span className="truncate">Detected Anomalies ({snapshot.anomalies.length})</span>
+                </div>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100/80 text-amber-800 shrink-0 font-medium">
+                  Review
+                </span>
               </div>
-              <ul className="space-y-1.5 text-xs text-amber-800">
+              <ul className="space-y-1.5 text-xs text-amber-800 overflow-y-auto pr-1 divide-y divide-amber-200/50 lr-scroll flex-1">
                 {snapshot.anomalies.map((a, i) => (
-                  <li key={i} className="flex items-start gap-1.5">
-                    <span>•</span>
-                    <span>
+                  <li key={i} className="pt-1.5 first:pt-0 flex items-start gap-1.5 min-w-0">
+                    <span className="text-amber-500 font-bold shrink-0">•</span>
+                    <span className="break-words min-w-0 flex-1 leading-snug">
                       {a.kind === "stuck_candidate" &&
                         `Candidate #${a.interview_id} stuck in ${a.phase} for ${a.minutes_since_event}m`}
                       {a.kind === "call_failure" &&
@@ -717,14 +722,14 @@ export default function LiveReportPage() {
             </div>
           )}
 
-          {/* Real-time Activity Feed */}
-          <div className="border border-slate-200 rounded-xl bg-white shadow-xs overflow-hidden flex flex-col h-[520px]">
-            <div className="p-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+          {/* Real-time Activity Feed - Strictly bounded to the remaining space with visible internal scrollbar */}
+          <div className="border border-slate-200 rounded-xl bg-white shadow-xs overflow-hidden flex flex-col flex-1 min-h-0 min-w-0 max-w-full">
+            <div className="p-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 shrink-0">
               <span className="text-xs font-semibold text-slate-800">Live Activity Feed</span>
               <span className="text-[10px] text-slate-400 font-mono">Streamed</span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs divide-y divide-slate-50">
+            <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs divide-y divide-slate-50 lr-scroll min-h-0">
               {feed.map((item) => {
                 const textColor =
                   item.tone === "critical"
@@ -744,7 +749,7 @@ export default function LiveReportPage() {
               })}
 
               {feed.length === 0 && (
-                <div className="h-full flex items-center justify-center text-slate-400 text-xs">
+                <div className="h-full py-2 flex items-center justify-center text-slate-400 text-xs">
                   Listening for stream activity...
                 </div>
               )}
