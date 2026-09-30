@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CallRecordings } from "@/components/CallRecordings";
 import { StopOutreachModal } from "@/components/StopOutreachModal";
 import {
   CheckCircle2,
@@ -29,7 +30,6 @@ import {
   Bot,
   Download,
   Ban,
-  Mic,
 } from "lucide-react";
 
 interface AssessModalProps {
@@ -43,14 +43,6 @@ interface AssessModalProps {
   candidateId?: string;
   candidateEmail?: string;
   candidatePhone?: string;
-}
-
-interface CallRecording {
-  key: string;
-  session_id: number;
-  url: string;
-  started_at?: string | null;
-  recorded_at: string;
 }
 
 interface AssessmentData {
@@ -74,44 +66,16 @@ export function AssessModal({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [stopOutreachOpen, setStopOutreachOpen] = useState(false);
-  const [recordings, setRecordings] = useState<CallRecording[]>([]);
-  const [recordingsUnavailable, setRecordingsUnavailable] = useState(false);
 
   useEffect(() => {
     if (open && interviewId) {
       fetchAssessmentData();
-      fetchRecordings();
     }
     if (!open) {
       setData(null);
       setError(null);
-      setRecordings([]);
-      setRecordingsUnavailable(false);
     }
   }, [open, interviewId]);
-
-  // Recordings only exist in production (S3); a failure here must never
-  // break the rest of the assessment.
-  const fetchRecordings = async () => {
-    setRecordings([]);
-    setRecordingsUnavailable(false);
-    try {
-      const response = await authFetch(
-        `${API_BASE}/api/v1/engagement/interviews/${interviewId}/recordings`
-      );
-      if (!response.ok) {
-        console.warn("Call recordings request failed:", response.status);
-        setRecordingsUnavailable(true);
-        return;
-      }
-      const result = await response.json();
-      setRecordings(result.recordings || []);
-      setRecordingsUnavailable(Boolean(result.unavailable));
-    } catch (err) {
-      console.warn("Call recordings request failed:", err);
-      setRecordingsUnavailable(true);
-    }
-  };
 
   const fetchAssessmentData = async () => {
     if (!interviewId) return;
@@ -535,36 +499,9 @@ export function AssessModal({
 
             {/* ===== TAB 3: Transcript ===== */}
             <TabsContent value="transcript" className="px-6 pb-6 mt-0">
-              {recordingsUnavailable && (
-                <p className="pt-4 text-[11px] text-slate-400 font-semibold">
-                  Call recordings are temporarily unavailable.
-                </p>
-              )}
-              {recordings.length > 0 && (
-                <div className="pt-4 space-y-3">
-                  <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide flex items-center gap-1.5">
-                    <Mic className="w-3.5 h-3.5" />
-                    Call Recording{recordings.length > 1 ? "s" : ""}
-                  </p>
-                  {recordings.map((rec, idx) => (
-                    <div key={rec.key} className="rounded-lg border border-slate-200 p-3">
-                      <p className="text-[11px] text-slate-500 font-semibold mb-1.5">
-                        {recordings.length > 1 ? `Recording ${idx + 1} · ` : ""}
-                        {new Date(rec.started_at || rec.recorded_at).toLocaleString()}
-                      </p>
-                      <audio
-                        controls
-                        preload="none"
-                        aria-label={`Call recording ${idx + 1}`}
-                        src={rec.url.startsWith("/") ? `${API_BASE}${rec.url}` : rec.url}
-                        className="w-full h-9"
-                      >
-                        Your browser does not support audio playback.
-                      </audio>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <div className="pt-4">
+                <CallRecordings interviewId={interviewId} open={open} />
+              </div>
               <div className="flex items-center justify-between mb-2 pt-4">
                 <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">
                   Conversation Log
