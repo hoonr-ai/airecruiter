@@ -3653,6 +3653,63 @@ async def get_assessment_data(interview_id: str):
     }
 
 
+@router.get("/interviews/{interview_id}/recordings")
+async def get_interview_recordings(interview_id: str):
+    """Call recordings (S3) of an interview, with presigned playback URLs.
+
+    Disabled unless ENVIRONMENT=production and S3_RECORDINGS_BUCKET is set,
+    matching when pair-bot uploads recordings.
+    """
+    from services import call_recordings
+
+    if not call_recordings.is_enabled():
+        return {"success": True, "enabled": False, "recordings": []}
+
+    try:
+        jobdiva_id = None
+        fallback_day = None
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT jobdiva_id, created_at
+                    FROM engage_interview_audit
+                    WHERE interview_id = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (interview_id,),
+                )
+                row = cur.fetchone()
+        if row:
+            jobdiva_id = (row.get("jobdiva_id") or "").strip() or None
+            created = row.get("created_at")
+            fallback_day = created.date() if created else None
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(
+                f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/detail",
+                headers=get_pair_auth_headers(),
+            )
+            res.raise_for_status()
+            detail = res.json()
+        if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
+            detail = detail["data"]
+        sessions = [
+            {"id": s.get("id"), "started_at": s.get("started_at")}
+            for s in (detail.get("sessions") or [])
+            if isinstance(s, dict)
+        ]
+
+        recordings = await asyncio.to_thread(
+            call_recordings.find_recordings, sessions, jobdiva_id, fallback_day
+        )
+        return {"success": True, "enabled": True, "recordings": recordings}
+    except Exception as e:
+        logger.error(f"❌ recordings lookup failed for interview {interview_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Could not load call recordings")
+
+
 # ---------------------------------------------------------------------------
 # 6. Outreach API Proxies
 # ---------------------------------------------------------------------------
