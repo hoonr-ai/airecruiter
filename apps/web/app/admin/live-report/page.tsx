@@ -10,8 +10,10 @@ import {
   EyeOff,
   Radio,
   RefreshCw,
+  Search,
   Server,
   Users,
+  X,
 } from "lucide-react";
 import { api, isNotFoundError, LIVE_REPORT_PROD_ONLY_MESSAGE } from "@/lib/api";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -118,13 +120,68 @@ export default function LiveReportPage() {
     [pushFeed, setSnapshot]
   );
 
-  activityEventRef.current = handleActivityEvent;
+  const [searchLaunchTerm, setSearchLaunchTerm] = useState<string>("");
+  const [debouncedSearch, setDebouncedSearch] = useState<string>("");
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearch(searchLaunchTerm);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [searchLaunchTerm]);
+
+  // Clean, recruiter-friendly event text formatter using full phase names
+  const formatRecruiterEvent = useCallback((event: {
+    interviewId?: number;
+    name?: string;
+    type: string;
+    subtype?: string | null;
+    phase?: string | null;
+    status?: string | null;
+  }): string | null => {
+    const p = (event.phase || "").toLowerCase();
+    let phaseName = "Outreach";
+    if (p === "phase1") phaseName = "Phase 1";
+    else if (p === "phase1_6hr" || p.includes("6hr")) phaseName = "Phase 2";
+    else if (p === "phase2") phaseName = "Phase 3";
+    else if (p === "phase3") phaseName = "Phase 4";
+    else if (p === "phase1_extra") phaseName = "Extra 1";
+    else if (p === "phase1_6hr_extra") phaseName = "Extra 2";
+    else if (p === "phase2_extra") phaseName = "Extra 3";
+    else if (p === "contact_check") phaseName = "Contact Check";
+    else if (p === "pass") phaseName = "Passed";
+    else if (p === "fail") phaseName = "Failed";
+
+    const t = (event.type || "").toLowerCase();
+    const st = (event.subtype || "").toLowerCase();
+
+    // Hide internal noise from recruiters
+    if (t.includes("stt_tts") || t.includes("phase_transition") || t.includes("teams_alert")) {
+      return null;
+    }
+
+    let action = t;
+    if (t.includes("interview_started")) action = "Interview Started";
+    else if (t.includes("interview_completed") || t.includes("evaluation_completed")) action = "Passed Interview";
+    else if (t.includes("interview_partial")) action = "Interview Partial";
+    else if (t.includes("voice_pipeline")) {
+      action = st.includes("hangup") || event.status?.includes("hangup") ? "Call Ended (Hangup)" : "Voice Call Completed";
+    } else if (t.includes("email_sms") || (t.includes("email") && t.includes("sms"))) {
+      action = "Email & SMS Sent";
+    } else if (t.includes("email")) action = "Email Sent";
+    else if (t.includes("sms")) action = "SMS Sent";
+    else if (t.includes("call")) action = "Call Placed";
+
+    const subject = event.name || (event.interviewId ? `#${event.interviewId}` : "Candidate");
+    const statusText = event.status === "failed" ? " [Failed]" : event.status === "passed" ? " [Passed]" : "";
+    return `${subject} (${phaseName}): ${action}${statusText}`;
+  }, []);
 
   // Fetch launch list and health stats
-  const fetchLaunchesAndHealth = useCallback(async () => {
+  const fetchLaunchesAndHealth = useCallback(async (searchQuery?: string) => {
     try {
       const [launchesData, healthData] = await Promise.allSettled([
-        api.liveReport.getLaunches(),
+        api.liveReport.getLaunches({ search: searchQuery, limit: 100 }),
         api.liveReport.getHealth(),
       ]);
 
@@ -135,7 +192,10 @@ export default function LiveReportPage() {
           : launchesData.value?.launches || [];
         setLaunches(list);
         if (list.length > 0) {
-          setSelectedBulkId((prev) => prev || list[0].bulk_id);
+          setSelectedBulkId((prev) => {
+            if (prev && list.some((l: any) => l.bulk_id === prev)) return prev;
+            return list[0].bulk_id;
+          });
         }
       } else {
         console.error("Failed to load live report launches:", launchesData.reason);
@@ -160,8 +220,8 @@ export default function LiveReportPage() {
   }, []);
 
   useEffect(() => {
-    fetchLaunchesAndHealth();
-  }, [fetchLaunchesAndHealth]);
+    fetchLaunchesAndHealth(debouncedSearch);
+  }, [fetchLaunchesAndHealth, debouncedSearch]);
 
   // Reset feed when user switches launches
   useEffect(() => {
@@ -182,6 +242,16 @@ export default function LiveReportPage() {
     for (const job of snapshot.jobs) {
       for (const cand of job.candidates) {
         for (const evt of cand.events || []) {
+          const formatted = formatRecruiterEvent({
+            interviewId: cand.interview_id,
+            name: cand.name,
+            type: evt.type,
+            subtype: evt.subtype,
+            phase: evt.phase,
+            status: evt.status,
+          });
+          if (!formatted) continue;
+
           const isFailed = evt.status === "failed";
           const d = evt.ts ? new Date(evt.ts) : new Date();
           const tsStr = !Number.isNaN(d.getTime())
@@ -193,7 +263,7 @@ export default function LiveReportPage() {
             id: feedIdCounterRef.current,
             rawTs: evt.ts || "",
             ts: tsStr,
-            text: `${cand.name} (${evt.phase || "outreach"}): ${evt.subtype ?? evt.type} [${evt.status ?? "completed"}]`,
+            text: formatted,
             critical: isFailed,
           });
         }
@@ -210,7 +280,7 @@ export default function LiveReportPage() {
         return prev;
       });
     }
-  }, [snapshot]);
+  }, [snapshot, formatRecruiterEvent]);
 
   if (isRoleLoading) {
     return (
@@ -268,12 +338,34 @@ export default function LiveReportPage() {
         </div>
 
         {/* Controls */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Search Box */}
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400 pointer-events-none" />
+            <input
+              type="text"
+              value={searchLaunchTerm}
+              onChange={(e) => setSearchLaunchTerm(e.target.value)}
+              placeholder="Search job name, JobDiva ID, bulk ID..."
+              className="border border-slate-300 rounded-lg pl-8 pr-7 py-1.5 text-xs bg-white text-slate-800 shadow-xs focus:ring-2 focus:ring-indigo-500 focus:outline-hidden w-64 placeholder:text-slate-400"
+            />
+            {searchLaunchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchLaunchTerm("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded"
+                title="Clear search"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+
           {/* Launch Select Dropdown */}
           <select
             value={selectedBulkId || ""}
             onChange={(e) => setSelectedBulkId(e.target.value)}
-            className="border border-slate-300 rounded-lg px-3 py-1.5 text-xs bg-white text-slate-800 shadow-xs focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
+            className="border border-slate-300 rounded-lg px-3 py-1.5 text-xs bg-white text-slate-800 shadow-xs focus:ring-2 focus:ring-indigo-500 focus:outline-hidden max-w-[280px] truncate"
           >
             {launches.map((l) => (
               <option key={l.bulk_id} value={l.bulk_id}>
@@ -281,7 +373,7 @@ export default function LiveReportPage() {
               </option>
             ))}
             {launches.length === 0 && (
-              <option value="">{launchesError ? "Error loading campaigns" : "No launches found"}</option>
+              <option value="">{launchesError ? "Error loading campaigns" : "No matching launches found"}</option>
             )}
           </select>
 

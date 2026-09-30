@@ -7,11 +7,11 @@ import { TERMINAL_PHASES } from "./types";
 import { CandidateChain } from "./CandidateChain";
 
 const PHASE_SEGMENTS: Array<{ keys: string[]; label: string; color: string }> = [
-  { keys: ["contact_check"], label: "CC", color: "#C8BFEA" },
-  { keys: ["phase1"], label: "P1", color: "#897ECF" },
-  { keys: ["phase1_6hr"], label: "P2", color: "#6B5FD3" },
-  { keys: ["phase2"], label: "P3", color: "#6B4FBB" },
-  { keys: ["phase3"], label: "P4", color: "#2B2742" },
+  { keys: ["contact_check"], label: "Contact Check", color: "#C8BFEA" },
+  { keys: ["phase1"], label: "Phase 1", color: "#897ECF" },
+  { keys: ["phase1_6hr"], label: "Phase 2", color: "#6B5FD3" },
+  { keys: ["phase2"], label: "Phase 3", color: "#6B4FBB" },
+  { keys: ["phase3"], label: "Phase 4", color: "#2B2742" },
   { keys: ["phase1_extra", "phase1_6hr_extra", "phase2_extra", "high_score_extra"], label: "Extra", color: "#f59e0b" },
   { keys: ["pass", "completed"], label: "Passed", color: "#10b981" },
   { keys: ["pending"], label: "No response", color: "#94a3b8" },
@@ -110,17 +110,17 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
           </span>
           <span className="mt-1 flex justify-between text-[10px] leading-3 text-slate-500">
             {(() => {
-              // Always display core progression milestones in order: CC, P1, P2, P3, P4
-              const coreLabels = ["CC", "P1", "P2", "P3", "P4"];
+              // Display progression milestones in order: Contact Check, Phase 1-4
+              const coreLabels = ["Contact Check", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
               const coreParts = coreLabels.map((lbl) => {
                 const found = allPhases.find((p) => p.label === lbl);
                 return `${lbl}: ${found ? found.n : 0}`;
               });
 
-              // Also append any non-zero Extra or terminal segments
+              // Also append any non-zero Extra segment
               const extraSegment = allPhases.find((p) => p.label === "Extra");
               if (extraSegment && extraSegment.n > 0) {
-                coreParts.push(`Ex: ${extraSegment.n}`);
+                coreParts.push(`Extra: ${extraSegment.n}`);
               }
 
               const fullText = coreParts.join(" · ");

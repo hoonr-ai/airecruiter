@@ -178,7 +178,15 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
           {candidate.name}
         </p>
         <p className="truncate text-xs text-slate-500 mt-0.5">
-          {candidate.is_stuck ? (
+          {passed ? (
+            <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded text-[11px]">
+              <Check size={11} className="text-emerald-600 shrink-0" /> Passed{scoreLabel ? ` · ${scoreLabel}` : ""}
+            </span>
+          ) : failedTerminal ? (
+            <span className="inline-flex items-center gap-1 font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.2 rounded text-[11px]">
+              <AlertTriangle size={11} className="text-rose-600 shrink-0" /> Failed{reasonLabel ? ` · ${reasonLabel}` : ""}
+            </span>
+          ) : candidate.is_stuck ? (
             <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
               <Hourglass size={11} className="text-amber-600 shrink-0" /> stuck · {stuckDetail}
             </span>
@@ -198,7 +206,9 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
               unknown phase · {candidate.phase}
             </span>
           ) : (
-            candidate.outreach_status ?? "—"
+            <span className="text-slate-600 font-medium capitalize">
+              In Progress · {CHAIN_STOPS[reached]?.short || candidate.outreach_status || "Phase 1"}
+            </span>
           )}
         </p>
       </div>

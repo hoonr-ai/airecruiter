@@ -135,9 +135,22 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
 
 
 @router.get("/api/analytics/live-report/launches")
-async def get_live_report_launches(user: UserIdentity = Depends(get_current_user)):
-    """Fetch all bulk launches, isolated so recruiters only see their launched jobs."""
-    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
+async def get_live_report_launches(
+    search: str | None = None,
+    jobdiva_id: str | None = None,
+    limit: int = 100,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Fetch bulk launches, with optional search, isolated so recruiters only see their launched jobs."""
+    base_target = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
+    params = {"limit": str(limit)}
+    if search:
+        params["search"] = search
+    if jobdiva_id:
+        params["jobdiva_id"] = jobdiva_id
+
+    query_str = urllib.parse.urlencode(params)
+    target_url = f"{base_target}?{query_str}"
     headers = _get_pair_headers()
 
     try:
