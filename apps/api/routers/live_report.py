@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
