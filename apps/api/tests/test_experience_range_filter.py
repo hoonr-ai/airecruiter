@@ -33,13 +33,15 @@ def test_experience_range_accepts_candidate_inside_inclusive_bounds():
     assert assessment["passes"] is True
 
 
-def test_experience_constraint_disables_jobagent_high_level_scoring():
+def test_only_an_upper_cap_makes_jobagent_range_filtering_strict():
     scorer = _scorer()
 
-    assert scorer._has_experience_years_constraint(
+    assert scorer._has_experience_years_range(
         SearchCriteria(job_id="26-100", min_experience_years=2, max_experience_years=5)
     ) is True
-    assert scorer._has_experience_years_constraint(SearchCriteria(job_id="26-100")) is False
+    assert scorer._has_experience_years_range(
+        SearchCriteria(job_id="26-100", min_experience_years=2)
+    ) is False
 
 
 @pytest.mark.parametrize("model, kwargs", [
@@ -49,3 +51,12 @@ def test_experience_constraint_disables_jobagent_high_level_scoring():
 def test_experience_range_rejects_an_inverted_bound(model, kwargs):
     with pytest.raises(ValidationError, match="min_experience_years cannot exceed"):
         model(**kwargs, min_experience_years=6, max_experience_years=5)
+
+
+@pytest.mark.parametrize("model, kwargs", [
+    (CandidateSearchRequest, {"job_id": "26-100"}),
+    (SearchCriteria, {"job_id": "26-100"}),
+])
+def test_maximum_experience_must_be_positive_when_present(model, kwargs):
+    with pytest.raises(ValidationError):
+        model(**kwargs, max_experience_years=0)

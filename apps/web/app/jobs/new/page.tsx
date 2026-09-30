@@ -1106,6 +1106,10 @@ function NewJobPageContent() {
   // and post-LLM (parsed years_of_experience).
   const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
   const [maxExperienceYears, setMaxExperienceYears] = useState<number | null>(null);
+  const hasInvalidExperienceRange =
+    minExperienceYears !== null &&
+    maxExperienceYears !== null &&
+    minExperienceYears > maxExperienceYears;
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
@@ -6623,6 +6627,10 @@ function NewJobPageContent() {
   // relaxation, no tranche follow-ups — one fast pass so the recruiter can
   // judge source quality before approving the full (expensive) run.
   const handleRunSampleSearch = async (): Promise<any[]> => {
+    if (hasInvalidExperienceRange) {
+      setSearchStatus("Set Max YOE to the same value as or above Min YOE before searching.");
+      return [];
+    }
     const searchStartMs = Date.now();
     let sampleResults: any[] = [];
 
@@ -6678,6 +6686,10 @@ function NewJobPageContent() {
   };
 
   const handleRunSearch = async (): Promise<any[]> => {
+    if (hasInvalidExperienceRange) {
+      setSearchStatus("Set Max YOE to the same value as or above Min YOE before searching.");
+      return [];
+    }
     const searchStartMs = Date.now();
     let accumulated: any[] = [];
     let runBreakdown: Array<Record<string, unknown>> = [];
@@ -9096,9 +9108,6 @@ function NewJobPageContent() {
                           ? Math.max(0, Math.min(40, parsed))
                           : null;
                         setMinExperienceYears(clamped);
-                        if (clamped !== null && maxExperienceYears !== null && clamped > maxExperienceYears) {
-                          setMaxExperienceYears(clamped);
-                        }
                       }}
                       placeholder="any"
                       className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
@@ -9124,15 +9133,17 @@ function NewJobPageContent() {
                           ? Math.max(0, Math.min(40, parsed))
                           : null;
                         setMaxExperienceYears(clamped);
-                        if (clamped !== null && minExperienceYears !== null && clamped < minExperienceYears) {
-                          setMinExperienceYears(clamped);
-                        }
                       }}
                       placeholder="any"
                       className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
                       title="Drops candidates whose resume confidently shows more years of experience. Leave blank for no cap."
                     />
                   </div>
+                  {hasInvalidExperienceRange && (
+                    <p className="basis-full -mt-3 text-[11px] font-medium text-rose-600">
+                      Max YOE must be the same as or greater than Min YOE.
+                    </p>
+                  )}
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
                       checked={includeNoResume}
