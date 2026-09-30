@@ -48,7 +48,7 @@ class _FakeJobDiva:
         self.uploads, self.updates, self.links, self.reads = [], [], [], 0
         self.refused = []
 
-    async def fetch_candidate_profiles_batch(self, ids):
+    async def fetch_candidate_profiles_batch(self, ids, priority=None):
         self.reads += 1
         return {JD: self.profile} if self.profile else {}
 

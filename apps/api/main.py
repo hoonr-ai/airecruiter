@@ -39,6 +39,7 @@ def readable_ist_now() -> str:
 # local dev readability) and picks up LOG_LEVEL from env. New Relic /
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
+from core.advisory_lock import AdvisoryLock
 from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -108,15 +109,24 @@ async def lifespan(app: FastAPI):
     async def auto_sync_all_jobs():
         """
         Global sync agent that runs inside the app process.
-        Uses a simple 'skip loop' if a sync is already in progress.
+
+        Every uvicorn worker schedules this, and all of them draw on the same
+        JobDiva account quota as live Step 5 searches. A Postgres session
+        advisory lock lets only ONE worker run the cycle; the rest skip.
+        app.sync_in_progress still guards against overlap within a worker.
         """
         if getattr(app, "sync_in_progress", False):
             logger.info("🤖 [AutoSync] Cycle skipped: A sync is already running.")
             return
-            
+
+        lock = AdvisoryLock(AUTO_SYNC_LOCK_KEY, "AutoSync")
+        if not await lock.try_acquire():
+            logger.info("🔒 [AutoSync] Another worker is syncing this cycle; skipping.")
+            return
+
         app.sync_in_progress = True
         logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
-        
+
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -134,7 +144,14 @@ async def lifespan(app: FastAPI):
                 logger.info("🤖 [AutoSync] No jobs to sync.")
                 return
 
-            for job in jobs:
+            for done, job in enumerate(jobs):
+                # If the lock connection dropped, Postgres released the lock
+                # and another worker may already be running a cycle: stop.
+                if not await lock.still_held():
+                    logger.error(
+                        f"❌ [AutoSync] Lost advisory lock after {done}/{len(jobs)} jobs; stopping this cycle."
+                    )
+                    return
                 jid = job['job_id']
                 logger.info(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
                 await auto_assign_service.synchronize_job_applicants(jid)
@@ -145,6 +162,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ [AutoSync] Cycle failed: {e}")
         finally:
             app.sync_in_progress = False
+            await lock.release()
 
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
@@ -540,6 +558,7 @@ def save_monitored_jobs(jobs_data: Dict[str, Any]):
         jobdiva_service.monitor_job_locally(jid, details)
 
 POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
+AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
 
 
 async def poll_all_jobs():

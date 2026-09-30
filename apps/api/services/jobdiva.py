@@ -22,8 +22,36 @@ from core import (
     JOBDIVA_PAIR_RESUME_SOURCE_NAMES,
 )
 from services.location_type import resolve_location_type
+from services import jobdiva_rate_limit as _bi_rate_limit
+from services import jobdiva_detail_cache as _detail_cache
 
 logger = logging.getLogger(__name__)
+
+# One semaphore per worker process for BI candidate batch fetches, shared by
+# every caller. It used to be created inside each call, which only serialized
+# that call's own chunks (incident 2026-09-29, docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Cross-worker
+# pacing is jobdiva_rate_limit's job; this just caps in-flight requests here.
+_BI_WORKER_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _bi_worker_semaphore(size: int) -> asyncio.Semaphore:
+    global _BI_WORKER_SEMAPHORE
+    if _BI_WORKER_SEMAPHORE is None:
+        _BI_WORKER_SEMAPHORE = asyncio.Semaphore(max(1, size))
+    return _BI_WORKER_SEMAPHORE
+
+
+async def _acquire_within(sem: asyncio.Semaphore, timeout_s: float) -> bool:
+    """Acquire ``sem`` within the caller's remaining budget. The semaphore is
+    shared by every BI caller in the worker, so waiting on it must count
+    against the same deadline as waiting for a JobDiva slot."""
+    if timeout_s <= 0:
+        return False
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout_s)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 # --- JobDiva HTTP request/response logging to New Relic ------------------
@@ -2973,57 +3001,86 @@ class JobDivaService:
         token: str,
         candidate_ids: List[str],
         chunk_size: int = 100,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Batch-fetch CandidatesDetail records and return them keyed by ID.
 
         Used by `_search_talent_pool` to enrich Talent Search results with
         fields the search payload doesn't reliably populate (address1,
-        linkedinUrl, full email/phone). Chunks are issued with bounded
-        concurrency (CANDIDATES_DETAIL_CONCURRENCY) and retried on 429/5xx
-        with backoff so JobDiva's rate limiter doesn't silently drop records.
+        linkedinUrl, full email/phone). Cached records (jobdiva_detail_cache)
+        are served without a call. The rest go out through the cross-worker
+        JobDiva BI limiter (jobdiva_rate_limit), at most
+        CANDIDATES_DETAIL_CONCURRENCY chunks at once per worker. A 429 starts
+        the shared cooldown that every caller waits out; the whole call gives
+        up after CANDIDATES_DETAIL_MAX_TOTAL_S (semaphore wait included) and
+        background hydration picks up whatever was dropped. Pass
+        ``priority=BACKGROUND`` from non-interactive callers so they yield to
+        live searches.
         """
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
         if not ids:
             return {}
 
+        results: Dict[str, Dict[str, Any]] = await _detail_cache.get_many(ids)
+        cached = len(results)
+        ids = [cid for cid in ids if cid not in results]
+        if not ids:
+            logger.info("CandidatesDetail TIMING: ids=%d all served from cache", cached)
+            return results
+
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesDetail"
         chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
 
-        # Bound how many chunks hit JobDiva at once and retry 429/5xx with
-        # backoff. JobDiva rate-limits bursts of concurrent CandidatesDetail
-        # requests (observed: 3 of 4 concurrent chunks 429'd), and the old
-        # code dropped those records with no retry. See sourcing_config.
         from core import sourcing_config as _sc_det
         conc = max(1, int(getattr(_sc_det, "CANDIDATES_DETAIL_CONCURRENCY", 1)))
         backoffs = list(getattr(_sc_det, "CANDIDATES_DETAIL_RETRY_BACKOFF_S", [2.0, 5.0, 10.0, 20.0]))
-        chunk_delay = float(getattr(_sc_det, "CANDIDATES_DETAIL_CHUNK_DELAY_S", 1.5))
-        sem = asyncio.Semaphore(conc)
+        max_total_s = float(getattr(_sc_det, "CANDIDATES_DETAIL_MAX_TOTAL_S", 90.0))
+        sem = _bi_worker_semaphore(conc)
+        deadline = time.perf_counter() + max_total_s
 
         async def _fetch_chunk(chunk: List[str], idx: int = 0) -> List[Dict[str, Any]]:
             for attempt in range(len(backoffs) + 1):
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    logger.warning(
+                        f"CandidatesDetail chunk {idx}: retry budget ({max_total_s:.0f}s) spent; "
+                        f"dropping {len(chunk)} ids for background hydration"
+                    )
+                    return []
                 try:
-                    async with sem:
-                        _c_t0 = time.perf_counter()
-                        async with httpx.AsyncClient(timeout=30.0) as client:
-                            response = await client.get(
-                                endpoint,
-                                params={"candidateIds": chunk},
-                                headers=headers,
-                            )
-                        _c_ms = (time.perf_counter() - _c_t0) * 1000.0
-                        # Pace requests while still holding the slot so the
-                        # next chunk can't burst past JobDiva's rate limiter.
-                        if chunk_delay > 0:
-                            await asyncio.sleep(chunk_delay)
+                    _c_t0 = time.perf_counter()
+                    if not await _acquire_within(sem, remaining):
+                        response = None
+                    else:
+                        try:
+                            async with httpx.AsyncClient(timeout=30.0) as client:
+                                response = await _bi_rate_limit.bi_get(
+                                    client,
+                                    endpoint,
+                                    max_wait_s=max(0.0, deadline - time.perf_counter()),
+                                    priority=priority,
+                                    label="CandidatesDetail",
+                                    params={"candidateIds": chunk},
+                                    headers=headers,
+                                )
+                        finally:
+                            sem.release()
+                    _c_ms = (time.perf_counter() - _c_t0) * 1000.0
+                    if response is None:
+                        logger.warning(
+                            f"CandidatesDetail chunk {idx}: no JobDiva slot within budget; "
+                            f"dropping {len(chunk)} ids for background hydration"
+                        )
+                        return []
                     try:
                         _c_bytes = len(response.content)
                     except Exception:
                         _c_bytes = 0
                     logger.info(
                         "CandidatesDetail chunk %d: %d ids -> HTTP %d in %.0fms "
-                        "(setup+http), %d bytes (attempt %d/%d)",
+                        "(wait+http), %d bytes (attempt %d/%d)",
                         idx, len(chunk), response.status_code, _c_ms, _c_bytes,
                         attempt + 1, len(backoffs) + 1,
                     )
@@ -3036,8 +3093,11 @@ class JobDivaService:
                         if isinstance(payload, dict):
                             payload = [payload]
                         return list(payload)
-                    # Retry rate-limit / server errors; give up on other 4xx.
-                    if (response.status_code == 429 or response.status_code >= 500) and attempt < len(backoffs):
+                    # 429: bi_get already started the shared cooldown; the
+                    # next attempt's bi_get waits it out. No private backoff.
+                    if response.status_code == 429 and attempt < len(backoffs):
+                        continue
+                    if response.status_code >= 500 and attempt < len(backoffs):
                         await asyncio.sleep(backoffs[attempt])
                         continue
                     logger.warning(
@@ -3053,7 +3113,7 @@ class JobDivaService:
                     return []
             return []
 
-        results: Dict[str, Dict[str, Any]] = {}
+        fetched: Dict[str, Dict[str, Any]] = {}
         _det_t0 = time.perf_counter()
         chunked = await asyncio.gather(*[_fetch_chunk(chunk, i) for i, chunk in enumerate(chunks)])
         _det_ms = (time.perf_counter() - _det_t0) * 1000.0
@@ -3064,11 +3124,13 @@ class JobDivaService:
                 cid = get_field(record, ["candidateId", "CANDIDATEID", "id", "ID"])
                 if cid is None:
                     continue
-                results[str(cid)] = record
+                fetched[str(cid)] = record
+        await _detail_cache.set_many(fetched)
+        results.update(fetched)
         logger.info(
-            "CandidatesDetail TIMING: ids=%d chunks=%d (chunk_size=%d, max_concurrency=%d) "
+            "CandidatesDetail TIMING: ids=%d cached=%d chunks=%d (chunk_size=%d, max_concurrency=%d) "
             "matched=%d total_ms=%.0f",
-            len(ids), len(chunks), chunk_size, conc, len(results), _det_ms,
+            len(ids) + cached, cached, len(chunks), chunk_size, conc, len(results), _det_ms,
         )
         return results
 
@@ -3077,6 +3139,7 @@ class JobDivaService:
         token: str,
         candidate_ids: List[str],
         chunk_size: int = 50,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, List[str]]:
         """Fetch CandidateNotesListDetail for candidates and extract their ACTIONTYPEs."""
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
@@ -3091,11 +3154,18 @@ class JobDivaService:
         for chunk in chunks:
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
-                    response = await client.get(
+                    response = await _bi_rate_limit.bi_get(
+                        client,
                         endpoint,
+                        max_wait_s=60.0,
+                        priority=priority,
+                        label="CandidateNotesListDetail",
                         params={"candidateIds": chunk},
                         headers=headers,
                     )
+                if response is None:
+                    logger.warning("CandidateNotesListDetail: no JobDiva slot within 60s; skipping chunk")
+                    continue
                 if response.status_code == 200:
                     data = response.json()
                     payload = data.get("data") if isinstance(data, dict) else data
@@ -3181,6 +3251,7 @@ class JobDivaService:
         self,
         candidate_ids: List[str],
         chunk_size: int = 40,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, Dict[str, Any]]:
         """Batch-fetch /apiv2/bi/CandidatesProfileDetail records keyed by ID.
 
@@ -3219,9 +3290,14 @@ class JobDivaService:
             for attempt in range(2):
                 try:
                     async with httpx.AsyncClient(timeout=30.0) as client:
-                        response = await client.get(
-                            endpoint, params={"candidateIds": chunk}, headers=headers
+                        response = await _bi_rate_limit.bi_get(
+                            client, endpoint, max_wait_s=30.0, priority=priority,
+                            label="CandidatesProfileDetail",
+                            params={"candidateIds": chunk}, headers=headers,
                         )
+                    if response is None:
+                        logger.warning("CandidatesProfileDetail: no JobDiva slot within 30s; skipping chunk")
+                        break
                     if response.status_code == 200:
                         data = response.json()
                         payload = data.get("data") if isinstance(data, dict) else data
@@ -3234,7 +3310,9 @@ class JobDivaService:
                             if cid is not None:
                                 results[str(cid)] = record
                         break
-                    if (response.status_code == 429 or response.status_code >= 500) and attempt == 0:
+                    if response.status_code == 429 and attempt == 0:
+                        continue  # bi_get started the shared cooldown
+                    if response.status_code >= 500 and attempt == 0:
                         await asyncio.sleep(2.0)
                         continue
                     logger.warning(
@@ -3273,9 +3351,9 @@ class JobDivaService:
 
         Feeds the launch-time resume-freshness check
         (services/employer_resolution.py): advisory, never launch-blocking —
-        failures degrade to {} / missing ids. Chunks share one client, are
-        throttled by the same CANDIDATES_DETAIL_CONCURRENCY semaphore the
-        sibling fetchers use (JobDiva 429s concurrent BI bursts — see
+        failures degrade to {} / missing ids. Chunks share one client, go
+        through the cross-worker JobDiva BI limiter and the per-worker BI
+        semaphore (JobDiva 429s concurrent BI bursts — see
         _fetch_candidate_details_batch), and retry once on 429/5xx.
         """
         ids: List[str] = []
@@ -3296,22 +3374,35 @@ class JobDivaService:
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
         chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
         from core import sourcing_config as _sc_res
-        sem = asyncio.Semaphore(max(1, int(getattr(_sc_res, "CANDIDATES_DETAIL_CONCURRENCY", 1))))
+        sem = _bi_worker_semaphore(int(getattr(_sc_res, "CANDIDATES_DETAIL_CONCURRENCY", 1)))
+        # Advisory launch check: never hold a launch longer than this for dates.
+        deadline = time.perf_counter() + 30.0
 
         async def _fetch_chunk(client: httpx.AsyncClient, chunk: List[str]) -> List[Dict[str, Any]]:
             for attempt in range(2):
                 try:
-                    async with sem:
-                        response = await client.get(
-                            endpoint, params={"candidateIds": chunk}, headers=headers
+                    if not await _acquire_within(sem, deadline - time.perf_counter()):
+                        return []
+                    try:
+                        response = await _bi_rate_limit.bi_get(
+                            client, endpoint,
+                            max_wait_s=max(0.0, deadline - time.perf_counter()),
+                            label="CandidatesResumesDetail",
+                            params={"candidateIds": chunk}, headers=headers,
                         )
+                    finally:
+                        sem.release()
+                    if response is None:
+                        return []
                     if response.status_code == 200:
                         data = response.json()
                         payload = data.get("data") if isinstance(data, dict) else data
                         if isinstance(payload, dict):
                             payload = [payload]
                         return [r for r in payload or [] if isinstance(r, dict)]
-                    if (response.status_code == 429 or response.status_code >= 500) and attempt == 0:
+                    if response.status_code == 429 and attempt == 0:
+                        continue  # bi_get started the shared cooldown
+                    if response.status_code >= 500 and attempt == 0:
                         await asyncio.sleep(2.0)
                         continue
                     logger.warning(
@@ -3379,9 +3470,12 @@ class JobDivaService:
             logger.debug(f"Fetching candidate resumes for {candidate_id}")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(endpoint, params=params, headers=headers)
+                response = await _bi_rate_limit.bi_get(
+                    client, endpoint, max_wait_s=60.0,
+                    label="CandidatesResumesDetail", params=params, headers=headers,
+                )
                 
-                if response.status_code == 200:
+                if response is not None and response.status_code == 200:
                     data = response.json()
                     
                     if isinstance(data, dict) and "data" in data:
@@ -3418,11 +3512,22 @@ class JobDivaService:
         
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # Step 1: Try to get candidate details
+                # Step 1: Try to get candidate details. Optional for the
+                # resume, so use the shared cache and only a short wait for a
+                # JobDiva slot — the resume text below matters more.
                 details_url = f"{self.api_url}/apiv2/bi/CandidatesDetail"
-                details_resp = await client.get(details_url, params={"candidateIds": [candidate_id]}, headers=headers)
+                _cached = (await _detail_cache.get_many([str(candidate_id)])).get(str(candidate_id))
+                details_resp = None
+                if _cached:
+                    candidate_info = _cached
+                else:
+                    details_resp = await _bi_rate_limit.bi_get(
+                        client, details_url, max_wait_s=5.0,
+                        label="CandidatesDetail:resume",
+                        params={"candidateIds": [candidate_id]}, headers=headers,
+                    )
                 
-                if details_resp.status_code == 200:
+                if details_resp is not None and details_resp.status_code == 200:
                     details_data = details_resp.json()
                     if isinstance(details_data, dict) and "data" in details_data:
                         candidates = details_data["data"]
@@ -6094,6 +6199,7 @@ class JobDivaService:
         token: str,
         candidate_ids: List[str],
         chunk_size: int = 50,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Fetch CandidatesQualificationsDetail in batch and group by candidate ID."""
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
@@ -6111,11 +6217,18 @@ class JobDivaService:
                 if not numeric_ids:
                     continue
                 async with httpx.AsyncClient(timeout=15.0) as client:
-                    response = await client.get(
+                    response = await _bi_rate_limit.bi_get(
+                        client,
                         endpoint,
+                        max_wait_s=60.0,
+                        priority=priority,
+                        label="CandidatesQualificationsDetail",
                         params={"candidateIds": numeric_ids},
                         headers=headers,
                     )
+                if response is None:
+                    logger.warning("CandidatesQualificationsDetail: no JobDiva slot within 60s; skipping chunk")
+                    continue
                 if response.status_code == 200:
                     data = response.json()
                     payload = data if isinstance(data, list) else (data.get("data") or [])
@@ -6144,7 +6257,9 @@ class JobDivaService:
         logger.info(f"CandidatesQualificationsDetail: fetched qualifications for {len(results)} candidates out of {len(ids)} requested")
         return results
 
-    async def get_candidate_qualifications(self, candidate_id: str) -> List[Dict[str, Any]]:
+    async def get_candidate_qualifications(
+        self, candidate_id: str, priority: str = _bi_rate_limit.INTERACTIVE
+    ) -> List[Dict[str, Any]]:
         """
         Fetch qualification history for a candidate from JobDiva BI endpoint.
         Uses /apiv2/bi/CandidatesQualificationsDetail.
@@ -6169,7 +6284,13 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bi_get(
+                    client, url, max_wait_s=60.0, priority=priority,
+                    label="CandidatesQualificationsDetail", params=params, headers=headers,
+                )
+                if response is None:
+                    logger.warning(f"get_candidate_qualifications: no JobDiva slot within 60s for {numeric_cid}")
+                    return []
                 if response.status_code == 200:
                     data = response.json()
                     result = data if isinstance(data, list) else (data.get("data") or [])
