@@ -3886,6 +3886,38 @@ class UnifiedCandidateSearch:
             return self._country_display_name(country)
         return self._scope_location_to_country(criteria.location, country)
 
+    def _location_criteria_variants(self, criteria: SearchCriteria) -> List[SearchCriteria]:
+        """Return one independent query criterion per selected location.
+
+        External providers accept one structured location per request.  A
+        combined ``New York OR Menlo Park`` string is not a portable geo query,
+        so fan out instead and merge/deduplicate the provider results.
+        """
+        entries: List[Dict[str, Any]] = []
+        if str(criteria.location or "").strip():
+            entries.append({"value": criteria.location, "within_miles": criteria.within_miles})
+        entries.extend(getattr(criteria, "additional_locations", None) or [])
+
+        variants: List[SearchCriteria] = []
+        seen = set()
+        for entry in entries:
+            value = str(entry.get("value") or "").strip()
+            key = self._normalize_term(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            miles = entry.get("within_miles", criteria.within_miles)
+            try:
+                miles = max(1, min(100, int(miles)))
+            except (TypeError, ValueError):
+                miles = criteria.within_miles
+            variants.append(criteria.copy(update={
+                "location": value,
+                "within_miles": miles,
+                "additional_locations": [],
+            }))
+        return variants or [criteria]
+
     def _scope_location_to_country(self, location: Any, country_code: str) -> str:
         """Append the job's country name to a location string when no country
         is already named, so downstream services (Exa, Dice, Vetted, Unipile)
@@ -7555,6 +7587,15 @@ class UnifiedCandidateSearch:
             return candidates
 
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if getattr(criteria, "additional_locations", None):
+            merged: List[Dict[str, Any]] = []
+            for variant in self._location_criteria_variants(criteria):
+                result = await self._search_linkedin(variant)
+                merged.extend(result.get("candidates") or [])
+            return {
+                "candidates": self._deduplicate_candidates(merged),
+                "source_type": "LinkedIn-Unipile",
+            }
         try:
             # Unipile expects skills as a list of dicts. Carry each term's real
             # rubric priority (Must Have vs Preferred) so the Unipile layer can
@@ -7770,6 +7811,12 @@ class UnifiedCandidateSearch:
         return False
 
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if getattr(criteria, "additional_locations", None):
+            merged: List[Dict[str, Any]] = []
+            for variant in self._location_criteria_variants(criteria):
+                result = await self._search_dice(variant)
+                merged.extend(result.get("candidates") or [])
+            return {"candidates": self._deduplicate_candidates(merged), "source_type": "Dice"}
         try:
             # Structured criteria feed natural-language queries (one role per
             # search — Exa doesn't parse boolean syntax). Only the recruiter-
@@ -7795,6 +7842,12 @@ class UnifiedCandidateSearch:
             return {"candidates": [], "source_type": "Dice"}
 
     async def _search_vetted(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if getattr(criteria, "additional_locations", None):
+            merged: List[Dict[str, Any]] = []
+            for variant in self._location_criteria_variants(criteria):
+                result = await self._search_vetted(variant)
+                merged.extend(result.get("candidates") or [])
+            return {"candidates": self._deduplicate_candidates(merged), "source_type": "VettedDB"}
         try:
             candidates = await self.vetted_service.search_candidates(
                 skills=criteria.sourcing_skill_values(),
@@ -7807,6 +7860,15 @@ class UnifiedCandidateSearch:
             return {"candidates": [], "source_type": "VettedDB"}
 
     async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if getattr(criteria, "additional_locations", None):
+            merged: List[Dict[str, Any]] = []
+            for variant in self._location_criteria_variants(criteria):
+                result = await self._search_exa(variant)
+                merged.extend(result.get("candidates") or [])
+            return {
+                "candidates": self._deduplicate_candidates(merged),
+                "source_type": "LinkedIn-Exa",
+            }
         try:
             # Floor at 30 so the Exa Research Pass B has a meaningful seed-URL
             # sample even when the recruiter's page_size is small, and cap at
