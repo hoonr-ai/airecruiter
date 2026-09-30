@@ -422,7 +422,7 @@ CANDIDATES_DETAIL_RETRY_BACKOFF_S = [2.0, 5.0, 10.0, 20.0]
 # paces every JobDiva BI candidate request across all workers
 # (JOBDIVA_BI_MIN_INTERVAL_S, default 1.5s) and makes every caller wait out a
 # shared cooldown after any 429. CANDIDATES_DETAIL_CONCURRENCY above is now a
-# per-worker cap shared by all callers (incident 2026-09-29, see fix.md).
+# per-worker cap shared by all callers (incident 2026-09-29, docs/incidents/2026-09-29-jobdiva-429-nginx-503.md).
 
 # Total time one CandidatesDetail batch call may spend waiting for slots and
 # retrying. Past this, remaining chunks are dropped and background hydration

@@ -39,6 +39,7 @@ def readable_ist_now() -> str:
 # local dev readability) and picks up LOG_LEVEL from env. New Relic /
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
+from core.advisory_lock import AdvisoryLock
 from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -118,19 +119,8 @@ async def lifespan(app: FastAPI):
             logger.info("🤖 [AutoSync] Cycle skipped: A sync is already running.")
             return
 
-        lock_conn = None
-        got_lock = False
-        try:
-            lock_conn = get_db_connection()
-            lc = lock_conn.cursor()
-            lc.execute("SELECT pg_try_advisory_lock(%s)", (AUTO_SYNC_LOCK_KEY,))
-            got_lock = bool(lc.fetchone()[0])
-            lock_conn.commit()
-        except Exception as e:
-            logger.error(f"❌ [AutoSync] Could not take advisory lock: {e}")
-        if not got_lock:
-            if lock_conn is not None:
-                lock_conn.close()
+        lock = AdvisoryLock(AUTO_SYNC_LOCK_KEY, "AutoSync")
+        if not await lock.try_acquire():
             logger.info("🔒 [AutoSync] Another worker is syncing this cycle; skipping.")
             return
 
@@ -154,7 +144,14 @@ async def lifespan(app: FastAPI):
                 logger.info("🤖 [AutoSync] No jobs to sync.")
                 return
 
-            for job in jobs:
+            for done, job in enumerate(jobs):
+                # If the lock connection dropped, Postgres released the lock
+                # and another worker may already be running a cycle: stop.
+                if not await lock.still_held():
+                    logger.error(
+                        f"❌ [AutoSync] Lost advisory lock after {done}/{len(jobs)} jobs; stopping this cycle."
+                    )
+                    return
                 jid = job['job_id']
                 logger.info(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
                 await auto_assign_service.synchronize_job_applicants(jid)
@@ -165,17 +162,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ [AutoSync] Cycle failed: {e}")
         finally:
             app.sync_in_progress = False
-            # A pooled connection outlives close(); a session lock left on it
-            # would block every later cycle on every worker.
-            try:
-                lock_conn.rollback()
-                uc = lock_conn.cursor()
-                uc.execute("SELECT pg_advisory_unlock(%s)", (AUTO_SYNC_LOCK_KEY,))
-                lock_conn.commit()
-            except Exception as e:
-                logger.warning(f"AutoSync advisory unlock failed: {e}")
-            finally:
-                lock_conn.close()
+            await lock.release()
 
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")

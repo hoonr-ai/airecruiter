@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # One semaphore per worker process for BI candidate batch fetches, shared by
 # every caller. It used to be created inside each call, which only serialized
-# that call's own chunks (incident 2026-09-29, see fix.md). Cross-worker
+# that call's own chunks (incident 2026-09-29, docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Cross-worker
 # pacing is jobdiva_rate_limit's job; this just caps in-flight requests here.
 _BI_WORKER_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
@@ -39,6 +39,19 @@ def _bi_worker_semaphore(size: int) -> asyncio.Semaphore:
     if _BI_WORKER_SEMAPHORE is None:
         _BI_WORKER_SEMAPHORE = asyncio.Semaphore(max(1, size))
     return _BI_WORKER_SEMAPHORE
+
+
+async def _acquire_within(sem: asyncio.Semaphore, timeout_s: float) -> bool:
+    """Acquire ``sem`` within the caller's remaining budget. The semaphore is
+    shared by every BI caller in the worker, so waiting on it must count
+    against the same deadline as waiting for a JobDiva slot."""
+    if timeout_s <= 0:
+        return False
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout_s)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 # --- JobDiva HTTP request/response logging to New Relic ------------------
@@ -2988,6 +3001,7 @@ class JobDivaService:
         token: str,
         candidate_ids: List[str],
         chunk_size: int = 100,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Batch-fetch CandidatesDetail records and return them keyed by ID.
@@ -2999,8 +3013,10 @@ class JobDivaService:
         JobDiva BI limiter (jobdiva_rate_limit), at most
         CANDIDATES_DETAIL_CONCURRENCY chunks at once per worker. A 429 starts
         the shared cooldown that every caller waits out; the whole call gives
-        up after CANDIDATES_DETAIL_MAX_TOTAL_S and background hydration picks
-        up whatever was dropped.
+        up after CANDIDATES_DETAIL_MAX_TOTAL_S (semaphore wait included) and
+        background hydration picks up whatever was dropped. Pass
+        ``priority=BACKGROUND`` from non-interactive callers so they yield to
+        live searches.
         """
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
         if not ids:
@@ -3034,17 +3050,24 @@ class JobDivaService:
                     )
                     return []
                 try:
-                    async with sem:
-                        _c_t0 = time.perf_counter()
-                        async with httpx.AsyncClient(timeout=30.0) as client:
-                            response = await _bi_rate_limit.bi_get(
-                                client,
-                                endpoint,
-                                max_wait_s=remaining,
-                                params={"candidateIds": chunk},
-                                headers=headers,
-                            )
-                        _c_ms = (time.perf_counter() - _c_t0) * 1000.0
+                    _c_t0 = time.perf_counter()
+                    if not await _acquire_within(sem, remaining):
+                        response = None
+                    else:
+                        try:
+                            async with httpx.AsyncClient(timeout=30.0) as client:
+                                response = await _bi_rate_limit.bi_get(
+                                    client,
+                                    endpoint,
+                                    max_wait_s=max(0.0, deadline - time.perf_counter()),
+                                    priority=priority,
+                                    label="CandidatesDetail",
+                                    params={"candidateIds": chunk},
+                                    headers=headers,
+                                )
+                        finally:
+                            sem.release()
+                    _c_ms = (time.perf_counter() - _c_t0) * 1000.0
                     if response is None:
                         logger.warning(
                             f"CandidatesDetail chunk {idx}: no JobDiva slot within budget; "
@@ -3116,6 +3139,7 @@ class JobDivaService:
         token: str,
         candidate_ids: List[str],
         chunk_size: int = 50,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, List[str]]:
         """Fetch CandidateNotesListDetail for candidates and extract their ACTIONTYPEs."""
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
@@ -3134,6 +3158,8 @@ class JobDivaService:
                         client,
                         endpoint,
                         max_wait_s=60.0,
+                        priority=priority,
+                        label="CandidateNotesListDetail",
                         params={"candidateIds": chunk},
                         headers=headers,
                     )
@@ -3225,6 +3251,7 @@ class JobDivaService:
         self,
         candidate_ids: List[str],
         chunk_size: int = 40,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, Dict[str, Any]]:
         """Batch-fetch /apiv2/bi/CandidatesProfileDetail records keyed by ID.
 
@@ -3264,7 +3291,8 @@ class JobDivaService:
                 try:
                     async with httpx.AsyncClient(timeout=30.0) as client:
                         response = await _bi_rate_limit.bi_get(
-                            client, endpoint, max_wait_s=30.0,
+                            client, endpoint, max_wait_s=30.0, priority=priority,
+                            label="CandidatesProfileDetail",
                             params={"candidateIds": chunk}, headers=headers,
                         )
                     if response is None:
@@ -3353,12 +3381,17 @@ class JobDivaService:
         async def _fetch_chunk(client: httpx.AsyncClient, chunk: List[str]) -> List[Dict[str, Any]]:
             for attempt in range(2):
                 try:
-                    async with sem:
+                    if not await _acquire_within(sem, deadline - time.perf_counter()):
+                        return []
+                    try:
                         response = await _bi_rate_limit.bi_get(
                             client, endpoint,
                             max_wait_s=max(0.0, deadline - time.perf_counter()),
+                            label="CandidatesResumesDetail",
                             params={"candidateIds": chunk}, headers=headers,
                         )
+                    finally:
+                        sem.release()
                     if response is None:
                         return []
                     if response.status_code == 200:
@@ -3438,7 +3471,8 @@ class JobDivaService:
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await _bi_rate_limit.bi_get(
-                    client, endpoint, max_wait_s=60.0, params=params, headers=headers
+                    client, endpoint, max_wait_s=60.0,
+                    label="CandidatesResumesDetail", params=params, headers=headers,
                 )
                 
                 if response is not None and response.status_code == 200:
@@ -3489,6 +3523,7 @@ class JobDivaService:
                 else:
                     details_resp = await _bi_rate_limit.bi_get(
                         client, details_url, max_wait_s=5.0,
+                        label="CandidatesDetail:resume",
                         params={"candidateIds": [candidate_id]}, headers=headers,
                     )
                 
@@ -6164,6 +6199,7 @@ class JobDivaService:
         token: str,
         candidate_ids: List[str],
         chunk_size: int = 50,
+        priority: str = _bi_rate_limit.INTERACTIVE,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Fetch CandidatesQualificationsDetail in batch and group by candidate ID."""
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
@@ -6185,6 +6221,8 @@ class JobDivaService:
                         client,
                         endpoint,
                         max_wait_s=60.0,
+                        priority=priority,
+                        label="CandidatesQualificationsDetail",
                         params={"candidateIds": numeric_ids},
                         headers=headers,
                     )
@@ -6219,7 +6257,9 @@ class JobDivaService:
         logger.info(f"CandidatesQualificationsDetail: fetched qualifications for {len(results)} candidates out of {len(ids)} requested")
         return results
 
-    async def get_candidate_qualifications(self, candidate_id: str) -> List[Dict[str, Any]]:
+    async def get_candidate_qualifications(
+        self, candidate_id: str, priority: str = _bi_rate_limit.INTERACTIVE
+    ) -> List[Dict[str, Any]]:
         """
         Fetch qualification history for a candidate from JobDiva BI endpoint.
         Uses /apiv2/bi/CandidatesQualificationsDetail.
@@ -6245,7 +6285,8 @@ class JobDivaService:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await _bi_rate_limit.bi_get(
-                    client, url, max_wait_s=60.0, params=params, headers=headers
+                    client, url, max_wait_s=60.0, priority=priority,
+                    label="CandidatesQualificationsDetail", params=params, headers=headers,
                 )
                 if response is None:
                     logger.warning(f"get_candidate_qualifications: no JobDiva slot within 60s for {numeric_cid}")

@@ -6,6 +6,7 @@ import psycopg2.extras
 import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
+from services import jobdiva_rate_limit as _bi_rate_limit
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from core.db import get_db_connection
 from services.feedback_metrics import count_feedback_metrics
@@ -468,7 +469,9 @@ class AutoAssignService:
                 continue
 
             # 2+3. Check candidate has PAIR qualification within 60 days of submittal
-            quals = await jobdiva_service.get_candidate_qualifications(candidate_id)
+            quals = await jobdiva_service.get_candidate_qualifications(
+                candidate_id, priority=_bi_rate_limit.BACKGROUND
+            )
             if not quals:
                 continue
 

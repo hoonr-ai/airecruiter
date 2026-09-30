@@ -2033,8 +2033,9 @@ function NewJobPageContent() {
   // array changes on every streamed result, selection and poll answer, and
   // each change used to fire an immediate poll and reset the attempt cap, so
   // one tab sent bursts of polls and nginx 503'd them (incident 2026-09-29,
-  // see fix.md). Attempts, last-poll time and backoff live in refs so a
-  // re-run keeps the cadence instead of restarting it.
+  // docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Attempts, last-poll
+  // time and backoff live in refs so a re-run keeps the cadence instead of
+  // restarting it.
   const otwPendingKey = useMemo(() => {
     const urls = new Set<string>();
     for (const c of candidates) {
@@ -2052,7 +2053,15 @@ function NewJobPageContent() {
   const otwSeenUrlsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!otwPendingKey) return;
+    if (!otwPendingKey) {
+      // Nothing pending (all resolved, or given up): forget this round so a
+      // later search that returns the same URLs gets a fresh attempt budget
+      // instead of hitting the cap and being marked false straight away.
+      otwAttemptsRef.current = 0;
+      otwDelayRef.current = 5000;
+      otwSeenUrlsRef.current = new Set();
+      return;
+    }
     const pendingUrls = otwPendingKey.split("\n");
 
     // Cap at 24 polls (~2 min) so a stuck backend never spins the chip
