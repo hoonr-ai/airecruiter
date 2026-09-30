@@ -364,6 +364,20 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         except (TypeError, ValueError):
             within_miles = 25
 
+        additional_locations = []
+        if locations and len(locations) > 1:
+            for loc in locations[1:]:
+                v = loc.get("value", "")
+                if v:
+                    loc_rad = 25
+                    try:
+                        r = "".join(ch for ch in str(loc.get("radius") or "") if ch.isdigit())
+                        if r:
+                            loc_rad = int(r)
+                    except ValueError:
+                        pass
+                    additional_locations.append({"value": v, "within_miles": loc_rad})
+
         return SearchCriteria(
             job_id=str(resolved_job_ref),
             title_criteria=title_criteria,
@@ -372,6 +386,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             companies=sourcing_filters.get("companies") or [],
             resume_match_filters=resume_match_filters,
             location=primary_location,
+            additional_locations=additional_locations,
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             min_experience_years=min_experience_years,
@@ -744,10 +759,27 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
 
         # Canonicalize location: top-level `location` is authoritative.
         location = ""
+        additional_locations: list = []
         if request.location:
             location = request.location
         elif request.locations:
             location = request.locations[0].value
+
+        # Multi-location: carry remaining locations beyond the primary.
+        if request.locations and len(request.locations) > 1:
+            for loc in request.locations[1:]:
+                loc_value = str(loc.value or "").strip()
+                if not loc_value:
+                    continue
+                loc_radius = 25
+                if loc.radius:
+                    digits = "".join(ch for ch in str(loc.radius) if ch.isdigit())
+                    if digits:
+                        loc_radius = min(100, max(1, int(digits)))
+                additional_locations.append({
+                    "value": loc_value,
+                    "within_miles": loc_radius,
+                })
 
         # Work arrangement: request wins; else read monitored_jobs so Remote
         # jobs skip the commute-radius constraint even when the caller
@@ -835,6 +867,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
             location=location,
+            additional_locations=additional_locations,
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             companies=companies,
@@ -1028,6 +1061,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    additional_locations=additional_locations,
                     location_type=location_type or "Unspecified",
                     within_miles=within_miles,
                     companies=request.companies or [],

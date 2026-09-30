@@ -305,6 +305,10 @@ class SearchCriteria(BaseModel):
     resume_match_filters: List[Dict[str, Any]] = []
     location: str = ""
     within_miles: int = 25
+    # Multi-location sourcing: additional locations beyond the primary.
+    # Each dict has "value" (location string) and optionally "within_miles".
+    # The location filter passes if the candidate is near ANY location.
+    additional_locations: List[Dict[str, Any]] = []
     # Job work arrangement ("Remote" | "Hybrid" | "Onsite" | "Unspecified").
     # Remote jobs skip the commute-radius constraint entirely (any US
     # location passes; non-US is still dropped).
@@ -2793,6 +2797,59 @@ class UnifiedCandidateSearch:
                 titles=title_pull_variants,
             )
 
+            # Multi-location: also search each additional location and merge.
+            additional_locs = getattr(criteria, "additional_locations", None) or []
+            for loc_entry in additional_locs:
+                loc_value = str(loc_entry.get("value") or "").strip()
+                if not loc_value:
+                    continue
+                loc_miles = loc_entry.get("within_miles", criteria.within_miles)
+                try:
+                    loc_miles = max(1, min(100, int(loc_miles)))
+                except (TypeError, ValueError):
+                    loc_miles = criteria.within_miles
+                # Build geo params for this additional location.
+                alt_criteria = criteria.copy(update={
+                    "location": loc_value,
+                    "within_miles": loc_miles,
+                    "additional_locations": [],
+                })
+                alt_countries, alt_states, alt_geo_zip = self._resolve_jobdiva_geo(alt_criteria)
+                if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+                    alt_geo_zip = ""
+                    alt_states = []
+                try:
+                    alt_candidates = await self.jobdiva_service.search_candidates(
+                        skills=list(criteria.skill_criteria or []),
+                        location=loc_value,
+                        page=1,
+                        limit=max_total,
+                        job_id=None,
+                        boolean_string=(
+                            criteria.boolean_string
+                            or self._build_boolean_string(criteria, dialect="jobdiva")
+                        ),
+                        recent_days=getattr(criteria, "recent_days", None),
+                        require_resume=getattr(criteria, "require_resume", True),
+                        countries=alt_countries,
+                        states=alt_states,
+                        page_number=0,
+                        zip_code=alt_geo_zip,
+                        within_miles=loc_miles,
+                        titles=title_pull_variants,
+                    )
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Multi-location TalentSearch for '{loc_value}' returned "
+                        f"{len(alt_candidates)} candidate(s)",
+                    )
+                    all_candidates.extend(alt_candidates)
+                except Exception as loc_err:
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Multi-location search failed for '{loc_value}': {loc_err}",
+                    )
+
             self._log_stage(
                 "TalentSearch",
                 f"TalentSearch returned {len(all_candidates)} candidate(s) "
@@ -3529,7 +3586,17 @@ class UnifiedCandidateSearch:
             if is_jobdiva:
                 parts.append("IN {US}")
         elif criteria.location:
-            add_unique(parts, seen_must, quote(criteria.location), criteria.location)
+            # Multi-location: combine primary + additional locations as OR.
+            loc_parts = [criteria.location]
+            for loc in (getattr(criteria, "additional_locations", None) or []):
+                v = str(loc.get("value") or "").strip()
+                if v and v not in loc_parts:
+                    loc_parts.append(v)
+            if len(loc_parts) == 1:
+                add_unique(parts, seen_must, quote(criteria.location), criteria.location)
+            else:
+                loc_clause = "(" + " OR ".join(quote(lp) for lp in loc_parts) + ")"
+                parts.append(loc_clause)
 
         boolean_string = " AND ".join(part for part in parts if part and part != "()") or "*"
         if exclude_terms:
@@ -3910,6 +3977,66 @@ class UnifiedCandidateSearch:
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
     ) -> Tuple[bool, str, Optional[float]]:
+        """Multi-location wrapper: try primary location, then each
+        additional location. Returns the best (closest) match."""
+        additional = getattr(criteria, "additional_locations", None) or []
+        if not criteria.location and not additional:
+            return True, "no_location_requirement", None
+
+        # Try primary location first.
+        if criteria.location:
+            ok, reason, distance = self._single_location_match_verdict(candidate, criteria)
+            # If within radius for primary, return immediately.
+            if ok and reason not in ("outside_radius_soft_keep", "geocode_unavailable_keep",
+                                     "candidate_location_missing_keep"):
+                return ok, reason, distance
+        else:
+            ok, reason, distance = True, "no_primary_location", None
+
+        # Try each additional location — build a temporary criteria with
+        # the additional location's value and radius. Return the closest
+        # match found across all locations.
+        best_ok, best_reason, best_distance = ok, reason, distance
+        for loc_entry in additional:
+            loc_value = str(loc_entry.get("value") or "").strip()
+            if not loc_value:
+                continue
+            loc_miles = loc_entry.get("within_miles", criteria.within_miles)
+            try:
+                loc_miles = max(1, min(100, int(loc_miles)))
+            except (TypeError, ValueError):
+                loc_miles = criteria.within_miles
+            # Build a shallow copy of criteria with this location.
+            alt_criteria = criteria.copy(update={
+                "location": loc_value,
+                "within_miles": loc_miles,
+                "additional_locations": [],  # prevent recursion
+            })
+            alt_ok, alt_reason, alt_distance = self._single_location_match_verdict(
+                candidate, alt_criteria
+            )
+            # If within radius for this location, return immediately.
+            if alt_ok and alt_reason not in ("outside_radius_soft_keep",
+                                              "geocode_unavailable_keep",
+                                              "candidate_location_missing_keep"):
+                return alt_ok, f"multi_loc_{alt_reason}", alt_distance
+            # Track closest distance across all locations.
+            if alt_distance is not None:
+                if best_distance is None or (
+                    isinstance(alt_distance, (int, float))
+                    and isinstance(best_distance, (int, float))
+                    and alt_distance < best_distance
+                ):
+                    best_ok, best_reason, best_distance = alt_ok, alt_reason, alt_distance
+
+        return best_ok, best_reason, best_distance
+
+    def _single_location_match_verdict(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> Tuple[bool, str, Optional[float]]:
+        """Check candidate against a single location from criteria."""
         if not criteria.location:
             return True, "no_location_requirement", None
 
@@ -4116,7 +4243,13 @@ class UnifiedCandidateSearch:
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
-        return bool(normalized_location)
+        if normalized_location:
+            return True
+        # Multi-location: enforce if any additional location is set.
+        for loc in (getattr(criteria, "additional_locations", None) or []):
+            if str(loc.get("value") or "").strip():
+                return True
+        return False
 
     def _parse_location(self, value: Any) -> Dict[str, str]:
         state_aliases = {
@@ -6381,7 +6514,15 @@ class UnifiedCandidateSearch:
         for company in criteria.companies:
             add_terms("companies", "must", [company])
         if self._should_enforce_location(criteria):
-            add_terms("location", "must", [criteria.location])
+            all_loc_values = []
+            if criteria.location:
+                all_loc_values.append(criteria.location)
+            for loc in (getattr(criteria, "additional_locations", None) or []):
+                v = str(loc.get("value") or "").strip()
+                if v and v not in all_loc_values:
+                    all_loc_values.append(v)
+            if all_loc_values:
+                add_terms("location", "must", all_loc_values)
 
         # PR-B: lift Certifications + Education filters from the Step-4
         # rubric into pre-screen. Other categories (skill / title /
