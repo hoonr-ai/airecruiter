@@ -27,6 +27,7 @@ interface FeedItem {
   ts: string;
   text: string;
   critical: boolean;
+  tone?: "good" | "critical" | "neutral";
 }
 
 export default function LiveReportPage() {
@@ -41,19 +42,24 @@ export default function LiveReportPage() {
   const feedIdCounterRef = useRef<number>(0);
 
   // Push into feed
-  const pushFeed = useCallback((text: string, critical = false) => {
-    feedIdCounterRef.current += 1;
-    const currentId = feedIdCounterRef.current;
-    setFeed((prev) => [
-      {
-        id: currentId,
-        ts: new Date().toLocaleTimeString(),
-        text,
-        critical,
-      },
-      ...prev.slice(0, 49), // retain up to 50 entries
-    ]);
-  }, []);
+  const pushFeed = useCallback(
+    (text: string, critical = false, tone?: "good" | "critical" | "neutral") => {
+      feedIdCounterRef.current += 1;
+      const currentId = feedIdCounterRef.current;
+      const resolvedTone = tone || (critical ? "critical" : "neutral");
+      setFeed((prev) => [
+        {
+          id: currentId,
+          ts: new Date().toLocaleTimeString(),
+          text,
+          critical,
+          tone: resolvedTone,
+        },
+        ...prev.slice(0, 49), // retain up to 50 entries
+      ]);
+    },
+    []
+  );
 
   // Self-healing SSE stream with auto-reconciling snapshot
   const activityEventRef = useRef<((event: any) => void) | null>(null);
@@ -81,9 +87,22 @@ export default function LiveReportPage() {
       status: string | null;
       terminalReason?: string | null;
     }) => {
+      const isFailed = event.status === "failed";
+      const isPassed =
+        event.status === "passed" ||
+        event.phase === "pass" ||
+        event.type === "evaluation_completed" ||
+        event.type === "interview_completed";
+      const tone: "good" | "critical" | "neutral" = isFailed
+        ? "critical"
+        : isPassed
+        ? "good"
+        : "neutral";
+
       pushFeed(
         `#${event.interviewId} ${event.type}${event.subtype ? ` (${event.subtype})` : ""} [${event.phase || "phase"}]`,
-        event.status === "failed"
+        isFailed,
+        tone
       );
 
       // Mutate snapshot candidate in real-time
@@ -271,6 +290,17 @@ export default function LiveReportPage() {
           if (!formatted) continue;
 
           const isFailed = evt.status === "failed";
+          const isPassed =
+            evt.status === "passed" ||
+            evt.phase === "pass" ||
+            evt.type === "evaluation_completed" ||
+            evt.type === "interview_completed" ||
+            cand.phase === "pass" && (evt.type.includes("evaluation") || evt.type.includes("interview"));
+          const tone: "good" | "critical" | "neutral" = isFailed
+            ? "critical"
+            : isPassed
+            ? "good"
+            : "neutral";
           const d = evt.ts ? new Date(evt.ts) : new Date();
           const tsStr = !Number.isNaN(d.getTime())
             ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
@@ -283,6 +313,7 @@ export default function LiveReportPage() {
             ts: tsStr,
             text: formatted,
             critical: isFailed,
+            tone,
           });
         }
       }
@@ -620,14 +651,24 @@ export default function LiveReportPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs divide-y divide-slate-50">
-              {feed.map((item) => (
-                <div key={item.id} className="pt-2 first:pt-0 flex items-start justify-between gap-2">
-                  <span className={item.critical ? "text-rose-600 font-medium" : "text-slate-700"}>
-                    {item.text}
-                  </span>
-                  <span className="text-[10px] text-slate-400 shrink-0 font-mono">{item.ts}</span>
-                </div>
-              ))}
+              {feed.map((item) => {
+                const isPassed = item.tone === "good" || item.text.includes("[Passed]") || item.text.includes("Passed");
+                const isFailed = item.critical || item.tone === "critical" || item.text.includes("[Failed]") || item.text.includes("Failed");
+                const textColor = isFailed
+                  ? "text-rose-600 font-medium"
+                  : isPassed
+                  ? "text-emerald-600 font-medium"
+                  : "text-slate-700";
+
+                return (
+                  <div key={item.id} className="pt-2 first:pt-0 flex items-start justify-between gap-2">
+                    <span className={textColor}>
+                      {item.text}
+                    </span>
+                    <span className="text-[10px] text-slate-400 shrink-0 font-mono">{item.ts}</span>
+                  </div>
+                );
+              })}
 
               {feed.length === 0 && (
                 <div className="h-full flex items-center justify-center text-slate-400 text-xs">
