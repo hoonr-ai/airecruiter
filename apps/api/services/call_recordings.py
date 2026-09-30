@@ -118,3 +118,46 @@ def find_recordings(
             ExpiresIn=PRESIGN_TTL_SECONDS,
         )
     return unique
+
+
+def mock_enabled() -> bool:
+    """Dev-only: show a fake recording so the player can be seen without S3."""
+    return (
+        os.getenv("MOCK_CALL_RECORDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
+        and os.getenv("ENVIRONMENT", "").strip().lower() != "production"
+    )
+
+
+def mock_recordings() -> List[Dict[str, Any]]:
+    now = datetime.now(timezone.utc).isoformat()
+    return [
+        {
+            "key": "mock/recording.wav",
+            "session_id": 0,
+            "size": 0,
+            "recorded_at": now,
+            "started_at": now,
+            "url": "/api/v1/engagement/mock-recording.wav",
+        }
+    ]
+
+
+def mock_wav(seconds: int = 8) -> bytes:
+    """A quiet 8s two-tone WAV, generated in memory."""
+    import io
+    import math
+    import struct
+    import wave
+
+    rate = 8000
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        frames = bytearray()
+        for i in range(rate * seconds):
+            freq = 440 if (i // rate) % 2 == 0 else 330
+            frames += struct.pack("<h", int(3000 * math.sin(2 * math.pi * freq * i / rate)))
+        w.writeframes(bytes(frames))
+    return buf.getvalue()

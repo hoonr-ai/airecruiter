@@ -537,7 +537,7 @@ export function AssessModal({
                         {recordings.length > 1 ? `Recording ${idx + 1} · ` : ""}
                         {new Date(rec.started_at || rec.recorded_at).toLocaleString()}
                       </p>
-                      <audio controls preload="none" src={rec.url} className="w-full h-9" />
+                      <audio controls preload="none" src={rec.url.startsWith("/") ? `${API_BASE}${rec.url}` : rec.url} className="w-full h-9" />
                     </div>
                   ))}
                 </div>

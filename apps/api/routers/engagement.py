@@ -3653,6 +3653,17 @@ async def get_assessment_data(interview_id: str):
     }
 
 
+@router.get("/mock-recording.wav")
+async def get_mock_recording():
+    """Dev-only stand-in audio for the recordings player (MOCK_CALL_RECORDINGS=true)."""
+    from fastapi.responses import Response
+    from services import call_recordings
+
+    if not call_recordings.mock_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(content=call_recordings.mock_wav(), media_type="audio/wav")
+
+
 @router.get("/interviews/{interview_id}/recordings")
 async def get_interview_recordings(interview_id: str):
     """Call recordings (S3) of an interview, with presigned playback URLs.
@@ -3663,6 +3674,8 @@ async def get_interview_recordings(interview_id: str):
     from services import call_recordings
 
     if not call_recordings.is_enabled():
+        if call_recordings.mock_enabled():
+            return {"success": True, "enabled": True, "recordings": call_recordings.mock_recordings()}
         return {"success": True, "enabled": False, "recordings": []}
 
     try:
