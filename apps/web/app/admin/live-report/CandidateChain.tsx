@@ -180,20 +180,20 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
         <div className="truncate text-xs text-slate-500 mt-0.5">
           {passed ? (
             <span
-              className="inline-flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded text-[11px] max-w-full truncate"
+              className="inline-flex items-center gap-1 font-semibold text-emerald-600 max-w-full truncate"
               title={scoreLabel ? `Passed · ${scoreLabel}` : "Passed"}
             >
-              <Check size={11} className="text-emerald-600 shrink-0" />
+              <Check size={12} className="text-emerald-600 shrink-0" />
               <span className="truncate">
                 Passed{candidate.overall_score != null ? ` · ${Math.round(candidate.overall_score)}%` : ""}
               </span>
             </span>
           ) : failedTerminal ? (
             <span
-              className="inline-flex items-center gap-1 font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded text-[11px] max-w-full truncate"
+              className="inline-flex items-center gap-1 font-semibold text-rose-600 max-w-full truncate"
               title={reasonLabel ? `Failed · ${reasonLabel}` : "Failed"}
             >
-              <AlertTriangle size={11} className="text-rose-600 shrink-0" />
+              <AlertTriangle size={12} className="text-rose-600 shrink-0" />
               <span className="truncate">
                 Failed{reasonLabel ? ` · ${reasonLabel}` : ""}
               </span>
