@@ -526,6 +526,17 @@ class UnifiedCandidateSearch:
             return None
         return detect_role_family(title_hint, "", criteria.skill_criteria or [])
 
+    @staticmethod
+    def _has_experience_years_constraint(criteria: "SearchCriteria") -> bool:
+        """Whether sourcing must establish total YOE before emitting a row."""
+        for field in ("min_experience_years", "max_experience_years"):
+            try:
+                if int(getattr(criteria, field, 0) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
 
     def _log_stage(self, stage: str, message: str) -> None:
         logger.info("[CandidateSearch] %s | %s", stage, message)
@@ -1352,7 +1363,7 @@ class UnifiedCandidateSearch:
                     "Applicants",
                     f"Found {len(applicants)} applicants; starting resume screen...",
                 )
-                if criteria.bypass_screening:
+                if criteria.bypass_screening and not self._has_experience_years_constraint(criteria):
                     self._log_stage("Applicants", f"Bypassing LLM enrichment for {len(applicants)} applicants (instant sync mode).")
                     for cand in applicants:
                         assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
@@ -1568,13 +1579,14 @@ class UnifiedCandidateSearch:
                             source_label="JobDiva-JobAgent",
                             cap_label="JobAgent rank",
                             # Recruiter-authored criteria in JobDiva + its own
-                            # ranking → trust the results: high-level score only
-                            # (no per-candidate LLM skills-match), never dropped.
-                            # assess_all_sources (auto-launch flow) overrides
-                            # this: agent rows need a real, comparable score.
-                            high_level_scoring=bool(
-                                getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
-                            ) and not criteria.assess_all_sources,
+                            # ranking normally use a high-level score. A selected
+                            # YOE range is an explicit cap, however, and requires
+                            # résumé extraction before a row can be emitted.
+                            high_level_scoring=(
+                                bool(getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True))
+                                and not criteria.assess_all_sources
+                                and not self._has_experience_years_constraint(criteria)
+                            ),
                         )
 
                     # Two-phase fetch: JobAgentSearch latency scales with
@@ -4855,7 +4867,7 @@ class UnifiedCandidateSearch:
         # like 4 from title alone, killing real candidates pre-LLM).
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
         max_years = getattr(criteria, "max_experience_years", None)
-        
+
         if enforce_years:
             years = float(profile.get("years_of_experience") or 0)
             if years > 0:
@@ -6296,7 +6308,7 @@ class UnifiedCandidateSearch:
         criteria: SearchCriteria,
     ) -> bool:
         """Cheap regex check before LLM enrichment runs.
-        
+
         True only when the candidate's headline / abstract / resume_text
         head contains a parseable years number AND that number is above
         `criteria.max_experience_years`.
@@ -6756,7 +6768,7 @@ class UnifiedCandidateSearch:
                             ),
                         )
                         return {"status": "failed_filter", "candidate": None}
-                    
+
                     if self._candidate_above_max_years_pre_llm(candidate, criteria):
                         counters.setdefault("pre_llm_skipped_max_years", 0)
                         counters["pre_llm_skipped_max_years"] += 1
@@ -6769,7 +6781,7 @@ class UnifiedCandidateSearch:
                         )
                         return {"status": "failed_filter", "candidate": None}
 
-                    if criteria.bypass_screening:
+                    if criteria.bypass_screening and not self._has_experience_years_constraint(criteria):
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
                         # In bypass mode, we still ensure name/title/location are basic-hydrated
                         # even without LLM if JobDiva already has them.
@@ -7167,7 +7179,7 @@ class UnifiedCandidateSearch:
                         await _keep("kept_max_years")
                         return
 
-                    if criteria.bypass_screening:
+                    if criteria.bypass_screening and not self._has_experience_years_constraint(criteria):
                         self._log_stage(
                             "ResumeScreen",
                             f"Bypassing LLM extraction for candidate_id={cid} (auto-sync mode)",

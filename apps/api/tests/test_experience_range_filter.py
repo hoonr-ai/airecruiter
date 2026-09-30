@@ -33,6 +33,15 @@ def test_experience_range_accepts_candidate_inside_inclusive_bounds():
     assert assessment["passes"] is True
 
 
+def test_experience_constraint_disables_jobagent_high_level_scoring():
+    scorer = _scorer()
+
+    assert scorer._has_experience_years_constraint(
+        SearchCriteria(job_id="26-100", min_experience_years=2, max_experience_years=5)
+    ) is True
+    assert scorer._has_experience_years_constraint(SearchCriteria(job_id="26-100")) is False
+
+
 @pytest.mark.parametrize("model, kwargs", [
     (CandidateSearchRequest, {"job_id": "26-100"}),
     (SearchCriteria, {"job_id": "26-100"}),
