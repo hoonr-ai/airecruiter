@@ -8,7 +8,7 @@ import re
 import time
 from typing import List, Dict, Any, Optional, Sequence, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from services.jobdiva import JobDivaService
 from utils.email_utils import is_placeholder_email
@@ -328,6 +328,16 @@ class SearchCriteria(BaseModel):
     require_resume: bool = True
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
+    max_experience_years: Optional[int] = Field(None, ge=1, le=40)
+
+    @model_validator(mode="after")
+    def experience_years_form_a_valid_range(self):
+        """Keep saved/re-score criteria from creating an impossible YOE range."""
+        minimum = self.min_experience_years
+        maximum = self.max_experience_years
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("min_experience_years cannot exceed max_experience_years")
+        return self
     # JobDiva tranche controls. Initial search uses offset=0/batch=150; the
     # "Search more" action uses offset=150/batch=150 to append the next page.
     jobdiva_offset: int = 0
@@ -515,6 +525,14 @@ class UnifiedCandidateSearch:
         if not title_hint:
             return None
         return detect_role_family(title_hint, "", criteria.skill_criteria or [])
+
+    @staticmethod
+    def _has_experience_years_range(criteria: "SearchCriteria") -> bool:
+        """Whether an upper YOE cap makes the range a strict hard filter."""
+        try:
+            return int(criteria.max_experience_years or 0) > 0
+        except (TypeError, ValueError):
+            return False
 
 
     def _log_stage(self, stage: str, message: str) -> None:
@@ -1075,6 +1093,27 @@ class UnifiedCandidateSearch:
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
+            # A selected experience range is an explicit recruiter constraint,
+            # unlike the normal JobDiva relevance gate (which intentionally
+            # remains advisory).  Do not let JOBDIVA_BYPASS_PASS_GATE leak an
+            # enriched candidate outside that range back into Step 5.
+            range_failure = self._has_experience_years_range(criteria) and (
+                assessment.get("min_years_failure")
+                or assessment.get("max_years_failure")
+            ) if isinstance(assessment, dict) else False
+            if range_failure:
+                self._log_stage(
+                    "ExperienceGate",
+                    f"dropping candidate_id={cid} outside configured experience range",
+                )
+                if not as_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "experience_years_out_of_range"},
+                    })
+                return False
             if not assessment.get("passes") and location_reason in {"non_us_candidate"}:
                 distance = cand.get("distance_miles")
                 self._log_stage(
@@ -1321,7 +1360,7 @@ class UnifiedCandidateSearch:
                     "Applicants",
                     f"Found {len(applicants)} applicants; starting resume screen...",
                 )
-                if criteria.bypass_screening:
+                if criteria.bypass_screening and not self._has_experience_years_range(criteria):
                     self._log_stage("Applicants", f"Bypassing LLM enrichment for {len(applicants)} applicants (instant sync mode).")
                     for cand in applicants:
                         assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
@@ -1531,19 +1570,25 @@ class UnifiedCandidateSearch:
                             _jc = str(_c.get("candidate_id") or _c.get("id") or "")
                             if _jc:
                                 jobagent_matched_ids.add(_jc)
+                        if self._has_experience_years_range(criteria):
+                            self._log_stage(
+                                "ExperienceGate",
+                                "JobAgent range filter enabled; extracting résumés before emitting candidates",
+                            )
                         await _process_talent_pool(
                             jobagent_res,
                             stage_name="JobDiva",
                             source_label="JobDiva-JobAgent",
                             cap_label="JobAgent rank",
                             # Recruiter-authored criteria in JobDiva + its own
-                            # ranking → trust the results: high-level score only
-                            # (no per-candidate LLM skills-match), never dropped.
-                            # assess_all_sources (auto-launch flow) overrides
-                            # this: agent rows need a real, comparable score.
-                            high_level_scoring=bool(
-                                getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
-                            ) and not criteria.assess_all_sources,
+                            # ranking normally use a high-level score. A selected
+                            # YOE range is an explicit cap, however, and requires
+                            # résumé extraction before a row can be emitted.
+                            high_level_scoring=(
+                                bool(getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True))
+                                and not criteria.assess_all_sources
+                                and not self._has_experience_years_range(criteria)
+                            ),
                         )
 
                     # Two-phase fetch: JobAgentSearch latency scales with
@@ -1820,7 +1865,6 @@ class UnifiedCandidateSearch:
                         # snippet shows fewer years than the configured floor.
                         if self._candidate_below_min_years_pre_llm(cand, criteria):
                             return {"status": "failed_filter"}
-
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
                             return {"status": "failed_filter"}
@@ -1860,11 +1904,32 @@ class UnifiedCandidateSearch:
                             cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
                             cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
+                        cand["experience_years"] = (
+                            cand["enhanced_info"].get("years_of_experience")
+                            or cand.get("experience_years")
+                        )
                         # Résumé is final for residence (see
                         # _apply_resume_location): an explicitly stated
                         # résumé location replaces the profile's; the profile
                         # value only stands when the résumé is silent.
                         self._apply_resume_location(cand)
+                        # The heuristic gate above is only an early cost saver.
+                        # Once enrichment has extracted total YOE, enforce the
+                        # requested range against that authoritative value.
+                        range_assessment = self._filter_assessment(
+                            cand, criteria, enforce_years=True
+                        )
+                        if (
+                            range_assessment.get("min_years_failure")
+                            or range_assessment.get("max_years_failure")
+                        ):
+                            self._log_stage(
+                                "ExperienceGate",
+                                "dropping candidate_id=%s outside configured experience range" % (
+                                    cand.get("candidate_id") or cand.get("id"),
+                                ),
+                            )
+                            return {"status": "failed_experience_range"}
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 
@@ -4800,16 +4865,27 @@ class UnifiedCandidateSearch:
         # heuristic default (which JobDiva can populate as a constant
         # like 4 from title alone, killing real candidates pre-LLM).
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if enforce_years and min_years > 0:
+        max_years = getattr(criteria, "max_experience_years", None)
+
+        if enforce_years:
             years = float(profile.get("years_of_experience") or 0)
-            if 0 < years < min_years:
-                return {
-                    "passes": False,
-                    "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
-                    "matched": self._dedupe_terms(matched),
-                    "excluded": self._dedupe_terms(excluded),
-                    "min_years_failure": True,
-                }
+            if years > 0:
+                if min_years > 0 and years < min_years:
+                    return {
+                        "passes": False,
+                        "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
+                        "matched": self._dedupe_terms(matched),
+                        "excluded": self._dedupe_terms(excluded),
+                        "min_years_failure": True,
+                    }
+                if max_years is not None and int(max_years) > 0 and years > int(max_years):
+                    return {
+                        "passes": False,
+                        "missing": [f"YOE: maximum {int(max_years)} years (resume shows {int(years)})"],
+                        "matched": self._dedupe_terms(matched),
+                        "excluded": self._dedupe_terms(excluded),
+                        "max_years_failure": True,
+                    }
 
         if self._should_enforce_location(criteria):
             location_ok, reason, distance = self._location_match_verdict(candidate, criteria)
@@ -6661,7 +6737,7 @@ class UnifiedCandidateSearch:
                         )
                         return {"status": "failed_filter", "candidate": None}
 
-                    if criteria.bypass_screening:
+                    if criteria.bypass_screening and not self._has_experience_years_range(criteria):
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
                         # In bypass mode, we still ensure name/title/location are basic-hydrated
                         # even without LLM if JobDiva already has them.
@@ -7046,7 +7122,7 @@ class UnifiedCandidateSearch:
                         await _keep("kept_min_years")
                         return
 
-                    if criteria.bypass_screening:
+                    if criteria.bypass_screening and not self._has_experience_years_range(criteria):
                         self._log_stage(
                             "ResumeScreen",
                             f"Bypassing LLM extraction for candidate_id={cid} (auto-sync mode)",
