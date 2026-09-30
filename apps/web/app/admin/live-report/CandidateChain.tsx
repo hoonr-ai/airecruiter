@@ -85,12 +85,34 @@ interface CandidateChainProps {
 }
 
 export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }) => {
-  const reached = phaseToStopIndex(candidate.phase);
   const isTerminal = TERMINAL_PHASES.has(candidate.phase);
   const passed = candidate.phase === "pass" || candidate.terminal_reason === "passed";
   const restedNoResponse = candidate.phase === "pending";
   const failedTerminal =
     isTerminal && !passed && !restedNoResponse && candidate.phase !== "completed";
+
+  // If candidate is in a terminal phase (pass, fail, outreach_failed, completed),
+  // find the highest phase that was actually reached/attempted, rather than blindly defaulting to 4.
+  const reached = (() => {
+    if (!isTerminal) {
+      return phaseToStopIndex(candidate.phase);
+    }
+    // Check highest phase from event_counts_by_phase or events
+    let maxIndex = 0;
+    const phaseKeys = Object.keys(candidate.event_counts_by_phase || {});
+    for (const k of phaseKeys) {
+      if ((candidate.event_counts_by_phase?.[k] ?? 0) > 0) {
+        maxIndex = Math.max(maxIndex, phaseToStopIndex(k));
+      }
+    }
+    for (const evt of candidate.events || []) {
+      if (evt.phase) {
+        maxIndex = Math.max(maxIndex, phaseToStopIndex(evt.phase));
+      }
+    }
+    // If no phase events were logged, default to 0 (contact check)
+    return maxIndex;
+  })();
   const outcome = candidate.call_outcome ? OUTCOME_META[candidate.call_outcome] : null;
   const unknownPhase = !isKnownPhase(candidate.phase);
   const idle = candidate.idle_minutes;

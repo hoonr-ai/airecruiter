@@ -92,20 +92,23 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
             {total === 0 || segments.length === 0 ? (
               <span className="h-full w-full bg-slate-200 rounded-full" />
             ) : (
-              segments.map((s) => {
-                const pct = total > 0 ? (s.n / total) * 100 : 0;
-                return (
-                  <span
-                    key={s.label}
-                    title={`${s.label}: ${s.n} (${Math.round(pct)}%)`}
-                    className="h-full transition-all duration-700"
-                    style={{
-                      width: `${pct}%`,
-                      background: s.color,
-                    }}
-                  />
-                );
-              })
+              (() => {
+                const totalSegmentCount = Math.max(total, segments.reduce((sum, s) => sum + s.n, 0));
+                return segments.map((s) => {
+                  const pct = totalSegmentCount > 0 ? (s.n / totalSegmentCount) * 100 : 0;
+                  return (
+                    <span
+                      key={s.label}
+                      title={`${s.label}: ${s.n} (${Math.round(pct)}%)`}
+                      className="h-full transition-all duration-700"
+                      style={{
+                        width: `${pct}%`,
+                        background: s.color,
+                      }}
+                    />
+                  );
+                });
+              })()
             )}
           </span>
           <span className="mt-1 flex justify-between text-[10px] leading-3 text-slate-500">

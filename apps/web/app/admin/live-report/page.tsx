@@ -121,6 +121,10 @@ export default function LiveReportPage() {
     [pushFeed, setSnapshot]
   );
 
+  useEffect(() => {
+    activityEventRef.current = handleActivityEvent;
+  }, [handleActivityEvent]);
+
   const [searchLaunchTerm, setSearchLaunchTerm] = useState<string>("");
   const [debouncedSearch, setDebouncedSearch] = useState<string>("");
   const [isDropdownOpen, setIsDropdownOpen] = useState<boolean>(false);
@@ -291,7 +295,13 @@ export default function LiveReportPage() {
         if (prev.length === 0) {
           return allRecentEvents.slice(0, 30).map(({ rawTs, ...item }) => item);
         }
-        return prev;
+        // Merge missing events from snapshot if any arrived while feed was active
+        const existingTexts = new Set(prev.map((p) => p.text));
+        const newItems = allRecentEvents
+          .filter((item) => !existingTexts.has(item.text))
+          .map(({ rawTs, ...item }) => item);
+        if (newItems.length === 0) return prev;
+        return [...newItems, ...prev].slice(0, 50);
       });
     }
   }, [snapshot, formatRecruiterEvent]);
@@ -366,8 +376,16 @@ export default function LiveReportPage() {
               <Search className="h-3.5 w-3.5 text-slate-400 shrink-0" />
               <input
                 type="text"
+                role="combobox"
+                aria-expanded={isDropdownOpen}
+                aria-haspopup="listbox"
                 value={searchLaunchTerm}
                 onFocus={() => setIsDropdownOpen(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setIsDropdownOpen(false);
+                  }
+                }}
                 onChange={(e) => {
                   setSearchLaunchTerm(e.target.value);
                   setIsDropdownOpen(true);
@@ -405,7 +423,10 @@ export default function LiveReportPage() {
 
             {/* Floating Dropdown Results */}
             {isDropdownOpen && (
-              <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-72 overflow-y-auto divide-y divide-slate-100 animate-in fade-in zoom-in-95 duration-100">
+              <div
+                role="listbox"
+                className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-72 overflow-y-auto divide-y divide-slate-100 animate-in fade-in zoom-in-95 duration-100"
+              >
                 {launches.length > 0 ? (
                   launches.map((l) => {
                     const isSelected = l.bulk_id === selectedBulkId;

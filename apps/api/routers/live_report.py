@@ -150,6 +150,15 @@ async def get_live_report_launches(
     if jobdiva_id:
         params["jobdiva_id"] = jobdiva_id
 
+    # If Recruiter / Team Lead, scope accessible jobs before querying PairBot
+    if not user.is_admin:
+        accessible_ids = _get_user_accessible_jobdiva_ids(user)
+        if not accessible_ids:
+            return {"launches": [], "retention_days": 14}
+        if jobdiva_id and jobdiva_id.strip() not in accessible_ids:
+            return {"launches": [], "retention_days": 14}
+        params["accessible_jobdiva_ids"] = ",".join(sorted(accessible_ids))
+
     query_str = urllib.parse.urlencode(params)
     target_url = f"{base_target}?{query_str}"
     headers = _get_pair_headers()
@@ -172,11 +181,8 @@ async def get_live_report_launches(
     if user.is_admin:
         return {"launches": launch_list, "retention_days": retention_days}
 
-    # If Recruiter / Team Lead, filter by accessible jobdiva_ids
+    # Defensive double-check filter for recruiter / team lead
     accessible_ids = _get_user_accessible_jobdiva_ids(user)
-    if not accessible_ids:
-        return {"launches": [], "retention_days": retention_days}
-
     filtered = []
     for item in launch_list:
         item_jobdivas = {str(j).strip() for j in item.get("jobdiva_ids", [])}
