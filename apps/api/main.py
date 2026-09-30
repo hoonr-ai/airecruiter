@@ -108,15 +108,35 @@ async def lifespan(app: FastAPI):
     async def auto_sync_all_jobs():
         """
         Global sync agent that runs inside the app process.
-        Uses a simple 'skip loop' if a sync is already in progress.
+
+        Every uvicorn worker schedules this, and all of them draw on the same
+        JobDiva account quota as live Step 5 searches. A Postgres session
+        advisory lock lets only ONE worker run the cycle; the rest skip.
+        app.sync_in_progress still guards against overlap within a worker.
         """
         if getattr(app, "sync_in_progress", False):
             logger.info("🤖 [AutoSync] Cycle skipped: A sync is already running.")
             return
-            
+
+        lock_conn = None
+        got_lock = False
+        try:
+            lock_conn = get_db_connection()
+            lc = lock_conn.cursor()
+            lc.execute("SELECT pg_try_advisory_lock(%s)", (AUTO_SYNC_LOCK_KEY,))
+            got_lock = bool(lc.fetchone()[0])
+            lock_conn.commit()
+        except Exception as e:
+            logger.error(f"❌ [AutoSync] Could not take advisory lock: {e}")
+        if not got_lock:
+            if lock_conn is not None:
+                lock_conn.close()
+            logger.info("🔒 [AutoSync] Another worker is syncing this cycle; skipping.")
+            return
+
         app.sync_in_progress = True
         logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
-        
+
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -145,6 +165,17 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ [AutoSync] Cycle failed: {e}")
         finally:
             app.sync_in_progress = False
+            # A pooled connection outlives close(); a session lock left on it
+            # would block every later cycle on every worker.
+            try:
+                lock_conn.rollback()
+                uc = lock_conn.cursor()
+                uc.execute("SELECT pg_advisory_unlock(%s)", (AUTO_SYNC_LOCK_KEY,))
+                lock_conn.commit()
+            except Exception as e:
+                logger.warning(f"AutoSync advisory unlock failed: {e}")
+            finally:
+                lock_conn.close()
 
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
@@ -540,6 +571,7 @@ def save_monitored_jobs(jobs_data: Dict[str, Any]):
         jobdiva_service.monitor_job_locally(jid, details)
 
 POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
+AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
 
 
 async def poll_all_jobs():

@@ -418,9 +418,18 @@ CANDIDATES_DETAIL_CONCURRENCY = 1
 # bounds the retry count (len == max retries after the first attempt).
 CANDIDATES_DETAIL_RETRY_BACKOFF_S = [2.0, 5.0, 10.0, 20.0]
 
-# Pace successive CandidatesDetail requests by holding the concurrency slot
-# for this long after each request, so we don't burst past JobDiva's limiter.
-CANDIDATES_DETAIL_CHUNK_DELAY_S = 1.5
+# Spacing between requests is no longer per call: services/jobdiva_rate_limit
+# paces every JobDiva BI candidate request across all workers
+# (JOBDIVA_BI_MIN_INTERVAL_S, default 1.5s) and makes every caller wait out a
+# shared cooldown after any 429. CANDIDATES_DETAIL_CONCURRENCY above is now a
+# per-worker cap shared by all callers (incident 2026-09-29, see fix.md).
+
+# Total time one CandidatesDetail batch call may spend waiting for slots and
+# retrying. Past this, remaining chunks are dropped and background hydration
+# fills them in later, so a live Step 5 search never hangs on JobDiva.
+CANDIDATES_DETAIL_MAX_TOTAL_S = float(
+    _os.getenv("CANDIDATES_DETAIL_MAX_TOTAL_S", "90").strip() or "90"
+)
 
 # Policy: a JobDiva candidate is never hidden from Step 5 just for being
 # outside the search radius / in a different state. When True, the JobDiva
