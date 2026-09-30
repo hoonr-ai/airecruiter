@@ -171,14 +171,14 @@ export interface PhaseStop {
 }
 
 export const CHAIN_STOPS: readonly PhaseStop[] = [
-  { key: "contact_check", label: "Contact check", short: "Contact Check" },
-  { key: "phase1", label: "Phase 1", short: "Phase 1" },
-  { key: "phase1_6hr", label: "Phase 2", short: "Phase 2" },
-  { key: "phase2", label: "Phase 3", short: "Phase 3" },
-  { key: "phase3", label: "Phase 4", short: "Phase 4" },
-  { key: "phase1_extra", label: "Extra 1", short: "Extra 1" },
-  { key: "phase1_6hr_extra", label: "Extra 2", short: "Extra 2" },
-  { key: "phase2_extra", label: "Extra 3", short: "Extra 3" },
+  { key: "contact_check", label: "Contact check", short: "CC" },
+  { key: "phase1", label: "Phase 1", short: "P1" },
+  { key: "phase1_6hr", label: "Phase 2", short: "P2" },
+  { key: "phase2", label: "Phase 3", short: "P3" },
+  { key: "phase3", label: "Phase 4", short: "P4" },
+  { key: "phase1_extra", label: "Extra 1", short: "Ex1" },
+  { key: "phase1_6hr_extra", label: "Extra 2", short: "Ex2" },
+  { key: "phase2_extra", label: "Extra 3", short: "Ex3" },
 ] as const;
 
 export const isKnownPhase = (phase: string): boolean => {

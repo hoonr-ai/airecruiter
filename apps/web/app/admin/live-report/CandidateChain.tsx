@@ -282,11 +282,11 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
                     <Check size={13} strokeWidth={2.5} />
                   ) : (
                     <span
-                      className={`text-[11px] font-bold tracking-tight ${
+                      className={`text-[9px] font-bold tracking-tight ${
                         isNodeDone ? "text-white" : ""
                       }`}
                     >
-                      {i + 1}
+                      {stop.short}
                     </span>
                   )}
                 </div>
