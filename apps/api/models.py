@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Any, Dict, Literal
 
 class Skill(BaseModel):
@@ -143,8 +143,18 @@ class CandidateSearchRequest(BaseModel):
     require_resume: Optional[bool] = None
     include_relocation_candidates: Optional[bool] = None
     min_experience_years: Optional[int] = None
+    max_experience_years: Optional[int] = Field(None, ge=1, le=40)
     jobdiva_offset: int = 0
     jobdiva_batch_size: int = 150
+
+    @model_validator(mode="after")
+    def experience_years_form_a_valid_range(self):
+        """Reject an inverted YOE range instead of silently returning no rows."""
+        minimum = self.min_experience_years
+        maximum = self.max_experience_years
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("min_experience_years cannot exceed max_experience_years")
+        return self
     # Optional hiring client / account name. When omitted the backend reads
     # customer_name from monitored_jobs. Powers the "Same client / industry"
     # scoring dimension and the currently-employed-by-client veto.
@@ -399,6 +409,7 @@ class JobDescription(BaseModel):
     content: str
     required_skills: List[str] = []
     min_experience_years: int = 0
+    max_experience_years: Optional[int] = None
 
 # =====================================================
 # RONAK SKILLS INTEGRATION MODELS  
@@ -456,4 +467,3 @@ class CandidateFeedbackRequest(BaseModel):
     submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
     manager_email: Optional[str] = None
     recruiter_notes: Optional[str] = None
-

@@ -352,6 +352,21 @@ def test_criteria_builder_ignores_a_zero_or_junk_minimum():
         assert criteria.min_experience_years is None, raw
 
 
+def test_criteria_builder_discards_a_stale_inverted_maximum():
+    filters = {
+        "titles": [],
+        "skills": [],
+        "locations": [],
+        "minExperienceYears": 8,
+        "maxExperienceYears": 5,
+    }
+    with patch("routers.candidates.get_db_connection", return_value=_mock_criteria_conn(filters)):
+        criteria = _build_resume_matching_criteria("26-99999")
+    assert criteria is not None
+    assert criteria.min_experience_years == 8
+    assert criteria.max_experience_years is None
+
+
 # ---------------------------------------------------------------------------
 # Role family must not leak between a search and an off-search scorer
 # ---------------------------------------------------------------------------
