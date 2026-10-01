@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { Pause, Play } from "lucide-react";
+import { Pause, Play, RotateCcw } from "lucide-react";
+import { formatTimecode } from "@/lib/timecode";
 
 /**
  * Compact audio player for call recordings, with a loader in place of the
@@ -25,12 +26,24 @@ interface RecordingPlayerProps {
   className?: string;
 }
 
-const formatTimecode = (seconds: number): string => {
-  const total = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-};
+/**
+ * Remounts the inner player when `src` changes (a refreshed presigned URL or a
+ * re-fetched list) or on retry, so loaded/failed/duration never outlive the
+ * source they were measured on.
+ */
+export function RecordingPlayer(props: RecordingPlayerProps) {
+  const [attempt, setAttempt] = useState(0);
+  return (
+    <PlayerInner key={`${props.src}#${attempt}`} {...props} onRetry={() => setAttempt((n) => n + 1)} />
+  );
+}
 
-export function RecordingPlayer({ src, label = "recording", className = "" }: RecordingPlayerProps) {
+function PlayerInner({
+  src,
+  label = "recording",
+  className = "",
+  onRetry,
+}: RecordingPlayerProps & { onRetry: () => void }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // `loaded` flips once, on the first metadata; `buffering` covers every later
@@ -62,14 +75,22 @@ export function RecordingPlayer({ src, label = "recording", className = "" }: Re
     const audio = audioRef.current;
     if (!audio) return;
     audio.currentTime = Number(e.target.value);
-    setCurrent(audio.currentTime);
+    setCurrent(Math.floor(audio.currentTime));
   };
 
   if (failed) {
     return (
-      <p className={`text-[11px] text-slate-400 font-semibold ${className}`}>
-        This recording could not be loaded. Close and reopen to try again.
-      </p>
+      <div className={`flex items-center gap-3 ${className}`}>
+        <p className="text-[11px] text-slate-400 font-semibold">This recording could not be loaded.</p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+        >
+          <RotateCcw size={12} />
+          Retry
+        </button>
+      </div>
     );
   }
 
@@ -99,12 +120,19 @@ export function RecordingPlayer({ src, label = "recording", className = "" }: Re
           if (e.currentTarget.paused) setBuffering(false);
         }}
         onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
+        onPause={() => {
+          // A paused player is never "buffering": clearing here covers a Pause
+          // clicked while play() was pending or during a stall, where no
+          // later canplay/playing event is guaranteed.
+          setPlaying(false);
+          setBuffering(false);
+        }}
         onEnded={() => {
           setPlaying(false);
           setBuffering(false);
         }}
-        onTimeUpdate={(e) => setCurrent(e.currentTarget.currentTime)}
+        // Whole seconds: React skips the re-render when the value is unchanged.
+        onTimeUpdate={(e) => setCurrent(Math.floor(e.currentTarget.currentTime))}
         onError={() => {
           setBuffering(false);
           setFailed(true);
@@ -135,7 +163,8 @@ export function RecordingPlayer({ src, label = "recording", className = "" }: Re
         aria-label={`Seek ${label}`}
         min={0}
         max={duration ?? 0}
-        step={0.1}
+        step={1}
+        aria-valuetext={`${formatTimecode(current)} of ${duration === null ? "unknown" : formatTimecode(duration)}`}
         value={Math.min(current, duration ?? 0)}
         onChange={seek}
         disabled={duration === null}
