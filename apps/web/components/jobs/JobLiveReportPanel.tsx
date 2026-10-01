@@ -7,9 +7,7 @@ import {
   Eye,
   EyeOff,
   AlertTriangle,
-  ExternalLink,
 } from "lucide-react";
-import Link from "next/link";
 import { api } from "@/lib/api";
 import { useLiveReportStream } from "@/hooks/use-live-report-stream";
 import { JobBlock } from "@/app/admin/live-report/JobBlock";
@@ -265,16 +263,6 @@ export function JobLiveReportPanel({
           >
             <RefreshCw className={`h-4 w-4 ${isSnapshotLoading ? "animate-spin" : ""}`} />
           </button>
-
-          <Link
-            href={`/jobs/${jobId}/live-report`}
-            target="_blank"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-medium text-slate-600 hover:text-slate-900 transition-colors shadow-2xs"
-            title="Open dedicated page in new tab"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">New Tab</span>
-          </Link>
         </div>
       </div>
 
