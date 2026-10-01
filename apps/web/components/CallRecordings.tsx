@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Mic } from "lucide-react";
 import { API_BASE, authFetch } from "@/lib/api";
+import { RecordingPlayer } from "@/components/RecordingPlayer";
 
 interface CallRecording {
   key: string;
@@ -73,15 +74,10 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
             {recordings.length > 1 ? `Recording ${idx + 1} · ` : ""}
             {new Date(rec.started_at || rec.recorded_at).toLocaleString()}
           </p>
-          <audio
-            controls
-            preload="none"
-            aria-label={`Call recording ${idx + 1}`}
+          <RecordingPlayer
             src={rec.url.startsWith("/") ? `${API_BASE}${rec.url}` : rec.url}
-            className="w-full h-9"
-          >
-            Your browser does not support audio playback.
-          </audio>
+            label={`call recording ${idx + 1}`}
+          />
         </div>
       ))}
     </div>
