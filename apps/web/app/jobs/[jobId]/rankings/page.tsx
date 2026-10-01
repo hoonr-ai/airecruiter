@@ -26,6 +26,7 @@ import {
   Check,
   X,
   Activity,
+  Radio,
   Ban,
   AlertTriangle,
   PhoneOff,
@@ -651,6 +652,7 @@ export default function CandidateRankingsPage() {
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
+  const [viewMode, setViewMode] = useState<"table" | "live-report">("table");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [feedbackFilter, setFeedbackFilter] = useState<string>("");
   const [minScore, handleMinScoreChange, setMinScore] = useClampedScoreInput("");
@@ -2255,6 +2257,16 @@ export default function CandidateRankingsPage() {
                 <Activity className="w-3.5 h-3.5" />
                 <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
               </div>
+
+              <button
+                type="button"
+                onClick={() => router.push(`/jobs/${jobId}/live-report`)}
+                className="flex items-center gap-1.5 rounded-lg px-3 h-9 border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-emerald-700 hover:border-emerald-300 transition-all select-none shadow-sm cursor-pointer"
+                title="Open Live Report real-time telemetry for this job"
+              >
+                <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+                <span className="text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap">Live Report</span>
+              </button>
 
               {hasActiveFilters && (
                 <button

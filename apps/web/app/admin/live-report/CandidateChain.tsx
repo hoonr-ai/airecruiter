@@ -188,19 +188,49 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
   // Col 3 distinct event list (Email, Phone, SMS) + total counter
   const totalEvents = candidate.event_count ?? events.length;
 
+  const isDnc = Boolean(
+    candidate.is_dnc ||
+    candidate.dnc_stopped_at ||
+    (candidate.terminal_reason === "outreach_failed" && candidate.dnc_trigger)
+  );
+
   return (
     <div
-      className={`grid h-16 grid-cols-[170px_1fr_150px_160px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
-        candidate.is_stuck ? "lr-row-stuck bg-amber-50/15" : "bg-white"
+      className={`grid h-16 grid-cols-[170px_1fr_150px_160px] items-center gap-3 px-4 py-2 border-b last:border-b-0 transition-colors duration-200 ${
+        isDnc
+          ? "bg-rose-50/90 border-l-4 border-l-rose-600 border-b-rose-200 ring-1 ring-rose-200/80 shadow-xs"
+          : candidate.is_stuck
+          ? "lr-row-stuck bg-amber-50/15 border-slate-100 hover:bg-amber-50/25"
+          : "bg-white hover:bg-slate-50/70 border-slate-100"
       }`}
     >
       {/* ── COL 1: PROFILE ─────────────────────────────────────────────── */}
       <div className="min-w-0 flex flex-col justify-center">
-        <p className="truncate text-sm font-semibold tracking-tight text-slate-900">
-          {candidate.name}
-        </p>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <p className="truncate text-sm font-semibold tracking-tight text-slate-900">
+            {candidate.name}
+          </p>
+          {isDnc && (
+            <span
+              className="inline-flex shrink-0 items-center px-1.5 py-0.2 rounded text-[9px] font-bold uppercase tracking-wider bg-rose-600 text-white shadow-2xs"
+              title={candidate.dnc_message || "Candidate on DNC / Opt-Out list. Outreach suppressed."}
+            >
+              DNC
+            </span>
+          )}
+        </div>
         <div className="truncate text-xs text-slate-500 mt-0.5">
-          {passed ? (
+          {isDnc ? (
+            <span
+              className="inline-flex items-center gap-1 font-semibold text-rose-700 max-w-full truncate"
+              title={candidate.dnc_trigger ? `Suppressed · ${candidate.dnc_trigger}` : "Suppressed on DNC list"}
+            >
+              <AlertTriangle size={12} className="text-rose-600 shrink-0" />
+              <span className="truncate">
+                DNC · {candidate.dnc_trigger ? candidate.dnc_trigger.replace(/_/g, " ") : "Do Not Contact"}
+              </span>
+            </span>
+          ) : passed ? (
             <span
               className="inline-flex items-center gap-1 font-semibold text-emerald-600 max-w-full truncate"
               title={scoreLabel ? `Passed · ${scoreLabel}` : "Passed"}
