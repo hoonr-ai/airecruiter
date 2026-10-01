@@ -13,7 +13,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { API_BASE, authFetch } from "../lib/api";
 
-export { isRecruiterAddedQuestion, canEditQuestionType } from "../lib/question-moderation";
+import { isRecruiterAddedQuestion, canEditQuestionType } from "../lib/question-moderation";
+
+export { isRecruiterAddedQuestion, canEditQuestionType };
 
 export interface QuestionPolicyVerdict {
     ok: boolean;
