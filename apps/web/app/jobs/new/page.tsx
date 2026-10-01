@@ -2197,13 +2197,17 @@ function NewJobPageContent() {
       const embeddedDetails = draft.job_details;
       const hasEmbeddedDetails = embeddedDetails && (embeddedDetails.title || embeddedDetails.customer_name);
 
+      let finalJobData: any = null;
+      let finalJobdivaId = "";
+      let finalIsExternal = false;
+
       if (hasEmbeddedDetails) {
-        setJobData(embeddedDetails);
+        finalJobData = embeddedDetails;
         if (embeddedDetails.jobdiva_id) {
-          setJobdivaId(embeddedDetails.jobdiva_id);
+          finalJobdivaId = embeddedDetails.jobdiva_id;
         }
         if (embeddedDetails.is_external || (embeddedDetails.jobdiva_id || "").startsWith("EXT-")) {
-          setIsExternal(true);
+          finalIsExternal = true;
         }
       } else {
         // Cold path: no persisted job_details yet (e.g. the user pasted a
@@ -2217,12 +2221,12 @@ function NewJobPageContent() {
 
         if (detailsResponse.ok) {
           const details = await detailsResponse.json();
-          setJobData(details);
+          finalJobData = details;
           if (details.jobdiva_id) {
-            setJobdivaId(details.jobdiva_id);
+            finalJobdivaId = details.jobdiva_id;
           }
           if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
-            setIsExternal(true);
+            finalIsExternal = true;
           }
         }
       }
@@ -2281,6 +2285,10 @@ function NewJobPageContent() {
       }
 
       // 4. Restore form state (Draft values overlay JobDiva values)
+      if (finalJobData) setJobData(finalJobData);
+      if (finalJobdivaId) setJobdivaId(finalJobdivaId);
+      if (finalIsExternal) setIsExternal(finalIsExternal);
+
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
       if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) {
         setEnhancedTitle(draft.enhanced_title || "");
