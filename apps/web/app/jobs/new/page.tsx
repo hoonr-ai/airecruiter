@@ -3219,6 +3219,103 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
+  // Step 2 auto-save for Publish fields (Job Title, AI Description, Job Boards)
+  const step2DirtyRef = useRef(false);
+  useEffect(() => {
+    if (currentStep !== 2) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step2DirtyRef.current = true;
+    const handle = setTimeout(async () => {
+      const ok = await saveJobDraft({ currentStep: 2, saveType: "auto", skipToast: true });
+      if (ok === true) step2DirtyRef.current = false;
+    }, 1500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentStep,
+    isReadOnly,
+    jobData,
+    jobTitle,
+    jobPosting,
+    selectedJobBoards,
+    botIntroduction,
+  ]);
+
+  // Flush a pending Step 2 save when the user navigates away from Step 2
+  useEffect(() => {
+    if (currentStep === 2) return;
+    if (!step2DirtyRef.current) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step2DirtyRef.current = false;
+    saveJobDraft({ currentStep: 2, saveType: "auto", skipToast: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
+
+  // Step 3 auto-save for Rubric fields (Titles, Skills, Education, Requirements etc.)
+  const step3DirtyRef = useRef(false);
+  useEffect(() => {
+    if (currentStep !== 3) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step3DirtyRef.current = true;
+    const handle = setTimeout(async () => {
+      const ok = await saveJobDraft({ currentStep: 3, saveType: "auto", skipToast: true });
+      if (ok === true) step3DirtyRef.current = false;
+    }, 1500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentStep,
+    isReadOnly,
+    jobData,
+    rubricData,
+    resumeMatchFilters,
+  ]);
+
+  // Flush a pending Step 3 save when the user navigates away from Step 3
+  useEffect(() => {
+    if (currentStep === 3) return;
+    if (!step3DirtyRef.current) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step3DirtyRef.current = false;
+    saveJobDraft({ currentStep: 3, saveType: "auto", skipToast: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
+
+  // Step 4 auto-save for Screening Questions
+  const step4DirtyRef = useRef(false);
+  useEffect(() => {
+    if (currentStep !== 4) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step4DirtyRef.current = true;
+    const handle = setTimeout(async () => {
+      const ok = await saveJobDraft({ currentStep: 4, saveType: "auto", skipToast: true });
+      if (ok === true) step4DirtyRef.current = false;
+    }, 1500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentStep,
+    isReadOnly,
+    jobData,
+    screenQuestions,
+  ]);
+
+  // Flush a pending Step 4 save when the user navigates away from Step 4
+  useEffect(() => {
+    if (currentStep === 4) return;
+    if (!step4DirtyRef.current) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step4DirtyRef.current = false;
+    saveJobDraft({ currentStep: 4, saveType: "auto", skipToast: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
+
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
       {Object.entries(STEP_LABELS).map(([step, label], index) => {
