@@ -3032,7 +3032,8 @@ function NewJobPageContent() {
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
-    skipToast?: boolean
+    skipToast?: boolean,
+    keepalive?: boolean
   }) => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
@@ -3066,6 +3067,7 @@ function NewJobPageContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: saveController.signal,
+        keepalive: stepData.keepalive,
         body: JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
