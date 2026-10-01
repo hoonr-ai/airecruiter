@@ -59,3 +59,39 @@ export function recordRedirectTimestamp(
     // Ignore storage write failures
   }
 }
+
+/**
+ * Extracts a human-readable error message from a backend API error response body.
+ * Handles FastAPI validation errors (array of loc/msg) and custom object details.
+ */
+export function extractErrorMessage(errorData: any, fallbackMessage: string): string {
+  if (!errorData) return fallbackMessage;
+
+  // Handle FastAPI validation error arrays
+  if (Array.isArray(errorData.detail)) {
+    return errorData.detail
+      .map((d: any) => d.msg || d.message || (typeof d === "string" ? d : JSON.stringify(d)))
+      .join(", ");
+  }
+
+  // Handle string detail
+  if (typeof errorData.detail === "string") {
+    return errorData.detail;
+  }
+
+  // Handle object detail (e.g. {"code": "...", "message": "..."})
+  if (errorData.detail && typeof errorData.detail === "object") {
+    if (typeof errorData.detail.message === "string") return errorData.detail.message;
+    if (typeof errorData.detail.msg === "string") return errorData.detail.msg;
+    // No known shape — fall back rather than surfacing raw JSON in a toast.
+    return fallbackMessage;
+  }
+
+  // Fallback properties on the root object
+  if (typeof errorData.message === "string") return errorData.message;
+  if (typeof errorData.msg === "string") return errorData.msg;
+
+  if (typeof errorData === "string") return errorData;
+
+  return fallbackMessage;
+}

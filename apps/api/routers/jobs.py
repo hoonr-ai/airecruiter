@@ -948,14 +948,47 @@ def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes
     except Exception as e:
         logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
 
-def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False) -> None:
+def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False, check_duplicate_launch: bool = False) -> None:
     if user.is_admin:
         return
     try:
         job_dict = _get_job_draft_sync(job_id)
         if job_dict.get("status") == "success" and job_dict.get("data"):
-            verify_job_access(job_dict["data"], user)
-            return
+            try:
+                verify_job_access(job_dict["data"], user)
+                return
+            except HTTPException as e:
+                if e.status_code == 403 and check_duplicate_launch:
+                    job_data = job_dict["data"]
+                    raw_emails = job_data.get("recruiter_emails", [])
+                    if isinstance(raw_emails, str):
+                        try:
+                            emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
+                        except Exception:
+                            emails = [raw_emails] if raw_emails else []
+                    elif isinstance(raw_emails, list):
+                        emails = raw_emails
+                    else:
+                        emails = []
+                    clean_assigned_emails = [str(email).strip().lower() for email in emails if email]
+                    if clean_assigned_emails:
+                        assigned_email = clean_assigned_emails[0]
+                        # Intentional: every authenticated caller here is an
+                        # internal recruiter at the same single-tenant org, so
+                        # revealing which teammate already launched the job
+                        # (to coordinate with them) is the point, not a leak
+                        # across org/tenant boundaries. Pinned by
+                        # test_auth_access.test_verify_job_access_by_id_duplicate_launch.
+                        raise HTTPException(
+                            status_code=403,
+                            detail={"code": "JOB_ALREADY_LAUNCHED", "recruiter_email": assigned_email, "message": f"Job has already been launched by {assigned_email}."}
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=403,
+                            detail={"code": "JOB_LOCKED", "message": "This job cannot be launched."}
+                        )
+                raise
         elif allow_not_found and job_dict.get("status") == "error" and "No data found" in str(job_dict.get("message", "")):
             return
     except Exception as e:
@@ -991,7 +1024,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     Save or update job data with real database persistence.
     Consolidated into monitored_jobs using the reference number as job_id.
     """
-    _verify_job_access_by_id(job_id, user, allow_not_found=True)
+    _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
     # Runs after the response — i.e. only when the save succeeded and the row
     # exists. First writer wins (services/job_attribution.py).
@@ -1075,8 +1108,12 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                         work_authorization = %s,
                         bot_introduction = %s,
                         screening_level = %s,
-                        processing_status = %s,
-                        current_step = %s,
+                        processing_status = CASE WHEN %s THEN processing_status ELSE %s END,
+                        -- GREATEST only on auto-saves, so a stray/out-of-order
+                        -- auto-save can't move current_step backwards. A manual
+                        -- save (explicit Next/back navigation) always sets the
+                        -- step directly, including deliberately backwards.
+                        current_step = CASE WHEN %s THEN GREATEST(current_step, %s) ELSE %s END,
                         customer_name = CASE 
                             WHEN %s IS NOT NULL AND %s NOT ILIKE 'Unknown%%' AND %s != '' THEN %s 
                             ELSE customer_name 
@@ -1097,8 +1134,11 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     draft_data.work_authorization,                       # work_authorization
                     draft_data.bot_introduction,                        # bot_introduction
                     draft_data.screening_level,                         # screening_level
+                    draft_data.is_auto_saved,                           # auto_save skips status update
                     f"step_{draft_data.current_step}_complete",         # processing_status
-                    draft_data.current_step,                            # current_step
+                    draft_data.is_auto_saved,                           # CASE: auto-save -> GREATEST path
+                    draft_data.current_step,                            # GREATEST bound (auto-save)
+                    draft_data.current_step,                            # direct set (manual save)
                     draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
                     draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
                     ref_code,                                           # 26-06182 (swapped)
@@ -1351,7 +1391,7 @@ async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, b
     """
     Auto-save progress when user navigates between steps.
     """
-    _verify_job_access_by_id(job_id, user, allow_not_found=True)
+    _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         draft_data.current_step = step
@@ -1386,7 +1426,7 @@ async def save_job_to_monitored_jobs_only(
     Save job data directly to monitored_jobs table without touching drafts table.
     This is used when the user wants form data to go straight to monitoring.
     """
-    _verify_job_access_by_id(job_id, user, allow_not_found=True)
+    _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
     background_tasks.add_task(stamp_job_posted_by, job_id, user.email)
     try:

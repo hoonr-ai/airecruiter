@@ -5,6 +5,8 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
+import { extractErrorMessage } from "@/lib/api-error";
+import { shouldSkipForInFlightManualSave, isSupersededAbort } from "@/lib/save-coordination";
 import {
   DEFAULT_SEARCH_SOURCES,
   SEARCH_SOURCES_VERSION,
@@ -98,6 +100,7 @@ import {
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow, type LaunchUnverifiedEmployer } from "@/hooks/use-engagement-flow";
 import { useStepActiveTime } from "@/hooks/use-step-active-time";
+import { useStepAutosave } from "@/hooks/use-step-autosave";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
 import {
   OUTREACH_MIN_SCORE,
@@ -1800,6 +1803,13 @@ function NewJobPageContent() {
   const [showResumeModal, setShowResumeModal] = useState(false);
 
   const [isHydratingJobSetup, setIsHydratingJobSetup] = useState(false);
+  // Gate autosave on a dedicated "hydration complete" signal instead of
+  // Boolean(jobData): loadJobDraft sets jobData partway through a sequence
+  // of setState calls (rubric, recruiter notes, sourcing filters, etc.), so
+  // Boolean(jobData) alone could flip true mid-hydration and let a spurious
+  // auto-save fire on page load/refresh before every field had its
+  // persisted value.
+  const isWizardHydrated = Boolean(jobData) && !isHydratingJobSetup;
   const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
   const stepStartMsRef = useRef<number>(Date.now());
 
@@ -2173,14 +2183,14 @@ function NewJobPageContent() {
       const draftResponse = await authFetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
       if (!draftResponse.ok) {
         console.error("Draft fetch HTTP error:", draftResponse.status);
-        return false;
+        return { ok: false };
       }
       const draftResult = await draftResponse.json();
 
       // Backend returns HTTP 200 with status:error when not found
       if (draftResult.status === "error" || !draftResult.data) {
         console.error("Draft not found:", draftResult.message);
-        return false;
+        return { ok: false };
       }
 
       const draft = draftResult.data;
@@ -2193,13 +2203,17 @@ function NewJobPageContent() {
       const embeddedDetails = draft.job_details;
       const hasEmbeddedDetails = embeddedDetails && (embeddedDetails.title || embeddedDetails.customer_name);
 
+      let finalJobData: any = null;
+      let finalJobdivaId = "";
+      let finalIsExternal = false;
+
       if (hasEmbeddedDetails) {
-        setJobData(embeddedDetails);
+        finalJobData = embeddedDetails;
         if (embeddedDetails.jobdiva_id) {
-          setJobdivaId(embeddedDetails.jobdiva_id);
+          finalJobdivaId = embeddedDetails.jobdiva_id;
         }
         if (embeddedDetails.is_external || (embeddedDetails.jobdiva_id || "").startsWith("EXT-")) {
-          setIsExternal(true);
+          finalIsExternal = true;
         }
       } else {
         // Cold path: no persisted job_details yet (e.g. the user pasted a
@@ -2213,12 +2227,12 @@ function NewJobPageContent() {
 
         if (detailsResponse.ok) {
           const details = await detailsResponse.json();
-          setJobData(details);
+          finalJobData = details;
           if (details.jobdiva_id) {
-            setJobdivaId(details.jobdiva_id);
+            finalJobdivaId = details.jobdiva_id;
           }
           if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
-            setIsExternal(true);
+            finalIsExternal = true;
           }
         }
       }
@@ -2226,6 +2240,9 @@ function NewJobPageContent() {
       // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
       // Always check for existing rubric regardless of current step to prevent redundant AI generation
       let loadedRubricForFallback: any = null;
+      let finalRubricData: any = null;
+      let finalScreenQuestions: any = null;
+      let finalBotIntroduction = "";
       try {
         const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
         if (rubricRes.ok) {
@@ -2233,7 +2250,7 @@ function NewJobPageContent() {
           // Only pre-load if it's an actual populated rubric, not an empty shell
           if (rData.titles?.length > 0 || rData.skills?.length > 0) {
             loadedRubricForFallback = applyTitleRequiredSafetyNet(rData);
-            setRubricData(loadedRubricForFallback);
+            finalRubricData = loadedRubricForFallback;
             // Seed the rubric-fingerprint refs from the loaded rubric so a
             // Step 3 → 4 / 4 → 5 transition without edits doesn't think the
             // rubric "changed since last regeneration" and clobber the saved
@@ -2247,13 +2264,12 @@ function NewJobPageContent() {
             // escape hatches (level change, explicit Regenerate, or rubric
             // change on Next) still work.
             if (rData.screen_questions?.length) {
-              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: resolveLockedFlag(q) })));
-              setQuestionIdCounter(rData.screen_questions.length + 1);
+              finalScreenQuestions = rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: resolveLockedFlag(q) }));
               userHasEditedQuestionsRef.current = true;
               lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
             }
             if (rData.bot_introduction) {
-              setBotIntroduction(rData.bot_introduction);
+              finalBotIntroduction = rData.bot_introduction;
               botIntroductionEditedRef.current = !matchesAutoBotIntroductionTemplate({
                 intro: rData.bot_introduction,
                 candidateTitles: [
@@ -2277,6 +2293,18 @@ function NewJobPageContent() {
       }
 
       // 4. Restore form state (Draft values overlay JobDiva values)
+      if (finalJobData) setJobData(finalJobData);
+      if (finalJobdivaId) setJobdivaId(finalJobdivaId);
+      if (finalIsExternal) setIsExternal(true);
+      if (finalRubricData) setRubricData(finalRubricData);
+      if (finalScreenQuestions) {
+        setScreenQuestions(finalScreenQuestions);
+        setQuestionIdCounter(finalScreenQuestions.length + 1);
+      }
+      if (finalBotIntroduction && !draft.bot_introduction) {
+        setBotIntroduction(finalBotIntroduction);
+      }
+
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
       if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) {
         setEnhancedTitle(draft.enhanced_title || "");
@@ -2436,11 +2464,11 @@ function NewJobPageContent() {
         setNumericJobId(jobIdToLoad);
       }
 
-      return true;
+      return { ok: true };
     } catch (error) {
       console.error("Failed to load draft:", error);
     }
-    return false;
+    return { ok: false };
   };
 
   const handleCreateExternal = async () => {
@@ -2548,7 +2576,7 @@ function NewJobPageContent() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        showToast(err.detail || "Failed to save resume", "error");
+        showToast(extractErrorMessage(err, "Failed to save resume"), "error");
         return;
       }
       const result = await res.json();
@@ -2594,7 +2622,7 @@ function NewJobPageContent() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        showToast(err.detail || "Bulk upload failed", "error");
+        showToast(extractErrorMessage(err, "Bulk upload failed"), "error");
         return;
       }
       const result = await res.json();
@@ -2846,7 +2874,7 @@ function NewJobPageContent() {
         step: 2,
         generated_length: (data?.description || "").length,
       });
-      return true;
+      return { ok: true };
     } catch (error) {
       const message = (error as Error)?.message ?? "unknown error";
       logger.error("ai_jd.enhance.exception", { message });
@@ -2855,7 +2883,7 @@ function NewJobPageContent() {
         step: 2,
         error: truncateForTelemetry(message),
       });
-      return false;
+      return { ok: false };
     } finally {
       setIsGeneratingJD(false);
     }
@@ -3021,38 +3049,54 @@ function NewJobPageContent() {
     });
   };
 
+  const saveAbortControllerRef = useRef<AbortController | null>(null);
+  // Tracks whether the save currently owning saveAbortControllerRef is an
+  // auto-save or a user-initiated (manual) one — see shouldSkipForInFlightManualSave.
+  const saveIsAutoRef = useRef(false);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
-    skipToast?: boolean
-  }) => {
+    skipToast?: boolean,
+    keepalive?: boolean
+  }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
       // entirely. Falsely returning true keeps the Next button flow intact
       // (it gates step transitions on save success) without mutating the
       // saved job.
-      return true;
+      return { ok: true };
     }
     if (!jobData || (!numericJobId && !jobdivaId)) {
       showToast("Job data not available for saving.", "info");
-      return false;
+      return { ok: false };
     }
+
+    const isAutoSave = stepData.saveType === "auto";
+
+    // "Latest wins" — but only among auto-saves. An auto-save must never
+    // cancel a save the user explicitly triggered (Next / Save & Exit):
+    // doing so surfaced a misleading "Save timed out" and blocked the step
+    // transition. A manual save may always supersede whatever's in flight
+    // (including another manual save, e.g. a rapid double-click).
+    if (saveAbortControllerRef.current) {
+      if (shouldSkipForInFlightManualSave({ inFlightIsAuto: saveIsAutoRef.current, incomingIsAuto: isAutoSave })) {
+        return { ok: true };
+      }
+      saveAbortControllerRef.current.abort("superseded");
+    }
+    const saveController = new AbortController();
+    saveAbortControllerRef.current = saveController;
+    saveIsAutoRef.current = isAutoSave;
 
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
     // gives the server a comfortable window to either succeed or return a
     // 500 with a real error. Without this, a hung backend (e.g. row-lock
     // contention pre-fix) left the user staring at a silent spinner.
-    const saveController = new AbortController();
-    const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
+    const saveTimeoutId = setTimeout(() => saveController.abort("timeout"), 20000);
     try {
       const apiUrl = API_BASE;
-      // Use the new endpoint that saves directly to monitored_jobs
-      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: saveController.signal,
-        body: JSON.stringify({
+      const requestBody = JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
           user_session: "default", // Add user session parameter required by API
@@ -3093,16 +3137,32 @@ function NewJobPageContent() {
             minExperienceYears,
             sourceLocationMiles,
           },
-          step1_completed: stepData.currentStep >= 1,
-          step2_completed: stepData.currentStep >= 2,
-          step3_completed: stepData.currentStep >= 3,
+          step1_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 1 : undefined,
+          step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
+          step3_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 3 : undefined,
           is_auto_saved: stepData.saveType === "auto"
-        })
+      });
+
+      // `keepalive: true` requests are capped (~64KB in Chromium) so the
+      // browser can guarantee delivery after the page starts unloading;
+      // past that they're silently dropped. A large rubric/JD payload can
+      // exceed it, so fall back to a normal fetch rather than guarantee a
+      // silent loss — best-effort during pagehide still beats nothing.
+      const KEEPALIVE_BYTE_LIMIT = 60000;
+      const useKeepalive = Boolean(stepData.keepalive) && new TextEncoder().encode(requestBody).length < KEEPALIVE_BYTE_LIMIT;
+
+      // Use the new endpoint that saves directly to monitored_jobs
+      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: saveController.signal,
+        keepalive: useKeepalive,
+        body: requestBody
       });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
-        const errorMessage = errorData?.detail || errorData?.message || `Save failed (HTTP ${response.status})`;
+        const errorMessage = extractErrorMessage(errorData, `Save failed (HTTP ${response.status})`);
         console.error("API Error Response:", errorData);
         throw new Error(errorMessage);
       }
@@ -3111,17 +3171,23 @@ function NewJobPageContent() {
       if (!stepData.skipToast) {
         showToast(stepData.saveType === "auto" ? "Auto-saved to monitored jobs" : "Saved to monitored jobs successfully", "success");
       }
-      return true;
+      return { ok: true };
     } catch (error) {
+      const isAbort = error instanceof Error && error.name === "AbortError";
+      if (isSupersededAbort(isAbort, saveController.signal.reason)) {
+        // A newer save (auto or manual) superseded this request — stay
+        // quiet and let that save own the toast/result; this is neither a
+        // failure nor a timeout.
+        return { ok: true };
+      }
       console.error("Error saving job to monitored jobs:", error);
+      const errorMsg = isAbort
+        ? "Save timed out — please retry."
+        : error instanceof Error ? error.message : "Failed to save. Please try again.";
       if (!stepData.skipToast) {
-        const isAbort = error instanceof DOMException && error.name === "AbortError";
-        const errorMsg = isAbort
-          ? "Save timed out — please retry."
-          : error instanceof Error ? error.message : "Failed to save. Please try again.";
         showToast(errorMsg, "error");
       }
-      return false;
+      return { ok: false, message: errorMsg };
     } finally {
       clearTimeout(saveTimeoutId);
     }
@@ -3136,22 +3202,7 @@ function NewJobPageContent() {
   // debounce hasn't flushed yet — if they click a different step indicator
   // within that window the cleanup below would clearTimeout, dropping the
   // edit. The currentStep-keyed effect further down catches that case.
-  const step5DirtyRef = useRef(false);
-  useEffect(() => {
-    if (currentStep !== 5) return;
-    if (isReadOnly) return;
-    if (!jobData) return;
-    step5DirtyRef.current = true;
-    const handle = setTimeout(async () => {
-      const ok = await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
-      if (ok) step5DirtyRef.current = false;
-    }, 1500);
-    return () => clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    currentStep,
-    isReadOnly,
-    jobData,
+  useStepAutosave(currentStep, 5, isReadOnly, isWizardHydrated, saveJobDraft, [
     searchSources,
     sourceTitles,
     sourceSkills,
@@ -3164,17 +3215,35 @@ function NewJobPageContent() {
     sourceLocationMiles,
   ]);
 
-  // Flush a pending Step 5 save when the user navigates away from Step 5
-  // (e.g., clicks the Step 4 indicator before the 1.5s debounce fires).
-  useEffect(() => {
-    if (currentStep === 5) return;
-    if (!step5DirtyRef.current) return;
-    if (isReadOnly) return;
-    if (!jobData) return;
-    step5DirtyRef.current = false;
-    saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentStep]);
+  // Step 1 auto-save for Intake fields (Recruiter Notes, Employment Type, Emails, Screening Level, Work Auth)
+  // Ensures data isn't lost if the user refreshes before clicking Next.
+  useStepAutosave(currentStep, 1, isReadOnly, isWizardHydrated, saveJobDraft, [
+    recruiterNotes,
+    selectedEmpTypes,
+    recruiterEmails,
+    screeningLevel,
+    workAuthorization,
+  ]);
+
+  // Step 2 auto-save for Publish fields (Job Title, Enhanced Title, AI Description, Job Boards)
+  useStepAutosave(currentStep, 2, isReadOnly, isWizardHydrated, saveJobDraft, [
+    jobTitle,
+    enhancedTitle,
+    jobPosting,
+    selectedJobBoards,
+    botIntroduction,
+  ]);
+
+  // Step 3 auto-save for Rubric fields (Titles, Skills, Education, Requirements etc.)
+  useStepAutosave(currentStep, 3, isReadOnly, isWizardHydrated, saveJobDraft, [
+    rubricData,
+    resumeMatchFilters,
+  ]);
+
+  // Step 4 auto-save for Screening Questions
+  useStepAutosave(currentStep, 4, isReadOnly, isWizardHydrated, saveJobDraft, [
+    screenQuestions,
+  ]);
 
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
@@ -10934,7 +11003,7 @@ return (
           className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
           onClick={async () => {
             const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-            if (saved) {
+            if (saved.ok) {
               router.push("/");
             }
           }}
@@ -10973,8 +11042,8 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 1 data. Please try again.", "error");
                     return;
                   }
                   trackStepAdvance(1, 2, { via: "next_button" });
@@ -10992,8 +11061,8 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 2 data. Please try again.", "error");
                     return;
                   }
 
@@ -11060,7 +11129,10 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                  if (!saved) return;
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 3 data. Please try again.", "error");
+                    return;
+                  }
                   // If the rubric (titles/skills/total_years) has been
                   // edited since the current Step-4 question set was
                   // generated, force-regenerate role-specific questions so
@@ -11084,7 +11156,10 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
-                  if (!saved) return;
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 4 data. Please try again.", "error");
+                    return;
+                  }
                   const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
                   // First entry: derive sourcing criteria from rubric.
                   // Subsequent entries: only refresh when the rubric or

@@ -7,6 +7,7 @@ import {
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
   recordRedirectTimestamp,
+  extractErrorMessage,
 } from "./api-error.ts";
 
 test("ApiError stores status and path correctly", () => {
@@ -75,5 +76,47 @@ test("isWithinRedirectCooldown and recordRedirectTimestamp work together cleanly
   };
   assert.equal(isWithinRedirectCooldown(t0, throwingStorage), false);
   assert.doesNotThrow(() => recordRedirectTimestamp(t0, throwingStorage));
+});
+
+test("extractErrorMessage gracefully parses API error responses", () => {
+  // 1. Missing or empty error body -> Fallback
+  assert.equal(extractErrorMessage(null, "Fallback"), "Fallback");
+  assert.equal(extractErrorMessage({}, "Fallback"), "Fallback");
+
+  // 2. FastAPI validation error array (loc/msg structure)
+  assert.equal(
+    extractErrorMessage({ detail: [{ msg: "Field required", loc: ["body", "name"] }, { msg: "Invalid format" }] }, "Fallback"),
+    "Field required, Invalid format"
+  );
+
+  // 3. Simple string detail
+  assert.equal(
+    extractErrorMessage({ detail: "Not Found" }, "Fallback"),
+    "Not Found"
+  );
+
+  // 4. Object detail (e.g. custom Job Already Launched exception)
+  assert.equal(
+    extractErrorMessage({ detail: { code: "ALREADY_LAUNCHED", message: "Job launched by xyz@example.com" } }, "Fallback"),
+    "Job launched by xyz@example.com"
+  );
+
+  // 5. Object detail with no known message/msg shape -> Fallback (never raw JSON)
+  assert.equal(
+    extractErrorMessage({ detail: { unknown: "field" } }, "Fallback"),
+    "Fallback"
+  );
+
+  // 6. Generic properties fallback
+  assert.equal(
+    extractErrorMessage({ message: "Internal Server Error" }, "Fallback"),
+    "Internal Server Error"
+  );
+
+  // 7. Ultimate string fallback
+  assert.equal(
+    extractErrorMessage("Just a raw string", "Fallback"),
+    "Just a raw string"
+  );
 });
 
