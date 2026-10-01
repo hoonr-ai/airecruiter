@@ -556,7 +556,7 @@ const isPlaceholderEmailUI = (e?: string) => {
   const domain = n.split("@").pop() || "";
   if (domain === "jobdiva.com") return true;
   if (n.endsWith("@noemail.pair.ai")) return true;
-  return { ok: false };
+  return false;
 };
 const candIsJobDivaUI = (c: any) => {
   const s = String(c?.source || "").toLowerCase();
@@ -1275,7 +1275,7 @@ function NewJobPageContent() {
     } catch (e) {
       console.warn("profile-url fetch failed", e);
     }
-    return { ok: false };
+    return false;
   };
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
@@ -1330,7 +1330,7 @@ function NewJobPageContent() {
     for (const src of seen) {
       if (matcher(src)) return true;
     }
-    return { ok: false };
+    return false;
   };
 
   const matchesSourceFilter = (cand: any) => {
