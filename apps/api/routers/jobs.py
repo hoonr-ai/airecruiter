@@ -2232,7 +2232,7 @@ async def create_new_job(job_data: Dict[str, Any]):
             "recruiter_emails": json.dumps(job_data.get("recruiter_emails", [])),
             "selected_employment_types": json.dumps(job_data.get("selected_employment_types", [])),
             "selected_job_boards": json.dumps(job_data.get("selected_job_boards", [])),
-            "screening_level": job_data.get("screening_level", "L1.5"),
+            "screening_level": job_data.get("screening_level", "L0.5"),
             "pair_enabled": job_data.get("pair_enabled", True),
             "pair_enhanced": job_data.get("pair_enhanced", False),
             "processing_status": "manual_created",

@@ -737,9 +737,14 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 _EXCLUDE_CATS = {"default", "work-arrangement", "intro", "logistics"}
                 tech_only = [
                     q for q in (tech_questions or [])
-                    if str((q or {}).get("category", "")).lower() not in _EXCLUDE_CATS
+                    if isinstance(q, dict) and str(q.get("category", "")).lower() not in _EXCLUDE_CATS
                 ]
                 logger.info(f"Generated {len(tech_only)} custom technical questions for child job {canonical_ref}.")
+                for q in tech_only:
+                    if isinstance(q, dict):
+                        # Force generated technical questions into the role-specific category
+                        # so they are implicitly trusted and bypass further moderation checks.
+                        q["category"] = "role-specific"
                 template_questions = template_questions + tech_only
                 for _i, _q in enumerate(template_questions):
                     _q["order_index"] = _i

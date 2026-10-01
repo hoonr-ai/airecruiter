@@ -11,17 +11,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch } from "../lib/api";
 
-// Question categories produced by our own generator/front-matter — trusted,
-// never moderated. Everything else (job wizard "other", campaigns "custom",
-// unknown imports) counts as recruiter-added. Single source of truth for both
-// editors — a category added to one list but not the other would make the two
-// surfaces silently disagree on what gets checked.
-const TRUSTED_QUESTION_CATEGORIES = ["default", "logistics", "work-arrangement", "role-specific", "intro"];
+import { isRecruiterAddedQuestion, canEditQuestionType } from "../lib/question-moderation";
 
-export const isRecruiterAddedQuestion = (category: string | null | undefined): boolean =>
-    !TRUSTED_QUESTION_CATEGORIES.includes(String(category || "").toLowerCase());
+export { isRecruiterAddedQuestion, canEditQuestionType };
 
 export interface QuestionPolicyVerdict {
     ok: boolean;
