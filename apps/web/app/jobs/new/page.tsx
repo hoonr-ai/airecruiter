@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
+import { extractErrorMessage } from "@/lib/api-error";
 import {
   DEFAULT_SEARCH_SOURCES,
   SEARCH_SOURCES_VERSION,
@@ -2549,7 +2550,7 @@ function NewJobPageContent() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        showToast(err.detail || "Failed to save resume", "error");
+        showToast(extractErrorMessage(err, "Failed to save resume"), "error");
         return;
       }
       const result = await res.json();
@@ -2595,7 +2596,7 @@ function NewJobPageContent() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        showToast(err.detail || "Bulk upload failed", "error");
+        showToast(extractErrorMessage(err, "Bulk upload failed"), "error");
         return;
       }
       const result = await res.json();
@@ -3112,7 +3113,7 @@ function NewJobPageContent() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
-        const errorMessage = errorData?.detail || errorData?.message || `Save failed (HTTP ${response.status})`;
+        const errorMessage = extractErrorMessage(errorData, `Save failed (HTTP ${response.status})`);
         console.error("API Error Response:", errorData);
         throw new Error(errorMessage);
       }
