@@ -98,6 +98,7 @@ import {
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow, type LaunchUnverifiedEmployer } from "@/hooks/use-engagement-flow";
 import { useStepActiveTime } from "@/hooks/use-step-active-time";
+import { useStepAutosave } from "@/hooks/use-step-autosave";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
 import {
   OUTREACH_MIN_SCORE,
@@ -3027,10 +3028,12 @@ function NewJobPageContent() {
     });
   };
 
+  const saveAbortControllerRef = useRef<AbortController | null>(null);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
-    skipToast?: boolean
+    skipToast?: boolean,
+    keepalive?: boolean
   }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
@@ -3044,12 +3047,18 @@ function NewJobPageContent() {
       return { ok: false };
     }
 
+    // Abort any in-flight save request to ensure latest wins and prevent race conditions
+    if (saveAbortControllerRef.current) {
+      saveAbortControllerRef.current.abort();
+    }
+    const saveController = new AbortController();
+    saveAbortControllerRef.current = saveController;
+
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
     // gives the server a comfortable window to either succeed or return a
     // 500 with a real error. Without this, a hung backend (e.g. row-lock
     // contention pre-fix) left the user staring at a silent spinner.
-    const saveController = new AbortController();
     const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
     try {
       const apiUrl = API_BASE;
@@ -3058,6 +3067,7 @@ function NewJobPageContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: saveController.signal,
+        keepalive: stepData.keepalive,
         body: JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
@@ -3100,9 +3110,9 @@ function NewJobPageContent() {
             maxExperienceYears,
             sourceLocationMiles,
           },
-          step1_completed: stepData.currentStep >= 1,
-          step2_completed: stepData.currentStep >= 2,
-          step3_completed: stepData.currentStep >= 3,
+          step1_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 1 : undefined,
+          step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
+          step3_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 3 : undefined,
           is_auto_saved: stepData.saveType === "auto"
         })
       });
@@ -3143,22 +3153,7 @@ function NewJobPageContent() {
   // debounce hasn't flushed yet — if they click a different step indicator
   // within that window the cleanup below would clearTimeout, dropping the
   // edit. The currentStep-keyed effect further down catches that case.
-  const step5DirtyRef = useRef(false);
-  useEffect(() => {
-    if (currentStep !== 5) return;
-    if (isReadOnly) return;
-    if (!jobData) return;
-    step5DirtyRef.current = true;
-    const handle = setTimeout(async () => {
-      const ok = await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
-      if (ok.ok) step5DirtyRef.current = false;
-    }, 1500);
-    return () => clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    currentStep,
-    isReadOnly,
-    jobData,
+  useStepAutosave(currentStep, 5, isReadOnly, Boolean(jobData), saveJobDraft, [
     searchSources,
     sourceTitles,
     sourceSkills,
@@ -3172,17 +3167,35 @@ function NewJobPageContent() {
     sourceLocationMiles,
   ]);
 
-  // Flush a pending Step 5 save when the user navigates away from Step 5
-  // (e.g., clicks the Step 4 indicator before the 1.5s debounce fires).
-  useEffect(() => {
-    if (currentStep === 5) return;
-    if (!step5DirtyRef.current) return;
-    if (isReadOnly) return;
-    if (!jobData) return;
-    step5DirtyRef.current = false;
-    saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentStep]);
+  // Step 1 auto-save for Intake fields (Recruiter Notes, Employment Type, Emails, Screening Level, Work Auth)
+  // Ensures data isn't lost if the user refreshes before clicking Next.
+  useStepAutosave(currentStep, 1, isReadOnly, Boolean(jobData), saveJobDraft, [
+    recruiterNotes,
+    selectedEmpTypes,
+    recruiterEmails,
+    screeningLevel,
+    workAuthorization,
+  ]);
+
+  // Step 2 auto-save for Publish fields (Job Title, Enhanced Title, AI Description, Job Boards)
+  useStepAutosave(currentStep, 2, isReadOnly, Boolean(jobData), saveJobDraft, [
+    jobTitle,
+    enhancedTitle,
+    jobPosting,
+    selectedJobBoards,
+    botIntroduction,
+  ]);
+
+  // Step 3 auto-save for Rubric fields (Titles, Skills, Education, Requirements etc.)
+  useStepAutosave(currentStep, 3, isReadOnly, Boolean(jobData), saveJobDraft, [
+    rubricData,
+    resumeMatchFilters,
+  ]);
+
+  // Step 4 auto-save for Screening Questions
+  useStepAutosave(currentStep, 4, isReadOnly, Boolean(jobData), saveJobDraft, [
+    screenQuestions,
+  ]);
 
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
