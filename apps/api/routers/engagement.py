@@ -3878,7 +3878,7 @@ async def _check_and_fire_candidate_passed_notification(
         job_row = cur.fetchone()
         
         cur.execute("""
-            SELECT name, email, phone, resume_text, data
+            SELECT name, email, phone, resume_text, data, source
             FROM sourced_candidates
             WHERE candidate_id = %s AND jobdiva_id = %s
             LIMIT 1
@@ -4142,6 +4142,14 @@ async def _check_and_fire_candidate_passed_notification(
 
         asyncio.create_task(create_and_pin_note())
 
+        # The JobDiva profile the email links to: the same id the Cross
+        # Submissions email and panel open (a JobDiva row's own id, else the
+        # profile Launch PAIR created/matched); "" for an unlinked LinkedIn row.
+        from services.cross_submissions import jobdiva_profile_id_for
+        jd_profile_id = jobdiva_profile_id_for(
+            cand_row.get("source"), candidate_id, cand_data if isinstance(cand_data, dict) else {}
+        )
+
         success = await asyncio.to_thread(
             notify_candidate_passed,
             candidate_name=cand_row["name"] or "Candidate",
@@ -4158,7 +4166,8 @@ async def _check_and_fire_candidate_passed_notification(
             resume_bytes=resume_bytes,
             resume_filename=resume_filename,
             candidate_id=candidate_id,
-            job_id=app_job_id
+            job_id=app_job_id,
+            jobdiva_candidate_id=jd_profile_id,
         )
 
         if success:

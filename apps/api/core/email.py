@@ -689,6 +689,7 @@ def notify_candidate_passed(
     candidate_id: str = "",
     job_id: str = "",
     app_base_url: Optional[str] = None,
+    jobdiva_candidate_id: str = "",
 ) -> bool:
     """
     Email #3 – Candidate Passed Phone Screen.
@@ -704,6 +705,13 @@ def notify_candidate_passed(
     # Deep link to the candidate evaluation report
     report_link    = candidate_report_link(base_url, jobdiva_id, candidate_id)
     safe_report_link = html.escape(report_link, quote=True)
+    # The person's JobDiva profile — the same link the Cross Submissions email
+    # and the rank list open. "" when PAIR knows no JobDiva profile id.
+    profile_link   = jobdiva_candidate_link(jobdiva_candidate_id)
+    profile_hyperlink = (
+        f'<a href="{html.escape(profile_link, quote=True)}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">Open in JobDiva</a>'
+    ) if profile_link else ""
 
 
     jd_hyperlink = (
@@ -896,6 +904,7 @@ def notify_candidate_passed(
         {_info_row("Name", candidate_name)}
         {_info_row("Email", candidate_email or "—")}
         {_info_row("Phone", candidate_phone or "—")}
+        {_info_row("JobDiva Profile", profile_hyperlink) if profile_hyperlink else ""}
         {_info_row("Screen Score", f'<span style="font-size:15px;color:#4f46e5;font-weight:700;">{screen_score}</span>' if screen_score else "—")}
       </tbody>
     </table>
@@ -939,7 +948,8 @@ def notify_candidate_passed(
         f"Name: {candidate_name}\n"
         f"Email: {candidate_email}\n"
         f"Phone: {candidate_phone}\n"
-        f"Screen Score: {screen_score}\n\n"
+        + (f"JobDiva Profile: {profile_link}\n" if profile_link else "")
+        + f"Screen Score: {screen_score}\n\n"
         f"View Full Report: {report_link}\n"
     )
 
@@ -966,6 +976,7 @@ def notify_internal_submission_to_manager(
     customer_name: str = "",
     recruiter_notes: Optional[str] = None,
     app_base_url: Optional[str] = None,
+    jobdiva_candidate_id: str = "",
 ) -> bool:
     """Send a passive manager-review email for an internal submission."""
     manager_email = (manager_email or "").strip()
@@ -976,6 +987,13 @@ def notify_internal_submission_to_manager(
     base_url = resolve_app_base_url(app_base_url)
     report_link = candidate_report_link(base_url, job_id_or_ref, candidate_id)
     safe_report_link = html.escape(report_link, quote=True)
+    # Same JobDiva profile link as the Cross Submissions / Candidate Passed emails.
+    profile_link = jobdiva_candidate_link(jobdiva_candidate_id)
+    profile_row = _info_row(
+        "JobDiva Profile",
+        f'<a href="{html.escape(profile_link, quote=True)}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">Open in JobDiva</a>',
+    ) if profile_link else ""
 
     safe_candidate = html.escape(candidate_name or "Candidate")
     safe_recruiter = html.escape(recruiter_name or recruiter_email or "Recruiter")
@@ -1006,6 +1024,7 @@ def notify_internal_submission_to_manager(
     <div style="margin:0 0 20px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
         <table style="width:100%;border-collapse:collapse;font-family:inherit;">
             {_info_row("Candidate Name", safe_candidate)}
+            {profile_row}
             {_info_row("Job Position", f"{safe_title} ({safe_job_ref})")}
             {_info_row("Client", safe_client)}
             {_info_row("Submitted By", f"{safe_recruiter} &lt;{safe_recruiter_email}&gt;")}
@@ -1033,7 +1052,8 @@ def notify_internal_submission_to_manager(
         f"Job: {job_title} ({job_id_or_ref})\n"
         f"Client: {customer_name or '-'}\n"
         f"Candidate: {candidate_name}\n"
-        f"{plain_notes}\n"
+        + (f"JobDiva Profile: {profile_link}\n" if profile_link else "")
+        + f"{plain_notes}\n"
         f"Review Candidate: {report_link}\n"
         "Opening the link will not submit externally; submit externally only from the report page.\n"
     )
