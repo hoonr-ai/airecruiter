@@ -1,6 +1,6 @@
 "use client";
 
-import React, { memo, useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Mail,
@@ -85,12 +85,34 @@ interface CandidateChainProps {
 }
 
 export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }) => {
-  const reached = phaseToStopIndex(candidate.phase);
   const isTerminal = TERMINAL_PHASES.has(candidate.phase);
   const passed = candidate.phase === "pass" || candidate.terminal_reason === "passed";
   const restedNoResponse = candidate.phase === "pending";
   const failedTerminal =
     isTerminal && !passed && !restedNoResponse && candidate.phase !== "completed";
+
+  // If candidate is in a terminal phase (pass, fail, outreach_failed, completed),
+  // find the highest phase that was actually reached/attempted, rather than blindly defaulting to 4.
+  const reached = useMemo(() => {
+    if (!isTerminal) {
+      return phaseToStopIndex(candidate.phase);
+    }
+    // Check highest phase from event_counts_by_phase or events
+    let maxIndex = 0;
+    const phaseKeys = Object.keys(candidate.event_counts_by_phase || {});
+    for (const k of phaseKeys) {
+      if ((candidate.event_counts_by_phase?.[k] ?? 0) > 0) {
+        maxIndex = Math.max(maxIndex, phaseToStopIndex(k));
+      }
+    }
+    for (const evt of candidate.events || []) {
+      if (evt.phase) {
+        maxIndex = Math.max(maxIndex, phaseToStopIndex(evt.phase));
+      }
+    }
+    // If no phase events were logged, default to 0 (contact check)
+    return maxIndex;
+  }, [candidate.phase, candidate.event_counts_by_phase, candidate.events, isTerminal]);
   const outcome = candidate.call_outcome ? OUTCOME_META[candidate.call_outcome] : null;
   const unknownPhase = !isKnownPhase(candidate.phase);
   const idle = candidate.idle_minutes;
@@ -168,7 +190,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
 
   return (
     <div
-      className={`grid h-16 grid-cols-[150px_1fr_170px_150px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
+      className={`grid h-16 grid-cols-[170px_1fr_150px_160px] items-center gap-3 px-4 py-2 border-b border-slate-100 last:border-b-0 transition-colors duration-200 hover:bg-slate-50/70 ${
         candidate.is_stuck ? "lr-row-stuck bg-amber-50/15" : "bg-white"
       }`}
     >
@@ -177,30 +199,54 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
         <p className="truncate text-sm font-semibold tracking-tight text-slate-900">
           {candidate.name}
         </p>
-        <p className="truncate text-xs text-slate-500 mt-0.5">
-          {candidate.is_stuck ? (
-            <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
-              <Hourglass size={11} className="text-amber-600 shrink-0" /> stuck · {stuckDetail}
+        <div className="truncate text-xs text-slate-500 mt-0.5">
+          {passed ? (
+            <span
+              className="inline-flex items-center gap-1 font-semibold text-emerald-600 max-w-full truncate"
+              title={scoreLabel ? `Passed · ${scoreLabel}` : "Passed"}
+            >
+              <Check size={12} className="text-emerald-600 shrink-0" />
+              <span className="truncate">
+                Passed{candidate.overall_score != null ? ` · ${Math.round(candidate.overall_score)}%` : ""}
+              </span>
+            </span>
+          ) : failedTerminal ? (
+            <span
+              className="inline-flex items-center gap-1 font-semibold text-rose-600 max-w-full truncate"
+              title={reasonLabel ? `Failed · ${reasonLabel}` : "Failed"}
+            >
+              <AlertTriangle size={12} className="text-rose-600 shrink-0" />
+              <span className="truncate">
+                Failed{reasonLabel ? ` · ${reasonLabel}` : ""}
+              </span>
+            </span>
+          ) : candidate.is_stuck ? (
+            <span className="inline-flex items-center gap-1 text-amber-700 font-medium truncate max-w-full">
+              <Hourglass size={11} className="text-amber-600 shrink-0" />
+              <span className="truncate">stuck · {stuckDetail}</span>
             </span>
           ) : candidate.awaiting_retry || nextAttemptLabel ? (
             <span
-              className="inline-flex items-center gap-1 text-slate-600"
+              className="inline-flex items-center gap-1 text-slate-600 truncate max-w-full"
               title={
                 candidate.next_attempt_at
                   ? `Next scheduled attempt: ${new Date(candidate.next_attempt_at).toLocaleString()}`
                   : "Waiting on a scheduled attempt"
               }
             >
-              <Clock size={11} className="text-slate-400 shrink-0" /> waiting{nextAttemptLabel ? ` · next ${nextAttemptLabel}` : ""}
+              <Clock size={11} className="text-slate-400 shrink-0" />
+              <span className="truncate">waiting{nextAttemptLabel ? ` · ${nextAttemptLabel}` : ""}</span>
             </span>
           ) : unknownPhase ? (
-            <span className="text-slate-400" title={`Unrecognized phase: ${candidate.phase}`}>
-              unknown phase · {candidate.phase}
+            <span className="text-slate-400 truncate max-w-full" title={`Unrecognized phase: ${candidate.phase}`}>
+              {candidate.phase}
             </span>
           ) : (
-            candidate.outreach_status ?? "—"
+            <span className="text-slate-600 font-medium capitalize truncate max-w-full">
+              {CHAIN_STOPS[reached]?.short || candidate.outreach_status || "In Progress"}
+            </span>
           )}
-        </p>
+        </div>
       </div>
 
       {/* ── COL 2: PROGRESS PIPELINE (Horizontal Stepper Track 1 to 6) ── */}
@@ -258,7 +304,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
                     <Check size={13} strokeWidth={2.5} />
                   ) : (
                     <span
-                      className={`text-[10px] font-semibold tracking-tight ${
+                      className={`text-[9px] font-bold tracking-tight ${
                         isNodeDone ? "text-white" : ""
                       }`}
                     >
@@ -273,7 +319,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
       </div>
 
       {/* ── COL 3: HISTORY LOGS (Sub-div with scroll actions annotated by phase) ── */}
-      <div className="flex items-center overflow-x-auto lr-scroll gap-1.5 justify-start pl-1 max-w-full py-1">
+      <div className="flex items-center overflow-x-auto lr-scroll gap-1.5 justify-start pl-1 min-w-0 py-1">
         {events.length > 0 ? (
           events.map((evt, idx) => {
             const isEmail = evt.type.includes("email") || evt.subtype === "email";
@@ -331,10 +377,10 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
       </div>
 
       {/* ── COL 4: ACTION / CTA (Badge / Voicemail Button) ───────────── */}
-      <div className="flex items-center justify-end pr-1">
+      <div className="flex items-center justify-end min-w-0 pr-1">
         {outcome ? (
           <span
-            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold shadow-2xs transition-colors ${
+            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium shadow-2xs transition-colors ${
               TONE_BADGE[outcome.tone] || TONE_BADGE.neutral
             }`}
           >

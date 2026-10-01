@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -135,9 +136,37 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
 
 
 @router.get("/api/analytics/live-report/launches")
-async def get_live_report_launches(user: UserIdentity = Depends(get_current_user)):
-    """Fetch all bulk launches, isolated so recruiters only see their launched jobs."""
-    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
+async def get_live_report_launches(
+    search: Optional[str] = Query(None, max_length=100, description="Optional search term matching job title, JobDiva ID, bulk ID"),
+    jobdiva_id: Optional[str] = Query(None, max_length=50, description="Filter launches by specific JobDiva job ID"),
+    limit: int = Query(100, ge=1, le=500, description="Max launches to return (between 1 and 500)"),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Fetch bulk launches, with optional search, isolated so recruiters only see their launched jobs."""
+    # When called directly in unit tests without FastAPI dependency resolution,
+    # parameters default to the Query() field object. Extract real values cleanly:
+    clean_search: Optional[str] = search if isinstance(search, str) else None
+    clean_jobdiva_id: Optional[str] = jobdiva_id if isinstance(jobdiva_id, str) else None
+    clean_limit: int = limit if isinstance(limit, int) else 100
+
+    base_target = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
+    params = {"limit": str(clean_limit)}
+    if clean_search:
+        params["search"] = clean_search
+    if clean_jobdiva_id:
+        params["jobdiva_id"] = clean_jobdiva_id
+
+    # If Recruiter / Team Lead, scope accessible jobs before querying PairBot
+    if not user.is_admin:
+        accessible_ids = _get_user_accessible_jobdiva_ids(user)
+        if not accessible_ids:
+            return {"launches": [], "retention_days": 14}
+        if clean_jobdiva_id and clean_jobdiva_id.strip() not in accessible_ids:
+            return {"launches": [], "retention_days": 14}
+        params["accessible_jobdiva_ids"] = ",".join(sorted(accessible_ids))
+
+    query_str = urllib.parse.urlencode(params)
+    target_url = f"{base_target}?{query_str}"
     headers = _get_pair_headers()
 
     try:
@@ -158,11 +187,8 @@ async def get_live_report_launches(user: UserIdentity = Depends(get_current_user
     if user.is_admin:
         return {"launches": launch_list, "retention_days": retention_days}
 
-    # If Recruiter / Team Lead, filter by accessible jobdiva_ids
+    # Defensive double-check filter for recruiter / team lead
     accessible_ids = _get_user_accessible_jobdiva_ids(user)
-    if not accessible_ids:
-        return {"launches": [], "retention_days": retention_days}
-
     filtered = []
     for item in launch_list:
         item_jobdivas = {str(j).strip() for j in item.get("jobdiva_ids", [])}

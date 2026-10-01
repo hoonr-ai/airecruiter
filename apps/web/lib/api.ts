@@ -472,7 +472,14 @@ export const api = {
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
   },
   liveReport: {
-    getLaunches: () => req<any>(`/api/analytics/live-report/launches`),
+    getLaunches: (params?: { search?: string; jobdiva_id?: string; limit?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.jobdiva_id) qs.set("jobdiva_id", params.jobdiva_id);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      const queryStr = qs.toString();
+      return req<any>(`/api/analytics/live-report/launches${queryStr ? `?${queryStr}` : ""}`);
+    },
     getHealth: () => req<any>(`/api/analytics/live-report/health`),
     getSnapshot: (bulkId: string, reveal = false) =>
       req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`),
