@@ -3028,6 +3028,7 @@ function NewJobPageContent() {
     });
   };
 
+  const saveAbortControllerRef = useRef<AbortController | null>(null);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
@@ -3045,12 +3046,18 @@ function NewJobPageContent() {
       return false;
     }
 
+    // Abort any in-flight save request to ensure latest wins and prevent race conditions
+    if (saveAbortControllerRef.current) {
+      saveAbortControllerRef.current.abort();
+    }
+    const saveController = new AbortController();
+    saveAbortControllerRef.current = saveController;
+
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
     // gives the server a comfortable window to either succeed or return a
     // 500 with a real error. Without this, a hung backend (e.g. row-lock
     // contention pre-fix) left the user staring at a silent spinner.
-    const saveController = new AbortController();
     const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
     try {
       const apiUrl = API_BASE;
