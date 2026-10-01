@@ -187,6 +187,8 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     assert len(email_calls) == 1
     assert email_calls[0]["manager_email"] == "Biswajit.Jena@celsiortech.com"
     assert email_calls[0]["candidate_name"] == "Srinivasan Subramanian"
+    # The manager email links the same JobDiva profile the panel/rank list open.
+    assert email_calls[0]["jobdiva_candidate_id"] == "21562841721070"
 
 
 @pytest.mark.anyio

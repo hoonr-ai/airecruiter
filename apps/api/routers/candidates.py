@@ -5301,6 +5301,7 @@ async def save_candidate_feedback(
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+    jd_profile_id = ""               # JobDiva profile the manager email links to
     candidate_name = "Candidate"
     job_title = "Job"
     customer_name = ""
@@ -5313,7 +5314,7 @@ async def save_candidate_feedback(
                 _cur.execute(
                     """
                     SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                           sc.name, mj.title, mj.customer_name
+                           sc.name, mj.title, mj.customer_name, sc.source
                     FROM sourced_candidates sc
                     LEFT JOIN monitored_jobs mj
                       ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -5341,7 +5342,7 @@ async def save_candidate_feedback(
                     _cur.execute(
                         """
                         SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                               sc.name, mj.title, mj.customer_name
+                               sc.name, mj.title, mj.customer_name, sc.source
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
@@ -5376,6 +5377,12 @@ async def save_candidate_feedback(
                         jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
                     else:
                         jd_candidate_id = sc_candidate_id
+                    # Same id the Cross Submissions email/panel link opens (own id
+                    # beats a stored one for JobDiva rows; "" if none is known).
+                    from services.cross_submissions import jobdiva_profile_id_for
+                    jd_profile_id = jobdiva_profile_id_for(
+                        row[8] if len(row) > 8 else None, sc_candidate_id, data_blob
+                    )
         finally:
             _conn.close()
     except Exception as e:
@@ -5501,6 +5508,7 @@ async def save_candidate_feedback(
                 job_title=job_title,
                 customer_name=customer_name,
                 recruiter_notes=request.recruiter_notes,
+                jobdiva_candidate_id=jd_profile_id,
             )
         except Exception as e:
             manager_email_sent = False
