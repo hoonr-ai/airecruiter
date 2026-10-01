@@ -156,43 +156,46 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
 
       {/* Candidate Chains Container */}
       {!collapsed && (
-        <div className="lr-scroll max-h-[440px] overflow-y-auto border-t border-slate-100">
-          {/* Subheader Toolbar: Search Box & Candidate Count - Sticky at top */}
-          <div className="sticky top-0 z-20 flex items-center justify-between gap-3 bg-slate-50/95 backdrop-blur-xs px-4 py-2 border-b border-slate-200">
-            <div className="relative flex-1 max-w-xs">
-              <Search
-                size={13}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
-              />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search candidates by name, ID, or phase..."
-                className="w-full h-7 pl-8 pr-7 text-xs bg-white border border-slate-200 rounded-md placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-shadow"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery("")}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded"
-                  title="Clear search"
-                >
-                  <X size={12} />
-                </button>
-              )}
+        <div className="lr-scroll max-h-[440px] overflow-y-auto border-t border-slate-100 relative">
+          {/* Sticky Header Group: Toolbar + Column Headers */}
+          <div className="sticky top-0 z-30 bg-slate-50 border-b border-slate-200 shadow-2xs">
+            {/* Subheader Toolbar: Search Box & Candidate Count */}
+            <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-slate-200/80 bg-slate-50">
+              <div className="relative flex-1 max-w-xs">
+                <Search
+                  size={13}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search candidates by name, ID, or phase..."
+                  className="w-full h-7 pl-8 pr-7 text-xs bg-white border border-slate-200 rounded-md placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-shadow"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded"
+                    title="Clear search"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+              <div className="text-[11px] text-slate-500 font-medium">
+                Showing {filteredCandidates.length} of {job.candidates.length} candidates
+              </div>
             </div>
-            <div className="text-[11px] text-slate-500 font-medium">
-              Showing {filteredCandidates.length} of {job.candidates.length} candidates
-            </div>
-          </div>
 
-          {/* Table Header with explicit 4 Columns - Sticky below search toolbar */}
-          <div className="sticky top-[45px] z-10 grid grid-cols-[170px_1fr_150px_160px] items-center gap-3 bg-slate-100/95 backdrop-blur-xs px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-600 border-b border-slate-200 shadow-2xs">
-            <div>PROFILE</div>
-            <div className="px-1 text-center">PROGRESS PIPELINE</div>
-            <div className="pl-1">HISTORY LOGS</div>
-            <div className="text-right pr-2">ACTION / CTA</div>
+            {/* Table Header with explicit 4 Columns */}
+            <div className="grid grid-cols-[170px_1fr_150px_160px] items-center gap-3 bg-slate-100/90 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-600">
+              <div>PROFILE</div>
+              <div className="px-1 text-center">PROGRESS PIPELINE</div>
+              <div className="pl-1">HISTORY LOGS</div>
+              <div className="text-right pr-2">ACTION / CTA</div>
+            </div>
           </div>
           <div className="divide-y divide-slate-100 px-1 py-1">
             {filteredCandidates.map((c) => (

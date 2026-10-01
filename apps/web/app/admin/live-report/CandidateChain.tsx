@@ -284,7 +284,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
             >
               <AlertTriangle size={12} className="text-rose-600 shrink-0" />
               <span className="truncate">
-                DNC · {candidate.dnc_trigger ? candidate.dnc_trigger.replace(/_/g, " ") : "Do Not Contact"}
+                DNC · {candidate.dnc_trigger ? candidate.dnc_trigger.replace(/_/g, " ") : "inbound sms stop"}
               </span>
             </span>
           ) : passed ? (
@@ -350,7 +350,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
           const isCompletedNode = i === completedStopIndex;
 
           let nodeCls =
-            "relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-300";
+            "relative z-[1] flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-300";
           if (isCompletedNode) {
             nodeCls += " border-emerald-600 bg-emerald-600 text-white shadow-2xs ring-2 ring-emerald-200";
           } else if (isNodeDone) {
@@ -465,7 +465,15 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
 
       {/* ── COL 4: ACTION / CTA (Badge / Voicemail Button) ───────────── */}
       <div className="flex items-center justify-end min-w-0 pr-1">
-        {outcome ? (
+        {isDnc ? (
+          <span
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold border-rose-300 bg-rose-100/90 text-rose-800 shadow-2xs"
+            title={candidate.dnc_message || "Candidate on DNC list. All outreach has been stopped."}
+          >
+            <UserX size={12} className="text-rose-700 shrink-0" />
+            outreach is stopped
+          </span>
+        ) : outcome ? (
           <span
             className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium shadow-2xs transition-colors ${
               TONE_BADGE[outcome.tone] || TONE_BADGE.neutral
