@@ -3031,7 +3031,7 @@ function NewJobPageContent() {
     currentStep: number,
     saveType?: string,
     skipToast?: boolean
-  }) => {
+  }): Promise<boolean | string> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
       // entirely. Falsely returning true keeps the Next button flow intact
@@ -3121,14 +3121,14 @@ function NewJobPageContent() {
       return true;
     } catch (error) {
       console.error("Error saving job to monitored jobs:", error);
+      const isAbort = error instanceof DOMException && error.name === "AbortError";
+      const errorMsg = isAbort
+        ? "Save timed out — please retry."
+        : error instanceof Error ? error.message : "Failed to save. Please try again.";
       if (!stepData.skipToast) {
-        const isAbort = error instanceof DOMException && error.name === "AbortError";
-        const errorMsg = isAbort
-          ? "Save timed out — please retry."
-          : error instanceof Error ? error.message : "Failed to save. Please try again.";
         showToast(errorMsg, "error");
       }
-      return false;
+      return errorMsg;
     } finally {
       clearTimeout(saveTimeoutId);
     }
@@ -3151,7 +3151,7 @@ function NewJobPageContent() {
     step5DirtyRef.current = true;
     const handle = setTimeout(async () => {
       const ok = await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
-      if (ok) step5DirtyRef.current = false;
+      if (ok === true) step5DirtyRef.current = false;
     }, 1500);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -10985,7 +10985,7 @@ return (
           className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
           onClick={async () => {
             const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-            if (saved) {
+            if (saved === true) {
               router.push("/");
             }
           }}
@@ -11024,8 +11024,8 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                  if (saved !== true) {
+                    showToast(typeof saved === "string" ? saved : "Failed to save Step 1 data. Please try again.", "info");
                     return;
                   }
                   trackStepAdvance(1, 2, { via: "next_button" });
@@ -11043,8 +11043,8 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                  if (saved !== true) {
+                    showToast(typeof saved === "string" ? saved : "Failed to save Step 2 data. Please try again.", "info");
                     return;
                   }
 
@@ -11111,7 +11111,10 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                  if (!saved) return;
+                  if (saved !== true) {
+                    showToast(typeof saved === "string" ? saved : "Failed to save Step 3 data. Please try again.", "info");
+                    return;
+                  }
                   // If the rubric (titles/skills/total_years) has been
                   // edited since the current Step-4 question set was
                   // generated, force-regenerate role-specific questions so
@@ -11135,7 +11138,10 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
-                  if (!saved) return;
+                  if (saved !== true) {
+                    showToast(typeof saved === "string" ? saved : "Failed to save Step 4 data. Please try again.", "info");
+                    return;
+                  }
                   const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
                   // First entry: derive sourcing criteria from rubric.
                   // Subsequent entries: only refresh when the rubric or

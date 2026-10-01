@@ -299,9 +299,10 @@ def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
 
     # Team leads can access any job assigned to someone on their team.
     if set(clean_assigned_emails).isdisjoint(get_user_scope_emails(user)):
+        assigned_email = clean_assigned_emails[0] if clean_assigned_emails else "another recruiter"
         raise HTTPException(
             status_code=403,
-            detail=f"Access denied. You ({user.email}) are not assigned as a recruiter for this job."
+            detail=f"Job has already been launched by {assigned_email}."
         )
 
 
