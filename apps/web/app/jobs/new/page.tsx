@@ -2173,14 +2173,14 @@ function NewJobPageContent() {
       const draftResponse = await authFetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
       if (!draftResponse.ok) {
         console.error("Draft fetch HTTP error:", draftResponse.status);
-        return false;
+        return { ok: false };
       }
       const draftResult = await draftResponse.json();
 
       // Backend returns HTTP 200 with status:error when not found
       if (draftResult.status === "error" || !draftResult.data) {
         console.error("Draft not found:", draftResult.message);
-        return false;
+        return { ok: false };
       }
 
       const draft = draftResult.data;
@@ -2436,11 +2436,11 @@ function NewJobPageContent() {
         setNumericJobId(jobIdToLoad);
       }
 
-      return true;
+      return { ok: true };
     } catch (error) {
       console.error("Failed to load draft:", error);
     }
-    return false;
+    return { ok: false };
   };
 
   const handleCreateExternal = async () => {
@@ -2846,7 +2846,7 @@ function NewJobPageContent() {
         step: 2,
         generated_length: (data?.description || "").length,
       });
-      return true;
+      return { ok: true };
     } catch (error) {
       const message = (error as Error)?.message ?? "unknown error";
       logger.error("ai_jd.enhance.exception", { message });
@@ -2855,7 +2855,7 @@ function NewJobPageContent() {
         step: 2,
         error: truncateForTelemetry(message),
       });
-      return false;
+      return { ok: false };
     } finally {
       setIsGeneratingJD(false);
     }
@@ -3025,17 +3025,17 @@ function NewJobPageContent() {
     currentStep: number,
     saveType?: string,
     skipToast?: boolean
-  }) => {
+  }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
       // entirely. Falsely returning true keeps the Next button flow intact
       // (it gates step transitions on save success) without mutating the
       // saved job.
-      return true;
+      return { ok: true };
     }
     if (!jobData || (!numericJobId && !jobdivaId)) {
       showToast("Job data not available for saving.", "info");
-      return false;
+      return { ok: false };
     }
 
     // Bound the save fetch — the backend save now caps its transaction at
@@ -3111,17 +3111,17 @@ function NewJobPageContent() {
       if (!stepData.skipToast) {
         showToast(stepData.saveType === "auto" ? "Auto-saved to monitored jobs" : "Saved to monitored jobs successfully", "success");
       }
-      return true;
+      return { ok: true };
     } catch (error) {
       console.error("Error saving job to monitored jobs:", error);
+      const isAbort = error instanceof DOMException && error.name === "AbortError";
+      const errorMsg = isAbort
+        ? "Save timed out — please retry."
+        : error instanceof Error ? error.message : "Failed to save. Please try again.";
       if (!stepData.skipToast) {
-        const isAbort = error instanceof DOMException && error.name === "AbortError";
-        const errorMsg = isAbort
-          ? "Save timed out — please retry."
-          : error instanceof Error ? error.message : "Failed to save. Please try again.";
         showToast(errorMsg, "error");
       }
-      return false;
+      return { ok: false, message: errorMsg };
     } finally {
       clearTimeout(saveTimeoutId);
     }
@@ -3144,7 +3144,7 @@ function NewJobPageContent() {
     step5DirtyRef.current = true;
     const handle = setTimeout(async () => {
       const ok = await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
-      if (ok) step5DirtyRef.current = false;
+      if (ok.ok) step5DirtyRef.current = false;
     }, 1500);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -10934,7 +10934,7 @@ return (
           className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
           onClick={async () => {
             const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-            if (saved) {
+            if (saved.ok) {
               router.push("/");
             }
           }}
@@ -10973,8 +10973,8 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 1 data. Please try again.", "error");
                     return;
                   }
                   trackStepAdvance(1, 2, { via: "next_button" });
@@ -10992,8 +10992,8 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 2 data. Please try again.", "error");
                     return;
                   }
 
@@ -11060,7 +11060,10 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                  if (!saved) return;
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 3 data. Please try again.", "error");
+                    return;
+                  }
                   // If the rubric (titles/skills/total_years) has been
                   // edited since the current Step-4 question set was
                   // generated, force-regenerate role-specific questions so
@@ -11084,7 +11087,10 @@ return (
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
-                  if (!saved) return;
+                  if (!saved.ok) {
+                    showToast(saved.message || "Failed to save Step 4 data. Please try again.", "error");
+                    return;
+                  }
                   const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
                   // First entry: derive sourcing criteria from rubric.
                   // Subsequent entries: only refresh when the rubric or
