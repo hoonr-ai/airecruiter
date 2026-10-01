@@ -49,6 +49,61 @@ const TONE_BADGE: Record<string, string> = {
   info: "bg-indigo-50 text-indigo-700 border-indigo-200",
 };
 
+/** Format recruiter-friendly tooltip for Col 3 History Logs */
+export function formatHistoryTooltip(evt: ActivityEvent): string {
+  const phaseMap: Record<string, string> = {
+    contact_check: "Contact Check",
+    phase1: "Phase 1",
+    phase1_6hr: "Phase 2",
+    phase2: "Phase 3",
+    phase3: "Phase 4",
+    phase1_extra: "Extra 1",
+    phase1_6hr_extra: "Extra 2",
+    phase2_extra: "Extra 3",
+    completed: "Completed",
+    pass: "Passed",
+    failed: "Failed",
+    pending: "Pending",
+  };
+
+  const actionMap: Record<string, string> = {
+    email_sent: "Email Sent",
+    email_delivered: "Email Delivered",
+    email_opened: "Email Opened",
+    email_bounced: "Email Bounced",
+    email_failed: "Email Failed",
+    call_attempt: "Phone Call Placed",
+    call_completed: "Phone Call Completed",
+    call_answered: "Phone Call Answered",
+    call_failed: "Phone Call Failed",
+    voice_pipeline: "Voice Interview Session",
+    sms_sent: "SMS Sent",
+    sms_delivered: "SMS Delivered",
+    sms_failed: "SMS Failed",
+    interview_started: "Interview Started",
+    interview_completed: "Interview Completed",
+    evaluation_completed: "Evaluation Completed",
+    link_opened: "Assessment Link Opened",
+    handoff_expired: "Handoff Window Expired",
+    outreach_deferred_quiet_hours: "Deferred (Quiet Hours)",
+    outreach_retry_scheduled: "Retry Scheduled",
+  };
+
+  const phaseLabel = evt.phase ? (phaseMap[evt.phase] || evt.phase.replace(/_/g, " ")) : "Outreach";
+  const actionLabel = actionMap[evt.type] || evt.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const subLabel = evt.subtype ? ` (${evt.subtype})` : "";
+  const statusLabel =
+    evt.status === "failed"
+      ? " — Failed"
+      : evt.status === "passed"
+      ? " — Passed"
+      : evt.status === "pending"
+      ? " — In Progress"
+      : "";
+
+  return `${phaseLabel}: ${actionLabel}${subLabel}${statusLabel}`;
+}
+
 /** Small channel icon for Col 3 history logs */
 const HistoryIcon: React.FC<{ type: string; subtype: string | null; failed?: boolean }> = ({
   type,
@@ -66,11 +121,13 @@ const HistoryIcon: React.FC<{ type: string; subtype: string | null; failed?: boo
   else if (type === "link_opened") icon = <Link2 size={11} />;
   else if (type.startsWith("interview_")) icon = <Check size={11} />;
 
+  const titleText = `${type.replace(/_/g, " ")}${subtype ? ` (${subtype})` : ""}${failed ? " — Failed" : ""}`;
+
   return (
     <span
       className="relative inline-flex h-6 w-6 items-center justify-center rounded-full border bg-white shadow-2xs transition-transform hover:scale-110"
       style={{ color: color ?? "#64748b", borderColor: color ?? "#e2e8f0" }}
-      title={`${type}${subtype ? ` (${subtype})` : ""}${failed ? " — failed" : ""}`}
+      title={titleText}
     >
       {icon}
       {failed && (
@@ -371,8 +428,8 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
             return (
               <span
                 key={idx}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 shadow-2xs transition-transform hover:scale-105"
-                title={`${evt.phase ?? "Outreach"}: ${evt.type} (${evt.status ?? "done"})`}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 shadow-2xs transition-transform hover:scale-105 cursor-help"
+                title={formatHistoryTooltip(evt)}
               >
                 <span className="font-bold text-indigo-600 text-[9px]">{phaseTag}</span>
                 {isEmail && <Mail size={11} className="text-purple-600 shrink-0" />}

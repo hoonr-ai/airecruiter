@@ -157,8 +157,8 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
       {/* Candidate Chains Container */}
       {!collapsed && (
         <div className="lr-scroll max-h-[440px] overflow-y-auto border-t border-slate-100">
-          {/* Subheader Toolbar: Search Box & Candidate Count */}
-          <div className="flex items-center justify-between gap-3 bg-slate-50/50 px-4 py-2 border-b border-slate-100">
+          {/* Subheader Toolbar: Search Box & Candidate Count - Sticky at top */}
+          <div className="sticky top-0 z-20 flex items-center justify-between gap-3 bg-slate-50/95 backdrop-blur-xs px-4 py-2 border-b border-slate-200">
             <div className="relative flex-1 max-w-xs">
               <Search
                 size={13}
@@ -182,13 +182,13 @@ export const JobBlock: React.FC<JobBlockProps> = ({ job, defaultCollapsed = fals
                 </button>
               )}
             </div>
-            <div className="text-[11px] text-slate-400 font-medium">
+            <div className="text-[11px] text-slate-500 font-medium">
               Showing {filteredCandidates.length} of {job.candidates.length} candidates
             </div>
           </div>
 
-          {/* Table Header with explicit 4 Columns matching layout */}
-          <div className="grid grid-cols-[170px_1fr_150px_160px] items-center gap-3 bg-slate-50/80 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          {/* Table Header with explicit 4 Columns - Sticky below search toolbar */}
+          <div className="sticky top-[45px] z-10 grid grid-cols-[170px_1fr_150px_160px] items-center gap-3 bg-slate-100/95 backdrop-blur-xs px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-600 border-b border-slate-200 shadow-2xs">
             <div>PROFILE</div>
             <div className="px-1 text-center">PROGRESS PIPELINE</div>
             <div className="pl-1">HISTORY LOGS</div>

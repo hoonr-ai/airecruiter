@@ -296,31 +296,59 @@ export function JobLiveReportPanel({
         {/* Right: Real-time Activity Feed & Anomalies (1 col) */}
         <div className="xl:col-span-1 flex flex-col gap-4 min-w-0 max-w-full h-full max-h-[640px]">
           {/* Anomalies Banner */}
-          {scopedAnomalies.length > 0 && (
-            <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5 shadow-2xs shrink-0 flex flex-col max-h-44">
-              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-amber-900 mb-2">
-                <div className="flex items-center gap-1.5 min-w-0 truncate">
-                  <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
-                  <span className="truncate">Detected Anomalies ({scopedAnomalies.length})</span>
+          {scopedAnomalies.length > 0 && (() => {
+            const candNameMap = new Map<number, string>();
+            for (const j of snapshot?.jobs || []) {
+              for (const c of j.candidates || []) {
+                if (c.interview_id && c.name) {
+                  candNameMap.set(c.interview_id, c.name);
+                }
+              }
+            }
+
+            return (
+              <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5 shadow-2xs shrink-0 flex flex-col max-h-44">
+                <div className="flex items-center justify-between gap-2 text-xs font-semibold text-amber-900 mb-2">
+                  <div className="flex items-center gap-1.5 min-w-0 truncate">
+                    <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                    <span className="truncate">Detected Anomalies ({scopedAnomalies.length})</span>
+                  </div>
                 </div>
+                <ul className="space-y-1.5 text-xs text-amber-800 overflow-y-auto pr-1 divide-y divide-amber-200/50 lr-scroll flex-1">
+                  {scopedAnomalies.map((a, i) => {
+                    const candName = candNameMap.get(a.interview_id) || "Candidate";
+                    const phase = a.kind === "stuck_candidate" ? a.phase : "";
+                    const cleanPhase =
+                      phase === "phase1"
+                        ? "Phase 1"
+                        : phase === "phase1_6hr"
+                        ? "Phase 2"
+                        : phase === "phase2"
+                        ? "Phase 3"
+                        : phase === "phase3"
+                        ? "Phase 4"
+                        : phase
+                        ? phase.replace(/_/g, " ")
+                        : "Outreach";
+
+                    return (
+                      <li key={i} className="pt-1.5 first:pt-0 flex items-start gap-1.5 min-w-0">
+                        <span className="text-amber-500 font-bold shrink-0">•</span>
+                        <span className="break-words min-w-0 flex-1 leading-snug">
+                          {a.kind === "stuck_candidate" &&
+                            `${candName} stuck in ${cleanPhase} for ${a.minutes_since_event}m`}
+                          {a.kind === "call_failure" &&
+                            `Call failure for ${candName}: ${(a.outcome || "failed").replace(/_/g, " ")}`}
+                          {a.kind === "handoff_expired" &&
+                            `Handoff expired for ${candName}`}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
-              <ul className="space-y-1.5 text-xs text-amber-800 overflow-y-auto pr-1 divide-y divide-amber-200/50 lr-scroll flex-1">
-                {scopedAnomalies.map((a, i) => (
-                  <li key={i} className="pt-1.5 first:pt-0 flex items-start gap-1.5 min-w-0">
-                    <span className="text-amber-500 font-bold shrink-0">•</span>
-                    <span className="break-words min-w-0 flex-1 leading-snug">
-                      {a.kind === "stuck_candidate" &&
-                        `Candidate #${a.interview_id} stuck in ${a.phase} for ${a.minutes_since_event}m`}
-                      {a.kind === "call_failure" &&
-                        `Call failure on #${a.interview_id}: ${a.outcome}`}
-                      {a.kind === "handoff_expired" &&
-                        `Handoff expired on #${a.interview_id}`}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Real-time Activity Feed */}
           <div className="border border-slate-200 rounded-xl bg-white shadow-2xs overflow-hidden flex flex-col flex-1 min-h-0 min-w-0 max-w-full">
