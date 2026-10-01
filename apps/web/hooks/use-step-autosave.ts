@@ -5,7 +5,7 @@ export type SaveJobDraft = (params: {
   saveType?: string;
   skipToast?: boolean;
   keepalive?: boolean;
-}) => Promise<boolean>;
+}) => Promise<{ ok: boolean, message?: string }>;
 
 // Pulled out of the effect so it can be unit tested without a DOM/React renderer.
 export function haveDepsChanged(deps: readonly unknown[], prevDeps: readonly unknown[]): boolean {
@@ -53,7 +53,7 @@ export function useStepAutosave(
     dirtyRef.current = true;
     const handle = setTimeout(async () => {
       const ok = await saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true });
-      if (ok) dirtyRef.current = false;
+      if (ok.ok) dirtyRef.current = false;
     }, 1500);
 
     return () => clearTimeout(handle);
