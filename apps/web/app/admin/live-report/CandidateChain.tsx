@@ -428,7 +428,7 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
             return (
               <span
                 key={idx}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 shadow-2xs transition-transform hover:scale-105 cursor-help"
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 shadow-2xs transition-transform hover:scale-105"
                 title={formatHistoryTooltip(evt)}
               >
                 <span className="font-bold text-indigo-600 text-[9px]">{phaseTag}</span>
