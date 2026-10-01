@@ -83,11 +83,8 @@ export function extractErrorMessage(errorData: any, fallbackMessage: string): st
   if (errorData.detail && typeof errorData.detail === "object") {
     if (typeof errorData.detail.message === "string") return errorData.detail.message;
     if (typeof errorData.detail.msg === "string") return errorData.detail.msg;
-    try {
-      return JSON.stringify(errorData.detail);
-    } catch {
-      // Fall through to other properties
-    }
+    // No known shape — fall back rather than surfacing raw JSON in a toast.
+    return fallbackMessage;
   }
 
   // Fallback properties on the root object

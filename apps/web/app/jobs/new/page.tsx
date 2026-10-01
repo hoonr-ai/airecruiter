@@ -6,6 +6,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
+import { shouldSkipForInFlightManualSave, isSupersededAbort } from "@/lib/save-coordination";
 import {
   DEFAULT_SEARCH_SOURCES,
   SEARCH_SOURCES_VERSION,
@@ -1802,6 +1803,13 @@ function NewJobPageContent() {
   const [showResumeModal, setShowResumeModal] = useState(false);
 
   const [isHydratingJobSetup, setIsHydratingJobSetup] = useState(false);
+  // Gate autosave on a dedicated "hydration complete" signal instead of
+  // Boolean(jobData): loadJobDraft sets jobData partway through a sequence
+  // of setState calls (rubric, recruiter notes, sourcing filters, etc.), so
+  // Boolean(jobData) alone could flip true mid-hydration and let a spurious
+  // auto-save fire on page load/refresh before every field had its
+  // persisted value.
+  const isWizardHydrated = Boolean(jobData) && !isHydratingJobSetup;
   const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
   const stepStartMsRef = useRef<number>(Date.now());
 
@@ -3042,6 +3050,9 @@ function NewJobPageContent() {
   };
 
   const saveAbortControllerRef = useRef<AbortController | null>(null);
+  // Tracks whether the save currently owning saveAbortControllerRef is an
+  // auto-save or a user-initiated (manual) one — see shouldSkipForInFlightManualSave.
+  const saveIsAutoRef = useRef(false);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
@@ -3060,28 +3071,32 @@ function NewJobPageContent() {
       return { ok: false };
     }
 
-    // Abort any in-flight save request to ensure latest wins and prevent race conditions
+    const isAutoSave = stepData.saveType === "auto";
+
+    // "Latest wins" — but only among auto-saves. An auto-save must never
+    // cancel a save the user explicitly triggered (Next / Save & Exit):
+    // doing so surfaced a misleading "Save timed out" and blocked the step
+    // transition. A manual save may always supersede whatever's in flight
+    // (including another manual save, e.g. a rapid double-click).
     if (saveAbortControllerRef.current) {
-      saveAbortControllerRef.current.abort();
+      if (shouldSkipForInFlightManualSave({ inFlightIsAuto: saveIsAutoRef.current, incomingIsAuto: isAutoSave })) {
+        return { ok: true };
+      }
+      saveAbortControllerRef.current.abort("superseded");
     }
     const saveController = new AbortController();
     saveAbortControllerRef.current = saveController;
+    saveIsAutoRef.current = isAutoSave;
 
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
     // gives the server a comfortable window to either succeed or return a
     // 500 with a real error. Without this, a hung backend (e.g. row-lock
     // contention pre-fix) left the user staring at a silent spinner.
-    const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
+    const saveTimeoutId = setTimeout(() => saveController.abort("timeout"), 20000);
     try {
       const apiUrl = API_BASE;
-      // Use the new endpoint that saves directly to monitored_jobs
-      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: saveController.signal,
-        keepalive: stepData.keepalive,
-        body: JSON.stringify({
+      const requestBody = JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
           user_session: "default", // Add user session parameter required by API
@@ -3126,7 +3141,23 @@ function NewJobPageContent() {
           step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
           step3_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 3 : undefined,
           is_auto_saved: stepData.saveType === "auto"
-        })
+      });
+
+      // `keepalive: true` requests are capped (~64KB in Chromium) so the
+      // browser can guarantee delivery after the page starts unloading;
+      // past that they're silently dropped. A large rubric/JD payload can
+      // exceed it, so fall back to a normal fetch rather than guarantee a
+      // silent loss — best-effort during pagehide still beats nothing.
+      const KEEPALIVE_BYTE_LIMIT = 60000;
+      const useKeepalive = Boolean(stepData.keepalive) && new TextEncoder().encode(requestBody).length < KEEPALIVE_BYTE_LIMIT;
+
+      // Use the new endpoint that saves directly to monitored_jobs
+      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: saveController.signal,
+        keepalive: useKeepalive,
+        body: requestBody
       });
 
       if (!response.ok) {
@@ -3142,8 +3173,14 @@ function NewJobPageContent() {
       }
       return { ok: true };
     } catch (error) {
+      const isAbort = error instanceof Error && error.name === "AbortError";
+      if (isSupersededAbort(isAbort, saveController.signal.reason)) {
+        // A newer save (auto or manual) superseded this request — stay
+        // quiet and let that save own the toast/result; this is neither a
+        // failure nor a timeout.
+        return { ok: true };
+      }
       console.error("Error saving job to monitored jobs:", error);
-      const isAbort = error instanceof DOMException && error.name === "AbortError";
       const errorMsg = isAbort
         ? "Save timed out — please retry."
         : error instanceof Error ? error.message : "Failed to save. Please try again.";
@@ -3165,7 +3202,7 @@ function NewJobPageContent() {
   // debounce hasn't flushed yet — if they click a different step indicator
   // within that window the cleanup below would clearTimeout, dropping the
   // edit. The currentStep-keyed effect further down catches that case.
-  useStepAutosave(currentStep, 5, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 5, isReadOnly, isWizardHydrated, saveJobDraft, [
     searchSources,
     sourceTitles,
     sourceSkills,
@@ -3180,7 +3217,7 @@ function NewJobPageContent() {
 
   // Step 1 auto-save for Intake fields (Recruiter Notes, Employment Type, Emails, Screening Level, Work Auth)
   // Ensures data isn't lost if the user refreshes before clicking Next.
-  useStepAutosave(currentStep, 1, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 1, isReadOnly, isWizardHydrated, saveJobDraft, [
     recruiterNotes,
     selectedEmpTypes,
     recruiterEmails,
@@ -3189,7 +3226,7 @@ function NewJobPageContent() {
   ]);
 
   // Step 2 auto-save for Publish fields (Job Title, Enhanced Title, AI Description, Job Boards)
-  useStepAutosave(currentStep, 2, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 2, isReadOnly, isWizardHydrated, saveJobDraft, [
     jobTitle,
     enhancedTitle,
     jobPosting,
@@ -3198,13 +3235,13 @@ function NewJobPageContent() {
   ]);
 
   // Step 3 auto-save for Rubric fields (Titles, Skills, Education, Requirements etc.)
-  useStepAutosave(currentStep, 3, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 3, isReadOnly, isWizardHydrated, saveJobDraft, [
     rubricData,
     resumeMatchFilters,
   ]);
 
   // Step 4 auto-save for Screening Questions
-  useStepAutosave(currentStep, 4, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 4, isReadOnly, isWizardHydrated, saveJobDraft, [
     screenQuestions,
   ]);
 

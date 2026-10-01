@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 
 export type SaveJobDraft = (params: {
   currentStep: number;
@@ -37,6 +37,20 @@ export function useStepAutosave(
   // Use a ref to store previous dependencies so we only mark dirty on actual changes
   const prevDeps = useRef<any[]>(deps);
 
+  // saveJobDraft is a fresh closure every render of the parent component, so
+  // it can't live in the effect dependency arrays below directly — that tore
+  // down (clearTimeout'ing the pending debounce / removing the beforeunload
+  // listeners) and re-ran the effects on every render, not just when
+  // currentStep/targetStep/isReadOnly/isHydrated/deps actually changed. That
+  // spurious re-run cancelled the debounce timer and then saw depsChanged
+  // === false (prevDeps.current was already updated by the run it just tore
+  // down), so it never rescheduled: dirtyRef stayed true with no save
+  // pending. useEffectEvent gives a stable identity that always reads the
+  // latest saveJobDraft without needing it in the dependency arrays.
+  const onAutoSave = useEffectEvent((step: number, opts?: { keepalive?: boolean }) =>
+    saveJobDraft({ currentStep: step, saveType: "auto", skipToast: true, ...opts })
+  );
+
   useEffect(() => {
     // 1. Check if any dependency actually changed (skip if identical or first run)
     const depsChanged = haveDepsChanged(deps, prevDeps.current);
@@ -52,12 +66,12 @@ export function useStepAutosave(
     // 2. Mark as dirty and set a debounce timer
     dirtyRef.current = true;
     const handle = setTimeout(async () => {
-      const ok = await saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true });
+      const ok = await onAutoSave(targetStep);
       if (ok.ok) dirtyRef.current = false;
     }, 1500);
 
     return () => clearTimeout(handle);
-  }, [currentStep, targetStep, isReadOnly, isHydrated, saveJobDraft, ...deps]);
+  }, [currentStep, targetStep, isReadOnly, isHydrated, ...deps]);
 
   // 3. Flush on step change
   useEffect(() => {
@@ -67,8 +81,8 @@ export function useStepAutosave(
     if (!isHydrated) return;
 
     dirtyRef.current = false;
-    saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true });
-  }, [currentStep, targetStep, isReadOnly, isHydrated, saveJobDraft]);
+    onAutoSave(targetStep);
+  }, [currentStep, targetStep, isReadOnly, isHydrated]);
 
   // 4. Tab close / refresh / backgrounding: warn while dirty, and best-effort
   // flush the pending save with keepalive so it has a chance to land after
@@ -81,7 +95,7 @@ export function useStepAutosave(
     const flush = () => {
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
-      saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true, keepalive: true });
+      onAutoSave(targetStep, { keepalive: true });
     };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (dirtyRef.current) {
@@ -101,5 +115,5 @@ export function useStepAutosave(
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pagehide", flush);
     };
-  }, [currentStep, targetStep, isReadOnly, isHydrated, saveJobDraft]);
+  }, [currentStep, targetStep, isReadOnly, isHydrated]);
 }

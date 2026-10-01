@@ -101,10 +101,10 @@ test("extractErrorMessage gracefully parses API error responses", () => {
     "Job launched by xyz@example.com"
   );
 
-  // 5. Object detail fallback to JSON.stringify if no message/msg found
+  // 5. Object detail with no known message/msg shape -> Fallback (never raw JSON)
   assert.equal(
     extractErrorMessage({ detail: { unknown: "field" } }, "Fallback"),
-    '{"unknown":"field"}'
+    "Fallback"
   );
 
   // 6. Generic properties fallback
