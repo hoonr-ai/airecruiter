@@ -2198,13 +2198,17 @@ function NewJobPageContent() {
       const embeddedDetails = draft.job_details;
       const hasEmbeddedDetails = embeddedDetails && (embeddedDetails.title || embeddedDetails.customer_name);
 
+      let finalJobData: any = null;
+      let finalJobdivaId = "";
+      let finalIsExternal = false;
+
       if (hasEmbeddedDetails) {
-        setJobData(embeddedDetails);
+        finalJobData = embeddedDetails;
         if (embeddedDetails.jobdiva_id) {
-          setJobdivaId(embeddedDetails.jobdiva_id);
+          finalJobdivaId = embeddedDetails.jobdiva_id;
         }
         if (embeddedDetails.is_external || (embeddedDetails.jobdiva_id || "").startsWith("EXT-")) {
-          setIsExternal(true);
+          finalIsExternal = true;
         }
       } else {
         // Cold path: no persisted job_details yet (e.g. the user pasted a
@@ -2218,12 +2222,12 @@ function NewJobPageContent() {
 
         if (detailsResponse.ok) {
           const details = await detailsResponse.json();
-          setJobData(details);
+          finalJobData = details;
           if (details.jobdiva_id) {
-            setJobdivaId(details.jobdiva_id);
+            finalJobdivaId = details.jobdiva_id;
           }
           if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
-            setIsExternal(true);
+            finalIsExternal = true;
           }
         }
       }
@@ -2231,6 +2235,9 @@ function NewJobPageContent() {
       // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
       // Always check for existing rubric regardless of current step to prevent redundant AI generation
       let loadedRubricForFallback: any = null;
+      let finalRubricData: any = null;
+      let finalScreenQuestions: any = null;
+      let finalBotIntroduction = "";
       try {
         const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
         if (rubricRes.ok) {
@@ -2238,7 +2245,7 @@ function NewJobPageContent() {
           // Only pre-load if it's an actual populated rubric, not an empty shell
           if (rData.titles?.length > 0 || rData.skills?.length > 0) {
             loadedRubricForFallback = applyTitleRequiredSafetyNet(rData);
-            setRubricData(loadedRubricForFallback);
+            finalRubricData = loadedRubricForFallback;
             // Seed the rubric-fingerprint refs from the loaded rubric so a
             // Step 3 → 4 / 4 → 5 transition without edits doesn't think the
             // rubric "changed since last regeneration" and clobber the saved
@@ -2252,13 +2259,12 @@ function NewJobPageContent() {
             // escape hatches (level change, explicit Regenerate, or rubric
             // change on Next) still work.
             if (rData.screen_questions?.length) {
-              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: resolveLockedFlag(q) })));
-              setQuestionIdCounter(rData.screen_questions.length + 1);
+              finalScreenQuestions = rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1, is_locked: resolveLockedFlag(q) }));
               userHasEditedQuestionsRef.current = true;
               lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
             }
             if (rData.bot_introduction) {
-              setBotIntroduction(rData.bot_introduction);
+              finalBotIntroduction = rData.bot_introduction;
               botIntroductionEditedRef.current = !matchesAutoBotIntroductionTemplate({
                 intro: rData.bot_introduction,
                 candidateTitles: [
@@ -2282,6 +2288,18 @@ function NewJobPageContent() {
       }
 
       // 4. Restore form state (Draft values overlay JobDiva values)
+      if (finalJobData) setJobData(finalJobData);
+      if (finalJobdivaId) setJobdivaId(finalJobdivaId);
+      if (finalIsExternal) setIsExternal(true);
+      if (finalRubricData) setRubricData(finalRubricData);
+      if (finalScreenQuestions) {
+        setScreenQuestions(finalScreenQuestions);
+        setQuestionIdCounter(finalScreenQuestions.length + 1);
+      }
+      if (finalBotIntroduction && !draft.bot_introduction) {
+        setBotIntroduction(finalBotIntroduction);
+      }
+
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
       if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) {
         setEnhancedTitle(draft.enhanced_title || "");
