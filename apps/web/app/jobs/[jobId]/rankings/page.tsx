@@ -43,6 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { JobLiveReportPanel } from "@/components/jobs/JobLiveReportPanel";
 import {
   Select,
   SelectContent,
@@ -2260,12 +2261,18 @@ export default function CandidateRankingsPage() {
 
               <button
                 type="button"
-                onClick={() => router.push(`/jobs/${jobId}/live-report`)}
-                className="flex items-center gap-1.5 rounded-lg px-3 h-9 border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-emerald-700 hover:border-emerald-300 transition-all select-none shadow-sm cursor-pointer"
-                title="Open Live Report real-time telemetry for this job"
+                onClick={() => setViewMode(prev => prev === "live-report" ? "table" : "live-report")}
+                className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all select-none shadow-sm cursor-pointer ${
+                  viewMode === "live-report"
+                    ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+                    : "bg-white border-slate-200 hover:bg-slate-50 text-slate-600 hover:text-emerald-700 hover:border-emerald-300"
+                }`}
+                title={viewMode === "live-report" ? "Switch back to Candidate Rankings view" : "Switch to Live Report telemetry view"}
               >
-                <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
-                <span className="text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap">Live Report</span>
+                <Radio className={`w-3.5 h-3.5 ${viewMode === "live-report" ? "text-indigo-600 animate-pulse" : "text-emerald-600 animate-pulse"}`} />
+                <span className="text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap">
+                  {viewMode === "live-report" ? "Rankings" : "Live Report"}
+                </span>
               </button>
 
               {hasActiveFilters && (
@@ -2288,76 +2295,88 @@ export default function CandidateRankingsPage() {
             </div>
           </div>
 
-          {/* Row 2: Status, Source, Feedback, Min Resume Score */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
-              >
-                <option value="all">All</option>
-                <option value="pass">Pass</option>
-                <option value="fail">Fail</option>
-                <option value="in_progress">In Progress</option>
-                <option value="pending">Pending</option>
-                <option value="n/a">N/A</option>
-                <option value="duplicate_candidate">Duplicate Candidate</option>
-                <option value="invalid_contact">Invalid Contact</option>
-              </select>
-            </div>
+          {/* Row 2: Status, Source, Feedback, Min Resume Score (only in table mode) */}
+          {viewMode === "table" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                  className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+                >
+                  <option value="all">All</option>
+                  <option value="pass">Pass</option>
+                  <option value="fail">Fail</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="pending">Pending</option>
+                  <option value="n/a">N/A</option>
+                  <option value="duplicate_candidate">Duplicate Candidate</option>
+                  <option value="invalid_contact">Invalid Contact</option>
+                </select>
+              </div>
 
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
-              <select
-                value={sourceFilter}
-                onChange={(e) => setSourceFilter(e.target.value)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
-              >
-                <option value="all">All</option>
-                {availableSources.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value)}
+                  className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+                >
+                  <option value="all">All</option>
+                  {availableSources.map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
 
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
-              <select
-                value={feedbackFilter}
-                onChange={(e) => setFeedbackFilter(e.target.value)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
-              >
-                <option value="">All</option>
-                <option value="no feedback">No Feedback</option>
-                <option value="submit">Submitted</option>
-                <option value="reject">Rejected</option>
-                <option value="unreachable">Unreachable</option>
-              </select>
-            </div>
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
+                <select
+                  value={feedbackFilter}
+                  onChange={(e) => setFeedbackFilter(e.target.value)}
+                  className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+                >
+                  <option value="">All</option>
+                  <option value="no feedback">No Feedback</option>
+                  <option value="submit">Submitted</option>
+                  <option value="reject">Rejected</option>
+                  <option value="unreachable">Unreachable</option>
+                </select>
+              </div>
 
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                value={minScore}
-                onChange={(e) => {
-                  handleMinScoreChange(e.target.value);
-                }}
-                className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
-              />
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={minScore}
+                  onChange={(e) => {
+                    handleMinScoreChange(e.target.value);
+                  }}
+                  className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
+                />
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* HTML Exact Replica Table */}
-        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
+        {/* View Mode Switching: Live Report vs. Candidate Rankings Table */}
+        {viewMode === "live-report" ? (
+          <div className="w-full">
+            <JobLiveReportPanel
+              jobId={jobId as string}
+              jobdivaId={job?.jobdiva_id}
+              initialTitle={job?.title}
+            />
+          </div>
+        ) : (
+          /* HTML Exact Replica Table */
+          <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
           <div
             ref={tableScrollRef}
             className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
@@ -2971,6 +2990,7 @@ export default function CandidateRankingsPage() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* Modals */}
