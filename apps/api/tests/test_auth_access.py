@@ -1,8 +1,8 @@
 import pytest
 from fastapi import HTTPException
 from unittest.mock import patch
-from apps.api.core.auth import verify_job_access, UserIdentity
-from apps.api.routers.jobs import _verify_job_access_by_id
+from core.auth import verify_job_access, UserIdentity
+from routers.jobs import _verify_job_access_by_id
 
 def test_verify_job_access_allows_admin():
     user = UserIdentity(email="test@example.com", role="admin")
@@ -30,7 +30,7 @@ def test_verify_job_access_allows_unassigned_job():
     # Should not raise exception
     verify_job_access(job_data, user)
 
-@patch("apps.api.routers.jobs._get_job_draft_sync")
+@patch("routers.jobs._get_job_draft_sync")
 def test_verify_job_access_by_id_duplicate_launch(mock_get_draft):
     user = UserIdentity(email="test@example.com", role="recruiter")
     # Mock job draft already launched by another recruiter
