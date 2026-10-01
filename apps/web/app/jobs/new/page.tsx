@@ -3184,6 +3184,41 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
+  // Step 1 auto-save for Intake fields (Recruiter Notes, Employment Type, Emails, Screening Level)
+  // Ensures data isn't lost if the user refreshes before clicking Next.
+  const step1DirtyRef = useRef(false);
+  useEffect(() => {
+    if (currentStep !== 1) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step1DirtyRef.current = true;
+    const handle = setTimeout(async () => {
+      const ok = await saveJobDraft({ currentStep: 1, saveType: "auto", skipToast: true });
+      if (ok === true) step1DirtyRef.current = false;
+    }, 1500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentStep,
+    isReadOnly,
+    jobData,
+    recruiterNotes,
+    selectedEmpTypes,
+    recruiterEmails,
+    screeningLevel
+  ]);
+
+  // Flush a pending Step 1 save when the user navigates away from Step 1
+  useEffect(() => {
+    if (currentStep === 1) return;
+    if (!step1DirtyRef.current) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step1DirtyRef.current = false;
+    saveJobDraft({ currentStep: 1, saveType: "auto", skipToast: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
+
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
       {Object.entries(STEP_LABELS).map(([step, label], index) => {
