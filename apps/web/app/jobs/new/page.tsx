@@ -3119,7 +3119,10 @@ function NewJobPageContent() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
-        const errorMessage = errorData?.detail || errorData?.message || `Save failed (HTTP ${response.status})`;
+        const detailStr = typeof errorData?.detail === 'string' 
+          ? errorData.detail 
+          : errorData?.detail?.message;
+        const errorMessage = detailStr || errorData?.message || `Save failed (HTTP ${response.status})`;
         console.error("API Error Response:", errorData);
         throw new Error(errorMessage);
       }
