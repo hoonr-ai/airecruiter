@@ -119,8 +119,6 @@ import {
   readNdjson,
 } from "@/lib/contact-lookup";
 
-
-
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
 const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -726,8 +724,10 @@ const looksLikeLinkedInProfile = (url?: string | null): boolean => {
  *  We only fall back when the value is genuinely absent — an explicit
  *  recruiter choice of L1.5 (Standard Screen) is preserved as-is.
  */
-const resolveScreeningLevel = (value: string | null | undefined): ScreeningLevel =>
-  (value || "L0.5") as ScreeningLevel;
+const resolveScreeningLevel = (value: string | null | undefined): ScreeningLevel => {
+  const v = value || "L0.5";
+  return (v === "L0.5" || v === "L1" || v === "L1.5" || v === "L2") ? v as ScreeningLevel : "L0.5";
+};
 
 export default function NewJobPage() {
   return (

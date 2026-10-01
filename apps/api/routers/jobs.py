@@ -698,7 +698,7 @@ async def save_job_to_monitoring_enhanced(job_id: str, job_details: dict) -> boo
             
             # Application state
             "processing_status": "pending",
-            "screening_level": job_details.get("screening_level") or "L0.5"
+            "screening_level": job_details.get("screening_level") or "L1.5"
         }
         
         # Save using centralized service logic
@@ -1309,7 +1309,7 @@ def _get_job_draft_sync(job_id: str) -> dict:
             "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
             "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
             "current_step": job_row.get("current_step") or 1,
-            "screening_level": job_row.get("screening_level") or "L0.5",
+            "screening_level": job_row.get("screening_level") or "L1.5",
             "bot_introduction": job_row.get("bot_introduction") or "",
             "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
             "sourcing_filters": job_row.get("sourcing_filters") or {},
