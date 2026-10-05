@@ -2911,7 +2911,16 @@ function NewJobPageContent() {
             
             if (newLocs.length > 0) {
               const additions = newLocs.join(" or ");
-              if (existingQ.question_text.includes("?")) {
+              const primaryLoc = sourceLocations[0]?.value;
+              
+              if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
+                const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+                const match = existingQ.question_text.match(regex);
+                const matchedText = match ? match[0] : primaryLoc;
+                existingQ.question_text = existingQ.question_text.replace(regex, `${matchedText} or ${additions}`);
+              } else if (existingQ.question_text.includes(". Are you")) {
+                existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
+              } else if (existingQ.question_text.includes("?")) {
                 existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
               } else {
                 existingQ.question_text += ` (or ${additions})`;
