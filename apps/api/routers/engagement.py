@@ -62,7 +62,8 @@ from core import (
     JOBDIVA_PAIR_QUALIFICATION_NAME,
     JOBDIVA_PAIR_QUALIFICATION_ID,
     JOBDIVA_PASS_ACTION_NAME,
-    JOBDIVA_PASS_QUALIFICATION_VALUE
+    JOBDIVA_PASS_QUALIFICATION_VALUE,
+    DEFAULT_SCREENING_LEVEL,
 )
 from utils.email_utils import is_placeholder_email, _EMAIL_RE
 
@@ -1045,7 +1046,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "ai_description": job_row.get("ai_description") or "",
                     "recruiter_notes": job_row.get("recruiter_notes") or "",
                     "is_l05": is_l05,
-                    "screening_level": job_row.get("screening_level") or "L0.5",
+                    "screening_level": job_row.get("screening_level") or DEFAULT_SCREENING_LEVEL,
                 },
                 "rubric": rubric if rubric else {},
                 "pre_screen_questions": pre_screen_questions,

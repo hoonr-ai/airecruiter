@@ -29,6 +29,10 @@ export function formatScreeningLevel(level?: string | null): string {
 
 export const JOB_BOARDS = ["LinkedIn", "Indeed", "Dice", "Monster", "CareerBuilder"];
 
+// Single source of truth for the recommended screening level, so the
+// campaign form and question-template defaults can't drift apart.
+export const DEFAULT_SCREENING_LEVEL: ScreeningLevel = "L0.5";
+
 const ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?";
 const ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role";
 
@@ -435,7 +439,7 @@ export async function generateScreeningQuestions(input: {
   return defaults;
 }
 
-export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L0.5"): TemplateQuestion[] {
+export function getDefaultCampaignScreeningQuestions(screeningLevel: string = DEFAULT_SCREENING_LEVEL): TemplateQuestion[] {
   const defaultQs = [
     {
       text: "Are you open to exploring new job opportunities?",
