@@ -81,7 +81,7 @@ export function CampaignForm({
   const [emailInput, setEmailInput] = useState("");
   const [emailError, setEmailError] = useState<string | null>(null);
   const [empTypes, setEmpTypes] = useState<string[]>(initial?.selected_employment_types ?? []);
-  const [screeningLevel, setScreeningLevel] = useState<string>(initial?.campaign_id ? (initial.screening_level ?? "L1.5") : "L0.5");
+  const [screeningLevel, setScreeningLevel] = useState<string>(initial?.campaign_id ? (initial.screening_level ?? "L0.5") : "L0.5");
   const [jobBoards, setJobBoards] = useState<string[]>(initial?.selected_job_boards ?? []);
   const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
   const [botIntro, setBotIntro] = useState(initial?.bot_introduction?.trim() ? initial.bot_introduction : defaultBotIntro);
@@ -105,7 +105,7 @@ export function CampaignForm({
           ...q,
           is_locked: resolveLockedFlag(q),
         }))
-      : getDefaultCampaignScreeningQuestions(initial?.campaign_id ? (initial.screening_level ?? "L1.5") : "L0.5")
+      : getDefaultCampaignScreeningQuestions(initial?.campaign_id ? (initial.screening_level ?? "L0.5") : "L0.5")
   );
   const [phase1ReminderHours, setPhase1ReminderHours] = useState<string>(
     initial?.phase1_6hr_reminder_hours != null && initial.phase1_6hr_reminder_hours >= 0
@@ -163,7 +163,7 @@ export function CampaignForm({
 
       if (!wasBoolean || hasRoleQuestion) return prev;
 
-      const roleQuestionTemplate = getDefaultCampaignScreeningQuestions("L1.5").find((q) =>
+      const roleQuestionTemplate = getDefaultCampaignScreeningQuestions("L0.5").find((q) =>
         isRoleResponsibilitiesQuestion(q.question_text)
       );
       if (!roleQuestionTemplate) return prev;

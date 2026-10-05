@@ -4525,7 +4525,7 @@ class JobDivaService:
                         "recruiter_emails": json.dumps(recruiter_emails) if recruiter_emails else '[]',
                         "selected_employment_types": json.dumps(data.get("selected_employment_types", [])),
                         "selected_job_boards": json.dumps(data.get("selected_job_boards", [])),
-                        "screening_level": data.get("screening_level", "L1.5"),
+                        "screening_level": data.get("screening_level", "L0.5"),
                         "processing_status": data.get("processing_status", "pending"),
 
                         # Phone-screen intro + campaign grouping (both plain TEXT

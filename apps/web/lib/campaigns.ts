@@ -435,7 +435,7 @@ export async function generateScreeningQuestions(input: {
   return defaults;
 }
 
-export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L1.5"): TemplateQuestion[] {
+export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L0.5"): TemplateQuestion[] {
   const defaultQs = [
     {
       text: "Are you open to exploring new job opportunities?",
