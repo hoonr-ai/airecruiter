@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   ApiError,
   isNotFoundError,
+  LIVE_REPORT_NOT_FOUND_MESSAGE,
+  LIVE_REPORT_FORBIDDEN_MESSAGE,
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
   recordRedirectTimestamp,
@@ -36,8 +38,10 @@ test("isNotFoundError detects status number or message fallbacks", () => {
   assert.equal(isNotFoundError(undefined), false);
 });
 
-test("LIVE_REPORT_PROD_ONLY_MESSAGE constant is defined", () => {
-  assert.equal(LIVE_REPORT_PROD_ONLY_MESSAGE, "Live Launch Monitor is available in Production only.");
+test("LIVE_REPORT_NOT_FOUND_MESSAGE and FORBIDDEN constants are defined", () => {
+  assert.equal(LIVE_REPORT_NOT_FOUND_MESSAGE, "Launch snapshot not found or no launches recorded yet.");
+  assert.equal(LIVE_REPORT_FORBIDDEN_MESSAGE, "You do not have permission to view this launch monitor.");
+  assert.equal(LIVE_REPORT_PROD_ONLY_MESSAGE, LIVE_REPORT_NOT_FOUND_MESSAGE);
 });
 
 test("isWithinRedirectCooldown and recordRedirectTimestamp work together cleanly", () => {

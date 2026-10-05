@@ -43,12 +43,19 @@ def _get_webhook_secret() -> str:
 def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     """Verify X-Hub-Signature-256: sha256=<hex_digest>."""
     secret = _get_webhook_secret()
-    # In development or testing if no secret configured, allow with warning
-    if not secret:
-        env = os.getenv("ENVIRONMENT", "dev").lower()
-        if env in {"production", "prod"}:
-            logger.error("DNC webhook rejected: PAIR_WEBHOOK_SECRET is not configured in production")
+    env = os.getenv("ENVIRONMENT", "dev").lower()
+
+    # Enforce HMAC unconditionally across production, staging, and QA
+    if env in {"production", "prod", "staging", "qa"}:
+        if not secret:
+            logger.error("DNC webhook rejected: neither PAIR_WEBHOOK_SECRET nor PAIR_API_KEY is configured in %s environment", env)
             return False
+        if not signature_header or not signature_header.startswith("sha256="):
+            logger.warning("DNC webhook rejected: Missing or invalid X-Hub-Signature-256 in %s environment", env)
+            return False
+    elif not secret:
+        # In local development without secret configured, log warning and allow
+        logger.warning("DNC webhook accepted without secret in local %s environment", env)
         return True
 
     if not signature_header or not signature_header.startswith("sha256="):
@@ -115,10 +122,18 @@ async def receive_dnc_webhook(
     candidate_data = data.get("candidate") or {}
     suppression_data = data.get("suppression") or {}
 
-    email = candidate_data.get("email")
-    phone = candidate_data.get("phone")
+    email = (candidate_data.get("email") or "").strip() or None
+    phone = (candidate_data.get("phone") or "").strip() or None
     name = candidate_data.get("name")
     interview_id = data.get("interview_id")
+
+    # Guard against payloads missing all candidate identifiers to prevent table-wide scans
+    if not email and not phone and not interview_id:
+        logger.warning("DNC webhook rejected: missing all candidate identifiers (email, phone, interview_id)")
+        raise HTTPException(
+            status_code=422,
+            detail="Missing candidate identifiers: at least one of email, phone, or interview_id is required",
+        )
     trigger = suppression_data.get("trigger") or "webhook"
     blocked_channels = suppression_data.get("blocked_channels") or ["email", "sms", "call"]
     reasons = suppression_data.get("reasons") or {}

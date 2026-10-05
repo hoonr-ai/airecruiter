@@ -92,6 +92,8 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
 export {
   ApiError,
   isNotFoundError,
+  LIVE_REPORT_NOT_FOUND_MESSAGE,
+  LIVE_REPORT_FORBIDDEN_MESSAGE,
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
   recordRedirectTimestamp,

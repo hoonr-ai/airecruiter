@@ -280,12 +280,10 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
           {isDnc ? (
             <span
               className="inline-flex items-center gap-1 font-semibold text-rose-700 max-w-full truncate"
-              title={candidate.dnc_trigger ? `Suppressed · ${candidate.dnc_trigger}` : "Suppressed on DNC list"}
+              title="Candidate on DNC list. No further reach out will happen."
             >
               <AlertTriangle size={12} className="text-rose-600 shrink-0" />
-              <span className="truncate">
-                DNC · {candidate.dnc_trigger ? candidate.dnc_trigger.replace(/_/g, " ") : "inbound sms stop"}
-              </span>
+              <span className="truncate">DNC</span>
             </span>
           ) : passed ? (
             <span
@@ -468,10 +466,10 @@ export const CandidateChain: React.FC<CandidateChainProps> = memo(({ candidate }
         {isDnc ? (
           <span
             className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold border-rose-300 bg-rose-100/90 text-rose-800 shadow-2xs"
-            title={candidate.dnc_message || "Candidate on DNC list. All outreach has been stopped."}
+            title="Candidate on DNC list. No further reach out will happen."
           >
             <UserX size={12} className="text-rose-700 shrink-0" />
-            outreach is stopped
+            no further reach out will happen
           </span>
         ) : outcome ? (
           <span

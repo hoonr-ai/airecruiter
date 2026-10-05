@@ -31,7 +31,9 @@ export function isNotFoundError(err: unknown): boolean {
   return msg.includes("404") || msg.includes("Not Found");
 }
 
-export const LIVE_REPORT_PROD_ONLY_MESSAGE = "Live Launch Monitor is available in Production only.";
+export const LIVE_REPORT_NOT_FOUND_MESSAGE = "Launch snapshot not found or no launches recorded yet.";
+export const LIVE_REPORT_FORBIDDEN_MESSAGE = "You do not have permission to view this launch monitor.";
+export const LIVE_REPORT_PROD_ONLY_MESSAGE = LIVE_REPORT_NOT_FOUND_MESSAGE;
 
 export const MSAL_REDIRECT_COOLDOWN_MS = 15000;
 export const MSAL_REDIRECT_STORAGE_KEY = "last_msal_login_redirect";

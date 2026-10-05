@@ -206,6 +206,19 @@ export function JobLiveReportPanel({
     );
   }, [snapshot?.anomalies, scopedJob]);
 
+  // Memoize candidate name resolution map
+  const candidateNameMap = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const j of snapshot?.jobs || []) {
+      for (const c of j.candidates || []) {
+        if (c.interview_id && c.name) {
+          map.set(c.interview_id, c.name);
+        }
+      }
+    }
+    return map;
+  }, [snapshot?.jobs]);
+
   return (
     <div className="flex flex-col gap-4 w-full">
       {/* Top Controls Strip */}
@@ -296,27 +309,17 @@ export function JobLiveReportPanel({
         {/* Right: Real-time Activity Feed & Anomalies (1 col) */}
         <div className="xl:col-span-1 flex flex-col gap-4 min-w-0 max-w-full h-full max-h-[640px]">
           {/* Anomalies Banner */}
-          {scopedAnomalies.length > 0 && (() => {
-            const candNameMap = new Map<number, string>();
-            for (const j of snapshot?.jobs || []) {
-              for (const c of j.candidates || []) {
-                if (c.interview_id && c.name) {
-                  candNameMap.set(c.interview_id, c.name);
-                }
-              }
-            }
-
-            return (
-              <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5 shadow-2xs shrink-0 flex flex-col max-h-44">
-                <div className="flex items-center justify-between gap-2 text-xs font-semibold text-amber-900 mb-2">
-                  <div className="flex items-center gap-1.5 min-w-0 truncate">
+          {scopedAnomalies.length > 0 && (
+            <div className="border border-amber-200 rounded-xl bg-amber-50/70 p-3.5 shadow-2xs shrink-0 flex flex-col max-h-44">
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-amber-900 mb-2">
+                <div className="flex items-center gap-1.5 min-w-0 truncate">
                     <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
                     <span className="truncate">Detected Anomalies ({scopedAnomalies.length})</span>
                   </div>
                 </div>
                 <ul className="space-y-1.5 text-xs text-amber-800 overflow-y-auto pr-1 divide-y divide-amber-200/50 lr-scroll flex-1">
                   {scopedAnomalies.map((a, i) => {
-                    const candName = candNameMap.get(a.interview_id) || "Candidate";
+                    const candName = candidateNameMap.get(a.interview_id) || "Candidate";
                     const phase = a.kind === "stuck_candidate" ? a.phase : "";
                     const cleanPhase =
                       phase === "phase1"
@@ -347,8 +350,7 @@ export function JobLiveReportPanel({
                   })}
                 </ul>
               </div>
-            );
-          })()}
+            )}
 
           {/* Real-time Activity Feed */}
           <div className="border border-slate-200 rounded-xl bg-white shadow-2xs overflow-hidden flex flex-col flex-1 min-h-0 min-w-0 max-w-full">
