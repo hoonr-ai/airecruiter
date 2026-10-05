@@ -5,7 +5,7 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from exa_py import Exa
-from services.location import extract_us_location_from_text
+from services.location import _NON_PLACE_TOKENS, extract_us_location_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -110,25 +110,41 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
 
+    def _is_plausible_city(city: str) -> bool:
+        """Reject headline/tool names and short uppercase fragments as cities.
+
+        This parser runs before the broader location helper for structured
+        Exa fields, so it must apply the same tech-brand guard itself.
+        """
+        value = city.strip()
+        if not value or value.lower() in _NON_PLACE_TOKENS:
+            return False
+        # Two-letter uppercase fragments such as "PS, PR" can be picked up
+        # from initials or resume text. Real two-letter city names are rare;
+        # keep mixed/title-case values such as "La Mesa" valid.
+        if re.fullmatch(r"[A-Z]{2}", value):
+            return False
+        return True
+
     # 1. Strict "Located/Based/Lives/etc. in CITY, ST"
     m = _LOCATED_IN_RE.search(text)
     if m:
         st = m.group(2).strip().upper()
-        if st in _US_STATE_CODES:
+        if st in _US_STATE_CODES and _is_plausible_city(m.group(1)):
             return m.group(1).strip(), st
 
     # 2. "City, ST" with a valid US state code — widened from 200 → 400 chars
     head = text[:400]
     for cand in _CITY_STATE_RE.finditer(head):
         st = cand.group(2).strip().upper()
-        if st in _US_STATE_CODES:
+        if st in _US_STATE_CODES and _is_plausible_city(cand.group(1)):
             return cand.group(1).strip(), st
 
     # 3. "City, FullStateName" — normalise to (City, ST)
     for cand in _CITY_STATE_NAME_RE.finditer(head):
         state_name = cand.group(2).strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_name)
-        if code:
+        if code and _is_plausible_city(cand.group(1)):
             return cand.group(1).strip(), code
 
     # 4. "Greater <City> Area" / "<City>, <State> Area" (LinkedIn header)
@@ -136,7 +152,7 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
         city = cand.group(1).strip()
         state_token = (cand.group(2) or "").strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_token) if state_token else ""
-        if city:
+        if city and _is_plausible_city(city):
             return city, code or ""
 
     # 5. Delegate to the broader helper (used by Step-5 elsewhere) and split.
