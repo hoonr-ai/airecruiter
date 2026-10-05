@@ -192,7 +192,7 @@ export function JobLiveReportPanel({
     if (matched) return matched;
 
     if (snapshot.jobs.length === 1) return snapshot.jobs[0];
-    return snapshot.jobs[0] || null;
+    return null;
   }, [snapshot, resolvedJobDivaId, jobId]);
 
   // Scoped Anomalies
