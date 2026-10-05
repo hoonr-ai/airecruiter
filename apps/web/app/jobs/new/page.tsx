@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useLayoutEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
@@ -1015,10 +1015,14 @@ function NewJobPageContent() {
     // ratio. Clamped to [0.1, 5] at the input layer.
     weight?: number;
   }>>([]);
+  const resumeMatchFiltersRef = useRef(resumeMatchFilters);
+  useLayoutEffect(() => { resumeMatchFiltersRef.current = resumeMatchFilters; }, [resumeMatchFilters]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
+  const screenQuestionsRef = useRef(screenQuestions);
+  useLayoutEffect(() => { screenQuestionsRef.current = screenQuestions; }, [screenQuestions]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
   // AI policy check (NSFW / rude / discriminatory / nonsensical) for
   // recruiter-added questions — shows a warning under the row, never blocks.
@@ -1093,6 +1097,8 @@ function NewJobPageContent() {
     value: string;
     radius: string;
   }>>([]);
+  const sourceLocationsRef = useRef(sourceLocations);
+  useLayoutEffect(() => { sourceLocationsRef.current = sourceLocations; }, [sourceLocations]);
   const [hasSeededSourceLocation, setHasSeededSourceLocation] = useState(false);
   const [sourceCompanies, setSourceCompanies] = useState<string[]>([]);
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
@@ -1100,6 +1106,8 @@ function NewJobPageContent() {
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
+  const sourceLocationMilesRef = useRef(sourceLocationMiles);
+  useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   // PR-B: top-level minimum years of experience floor for sourcing.
@@ -2863,29 +2871,29 @@ function NewJobPageContent() {
       const data = await response.json();
       setJobPosting(data.description);
       if (data.locations && Array.isArray(data.locations) && data.locations.length > 0) {
-        // Computed directly from the current state snapshot (not inside a
-        // setState updater) so the exact same values can be handed to
-        // saveJobDraft below — a setTimeout + closure over component state
-        // here previously saved whatever sourceLocations/resumeMatchFilters/
-        // screenQuestions were BEFORE this update, silently reverting the
-        // newly extracted locations on the next reload.
-        const newLocs = [...sourceLocations];
-        const existingValues = new Set(sourceLocations.map(l => l.value.toLowerCase()));
+        // Read refs after the async generation request so recruiter edits
+        // made while it was running are included in both state and the draft
+        // payload instead of being overwritten by stale render closures.
+        const latestLocations = sourceLocationsRef.current;
+        const latestFilters = resumeMatchFiltersRef.current;
+        const latestQuestions = screenQuestionsRef.current;
+        const newLocs = [...latestLocations];
+        const existingValues = new Set(latestLocations.map(l => l.value.toLowerCase()));
         let nextLocationId = Math.max(Date.now(), ...newLocs.map(loc => loc.id + 1));
         for (const loc of data.locations) {
           if (!existingValues.has(loc.toLowerCase())) {
             newLocs.push({
               id: nextLocationId++,
               value: loc,
-              radius: "within 25 mi"
+              radius: `within ${sourceLocationMilesRef.current} mi`
             });
             existingValues.add(loc.toLowerCase());
           }
         }
         setSourceLocations(newLocs);
 
-        const newFilters = [...resumeMatchFilters];
-        const existingLocs = new Set(resumeMatchFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+        const newFilters = [...latestFilters];
+        const existingLocs = new Set(latestFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
         let nextFilterId = Math.max(Date.now(), ...newFilters.map(filter => filter.id + 1));
         for (const loc of data.locations) {
           if (!existingLocs.has(loc.toLowerCase())) {
@@ -2903,7 +2911,7 @@ function NewJobPageContent() {
         }
         setResumeMatchFilters(newFilters);
 
-        const newQuestions = [...screenQuestions];
+        const newQuestions = [...latestQuestions];
         const existingLocIndex = newQuestions.findIndex(
           q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
         );
@@ -2914,7 +2922,7 @@ function NewJobPageContent() {
 
           if (additionalLocs.length > 0) {
             const additions = additionalLocs.join(" or ");
-            const primaryLoc = sourceLocations[0]?.value;
+            const primaryLoc = newLocs[0]?.value;
 
             if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
               const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
