@@ -31,5 +31,7 @@ export function getCandidateLocations(c: CandidateLocationInput): {
       .trim() ||
     null;
 
-  return { home: home || null, work: work || null };
+  // Remote roles may legitimately admit candidates without a published
+  // residence, but Step 5 should never render an unexplained empty location.
+  return { home: home || "Location unavailable", work: work || null };
 }

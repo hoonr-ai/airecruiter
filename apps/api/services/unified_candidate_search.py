@@ -720,6 +720,7 @@ class UnifiedCandidateSearch:
 
         def finalize_candidate(cand):
             """Apply match scoring to a candidate — see apply_scoring_policy."""
+            self._hydrate_candidate_location_from_zip(cand)
             return self.apply_scoring_policy(cand, criteria)
 
         # Which JobDiva producers this request selects — see
@@ -830,6 +831,7 @@ class UnifiedCandidateSearch:
             # Step 5 has a strict radius contract across every source. Check
             # again after finalization because résumé extraction may replace
             # a stale profile location or recover a previously blank one.
+            self._hydrate_candidate_location_from_zip(cand)
             final_location_veto = self._location_hard_gate(cand, criteria)
             if final_location_veto:
                 summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
@@ -957,16 +959,19 @@ class UnifiedCandidateSearch:
             if cid and cid in seen_ids:
                 return False
 
+            self._hydrate_candidate_location_from_zip(cand)
             final_location_veto = self._location_hard_gate(cand, criteria)
             if final_location_veto:
-                summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
                 self._log_stage(
                     "LocationGate",
-                    f"dropping JobDiva candidate_id={cid} source={source_label} "
+                    f"deferring JobDiva candidate_id={cid} source={source_label} "
                     f"reason={cand.get('location_veto_reason') or final_location_veto} "
                     f"distance={cand.get('distance_miles')}",
                 )
-                return False
+                # The CRM location may be absent or stale; résumé enrichment
+                # can supply the authoritative current residence. Keep it out
+                # of Step 5 until the post-enrichment gate has a final verdict.
+                cand["_defer_initial_emit"] = True
 
             if cid:
                 seen_ids.add(cid)
@@ -996,8 +1001,9 @@ class UnifiedCandidateSearch:
                 if v not in (None, "", [], {}):
                     agent_payload[key] = v
 
-            summary["total_candidates"] += 1
-            await queue.put({"type": "candidate", "data": agent_payload})
+            if not cand.get("_defer_initial_emit", False):
+                summary["total_candidates"] += 1
+                await queue.put({"type": "candidate", "data": agent_payload})
             return True
 
         async def emit_source_status(
@@ -1122,6 +1128,8 @@ class UnifiedCandidateSearch:
             drops — no drop patch is sent for a row the client never saw.
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
+            deferred_initial = bool(cand.pop("_defer_initial_emit", False))
+            emit_full_row = as_full_row or deferred_initial
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
             # A selected experience range is an explicit recruiter constraint,
             # unlike the normal JobDiva relevance gate (which intentionally
@@ -1136,7 +1144,7 @@ class UnifiedCandidateSearch:
                     "ExperienceGate",
                     f"dropping candidate_id={cid} outside configured experience range",
                 )
-                if not as_full_row:
+                if not emit_full_row:
                     await queue.put({
                         "type": "candidate_detail",
                         "candidate_id": cid,
@@ -1150,7 +1158,7 @@ class UnifiedCandidateSearch:
                     "LocationGate",
                     f"dropping candidate_id={cid} reason={location_reason} distance={distance}",
                 )
-                if not as_full_row:
+                if not emit_full_row:
                     await queue.put({
                         "type": "candidate_detail",
                         "candidate_id": cid,
@@ -1164,6 +1172,7 @@ class UnifiedCandidateSearch:
             # emit_jobdiva_agent_result never saw — re-check here so a
             # résumé-recovered location outside every configured radius
             # still gets dropped instead of reaching Step 5.
+            self._hydrate_candidate_location_from_zip(cand)
             scored_location_veto = self._location_hard_gate(cand, criteria)
             if scored_location_veto:
                 summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
@@ -1172,7 +1181,7 @@ class UnifiedCandidateSearch:
                     f"dropping candidate_id={cid} reason={cand.get('location_veto_reason') or scored_location_veto} "
                     f"distance={cand.get('distance_miles')}",
                 )
-                if not as_full_row:
+                if not emit_full_row:
                     await queue.put({
                         "type": "candidate_detail",
                         "candidate_id": cid,
@@ -1214,7 +1223,7 @@ class UnifiedCandidateSearch:
                 # never-dropped JobAgent copy re-emit if it arrives later.
                 if cid:
                     seen_ids.discard(cid)
-                if not as_full_row:
+                if not emit_full_row:
                     await queue.put({
                         "type": "candidate_detail",
                         "candidate_id": cid,
@@ -1271,7 +1280,7 @@ class UnifiedCandidateSearch:
                             "candidate_id": owner_id,
                             "patch": dict(changed),
                         })
-                    if not as_full_row:
+                    if not emit_full_row:
                         await queue.put({
                             "type": "candidate_detail",
                             "candidate_id": cid,
@@ -1286,7 +1295,7 @@ class UnifiedCandidateSearch:
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
 
-            if as_full_row:
+            if emit_full_row:
                 # Sample mode: no skeleton row exists client-side — emit the
                 # fully-enriched, scored candidate as a complete row. The
                 # total_candidates counter normally increments at the
@@ -3943,6 +3952,39 @@ class UnifiedCandidateSearch:
             "location_match_reason", "location_veto_reason",
         ):
             candidate.pop(key, None)
+        return True
+
+    def _hydrate_candidate_location_from_zip(self, candidate: Dict[str, Any]) -> bool:
+        """Fill a missing display location from a validated US ZIP code."""
+        if not isinstance(candidate, dict):
+            return False
+        existing = sanitize_candidate_location(candidate.get("location"))
+        if not existing:
+            existing = sanitize_candidate_location(
+                ", ".join(
+                    part for part in (
+                        str(candidate.get("city") or "").strip(),
+                        str(candidate.get("state") or "").strip(),
+                    ) if part
+                )
+            )
+        if existing:
+            candidate["location"] = existing
+            return False
+
+        from services import zip_index
+
+        entry = zip_index.lookup_zip(str(candidate.get("zipcode") or "").strip())
+        if not entry:
+            return False
+        city, state = str(entry.get("city") or "").strip(), str(entry.get("state") or "").strip()
+        location = sanitize_candidate_location(f"{city}, {state}")
+        if not location:
+            return False
+        candidate["city"] = city
+        candidate["state"] = state
+        candidate["location"] = location
+        candidate["location_source"] = candidate.get("location_source") or "zipcode"
         return True
 
     def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
