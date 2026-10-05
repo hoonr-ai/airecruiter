@@ -630,6 +630,20 @@ def test_created_profile_fill_never_overwrites_real_values():
     ) == {}
 
 
+def test_linkedin_member_name_on_a_profile_is_replaced_even_when_not_fresh():
+    current = {"FIRSTNAME": "Linkedin", "LASTNAME": "Member", "EMAIL": "jane@real.dev", "CELLPHONE": "2015550100"}
+    assert created_profile_fill(current, first_name="Jane", last_name="Doe", fresh=False) == {
+        "firstName": "Jane", "lastName": "Doe",
+    }
+
+
+def test_a_real_name_on_an_existing_profile_is_never_replaced():
+    # "At" in a surname trips is_placeholder_name's headline heuristic; the
+    # JobDiva-side check uses only the exact stand-ins.
+    current = {"FIRSTNAME": "Maria", "LASTNAME": "At Santos", "EMAIL": "maria@real.dev", "CELLPHONE": "2015550100"}
+    assert created_profile_fill(current, first_name="Maria", last_name="Santos", fresh=False) == {}
+
+
 def test_created_profile_gets_its_social_links_and_alternate_email():
     read_back = {"ID": "777", "FIRSTNAME": "Ada", "LASTNAME": "Lovelace", "EMAIL": "ada@lovelace.dev",
                  "LINKEDIN": "", "GITHUB": "https://github.com/someone-set-this", "DATECREATED": _now_et_str()}
