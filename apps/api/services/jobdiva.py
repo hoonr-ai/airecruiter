@@ -20,6 +20,7 @@ from core import (
     JOBDIVA_PAIR_RESUME_SOURCE_ID,
     JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL,
     JOBDIVA_PAIR_RESUME_SOURCE_NAMES,
+    DEFAULT_SCREENING_LEVEL,
 )
 from services.location_type import resolve_location_type
 from services import jobdiva_rate_limit as _bi_rate_limit
@@ -4525,7 +4526,7 @@ class JobDivaService:
                         "recruiter_emails": json.dumps(recruiter_emails) if recruiter_emails else '[]',
                         "selected_employment_types": json.dumps(data.get("selected_employment_types", [])),
                         "selected_job_boards": json.dumps(data.get("selected_job_boards", [])),
-                        "screening_level": data.get("screening_level", "L1.5"),
+                        "screening_level": data.get("screening_level", DEFAULT_SCREENING_LEVEL),
                         "processing_status": data.get("processing_status", "pending"),
 
                         # Phone-screen intro + campaign grouping (both plain TEXT

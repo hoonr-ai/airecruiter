@@ -33,6 +33,7 @@ from routers.jobs import invalidate_monitored_jobs_cache
 from services.jobdiva import jobdiva_service
 from services.job_attribution import stamp_job_posted_by
 from core.auth import get_current_user, UserIdentity, verify_job_access
+from core.config import DEFAULT_SCREENING_LEVEL
 
 # Cap on ids accepted by the bulk-add endpoint (each id is a synchronous
 # JobDiva fetch + DB write; keep the request bounded).
@@ -75,7 +76,7 @@ async def init_campaigns_schema():
                         customer_name             TEXT,
                         recruiter_emails          TEXT,
                         selected_employment_types TEXT,
-                        screening_level           TEXT DEFAULT 'L1.5',
+                        screening_level           TEXT DEFAULT 'L0.5',
                         recruiter_notes           TEXT,
                         work_authorization        TEXT,
                         selected_job_boards       TEXT,
@@ -111,6 +112,11 @@ async def init_campaigns_schema():
                     ADD COLUMN IF NOT EXISTS phase2_call_delay_mins INTEGER DEFAULT NULL,
                     ADD COLUMN IF NOT EXISTS phase3_call_delay_mins INTEGER DEFAULT NULL;
                     """
+                )
+                # Tables created before the L0.5 rollout still carry the old
+                # column default; re-point it so new rows match app code.
+                cur.execute(
+                    "ALTER TABLE campaigns ALTER COLUMN screening_level SET DEFAULT 'L0.5';"
                 )
                 conn.commit()
     except Exception as e:
@@ -505,7 +511,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
         city = ""
         state = ""
         loc_type = "Onsite"
-        screening_lvl = "L1.5"
+        screening_lvl = DEFAULT_SCREENING_LEVEL
         job_recruiter_notes = None
         ai_description = ""
         customer_name = campaign.get("customer_name") or ""
@@ -527,7 +533,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                     job_desc = row[2] or ""
                     city = row[3] or ""
                     loc_type = row[4] or "Onsite"
-                    screening_lvl = row[5] or "L1.5"
+                    screening_lvl = row[5] or DEFAULT_SCREENING_LEVEL
                     job_recruiter_notes = row[7] if len(row) > 7 else None
                     ai_description = row[8] or ""
                     state = row[9] or ""
@@ -997,7 +1003,7 @@ async def _create_campaign_job(
         "selected_job_boards": (
             selected_job_boards if selected_job_boards is not None else (campaign.get("selected_job_boards") or [])
         ),
-        "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
+        "screening_level": screening_level or campaign.get("screening_level") or DEFAULT_SCREENING_LEVEL,
         "bot_introduction": raw_intro,
         "processing_status": "campaign_created",
         "sourcing_filters": data.get("sourcing_filters") or None,
