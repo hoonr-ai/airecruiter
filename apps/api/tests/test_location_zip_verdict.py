@@ -124,7 +124,7 @@ def test_verdict_far_zip_confirmed_outside_offline(svc):
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701"}, _criteria()
     )
-    assert not ok and reason == "outside_radius_soft_keep"
+    assert not ok and reason == "outside_radius_confirmed"
     assert dist is not None and dist > 25
 
 
@@ -169,7 +169,7 @@ def test_verdict_remote_job_skips_radius(svc):
 
 def test_verdict_missing_location_soft_keep_sentinel(svc):
     ok, reason, dist = svc._location_match_verdict({"location": ""}, _criteria())
-    assert not ok and reason == "candidate_location_missing_keep" and dist == 9999.0
+    assert not ok and reason == "candidate_location_missing" and dist == 9999.0
 
 
 def test_verdict_state_only_matches_via_direct_zip(svc):
@@ -184,7 +184,7 @@ def test_verdict_open_to_relocation_does_not_bypass_configured_radius(svc):
         {"location": "Tucson, AZ 85701", "open_to_relocation": True},
         _criteria(include_relocation_candidates=False),
     )
-    assert not ok and reason == "outside_radius_soft_keep"
+    assert not ok and reason == "outside_radius_confirmed"
     assert dist is not None and dist > 25
 
 
@@ -252,6 +252,26 @@ def test_hard_gate_no_veto_for_remote_job(svc):
     ) is None
 
 
+def test_hard_gate_allows_unknown_location_for_remote_job(svc):
+    candidate = {}
+    assert svc._location_hard_gate(
+        candidate, _criteria(location_type="Remote")
+    ) is None
+
+
+def test_hard_gate_soft_keeps_transient_geocoder_failure(svc, monkeypatch):
+    import services.unified_candidate_search as ucs
+
+    monkeypatch.setattr(
+        ucs, "within_radius",
+        lambda *args, **kwargs: (False, "candidate_ungeocodable", None),
+    )
+    candidate = {"location": "Nopeville, CA"}
+    assert svc._location_hard_gate(candidate, _criteria()) is None
+    assert candidate.get("location_match_reason") == "geocode_unavailable"
+    assert "location_veto_reason" not in candidate
+
+
 # ---------------------------------------------- review-confirmed regressions
 
 def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
@@ -310,7 +330,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
     # (soft-keep verdict; _location_hard_gate turns the real distance into a
     # veto). The LLM string is ignored entirely — no Nominatim call, so the
     # unresolvable "Phoenix Metropolitan Area" cannot rescue the row.
-    assert not ok and reason == "outside_radius_soft_keep"
+    assert not ok and reason == "outside_radius_confirmed"
     assert dist is not None and dist > 25
     assert geocoded == []
 
@@ -349,7 +369,7 @@ def test_verdict_all_signals_offline_skips_nominatim(svc, monkeypatch):
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701"}, _criteria()
     )
-    assert not ok and reason == "outside_radius_soft_keep" and dist > 25
+    assert not ok and reason == "outside_radius_confirmed" and dist > 25
 
 
 def test_parse_location_street_number_not_mistaken_for_zip(svc):

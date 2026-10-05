@@ -74,6 +74,8 @@ def sanitize_candidate_location(value) -> str:
     pass through untouched.
     """
     text = re.sub(r"\s+", " ", str(value or "").strip())
+    if text.casefold() in {"unknown", "n/a", "na", "none", "not specified"}:
+        return ""
     if not text or not _ARRANGEMENT_HINT_RE.search(text):
         # Display/storage paths also receive parser-produced city/state
         # strings. Apply the shared false-city guard here so a bad upstream
@@ -98,19 +100,13 @@ def sanitize_candidate_location(value) -> str:
     if all(t.lower() in _ARRANGEMENT_RESIDUE_WORDS for t in alpha_tokens):
         return ""
         
-    # If the remaining location is just a broad country name, treat it as unknown
-    # so that the LLM extraction (which often finds the exact city) can take over.
-    broad_names = {"united states", "usa", "us", "u.s.", "u.s.a.", "india", "canada", "uk", "united kingdom", "unknown"}
-    if cleaned.lower() in broad_names:
-        return ""
-        
     return _sanitize_city_state_display(cleaned)
 
 
 def _sanitize_city_state_display(value: str) -> str:
     """Blank city/state-shaped strings whose city token is known to be noise."""
     match = re.fullmatch(r"(.+?),\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?", value)
-    if match and not is_plausible_city_token(match.group(1)):
+    if match and not is_plausible_city_token(match.group(1), match.group(2)):
         return ""
     return value
 
@@ -304,7 +300,7 @@ _NON_PLACE_TOKENS: frozenset = frozenset({
 })
 
 
-def is_plausible_city_token(value: str) -> bool:
+def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
     """Reject brand/tool names and bare two-letter initials as a city token.
 
     Shared by every caller of ``extract_us_location_from_text`` and by
@@ -315,9 +311,23 @@ def is_plausible_city_token(value: str) -> bool:
     so only all-uppercase two-letter fragments are rejected here.
     """
     token = value.strip()
-    if not token or token.lower() in _NON_PLACE_TOKENS:
+    if not token:
+        return False
+    # The offline city/ZIP index is authoritative when available. This avoids
+    # rejecting real place names that collide with brand/tool words (Spring,
+    # Oracle, Cassandra) or arrive in uppercase CRM exports.
+    try:
+        from services.zip_index import is_known_city
+        if is_known_city(token, state):
+            return True
+    except Exception:
+        pass
+    if token.lower() in _NON_PLACE_TOKENS:
         return False
     if re.fullmatch(r"[A-Z]{2}", token):
+        # The District of Columbia is often exported as "DC, DC".
+        if token == state and token == "DC":
+            return True
         return False
     return True
 
@@ -356,7 +366,7 @@ def extract_us_location_from_text(text: str) -> str:
         if state not in _US_STATE_CODES:
             continue
         city_token = match.group(1).strip()
-        if not is_plausible_city_token(city_token):
+        if not is_plausible_city_token(city_token, state):
             continue
         return normalize_location_string(f"{city_token}, {state}")
 
@@ -367,7 +377,7 @@ def extract_us_location_from_text(text: str) -> str:
         if not state_code:
             continue
         city_token = match.group(1).strip()
-        if not is_plausible_city_token(city_token):
+        if not is_plausible_city_token(city_token, state_code):
             continue
         return normalize_location_string(f"{city_token}, {state_code}")
 
@@ -391,6 +401,47 @@ def extract_us_location_from_text(text: str) -> str:
             return cleaned
 
     return ""
+
+
+def extract_us_locations_from_text(text: str, limit: int = 10) -> list[str]:
+    """Extract distinct, ZIP-index-validated US city/state locations.
+
+    Used for recruiter-note location chips so generating a JD doesn't require
+    a second LLM request. Unknown city/state pairs are ignored; the UI only
+    receives normalized, deduplicated locations.
+    """
+    from services import zip_index
+
+    body = str(text or "")[:20000]
+    cap = max(0, min(10, int(limit or 10)))
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(city: str, state: str) -> None:
+        city = re.sub(r"\s+", " ", city).strip(" ,.;:-")
+        state = state.upper().strip()
+        if not city or state not in _US_STATE_CODES:
+            return
+        if not is_plausible_city_token(city, state):
+            return
+        value = sanitize_candidate_location(f"{city}, {state}")
+        key = value.casefold()
+        if value and key not in seen and len(found) < cap:
+            seen.add(key)
+            found.append(value)
+
+    for match in _RE_CITY_STATE_CODE.finditer(body):
+        add(match.group(1), match.group(2))
+    for match in _RE_CITY_STATE_NAME.finditer(body):
+        state = _US_STATE_NAMES.get(match.group(2).strip().lower())
+        if state:
+            add(match.group(1), state)
+
+    for match in re.finditer(r"\b(\d{5})(?:-\d{4})?\b", body):
+        entry = zip_index.lookup_zip(match.group(1))
+        if entry:
+            add(entry["city"], entry["state"])
+    return found
 
 
 class LocationVerdict(BaseModel):

@@ -655,7 +655,7 @@ export function CandidateMatchTable({
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-28" data-testid="shimmer-location" />
                     ) : (
-                      <span className="text-slate-300">—</span>
+                      <span className="text-slate-400">Location unavailable</span>
                     )}
                   </TableCell>
                   <TableCell>

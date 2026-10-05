@@ -338,6 +338,9 @@ export function SourcedCandidatesView({
                             {home}
                           </span>
                         )}
+                        {!home && !work && (
+                          <span className="text-slate-400">Location unavailable</span>
+                        )}
                         {work && (
                           <span className="inline-flex items-center gap-1 text-slate-500" title={`Works in: ${work}`}>
                             <Briefcase className="w-3 h-3 text-slate-400" />

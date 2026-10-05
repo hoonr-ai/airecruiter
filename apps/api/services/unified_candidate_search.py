@@ -792,11 +792,9 @@ class UnifiedCandidateSearch:
             }
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
-            # Policy 2026-05-13: only hard-drop on definitive non-US evidence.
-            # State-mismatch, outside-radius, and relocation-excluded-by-filter
-            # are softened to "show + score + let recruiter filter in UI" since
-            # the source-side metadata is often stale or the candidate is
-            # actively relocating.
+            # Keep the early source assessment permissive so candidates can
+            # finish enrichment. The final location gate below enforces every
+            # configured radius consistently before a row reaches Step 5.
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
             if not assessment.get("passes") and location_reason in {
                 "non_us_candidate",
@@ -2206,6 +2204,10 @@ class UnifiedCandidateSearch:
                             # in the same prompt rather than a fan-out).
                             location=self._search_location_for_deep_research(criteria),
                             seed_urls=seed_urls,
+                            # Exa accepts one radius for this OR query, so
+                            # request the broadest configured search envelope.
+                            # emit_candidate enforces each chip's exact radius
+                            # before a candidate reaches Step 5.
                             within_miles=max(
                                 [getattr(criteria, "within_miles", 25) or 25]
                                 + [entry.within_miles for entry in (criteria.additional_locations or [])]
@@ -3257,13 +3259,15 @@ class UnifiedCandidateSearch:
 
         US-only is applied unconditionally; only candidates with positive
         evidence of a non-US location are dropped. The radius/state check
-        runs only when ``criteria.location`` is set, and soft-keeps any
-        candidate whose location can't be resolved.
+        runs only when a configured location is set. Missing locations are
+        deferred while enrichment can still supply one; confirmed radius
+        failures are rejected.
 
         Confirmed out-of-radius and state-mismatch candidates are removed
-        before Step 5. Missing or unresolvable locations can continue through
-        enrichment, but the final emission gate rejects them if location is
-        still unknown.
+        before Step 5. Missing locations can continue through enrichment, but
+        the final emission gate rejects them if location is still unknown. A
+        location string that could not be geocoded is retained as unverified
+        rather than misclassified as a confirmed radius failure.
         """
         if not candidates:
             return candidates
@@ -3293,13 +3297,13 @@ class UnifiedCandidateSearch:
                 c["location_match_reason"] = reason
             if is_match:
                 kept.append(c)
-            elif reason in {"outside_radius_soft_keep", "state_mismatch"}:
+            elif reason in {"outside_radius_confirmed", "state_mismatch"}:
                 # These are confirmed mismatches. Don't let source-specific
                 # soft-keep flags bypass the recruiter-configured radius.
                 c["location_out_of_radius"] = True
                 c["location_veto_reason"] = (
                     "outside_radius_confirmed"
-                    if reason == "outside_radius_soft_keep"
+                    if reason == "outside_radius_confirmed"
                     else reason
                 )
                 if distance is not None and distance != _UNKNOWN_DISTANCE_SENTINEL:
@@ -4231,8 +4235,8 @@ class UnifiedCandidateSearch:
         if criteria.location:
             ok, reason, distance = self._single_location_match_verdict(candidate, criteria)
             # If within radius for primary, return immediately.
-            if ok and reason not in ("outside_radius_soft_keep", "geocode_unavailable_keep",
-                                     "candidate_location_missing_keep"):
+            if ok and reason not in ("outside_radius_confirmed", "geocode_unavailable",
+                                     "candidate_location_missing"):
                 return ok, reason, distance
         else:
             ok, reason, distance = True, "no_primary_location", None
@@ -4256,9 +4260,9 @@ class UnifiedCandidateSearch:
                 candidate, alt_criteria
             )
             # If within radius for this location, return immediately.
-            if alt_ok and alt_reason not in ("outside_radius_soft_keep",
-                                              "geocode_unavailable_keep",
-                                              "candidate_location_missing_keep"):
+            if alt_ok and alt_reason not in ("outside_radius_confirmed",
+                                              "geocode_unavailable",
+                                              "candidate_location_missing"):
                 return alt_ok, f"multi_loc_{alt_reason}", alt_distance
             # When alt_distance is None the zip-index lookup failed for this
             # location; we skip updating best so a soft-keep on another
@@ -4320,7 +4324,7 @@ class UnifiedCandidateSearch:
             # inside any configured radius. It may pass the early source
             # screen so résumé enrichment can recover the location, but the
             # Step 5 emission gate will reject it if it remains unknown.
-            return False, "candidate_location_missing_keep", _UNKNOWN_DISTANCE_SENTINEL
+            return False, "candidate_location_missing", _UNKNOWN_DISTANCE_SENTINEL
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
@@ -4340,7 +4344,7 @@ class UnifiedCandidateSearch:
             if not seen_states:
                 # Defer unparseable text to résumé enrichment. If it remains
                 # unknown, the final Step 5 gate rejects it.
-                return False, "candidate_state_unknown_keep", _UNKNOWN_DISTANCE_SENTINEL
+                return False, "candidate_state_unknown", _UNKNOWN_DISTANCE_SENTINEL
             return False, "state_mismatch", None
 
         # Hard cap 100 mi everywhere (defense-in-depth — UI also caps).
@@ -4439,7 +4443,7 @@ class UnifiedCandidateSearch:
             # closest-distance with the offline estimate.
             closest_distance = offline_d
             if not unresolved_locs:
-                return False, "outside_radius_soft_keep", offline_d
+                return False, "outside_radius_confirmed", offline_d
 
         # Network path: Nominatim for the strings the offline index couldn't
         # place. Geocode the cleaned "City, ST" reconstruction as target —
@@ -4464,11 +4468,11 @@ class UnifiedCandidateSearch:
             closest_distance = offline_state_mismatch_distance
 
         if geocode_failure:
-            # Location could not be verified; don't treat that as a radius
-            # match. Résumé enrichment gets a chance to provide better data
-            # before the final Step 5 gate.
-            return False, "geocode_unavailable_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
-        return False, "outside_radius_soft_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
+            # Geocoding failure is not proof of a radius mismatch. Preserve
+            # this result as unverified; confirmed distances outside every
+            # configured radius are still rejected by the final Step 5 gate.
+            return False, "geocode_unavailable", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
+        return False, "outside_radius_confirmed", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
@@ -5408,7 +5412,10 @@ class UnifiedCandidateSearch:
                 if days <= 180:
                     return 0.5
                 return 0.3
-        if candidate.get("open_to_work") or candidate.get("open_to_relocation"):
+        if candidate.get("open_to_work") or (
+            criteria.include_relocation_candidates
+            and candidate.get("open_to_relocation")
+        ):
             return 0.8
         return None
 
@@ -5427,7 +5434,17 @@ class UnifiedCandidateSearch:
             return None
 
     def _location_hard_gate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Optional[str]:
-        """Return a veto unless a candidate is verifiably within a location radius."""
+        """Veto confirmed radius failures and unknown local locations.
+
+        A geocoder outage is not evidence that a candidate is outside the
+        radius, so it is soft-kept after résumé enrichment. The strict gate
+        can be disabled operationally with LOCATION_RADIUS_HARD_GATE_ENABLED.
+        """
+        for key in (
+            "location_veto_reason", "location_out_of_radius",
+            "distance_miles", "location_match_reason",
+        ):
+            candidate.pop(key, None)
         if not self._should_enforce_location(criteria):
             return None
         ok, reason, distance = self._location_match_verdict(candidate, criteria)
@@ -5439,13 +5456,26 @@ class UnifiedCandidateSearch:
         if (
             isinstance(distance, (int, float))
             and distance != _UNKNOWN_DISTANCE_SENTINEL
-            and reason == "outside_radius_soft_keep"
+            and reason == "outside_radius_confirmed"
         ):
             candidate["location_out_of_radius"] = True
             candidate.setdefault("location_match_reason", reason)
 
         if ok:
-            candidate.pop("location_veto_reason", None)
+            return None
+
+        candidate["location_match_reason"] = reason
+        if reason == "geocode_unavailable":
+            # We have a location string but the geocoder could not resolve
+            # it. Don't turn a transient network failure into a false
+            # confirmed mismatch; retain the row without an out-of-radius
+            # badge and let the recruiter see the known text location.
+            return None
+
+        from core import sourcing_config as _sc_location
+        if not getattr(_sc_location, "LOCATION_RADIUS_HARD_GATE_ENABLED", True):
+            # Kill switch preserves the radius badge/reason while allowing
+            # results through for rollback during a geodata incident.
             return None
 
         if reason == "state_mismatch":
@@ -5454,20 +5484,18 @@ class UnifiedCandidateSearch:
             candidate["location_veto_reason"] = reason
             return f"location outside {criteria.location}"
         if (
-            reason == "outside_radius_soft_keep"
+            reason == "outside_radius_confirmed"
             and isinstance(distance, (int, float))
             and distance != _UNKNOWN_DISTANCE_SENTINEL
         ):
             candidate["location_veto_reason"] = "outside_radius_confirmed"
             return f"location {round(float(distance))}mi outside every configured radius"
 
-        # Every other reason ends in "_keep" (candidate_location_missing_keep,
-        # geocode_unavailable_keep, candidate_state_unknown_keep): the
-        # emission gate still vetoes it (location is unverified, not
-        # confirmed fine), but callers scoring the candidate (see
-        # _score_candidate / _score_candidate_matrix) treat only
-        # "state_mismatch" / "outside_radius_confirmed" as score-zeroing —
-        # an unverifiable location must not read as a confirmed mismatch.
+        # Missing/unknown locations are vetoed for local jobs. Geocoder
+        # failures were handled above: they are retained as unverified so a
+        # transient geodata outage does not masquerade as a confirmed
+        # out-of-radius result. Scoring treats only confirmed state or radius
+        # mismatches as score-zeroing.
         candidate["location_veto_reason"] = reason or "location_unverified"
         if distance == _UNKNOWN_DISTANCE_SENTINEL:
             candidate["distance_miles"] = None
@@ -6141,10 +6169,10 @@ class UnifiedCandidateSearch:
             hard_filters["certifications"] = "n/a"
 
         # ── Hard filter: mandatory location (evidence-based) ─────────────
-        # _location_hard_gate vetoes any unverified location too (the
-        # emission gates need that to drop unknowns outright), but scoring
-        # only hard-fails a *confirmed* mismatch — an unverifiable location
-        # must not read the same as "definitely somewhere else".
+        # The emission gate drops missing local locations, but a geocoder
+        # failure is retained as unverified. Scoring only hard-fails a
+        # confirmed mismatch; uncertainty must not read as "definitely
+        # somewhere else".
         location_veto = self._location_hard_gate(candidate, criteria)
         confirmed_location_veto = location_veto and candidate.get("location_veto_reason") in (
             "state_mismatch", "outside_radius_confirmed",
@@ -6449,25 +6477,14 @@ class UnifiedCandidateSearch:
                 matched_required_skills.append(f"{label}: {round(s * 100)}%")
 
         # ---- Location hard gate (evidence-based). Only vetoes when the
-        # candidate's location is known AND confirmed outside the radius —
-        # an unverifiable location (_location_hard_gate still vetoes those
-        # for the emission gates) must not read as a confirmed mismatch here.
+        # candidate's location is known AND confirmed outside the radius.
+        # Missing local locations are dropped at emission; geocoder failures
+        # remain unverified and must not read as confirmed mismatches here.
         location_veto = self._location_hard_gate(candidate, criteria)
         if location_veto and candidate.get("location_veto_reason") not in (
             "state_mismatch", "outside_radius_confirmed",
         ):
             location_veto = None
-        # JobDiva-JobAgent rows follow the recruiter's own JobDiva criteria —
-        # a location veto here must not zero an otherwise-strong score (the
-        # 2026-08-25 "sea of 0%" fix); Step 5 emission still enforces the
-        # radius uniformly for every source at drop time, independent of this.
-        jobagent_location_exempt = (
-            bool(location_veto)
-            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
-        )
-        if jobagent_location_exempt:
-            location_veto = None
-
         score = 0
         if weighted_max > 0:
             score = round(max(0.0, min(100.0, (sum(weighted_scores) / weighted_max) * 100)))
@@ -6494,19 +6511,6 @@ class UnifiedCandidateSearch:
             explainability.insert(0, "Partial fit; review missing rubric requirements")
         else:
             explainability.insert(0, "Limited fit against active rubric and sourcing filters")
-
-        if jobagent_location_exempt and candidate.get("location_out_of_radius"):
-            _dist = candidate.get("distance_miles")
-            _note = (
-                f"~{round(float(_dist))} mi from the job location"
-                if isinstance(_dist, (int, float))
-                else "Outside the job's location radius"
-            )
-            explainability.insert(
-                1,
-                f"{_note} — kept: JobDiva agent results follow the "
-                "recruiter's own criteria, so location isn't hard-enforced",
-            )
 
         if not explainability:
             explainability = ["No active resume-match filters were available for scoring"]

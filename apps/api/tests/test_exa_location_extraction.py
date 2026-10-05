@@ -133,6 +133,11 @@ CASES = [
         "Devlin Rocha - Software Engineer. San Francisco Bay Area",
         ("San Francisco", ""),
     ),
+    # 14. Multi-word city names are preserved by the lazy Area regex.
+    (
+        "Senior Product Manager · Greater San Francisco Bay Area",
+        ("San Francisco", ""),
+    ),
 ]
 
 

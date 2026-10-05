@@ -325,7 +325,7 @@ function CandidateRow({
                     {(() => {
                         const { home, work } = getCandidateLocations(candidate);
                         if (!home && !work) {
-                            return <span className="text-slate-300">—</span>;
+                            return <span className="text-slate-400">Location unavailable</span>;
                         }
                         return (
                             <>

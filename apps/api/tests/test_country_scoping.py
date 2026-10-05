@@ -213,7 +213,7 @@ def test_location_hard_gate_unknown_location_is_rejected(svc):
     cand = {"location": ""}
     veto = svc._location_hard_gate(cand, _criteria())
     assert veto is not None
-    assert cand.get("location_veto_reason") == "candidate_location_missing_keep"
+    assert cand.get("location_veto_reason") == "candidate_location_missing"
 
 
 # ------------------------------------------- all-source strict radius gate
@@ -234,15 +234,39 @@ def test_location_hard_gate_jobagent_state_mismatch_is_vetoed(svc):
     assert cand.get("location_veto_reason") == "state_mismatch"
 
 
-def test_location_hard_gate_jobagent_radius_does_not_depend_on_feature_flag(svc, monkeypatch):
+def test_location_hard_gate_jobagent_radius_is_strict_by_default(svc, monkeypatch):
     from core import sourcing_config
     monkeypatch.setattr(
-        sourcing_config, "JOBAGENT_LOCATION_HARD_VETO", False, raising=False
+        sourcing_config, "LOCATION_RADIUS_HARD_GATE_ENABLED", True, raising=False
     )
     cand = {"location": "Tucson, AZ", "source": "JobDiva-JobAgent"}
     veto = svc._location_hard_gate(cand, _criteria())
     assert veto is not None
     assert cand.get("location_veto_reason") == "outside_radius_confirmed"
+
+
+def test_location_hard_gate_operational_kill_switch_soft_keeps_confirmed_mismatch(svc, monkeypatch):
+    from core import sourcing_config
+    monkeypatch.setattr(
+        sourcing_config, "LOCATION_RADIUS_HARD_GATE_ENABLED", False, raising=False
+    )
+    cand = {"location": "Tucson, AZ", "source": "JobDiva-JobAgent"}
+    assert svc._location_hard_gate(cand, _criteria()) is None
+    assert cand.get("location_out_of_radius") is True
+
+
+def test_location_hard_gate_clears_stale_veto_markers_after_location_changes(svc):
+    cand = {
+        "location": "Tempe, AZ",
+        "location_veto_reason": "outside_radius_confirmed",
+        "location_out_of_radius": True,
+        "location_match_reason": "outside_radius_confirmed",
+        "distance_miles": 2900.0,
+    }
+    assert svc._location_hard_gate(cand, _criteria()) is None
+    assert "location_veto_reason" not in cand
+    assert "location_out_of_radius" not in cand
+    assert cand["distance_miles"] == 0.0
 
 
 @pytest.mark.parametrize("source", [

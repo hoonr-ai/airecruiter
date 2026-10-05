@@ -62,7 +62,7 @@ _CITY_STATE_RE = re.compile(rf"\b({_CITY_PAT}),\s*([A-Z]{{2}})\b")
 # Matched without anchoring to a verb so it catches the common header pattern
 # where the city sits alone with no "Located in" preamble.
 _AREA_RE = re.compile(
-    rf"\b(?:Greater\s+)?({_CITY_PAT}?)(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:(?:Bay|Metro(?:politan)?|Metropolitan)\s+)?Area\b"
+    rf"\b(?:Greater\s+)?({_CITY_PAT}?)(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:(?:Bay|Metro(?:politan)?)\s+)?Area\b"
 )
 # Full state names → 2-letter codes, used when the highlight uses e.g.
 # "Dallas, Texas" instead of "Dallas, TX".
@@ -118,21 +118,21 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     m = _LOCATED_IN_RE.search(text)
     if m:
         st = m.group(2).strip().upper()
-        if st in _US_STATE_CODES and _is_plausible_city(m.group(1)):
+        if st in _US_STATE_CODES and _is_plausible_city(m.group(1), st):
             return m.group(1).strip(), st
 
     # 2. "City, ST" with a valid US state code — widened from 200 → 400 chars
     head = text[:400]
     for cand in _CITY_STATE_RE.finditer(head):
         st = cand.group(2).strip().upper()
-        if st in _US_STATE_CODES and _is_plausible_city(cand.group(1)):
+        if st in _US_STATE_CODES and _is_plausible_city(cand.group(1), st):
             return cand.group(1).strip(), st
 
     # 3. "City, FullStateName" — normalise to (City, ST)
     for cand in _CITY_STATE_NAME_RE.finditer(head):
         state_name = cand.group(2).strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_name)
-        if code and _is_plausible_city(cand.group(1)):
+        if code and _is_plausible_city(cand.group(1), code):
             return cand.group(1).strip(), code
 
     # 4. "Greater <City> Area" / "<City>, <State> Area" (LinkedIn header)
@@ -140,7 +140,7 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
         city = cand.group(1).strip()
         state_token = (cand.group(2) or "").strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_token) if state_token else ""
-        if city and _is_plausible_city(city):
+        if city and _is_plausible_city(city, code or None):
             return city, code or ""
 
     # 5. Delegate to the broader helper (used by Step-5 elsewhere) and split.

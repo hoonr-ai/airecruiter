@@ -15,7 +15,7 @@ from datetime import datetime
 
 from services.jobdiva import jobdiva_service, strip_job_version_suffix
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
-from services.extractor import LLMExtractor
+from services.location import extract_us_locations_from_text
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
 from services.screening_question_generator import generate_screening_questions
@@ -160,7 +160,7 @@ def _lookup_job_ref_sync(job_id: str):
                     if row and row[0]:
                         ref_code = row[0]
     except Exception as e:
-        print(f"DEBUG: Failed to fetch ref code: {e}")
+        logger.warning("Failed to fetch JobDiva reference code: %s", e)
     return numeric_job_id, ref_code
 
 
@@ -178,9 +178,10 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     last_request_time = time.time()
 
-    print(
-        f"DEBUG PAYLOAD: Job Notes Length = {len(req.jobNotes)}, JD Length = {len(req.jobDescription)}, "
-        f"YoE = {req.yearsOfExperience}, education={len(req.education)}, certs={len(req.certifications)}"
+    logger.debug(
+        "JD generation payload notes_len=%s jd_len=%s yoe=%s education=%s certs=%s",
+        len(req.jobNotes), len(req.jobDescription), req.yearsOfExperience,
+        len(req.education), len(req.certifications),
     )
 
     # ---- Structured context blocks (empty strings when no data, so the prompt
@@ -326,12 +327,14 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set in environment variables.")
 
     description = None
-    locations = []
     try:
-        print(f"DEBUG: Attempting JD generation with OpenAI: {OPENAI_MODEL}")
-        llm_extractor = LLMExtractor()
-        
-        completion_task = client.chat.completions.create(
+        locations = extract_us_locations_from_text(req.jobNotes, limit=10)
+    except Exception:
+        logger.exception("Could not extract validated locations from recruiter notes")
+        locations = []
+    try:
+        logger.debug("Attempting JD generation with OpenAI model=%s", OPENAI_MODEL)
+        completion = await client.chat.completions.create(
             model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an expert recruitment copywriter."},
@@ -341,28 +344,15 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
             timeout=45,
             prompt_cache_key="jd-gen-v1",
         )
-        
-        extract_task = llm_extractor.extract_from_jd(req.jobNotes) if req.jobNotes.strip() else None
-        
-        if extract_task:
-            completion, extracted = await asyncio.gather(completion_task, extract_task, return_exceptions=True)
-            if not isinstance(extracted, Exception) and hasattr(extracted, 'locations'):
-                locations = extracted.locations
-        else:
-            completion = await completion_task
-            
-        if isinstance(completion, Exception):
-            raise completion
-            
         description = completion.choices[0].message.content
-        print("DEBUG: OpenAI JD generation successful.")
+        logger.debug("OpenAI JD generation successful")
     except Exception as e:
-        print(f"DEBUG: OpenAI JD generation failed: {e}")
+        logger.exception("OpenAI JD generation failed: %s", e)
         # No fallback to Gemini as requested
 
     if not description:
         # ULTIMATE FALLBACK: Expert Template
-        print("DEBUG: Using Expert Template Fallback due to API issues.")
+        logger.warning("Using expert template fallback after JD generation failure")
         description = (
             f"{req.jobTitle.upper()}\n\n"
             "**The Role**\n"
@@ -420,14 +410,14 @@ async def generate_job_title(req: JobDescriptionRequest):
     )
     
     if not OPENAI_API_KEY:
-        print("DEBUG TITLE: No OpenAI API Key found.")
+        logger.warning("Title enhancement skipped: OpenAI API key is not configured")
         return {"title": f"ERROR: No API Key"}
 
     try:
         # Tier-3 #11: title polish is a sub-60-char text transform —
         # nano is plenty. Override via LLM_MODEL_TITLE_POLISH.
         _title_model = model_for("title_polish", "gpt-4.1-nano")
-        print(f"DEBUG TITLE: Attempting title enhancement with OpenAI: {_title_model}")
+        logger.debug("Attempting title enhancement with OpenAI model=%s", _title_model)
         completion = await client.chat.completions.create(
             model=_title_model,
             messages=[
@@ -445,13 +435,13 @@ async def generate_job_title(req: JobDescriptionRequest):
         new_title = re.sub(r'^[\"\']|[\"\']$', '', new_title).strip()
         new_title = new_title.replace("**", "")
         
-        print(f"DEBUG TITLE: Original: '{req.jobTitle}' -> New: '{new_title}'")
+        logger.debug("Title enhancement completed: %r -> %r", req.jobTitle, new_title)
         
         if new_title:
             return {"title": new_title}
             
     except Exception as e:
-        print(f"DEBUG TITLE: OpenAI title enhancement failed: {e}")
+        logger.exception("OpenAI title enhancement failed: %s", e)
         # No fallback to Gemini as requested
 
     return {"title": f"ERROR: AI enhancement failed"}

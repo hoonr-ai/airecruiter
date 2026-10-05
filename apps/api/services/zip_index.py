@@ -170,6 +170,18 @@ def city_state_centroid(city: str, state: str) -> Optional[Tuple[float, float]]:
     return (entry[0], entry[1])
 
 
+def is_known_city(city: str, state: Optional[str] = None) -> bool:
+    """Whether a city token appears in the offline ZIP/city index."""
+    city_key = _clean(city).lower()
+    if not city_key:
+        return False
+    index = _city_index()
+    if state:
+        key = _city_key(city, state)
+        return bool(key and key in index)
+    return any(name == city_key for name, _state in index)
+
+
 def city_state_default_zip(city: str, state: str) -> Optional[str]:
     """A representative zip for a US city — the one nearest the city's
     averaged centroid. For APIs that take zip+radius when the job record

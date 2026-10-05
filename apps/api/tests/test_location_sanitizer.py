@@ -13,7 +13,10 @@ object.__new__, pure methods exercised directly.
 """
 import pytest  # noqa: E402
 
-from services.location import sanitize_candidate_location  # noqa: E402
+from services.location import (  # noqa: E402
+    extract_us_locations_from_text,
+    sanitize_candidate_location,
+)
 from services.sourced_candidates_storage import _clean_location_value  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     UnifiedCandidateSearch,
@@ -77,11 +80,9 @@ def test_mixed_strings_keep_the_place(value, expected):
     assert sanitize_candidate_location(value) == expected
 
 
-def test_bare_country_name_blanks_so_llm_extraction_can_recover_the_city():
-    """A broad country name alone ("Remote, USA" → "USA") carries no city
-    for the radius gate, so it is blanked rather than kept — see the
-    broad-country fallback added alongside the multi-location radius fix."""
-    assert sanitize_candidate_location("Remote, USA") == ""
+@pytest.mark.parametrize("country", ["USA", "India", "Canada", "UK"])
+def test_country_location_is_preserved_for_country_gate(country):
+    assert sanitize_candidate_location(country) == country
 
 
 # ------------------------------------------------------------- passthrough
@@ -116,10 +117,27 @@ def test_real_city_state_values_survive_shared_display_sanitizer(value):
     assert sanitize_candidate_location(value) == value
 
 
+@pytest.mark.parametrize("value", [
+    "Spring, TX", "Oracle, AZ", "Cassandra, PA", "DC, DC",
+])
+def test_real_cities_that_collide_with_denylist_or_initials_survive(value):
+    assert sanitize_candidate_location(value) == value
+
+
 def test_empty_and_none_inputs():
     assert sanitize_candidate_location("") == ""
     assert sanitize_candidate_location(None) == ""
     assert sanitize_candidate_location("   ") == ""
+
+
+def test_recruiter_note_location_extraction_validates_deduplicates_and_caps():
+    notes = (
+        "Locations: Mountain View, CA 94043; New York, New York; "
+        "Phoenix, AZ; Salesforce, MS; PS, PR"
+    )
+    locations = extract_us_locations_from_text(notes, limit=2)
+    assert locations == ["Mountain View, CA", "Phoenix, AZ"]
+    assert len(extract_us_locations_from_text(notes, limit=10)) <= 10
 
 
 def test_clean_location_value_rejects_arrangements_and_placeholders():
@@ -187,7 +205,7 @@ def test_verdict_arrangement_only_candidate_is_location_unknown(svc, monkeypatch
         {"location": "Remote", "enhanced_info": {"current_location": "Remote"}},
         _criteria(),
     )
-    assert not ok and reason == "candidate_location_missing_keep"
+    assert not ok and reason == "candidate_location_missing"
     assert dist is not None  # sentinel distance, not "in radius"
 
 
