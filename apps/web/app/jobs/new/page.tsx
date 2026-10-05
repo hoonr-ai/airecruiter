@@ -2871,10 +2871,11 @@ function NewJobPageContent() {
         // newly extracted locations on the next reload.
         const newLocs = [...sourceLocations];
         const existingValues = new Set(sourceLocations.map(l => l.value.toLowerCase()));
+        let nextLocationId = Math.max(Date.now(), ...newLocs.map(loc => loc.id + 1));
         for (const loc of data.locations) {
           if (!existingValues.has(loc.toLowerCase())) {
             newLocs.push({
-              id: crypto.randomUUID(),
+              id: nextLocationId++,
               value: loc,
               radius: "within 25 mi"
             });
@@ -2885,10 +2886,11 @@ function NewJobPageContent() {
 
         const newFilters = [...resumeMatchFilters];
         const existingLocs = new Set(resumeMatchFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+        let nextFilterId = Math.max(Date.now(), ...newFilters.map(filter => filter.id + 1));
         for (const loc of data.locations) {
           if (!existingLocs.has(loc.toLowerCase())) {
             newFilters.push({
-              id: crypto.randomUUID(),
+              id: nextFilterId++,
               category: "Location",
               value: loc,
               active: true,
