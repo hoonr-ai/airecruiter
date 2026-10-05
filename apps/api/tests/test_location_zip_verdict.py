@@ -120,11 +120,11 @@ def test_verdict_nearby_zip_within_radius_offline(svc):
 
 
 def test_verdict_far_zip_confirmed_outside_offline(svc):
-    # Tucson is ~100 mi from Tempe — confirmed outside, soft-kept, real distance.
+    # Tucson is ~100 mi from Tempe — confirmed outside and rejected.
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701"}, _criteria()
     )
-    assert ok and reason == "outside_radius_soft_keep"
+    assert not ok and reason == "outside_radius_soft_keep"
     assert dist is not None and dist > 25
 
 
@@ -169,7 +169,7 @@ def test_verdict_remote_job_skips_radius(svc):
 
 def test_verdict_missing_location_soft_keep_sentinel(svc):
     ok, reason, dist = svc._location_match_verdict({"location": ""}, _criteria())
-    assert ok and reason == "candidate_location_missing_keep" and dist == 9999.0
+    assert not ok and reason == "candidate_location_missing_keep" and dist == 9999.0
 
 
 def test_verdict_state_only_matches_via_direct_zip(svc):
@@ -179,13 +179,64 @@ def test_verdict_state_only_matches_via_direct_zip(svc):
     assert ok and reason == "state_match"
 
 
-def test_verdict_relocation_optout_blocks_confirmed_outside(svc):
+def test_verdict_open_to_relocation_does_not_bypass_configured_radius(svc):
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701", "open_to_relocation": True},
         _criteria(include_relocation_candidates=False),
     )
-    assert not ok and reason == "relocation_excluded_by_filter"
+    assert not ok and reason == "outside_radius_soft_keep"
     assert dist is not None and dist > 25
+
+
+def test_configured_mountain_view_new_york_phoenix_radii(svc):
+    criteria = _criteria(
+        location="Mountain View, CA 94043",
+        within_miles=25,
+        additional_locations=[
+            {"value": "New York, NY", "within_miles": 50},
+            {"value": "Phoenix, AZ", "within_miles": 50},
+        ],
+    )
+    for location in ("San Jose, CA", "Pleasanton, CA"):
+        ok, reason, distance = svc._location_match_verdict({"location": location}, criteria)
+        assert ok, (location, reason, distance)
+        assert distance is not None and distance <= 25
+
+    for location in ("San Francisco, CA", "Buffalo, NY"):
+        ok, reason, distance = svc._location_match_verdict({"location": location}, criteria)
+        assert not ok, (location, reason, distance)
+        assert distance is not None and distance > 25
+
+    for location in ("New York, NY", "Phoenix, AZ"):
+        ok, reason, distance = svc._location_match_verdict({"location": location}, criteria)
+        assert ok, (location, reason, distance)
+
+
+def test_step5_location_gate_removes_candidates_outside_every_radius(svc):
+    from unittest.mock import MagicMock
+
+    svc._log_stage = MagicMock()
+    criteria = _criteria(
+        location="Mountain View, CA 94043",
+        within_miles=25,
+        additional_locations=[
+            {"value": "New York, NY", "within_miles": 50},
+            {"value": "Phoenix, AZ", "within_miles": 50},
+        ],
+    )
+    candidates = [
+        {"location": "San Jose, CA", "candidate_id": "san-jose"},
+        {"location": "Pleasanton, CA", "candidate_id": "pleasanton"},
+        {"location": "New York, NY", "candidate_id": "new-york"},
+        {"location": "Phoenix, AZ", "candidate_id": "phoenix"},
+        {"location": "Buffalo, NY", "candidate_id": "buffalo"},
+    ]
+
+    kept = svc._filter_by_state(candidates, criteria)
+
+    assert {candidate["candidate_id"] for candidate in kept} == {
+        "san-jose", "pleasanton", "new-york", "phoenix"
+    }
 
 
 def test_hard_gate_vetoes_offline_confirmed_outside(svc):
@@ -259,7 +310,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
     # (soft-keep verdict; _location_hard_gate turns the real distance into a
     # veto). The LLM string is ignored entirely — no Nominatim call, so the
     # unresolvable "Phoenix Metropolitan Area" cannot rescue the row.
-    assert ok and reason == "outside_radius_soft_keep"
+    assert not ok and reason == "outside_radius_soft_keep"
     assert dist is not None and dist > 25
     assert geocoded == []
 
@@ -298,7 +349,7 @@ def test_verdict_all_signals_offline_skips_nominatim(svc, monkeypatch):
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701"}, _criteria()
     )
-    assert ok and reason == "outside_radius_soft_keep" and dist > 25
+    assert not ok and reason == "outside_radius_soft_keep" and dist > 25
 
 
 def test_parse_location_street_number_not_mistaken_for_zip(svc):

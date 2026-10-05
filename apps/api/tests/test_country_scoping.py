@@ -209,41 +209,35 @@ def test_location_hard_gate_stamps_confirmed_outside_radius(svc):
     assert cand.get("location_out_of_radius") is True
 
 
-def test_location_hard_gate_unknown_location_no_veto(svc):
+def test_location_hard_gate_unknown_location_is_rejected(svc):
     cand = {"location": ""}
     veto = svc._location_hard_gate(cand, _criteria())
-    assert veto is None
-    assert "location_veto_reason" not in cand
+    assert veto is not None
+    assert cand.get("location_veto_reason") == "candidate_location_missing_keep"
 
 
-# ------------------------------------------- JobAgent location-veto exemption
-# JobAgent results follow the criteria the recruiter authored inside JobDiva,
-# so a confirmed location mismatch never zeroes their score (2026-08-25).
-# The badge fields still stamp so the UI renders the distance.
+# ------------------------------------------- all-source strict radius gate
 
-def test_location_hard_gate_jobagent_out_of_radius_not_vetoed(svc):
+def test_location_hard_gate_jobagent_out_of_radius_is_vetoed(svc):
     cand = {"location": "Tucson, AZ", "source": "JobDiva-JobAgent"}
     veto = svc._location_hard_gate(cand, _criteria())
-    assert veto is None
-    # Badge fields still stamped so the UI renders "~N mi away"…
+    assert veto is not None
     assert cand.get("location_out_of_radius") is True
     assert isinstance(cand.get("distance_miles"), float)
-    # …but no machine-readable veto marker: nothing downstream may treat
-    # this row as location-vetoed.
-    assert "location_veto_reason" not in cand
+    assert cand.get("location_veto_reason") == "outside_radius_confirmed"
 
 
-def test_location_hard_gate_jobagent_state_mismatch_not_vetoed(svc):
+def test_location_hard_gate_jobagent_state_mismatch_is_vetoed(svc):
     cand = {"location": "Miami, FL", "source": "JobDiva-JobAgent"}
     veto = svc._location_hard_gate(cand, _criteria(location="AZ"))
-    assert veto is None
-    assert "location_veto_reason" not in cand
+    assert veto is not None
+    assert cand.get("location_veto_reason") == "state_mismatch"
 
 
-def test_location_hard_gate_jobagent_flag_restores_veto(svc, monkeypatch):
+def test_location_hard_gate_jobagent_radius_does_not_depend_on_feature_flag(svc, monkeypatch):
     from core import sourcing_config
     monkeypatch.setattr(
-        sourcing_config, "JOBAGENT_LOCATION_HARD_VETO", True, raising=False
+        sourcing_config, "JOBAGENT_LOCATION_HARD_VETO", False, raising=False
     )
     cand = {"location": "Tucson, AZ", "source": "JobDiva-JobAgent"}
     veto = svc._location_hard_gate(cand, _criteria())

@@ -116,6 +116,23 @@ CASES = [
         "Resides in Miami, FL. Bilingual sales leader.",
         ("Miami", "FL"),
     ),
+    # 11. Ignore a headline technology brand + state-code-looking suffix and
+    # continue to the actual LinkedIn location header.
+    (
+        "John Lash - Salesforce, MS Dynamics. Greater Chicago Area",
+        ("Chicago", ""),
+    ),
+    # 12. Ignore a two-letter resume fragment that resembles a city, then
+    # recover the broad LinkedIn metro location.
+    (
+        "Yuhong Ouyang - PS, PR. Los Angeles Metropolitan Area",
+        ("Los Angeles", ""),
+    ),
+    # 13. Bay Area headline should populate a location instead of staying blank.
+    (
+        "Devlin Rocha - Software Engineer. San Francisco Bay Area",
+        ("San Francisco", ""),
+    ),
 ]
 
 

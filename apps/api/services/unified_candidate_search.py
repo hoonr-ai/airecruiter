@@ -827,6 +827,20 @@ class UnifiedCandidateSearch:
             cand = finalize_candidate(cand)
             cid = str(cand.get("candidate_id") or cand.get("id"))
 
+            # Step 5 has a strict radius contract across every source. Check
+            # again after finalization because résumé extraction may replace
+            # a stale profile location or recover a previously blank one.
+            final_location_veto = self._location_hard_gate(cand, criteria)
+            if final_location_veto:
+                summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
+                self._log_stage(
+                    "LocationGate",
+                    f"dropping candidate_id={cid} source={cand.get('source')} "
+                    f"reason={cand.get('location_veto_reason') or final_location_veto} "
+                    f"distance={cand.get('distance_miles')}",
+                )
+                return False
+
             # Relevance gate for machine-queried sources (Exa / Unipile /
             # DeepSearch / Dice / Vetted). JobDiva-JobAgent (recruiter-authored
             # criteria) and JobDiva-Applicants (real applicants) are exempt.
@@ -838,18 +852,6 @@ class UnifiedCandidateSearch:
             _exempt = set(getattr(_sc_gate, "EXTERNAL_MIN_SCORE_EXEMPT_SOURCES",
                                   ("JobDiva-JobAgent", "JobDiva-Applicants")))
             if _src not in _exempt:
-                if (
-                    bool(getattr(_sc_gate, "EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP", True))
-                    and cand.get("location_veto_reason")
-                ):
-                    summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
-                    self._log_stage(
-                        "LocationGate",
-                        f"dropping candidate_id={cid} source={_src} "
-                        f"reason={cand.get('location_veto_reason')} "
-                        f"distance={cand.get('distance_miles')}",
-                    )
-                    return False
                 _min_score = getattr(_sc_gate, "EXTERNAL_SOURCE_MIN_SCORE", None)
                 if (
                     _min_score is not None
@@ -3210,26 +3212,20 @@ class UnifiedCandidateSearch:
         runs only when ``criteria.location`` is set, and soft-keeps any
         candidate whose location can't be resolved.
 
-        POLICY (JOBDIVA_LOCATION_SOFT_KEEP, default True): out-of-radius /
-        state-mismatch JobDiva candidates are NOT dropped here — they are kept
-        and flagged (`location_out_of_radius`, with `distance_miles`) so the
-        location rubric dimension scores them down and the recruiter can narrow
-        via the location chip / MIN MATCH. This mirrors `emit_candidate`'s
-        "soften everything except positive non-US evidence" policy so a JobDiva
-        row is never removed before it renders. Set the flag False to restore
-        the old hard radius filter.
+        Confirmed out-of-radius and state-mismatch candidates are removed
+        before Step 5. Missing or unresolvable locations can continue through
+        enrichment, but the final emission gate rejects them if location is
+        still unknown.
         """
         if not candidates:
             return candidates
 
-        from core import sourcing_config as _sc_loc
-        soft_keep = bool(getattr(_sc_loc, "JOBDIVA_LOCATION_SOFT_KEEP", True))
         enforce_location = self._should_enforce_location(criteria)
         job_country = self._target_country(criteria)
 
         kept: List[Dict[str, Any]] = []
         non_us_dropped = 0
-        out_of_radius_kept = 0
+        out_of_radius_dropped = 0
         filtered = 0
         geocode_failed = 0
 
@@ -3243,27 +3239,36 @@ class UnifiedCandidateSearch:
                 continue
 
             is_match, reason, distance = self._location_match_verdict(c, criteria)
-            if distance is not None:
+            if distance is not None and distance != _UNKNOWN_DISTANCE_SENTINEL:
                 c["distance_miles"] = round(float(distance), 1)
             if reason:
                 c["location_match_reason"] = reason
             if is_match:
                 kept.append(c)
-            elif soft_keep:
-                # Outside radius / different state — keep it visible (scored
-                # down on location), never hard-drop a JobDiva candidate here.
+            elif reason in {"outside_radius_soft_keep", "state_mismatch"}:
+                # These are confirmed mismatches. Don't let source-specific
+                # soft-keep flags bypass the recruiter-configured radius.
                 c["location_out_of_radius"] = True
-                out_of_radius_kept += 1
-                kept.append(c)
+                c["location_veto_reason"] = (
+                    "outside_radius_confirmed"
+                    if reason == "outside_radius_soft_keep"
+                    else reason
+                )
+                if distance is not None and distance != _UNKNOWN_DISTANCE_SENTINEL:
+                    c["distance_miles"] = round(float(distance), 1)
+                out_of_radius_dropped += 1
             else:
-                filtered += 1
+                # Keep unknown locations temporarily so resume/profile
+                # enrichment can recover them. The final emission gate is
+                # strict and drops them if the radius still can't be checked.
+                kept.append(c)
                 if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
                     geocode_failed += 1
 
         self._log_stage(
             "LocationGate",
             f"pre-filter kept {len(kept)}/{len(candidates)} candidates"
-            f" (non_us_dropped={non_us_dropped}, out_of_radius_kept={out_of_radius_kept},"
+            f" (non_us_dropped={non_us_dropped}, out_of_radius_dropped={out_of_radius_dropped},"
             f" filtered={filtered}, geocode_failures={geocode_failed})",
         )
         return kept
@@ -4201,11 +4206,6 @@ class UnifiedCandidateSearch:
         if not required["city"] and not required["state"] and not required.get("zip"):
             return True, "empty_location_requirement", None
 
-        # B1: opt-out for "open to relocation" candidates whose actual location
-        # is unknown or outside the radius. Default keeps them (soft-keep).
-        relocation_flag = bool(candidate.get("open_to_relocation"))
-        include_relocation = bool(getattr(criteria, "include_relocation_candidates", True))
-
         candidate_locs = self._candidate_structured_locations(candidate)
 
         # Direct zip from the source payload (JobDiva JobAgent) — usable even
@@ -4217,13 +4217,11 @@ class UnifiedCandidateSearch:
             direct_zip = direct_zip_entry["zip"]
 
         if not candidate_locs and not direct_zip:
-            if relocation_flag and not include_relocation:
-                return False, "relocation_excluded_by_filter", None
-            # Soft-keep with sentinel distance so the UI counts these under
-            # BEYOND 25MI instead of silently treating them as in-radius.
-            # Common with JobDiva-JobAgent applicants whose city/state field
-            # is blank in the API response (data quality, not a remote signal).
-            return True, "candidate_location_missing_keep", _UNKNOWN_DISTANCE_SENTINEL
+            # A candidate without a usable location cannot be confirmed
+            # inside any configured radius. It may pass the early source
+            # screen so résumé enrichment can recover the location, but the
+            # Step 5 emission gate will reject it if it remains unknown.
+            return False, "candidate_location_missing_keep", _UNKNOWN_DISTANCE_SENTINEL
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
@@ -4241,9 +4239,9 @@ class UnifiedCandidateSearch:
                     if state == required["state"]:
                         return True, "state_match", None
             if not seen_states:
-                # Candidate has location text but no parseable state →
-                # soft-keep and let enrichment decide.
-                return True, "candidate_state_unknown_keep", None
+                # Defer unparseable text to résumé enrichment. If it remains
+                # unknown, the final Step 5 gate rejects it.
+                return False, "candidate_state_unknown_keep", _UNKNOWN_DISTANCE_SENTINEL
             return False, "state_mismatch", None
 
         # Hard cap 100 mi everywhere (defense-in-depth — UI also caps).
@@ -4342,9 +4340,7 @@ class UnifiedCandidateSearch:
             # closest-distance with the offline estimate.
             closest_distance = offline_d
             if not unresolved_locs:
-                if relocation_flag and not include_relocation:
-                    return False, "relocation_excluded_by_filter", offline_d
-                return True, "outside_radius_soft_keep", offline_d
+                return False, "outside_radius_soft_keep", offline_d
 
         # Network path: Nominatim for the strings the offline index couldn't
         # place. Geocode the cleaned "City, ST" reconstruction as target —
@@ -4369,16 +4365,11 @@ class UnifiedCandidateSearch:
             closest_distance = offline_state_mismatch_distance
 
         if geocode_failure:
-            # Nominatim is best-effort and rate-limited. A geocode miss is
-            # not evidence the candidate is outside the radius — soft-keep
-            # but report the sentinel distance so BEYOND 25MI counts them.
-            return True, "geocode_unavailable_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
-        if relocation_flag and not include_relocation:
-            return False, "relocation_excluded_by_filter", closest_distance
-        # No hard filter: a candidate geocoded as outside the radius is
-        # still kept and shown under BEYOND 25MI with the real distance.
-        # The recruiter decides whether to widen radius or skip them.
-        return True, "outside_radius_soft_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
+            # Location could not be verified; don't treat that as a radius
+            # match. Résumé enrichment gets a chance to provide better data
+            # before the final Step 5 gate.
+            return False, "geocode_unavailable_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
+        return False, "outside_radius_soft_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
@@ -5337,10 +5328,7 @@ class UnifiedCandidateSearch:
             return None
 
     def _location_hard_gate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Optional[str]:
-        """Evidence-based location gate. Returns a veto reason string ONLY when
-        the candidate's location is KNOWN and confirmed outside the radius;
-        returns None (no veto) when location is unknown/unparseable — those
-        candidates are kept (soft) per the existing location policy."""
+        """Return a veto unless a candidate is verifiably within a location radius."""
         if not self._should_enforce_location(criteria):
             return None
         ok, reason, distance = self._location_match_verdict(candidate, criteria)
@@ -5348,39 +5336,20 @@ class UnifiedCandidateSearch:
             candidate["distance_miles"] = (
                 None if distance == _UNKNOWN_DISTANCE_SENTINEL else round(float(distance), 1)
             )
-        # Confirmed-outside reasons. "outside_radius_soft_keep" only counts as
-        # confirmed when we have a real (non-sentinel) distance beyond the radius.
-        miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
-        # Stamp the badge fields for every scored candidate — previously only
-        # the JobDiva LocationGate set them, so Exa/LinkedIn rows never showed
-        # the out-of-radius badge even with a confirmed distance.
+        # Stamp the distance badge for all known out-of-radius candidates.
         if (
             isinstance(distance, (int, float))
             and distance != _UNKNOWN_DISTANCE_SENTINEL
-            and distance > miles
+            and reason == "outside_radius_soft_keep"
         ):
             candidate["location_out_of_radius"] = True
             candidate.setdefault("location_match_reason", reason)
-        # JobDiva-JobAgent exemption: these rows follow the criteria the
-        # recruiter authored inside JobDiva (which may deliberately reach
-        # beyond the job's radius), so a confirmed mismatch never zeroes
-        # their score — the badge fields stamped above still render the
-        # distance and the recruiter filters via the UI chips. Every other
-        # source falls through to the hard veto below.
-        # Résumé-is-final policy: the exemption trusts JobDiva's own location
-        # filtering, which is exactly what a conflicting résumé location just
-        # contradicted — then the mismatch vetoes like any other source.
-        from core import sourcing_config as _sc_gate
-        resume_contradicts_profile = bool(
-            candidate.get("location_source") == "resume" and candidate.get("location_conflict")
-        )
-        if (
-            str(candidate.get("source") or "") == "JobDiva-JobAgent"
-            and not getattr(_sc_gate, "JOBAGENT_LOCATION_HARD_VETO", False)
-            and not resume_contradicts_profile
-        ):
+
+        if ok:
+            candidate.pop("location_veto_reason", None)
             return None
-        if reason in ("state_mismatch", "relocation_excluded_by_filter"):
+
+        if reason == "state_mismatch":
             # Machine-readable veto marker for the emit-time drop gates and
             # telemetry (the human string below feeds explainability only).
             candidate["location_veto_reason"] = reason
@@ -5389,11 +5358,14 @@ class UnifiedCandidateSearch:
             reason == "outside_radius_soft_keep"
             and isinstance(distance, (int, float))
             and distance != _UNKNOWN_DISTANCE_SENTINEL
-            and distance > miles
         ):
             candidate["location_veto_reason"] = "outside_radius_confirmed"
-            return f"location {round(float(distance))}mi outside {criteria.location} ({miles}mi radius)"
-        return None
+            return f"location {round(float(distance))}mi outside every configured radius"
+
+        candidate["location_veto_reason"] = reason or "location_unverified"
+        if distance == _UNKNOWN_DISTANCE_SENTINEL:
+            candidate["distance_miles"] = None
+        return f"location could not be verified within every configured radius ({reason or 'unknown'})"
 
     # ------------------------------------------------------------------
     # Scoring Matrix v2 (recruiter rubric, 2026-09-11) — see core.config

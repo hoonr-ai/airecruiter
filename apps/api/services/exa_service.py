@@ -62,7 +62,7 @@ _CITY_STATE_RE = re.compile(rf"\b({_CITY_PAT}),\s*([A-Z]{{2}})\b")
 # Matched without anchoring to a verb so it catches the common header pattern
 # where the city sits alone with no "Located in" preamble.
 _AREA_RE = re.compile(
-    rf"\b(?:Greater\s+)?({_CITY_PAT})(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:Metropolitan\s+)?Area\b"
+    rf"\b(?:Greater\s+)?({_CITY_PAT}?)(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:(?:Bay|Metro(?:politan)?|Metropolitan)\s+)?Area\b"
 )
 # Full state names → 2-letter codes, used when the highlight uses e.g.
 # "Dallas, Texas" instead of "Dallas, TX".
@@ -101,7 +101,7 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
       1. "Located/Based/Lives/Currently/Resides in CITY, ST"
       2. "City, ST" with a real US state code in the first ~400 chars
       3. "City, FullStateName" (e.g. "Dallas, Texas") — normalises to ST
-      4. "Greater <City> Area" / "<City>, <State> Area" — LinkedIn header
+      4. LinkedIn metro, metropolitan, and Bay Area headers
       5. Fallback to `extract_us_location_from_text` and split its result
 
     Returns ("", "") on miss — callers MUST treat empty as "unknown" rather

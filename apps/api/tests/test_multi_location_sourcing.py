@@ -136,14 +136,14 @@ def test_location_match_verdict_candidate_matches_only_second_location():
     candidate = {"location": "San Jose, CA"}
 
     # Stub _single_location_match_verdict to simulate:
-    #   - primary (NY): outside radius soft-keep (not a hard match)
+    #   - primary (NY): outside radius
     #   - San Jose: hard within-radius match
     call_count = [0]
 
     def _stub_verdict(cand, crit):
         call_count[0] += 1
         if "New York" in crit.location:
-            return True, "outside_radius_soft_keep", 2900.0
+            return False, "outside_radius_soft_keep", 2900.0
         # San Jose matches within radius
         return True, "within_radius", 5.0
 

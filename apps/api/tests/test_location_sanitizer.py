@@ -163,7 +163,7 @@ def test_verdict_arrangement_only_candidate_is_location_unknown(svc, monkeypatch
         {"location": "Remote", "enhanced_info": {"current_location": "Remote"}},
         _criteria(),
     )
-    assert ok and reason == "candidate_location_missing_keep"
+    assert not ok and reason == "candidate_location_missing_keep"
     assert dist is not None  # sentinel distance, not "in radius"
 
 
