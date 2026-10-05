@@ -112,6 +112,10 @@ JOBDIVA_PAIR_QUALIFICATION_ID = int(get_env_with_default("JOBDIVA_PAIR_QUALIFICA
 JOBDIVA_PASS_ACTION_NAME = get_env_with_default("JOBDIVA_PASS_ACTION_NAME", "PAIR Pass Candidate Report")
 JOBDIVA_PASS_QUALIFICATION_VALUE = get_env_with_default("JOBDIVA_PASS_QUALIFICATION_VALUE", "Pass")
 
+# Screening level a job falls back to when its own monitored_jobs row has
+# none set — must stay in sync with pairbotqa's own default.
+DEFAULT_SCREENING_LEVEL = get_env_with_default("DEFAULT_SCREENING_LEVEL", "L1.5")
+
 # ---- JobDiva provenance: mark the applications PAIR records ----
 # JobDiva's applicant list (bi/JobApplicantsDetail) cannot tell an application
 # PAIR recorded on Launch PAIR from one the person made themselves, so every
