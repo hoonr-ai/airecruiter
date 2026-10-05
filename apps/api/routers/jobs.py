@@ -28,8 +28,13 @@ from models import (
     SkillsExtractionRequest, SkillsExtractionResponse, JobSkillsSummaryResponse,
     ExternalJobCreateRequest,
 )
-from routers._helpers import get_db_connection, get_dict_cursor_connection
-from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
+from routers._helpers import (
+    get_db_connection,
+    get_dict_cursor_connection,
+    _get_job_draft_sync,
+    _verify_job_access_by_id,
+)
+from core.auth import get_current_user, get_user_scope_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
 from services.launched_candidates import fetch_launched_candidates, interview_id_of
 
@@ -948,54 +953,6 @@ def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes
     except Exception as e:
         logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
 
-def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False, check_duplicate_launch: bool = False) -> None:
-    if user.is_admin:
-        return
-    try:
-        job_dict = _get_job_draft_sync(job_id)
-        if job_dict.get("status") == "success" and job_dict.get("data"):
-            try:
-                verify_job_access(job_dict["data"], user)
-                return
-            except HTTPException as e:
-                if e.status_code == 403 and check_duplicate_launch:
-                    job_data = job_dict["data"]
-                    import json
-                    raw_emails = job_data.get("recruiter_emails", [])
-                    if isinstance(raw_emails, str):
-                        try:
-                            emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
-                        except Exception:
-                            emails = [raw_emails] if raw_emails else []
-                    elif isinstance(raw_emails, list):
-                        emails = raw_emails
-                    else:
-                        emails = []
-                    clean_assigned_emails = [str(email).strip().lower() for email in emails if email]
-                    if clean_assigned_emails:
-                        assigned_email = clean_assigned_emails[0]
-                        raise HTTPException(
-                            status_code=403,
-                            detail={"code": "JOB_ALREADY_LAUNCHED", "recruiter_email": assigned_email, "message": f"Job has already been launched by {assigned_email}."}
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=403,
-                            detail={"code": "JOB_LOCKED", "message": "This job cannot be launched."}
-                        )
-                raise
-        elif allow_not_found and job_dict.get("status") == "error" and "No data found" in str(job_dict.get("message", "")):
-            return
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        logger.error(f"Error verifying job access for job_id={job_id}: {e}")
-
-    raise HTTPException(
-        status_code=403,
-        detail="Access denied. You do not have permission to access or modify this job."
-    )
-
 def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> None:
     if user.is_admin or not user.email:
         return
@@ -1278,92 +1235,6 @@ async def create_external_job(req: ExternalJobCreateRequest, user: UserIdentity 
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create external job: {str(e)}")
-
-def _get_job_draft_sync(job_id: str) -> dict:
-    import json
-
-    def parse_json(val):
-        if not val: return []
-        if isinstance(val, (list, dict)): return val
-        try: return json.loads(val)
-        except: return []
-
-    def _fetch_one_monitored_job(cursor, requested_job_id: str):
-        # Avoid `OR` predicates on job_id/jobdiva_id so planner can use single-column
-        # indexes more reliably under load.
-        cursor.execute(
-            """
-            SELECT * FROM monitored_jobs
-            WHERE job_id = %s
-            UNION ALL
-            SELECT * FROM monitored_jobs
-            WHERE jobdiva_id = %s AND job_id <> %s
-            LIMIT 1
-            """,
-            (requested_job_id, requested_job_id, requested_job_id),
-        )
-        return cursor.fetchone()
-
-    conn = get_dict_cursor_connection()
-    cursor = conn.cursor()
-    try:
-        normalized_job_id = job_id.lstrip('0') if job_id and '-' not in job_id else job_id
-        job_row = _fetch_one_monitored_job(cursor, job_id)
-        if not job_row and normalized_job_id != job_id:
-            job_row = _fetch_one_monitored_job(cursor, normalized_job_id)
-    finally:
-        cursor.close()
-        conn.close()
-
-    if not job_row:
-        return {"status": "error", "message": f"No data found for job {job_id}"}
-
-    return {
-        "status": "success",
-        "data": {
-            "id": job_id,
-            "job_id": job_id,
-            "jobdiva_id": job_row.get("jobdiva_id") or job_id,
-            "title": job_row.get("title") or "",
-            "enhanced_title": job_row.get("enhanced_title") or job_row.get("title") or "",
-            "customer_name": job_row.get("customer_name") or "",
-            "location_type": job_row.get("location_type") or "Onsite",
-            "city": job_row.get("city") or "",
-            "state": job_row.get("state") or "",
-            "zip_code": job_row.get("zip_code") or "",
-            "ai_description": job_row.get("ai_description") or "",
-            "jobdiva_description": job_row.get("jobdiva_description") or "",
-            "recruiter_notes": job_row.get("recruiter_notes") or "",
-            "work_authorization": job_row.get("work_authorization") or "",
-            "selected_job_boards": parse_json(job_row.get("selected_job_boards")),
-            "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
-            "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
-            "current_step": job_row.get("current_step") or 1,
-            "screening_level": job_row.get("screening_level") or "L0.5",
-            "bot_introduction": job_row.get("bot_introduction") or "",
-            "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
-            "sourcing_filters": job_row.get("sourcing_filters") or {},
-            "job_details": {
-                "id": job_row.get("job_id") or job_id,
-                "jobdiva_id": job_row.get("jobdiva_id") or job_id,
-                "title": job_row.get("title") or "",
-                "customer_name": job_row.get("customer_name") or "",
-                "status": job_row.get("status") or "OPEN",
-                "city": job_row.get("city") or "",
-                "state": job_row.get("state") or "",
-                "zip_code": job_row.get("zip_code") or "",
-                "location_type": job_row.get("location_type") or "Onsite",
-                "description": job_row.get("jobdiva_description") or "",
-                "jobdiva_description": job_row.get("jobdiva_description") or "",
-                "ai_description": job_row.get("ai_description") or "",
-                "recruiter_notes": job_row.get("recruiter_notes") or "",
-                "employment_type": job_row.get("employment_type") or "",
-                "pay_rate": job_row.get("pay_rate") or "",
-                "work_authorization": job_row.get("work_authorization") or ""
-            }
-        }
-    }
-
 
 @router.get("/jobs/{job_id}/draft")
 async def get_job_draft(job_id: str, user_session: str = "default", user: UserIdentity = Depends(get_current_user)):

@@ -165,19 +165,36 @@ def find_recordings(
         return {"recordings": [], "unavailable": True}
 
 
+def _mock_flag_set() -> bool:
+    return os.getenv("MOCK_CALL_RECORDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def mock_enabled() -> bool:
     """Dev-only: show a fake recording so the player can be seen without S3."""
-    return (
-        os.getenv("MOCK_CALL_RECORDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
-        and os.getenv("ENVIRONMENT", "").strip().lower() != "production"
-    )
+    return _mock_flag_set() and os.getenv("ENVIRONMENT", "").strip().lower() != "production"
+
+
+def warn_if_misconfigured() -> None:
+    """Log loudly if MOCK_CALL_RECORDINGS is set alongside ENVIRONMENT=production.
+
+    `mock_enabled()` already refuses to serve mock audio in that case, so this
+    is not a security hole — but a deploy with both set almost certainly has
+    a stray dev flag left on, and that should show up at startup rather than
+    stay silent.
+    """
+    if _mock_flag_set() and os.getenv("ENVIRONMENT", "").strip().lower() == "production":
+        logger.warning(
+            "MOCK_CALL_RECORDINGS is set in a production environment — it has no "
+            "effect here (mock recordings are disabled in production), but this "
+            "flag should not be set in prod config."
+        )
 
 
 def mock_recordings() -> List[Dict[str, Any]]:
     now = datetime.now(timezone.utc).isoformat()
     return [
         {
-            "key": "mock/recording.wav",
+            "id": "mock-recording",
             "session_id": 0,
             "size": 0,
             "recorded_at": now,

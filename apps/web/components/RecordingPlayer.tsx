@@ -24,6 +24,10 @@ interface RecordingPlayerProps {
   src: string;
   label?: string;
   className?: string;
+  // Called instead of a bare remount when the viewer clicks Retry — e.g. to
+  // refetch the recordings list and get a fresh presigned URL once the
+  // 15-minute TTL on `src` has expired, which a remount alone can't fix.
+  onRetry?: () => void;
 }
 
 /**
@@ -33,9 +37,14 @@ interface RecordingPlayerProps {
  */
 export function RecordingPlayer(props: RecordingPlayerProps) {
   const [attempt, setAttempt] = useState(0);
-  return (
-    <PlayerInner key={`${props.src}#${attempt}`} {...props} onRetry={() => setAttempt((n) => n + 1)} />
-  );
+  const handleRetry = useCallback(() => {
+    if (props.onRetry) {
+      props.onRetry();
+    } else {
+      setAttempt((n) => n + 1);
+    }
+  }, [props.onRetry]);
+  return <PlayerInner key={`${props.src}#${attempt}`} {...props} onRetry={handleRetry} />;
 }
 
 function PlayerInner({

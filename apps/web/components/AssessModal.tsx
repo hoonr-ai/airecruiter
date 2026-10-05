@@ -502,7 +502,7 @@ export function AssessModal({
               <div className="pt-4">
                 <CallRecordings interviewId={interviewId} open={open} />
               </div>
-              <div className="flex items-center justify-between mb-2 pt-4">
+              <div className="flex items-center justify-between mb-2">
                 <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">
                   Conversation Log
                 </p>
