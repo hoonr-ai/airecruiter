@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CallRecordings } from "@/components/CallRecordings";
 import { StopOutreachModal } from "@/components/StopOutreachModal";
 import {
   CheckCircle2,
@@ -498,7 +499,10 @@ export function AssessModal({
 
             {/* ===== TAB 3: Transcript ===== */}
             <TabsContent value="transcript" className="px-6 pb-6 mt-0">
-              <div className="flex items-center justify-between mb-2 pt-4">
+              <div className="pt-4">
+                <CallRecordings interviewId={interviewId} open={open} />
+              </div>
+              <div className="flex items-center justify-between mb-2">
                 <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">
                   Conversation Log
                 </p>

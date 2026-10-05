@@ -22,7 +22,7 @@ import os
 import httpx
 import re
 from datetime import datetime, timezone, timedelta
-from routers._helpers import get_db_connection
+from routers._helpers import get_db_connection, _verify_job_access_by_id
 from services.pair_auth import get_pair_auth_headers
 
 from core.email import (
@@ -130,6 +130,32 @@ def _log_generate_payload_response_to_newrelic(response_obj: Dict[str, Any], *, 
         record_message("Engage generate-payload response", attributes=event_data, level=level)
     except Exception:
         # New Relic logging must never affect the API path.
+        return
+
+
+def _log_recordings_upstream_failure(interview_id: str, exc: BaseException) -> None:
+    """Best-effort New Relic event for a PAIR-detail failure on the
+    recordings endpoint. The endpoint itself returns 200 (unavailable: true)
+    so the modal degrades gracefully, which means a status-code-based
+    monitor would never see the outage — this event is what an alert can
+    fire on instead.
+    """
+    try:
+        from core.newrelic import is_enabled, record_custom_event, record_message
+        if not is_enabled():
+            return
+    except Exception:
+        return
+
+    try:
+        event_data = {
+            "api_endpoint": "/interviews/{interview_id}/recordings",
+            "interview_id": interview_id,
+            "error": str(exc)[:500],
+        }
+        record_custom_event("RecordingsUpstreamFailure", event_data)
+        record_message("Call recordings upstream (PAIR) lookup failed", attributes=event_data, level="warning")
+    except Exception:
         return
 
 def _parse_json_list(val) -> list:
@@ -781,6 +807,8 @@ def _ensure_audit_table():
 async def init_engagement_tables() -> None:
     """Async wrapper for the sync migration. Called from main.py lifespan."""
     await asyncio.to_thread(_ensure_audit_table)
+    from services import call_recordings
+    call_recordings.warn_if_misconfigured()
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -3651,6 +3679,147 @@ async def get_assessment_data(interview_id: str):
         "transcriptions": transcription_data if isinstance(transcription_data, list) else (transcription_data or []),
         "outreach": outreach_data
     }
+
+
+@router.get("/mock-recording.wav")
+async def get_mock_recording():
+    """Dev-only stand-in audio for the recordings player (MOCK_CALL_RECORDINGS=true)."""
+    from fastapi.responses import Response
+    from services import call_recordings
+
+    if not call_recordings.mock_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(content=call_recordings.mock_wav(), media_type="audio/wav")
+
+
+def _recording_audit_row(interview_id: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT jobdiva_id, created_at
+                FROM engage_interview_audit
+                WHERE interview_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (interview_id,),
+            )
+            return cur.fetchone()
+
+
+# Cap sequential S3 list_objects_v2 calls per request: when a session has no
+# started_at, each one lists up to 6 prefixes (unknown-date plus a ±days
+# fallback window around the interview's creation day).
+_RECORDINGS_MAX_SESSIONS = 20
+
+
+@router.get("/interviews/{interview_id}/recordings")
+async def get_interview_recordings(
+    interview_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Call recordings (S3) of an interview, with presigned playback URLs.
+
+    Requires a signed-in user and only serves interviews Curate itself
+    launched (present in engage_interview_audit), scoped to the same
+    recruiter/team access as the rest of the job's /interviews/{id}/...
+    routes. Disabled unless ENVIRONMENT=production and S3_RECORDINGS_BUCKET
+    is set, matching when pair-bot uploads recordings.
+    """
+    from services import call_recordings
+
+    if not call_recordings.is_enabled():
+        if call_recordings.mock_enabled():
+            return {
+                "success": True,
+                "enabled": True,
+                "unavailable": False,
+                "recordings": call_recordings.mock_recordings(),
+            }
+        return {"success": True, "enabled": False, "unavailable": False, "recordings": []}
+
+    try:
+        row = await asyncio.to_thread(_recording_audit_row, interview_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Interview not found")
+        jobdiva_id = (row.get("jobdiva_id") or "").strip() or None
+
+        # Scope to the same job-level recruiter/team access as other
+        # /interviews/{id}/... routes. An interview with no jobdiva_id on its
+        # audit row can't be scoped to any job, so only admins may read it.
+        #
+        # _verify_job_access_by_id is deliberately called WITHOUT
+        # allow_not_found=True: if the job's monitored_jobs draft has been
+        # deleted (e.g. an old or cleaned-up job), a non-admin recruiter gets
+        # 403 here rather than access. There is no other source of truth to
+        # fall back to — engage_interview_audit does not carry recruiter
+        # assignment — and recordings are candidate call audio, so failing
+        # closed on an unresolvable ownership check is intentional. An admin
+        # can always still retrieve the recording if that happens.
+        if jobdiva_id:
+            await asyncio.to_thread(_verify_job_access_by_id, jobdiva_id, user)
+        elif not user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied. You do not have permission to access this interview.",
+            )
+
+        created = row.get("created_at")
+        fallback_day = created.date() if created else None
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                res = await client.get(
+                    f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/detail",
+                    headers=get_pair_auth_headers(),
+                )
+                res.raise_for_status()
+                detail = res.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            # Upstream PAIR outage: degrade the same way an S3 outage does
+            # (unavailable: true) instead of surfacing a 500, so the modal
+            # shows the "temporarily unavailable" hint rather than an error.
+            # A 200 with unavailable:true is invisible to status-code-based
+            # monitoring, so also emit a New Relic event an alert can fire on.
+            logger.warning(
+                "recordings detail lookup failed for interview %s: %s", interview_id, exc
+            )
+            _log_recordings_upstream_failure(interview_id, exc)
+            return {"success": True, "enabled": True, "recordings": [], "unavailable": True}
+
+        if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
+            detail = detail["data"]
+        all_sessions = [
+            {"id": s.get("id"), "started_at": s.get("started_at")}
+            for s in (detail.get("sessions") or [])
+            if isinstance(s, dict)
+        ]
+        sessions = all_sessions[:_RECORDINGS_MAX_SESSIONS]
+        if len(all_sessions) > len(sessions):
+            logger.warning(
+                "recordings session list truncated interview=%s total=%d kept=%d",
+                interview_id, len(all_sessions), len(sessions),
+            )
+
+        result = await asyncio.to_thread(
+            call_recordings.find_recordings, sessions, jobdiva_id, fallback_day
+        )
+        # The raw S3 key is internal detail the client never needs — only an
+        # opaque, stable id (used as a React list key) and the presigned url.
+        recordings = []
+        for rec in result.get("recordings", []):
+            rec = dict(rec)
+            raw_key = rec.pop("key", "")
+            rec["id"] = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+            recordings.append(rec)
+        result = {**result, "recordings": recordings}
+        return {"success": True, "enabled": True, **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ recordings lookup failed for interview {interview_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Could not load call recordings")
 
 
 # ---------------------------------------------------------------------------
