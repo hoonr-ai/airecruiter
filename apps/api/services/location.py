@@ -233,6 +233,17 @@ _CITY_RE = r"([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){0,3})"
 _RE_GREATER_AREA = re.compile(
     rf"\bGreater\s+{_CITY_RE}\s+Area\b"
 )
+# LinkedIn variants not matched by _RE_GREATER_AREA:
+#   "San Francisco Bay Area"  → city = "San Francisco"
+#   "New York Metro Area"     → city = "New York"
+#   "Los Angeles Metropolitan Area" → city = "Los Angeles"
+_RE_BAY_AREA = re.compile(
+    rf"\b{_CITY_RE}\s+Bay\s+Area\b"
+)
+_RE_METRO_AREA = re.compile(
+    rf"\b{_CITY_RE}\s+(?:Metro(?:politan)?|Metropolitan)\s+Area\b",
+    re.IGNORECASE,
+)
 _RE_CITY_STATE_CODE = re.compile(
     rf"\b{_CITY_RE},\s+([A-Z]{{2}})\b"
 )
@@ -247,6 +258,31 @@ _RE_BASED_LOCATED = re.compile(
     re.IGNORECASE,
 )
 
+# Tech brand names, tools, and common proper-noun words that the City regex
+# can mistakenly capture from headline / resume text
+# (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
+# Any City, ST match whose city token is in this set is rejected so we fall
+# through to the next extraction pattern. Lower-cased; comparisons use .lower().
+_NON_PLACE_TOKENS: frozenset = frozenset({
+    # CRM / cloud platforms
+    "salesforce", "servicenow", "workday", "oracle", "sap", "dynamics",
+    "hubspot", "marketo", "zendesk", "freshdesk", "netsuite",
+    # BI / analytics tools
+    "tableau", "powerbi", "looker", "qlik", "microstrategy", "cognos",
+    "superset", "metabase", "splunk", "grafana",
+    # Cloud / infra
+    "kubernetes", "terraform", "ansible", "jenkins", "datadog", "newrelic",
+    # Languages / frameworks (capitalised in resume text)
+    "typescript", "javascript", "python", "golang", "kotlin", "scala",
+    "angular", "react", "vue", "django", "flask", "fastapi", "spring",
+    # Databases
+    "mongodb", "postgresql", "cassandra", "elasticsearch", "redis",
+    "snowflake", "databricks", "bigquery", "redshift",
+    # Certificates / frameworks
+    "scrum", "agile", "itil", "cobit", "togaf",
+    # Misc proper nouns that look like city names but are never places
+    "linkedin", "github", "gitlab", "jira", "confluence", "slack",
+})
 
 def extract_us_location_from_text(text: str) -> str:
     """Best-effort: pull a location string out of free text.
@@ -261,23 +297,41 @@ def extract_us_location_from_text(text: str) -> str:
         return ""
     body = str(text)[:6000]
 
-    # 1. LinkedIn classic: "Greater <City> Area"
+    # 1a. LinkedIn classic: "Greater <City> Area"
     match = _RE_GREATER_AREA.search(body)
+    if match:
+        return normalize_location_string(match.group(1))
+
+    # 1b. LinkedIn variant: "<City> Bay Area" (e.g. "San Francisco Bay Area")
+    match = _RE_BAY_AREA.search(body)
+    if match:
+        return normalize_location_string(match.group(1))
+
+    # 1c. LinkedIn variant: "<City> Metro Area" / "<City> Metropolitan Area"
+    match = _RE_METRO_AREA.search(body)
     if match:
         return normalize_location_string(match.group(1))
 
     # 2. "City, ST" with a real US state code
     for match in _RE_CITY_STATE_CODE.finditer(body):
         state = match.group(2).upper()
-        if state in _US_STATE_CODES:
-            return normalize_location_string(f"{match.group(1)}, {state}")
+        if state not in _US_STATE_CODES:
+            continue
+        city_token = match.group(1).strip()
+        if city_token.lower() in _NON_PLACE_TOKENS:
+            continue
+        return normalize_location_string(f"{city_token}, {state}")
 
     # 3. "City, FullStateName" → normalise to "City, ST"
     for match in _RE_CITY_STATE_NAME.finditer(body):
         candidate_state = match.group(2).strip().lower()
         state_code = _US_STATE_NAMES.get(candidate_state)
-        if state_code:
-            return normalize_location_string(f"{match.group(1)}, {state_code}")
+        if not state_code:
+            continue
+        city_token = match.group(1).strip()
+        if city_token.lower() in _NON_PLACE_TOKENS:
+            continue
+        return normalize_location_string(f"{city_token}, {state_code}")
 
     # 4. "City, Country" with a known non-US country
     for match in _RE_CITY_COUNTRY.finditer(body):
