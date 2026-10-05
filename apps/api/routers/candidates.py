@@ -31,7 +31,8 @@ from models import (
 )
 from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
-from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
+from routers.jobs import invalidate_monitored_jobs_cache
+from routers._helpers import _verify_job_access_by_id
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
 

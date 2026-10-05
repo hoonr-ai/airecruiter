@@ -25,7 +25,7 @@ import os
 import httpx
 import re
 from datetime import datetime, timezone, timedelta
-from routers._helpers import get_db_connection
+from routers._helpers import get_db_connection, _verify_job_access_by_id
 from services.pair_auth import get_pair_auth_headers
 
 from core.email import (
@@ -60,7 +60,6 @@ from services.profile_resume import (
 from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
 from core.auth import UserIdentity, get_current_user
-from routers.jobs import _verify_job_access_by_id
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -134,6 +133,32 @@ def _log_generate_payload_response_to_newrelic(response_obj: Dict[str, Any], *, 
         record_message("Engage generate-payload response", attributes=event_data, level=level)
     except Exception:
         # New Relic logging must never affect the API path.
+        return
+
+
+def _log_recordings_upstream_failure(interview_id: str, exc: BaseException) -> None:
+    """Best-effort New Relic event for a PAIR-detail failure on the
+    recordings endpoint. The endpoint itself returns 200 (unavailable: true)
+    so the modal degrades gracefully, which means a status-code-based
+    monitor would never see the outage — this event is what an alert can
+    fire on instead.
+    """
+    try:
+        from core.newrelic import is_enabled, record_custom_event, record_message
+        if not is_enabled():
+            return
+    except Exception:
+        return
+
+    try:
+        event_data = {
+            "api_endpoint": "/interviews/{interview_id}/recordings",
+            "interview_id": interview_id,
+            "error": str(exc)[:500],
+        }
+        record_custom_event("RecordingsUpstreamFailure", event_data)
+        record_message("Call recordings upstream (PAIR) lookup failed", attributes=event_data, level="warning")
+    except Exception:
         return
 
 def _parse_json_list(val) -> list:
@@ -3723,6 +3748,15 @@ async def get_interview_recordings(
         # Scope to the same job-level recruiter/team access as other
         # /interviews/{id}/... routes. An interview with no jobdiva_id on its
         # audit row can't be scoped to any job, so only admins may read it.
+        #
+        # _verify_job_access_by_id is deliberately called WITHOUT
+        # allow_not_found=True: if the job's monitored_jobs draft has been
+        # deleted (e.g. an old or cleaned-up job), a non-admin recruiter gets
+        # 403 here rather than access. There is no other source of truth to
+        # fall back to — engage_interview_audit does not carry recruiter
+        # assignment — and recordings are candidate call audio, so failing
+        # closed on an unresolvable ownership check is intentional. An admin
+        # can always still retrieve the recording if that happens.
         if jobdiva_id:
             await asyncio.to_thread(_verify_job_access_by_id, jobdiva_id, user)
         elif not user.is_admin:
@@ -3746,18 +3780,27 @@ async def get_interview_recordings(
             # Upstream PAIR outage: degrade the same way an S3 outage does
             # (unavailable: true) instead of surfacing a 500, so the modal
             # shows the "temporarily unavailable" hint rather than an error.
+            # A 200 with unavailable:true is invisible to status-code-based
+            # monitoring, so also emit a New Relic event an alert can fire on.
             logger.warning(
                 "recordings detail lookup failed for interview %s: %s", interview_id, exc
             )
+            _log_recordings_upstream_failure(interview_id, exc)
             return {"success": True, "enabled": True, "recordings": [], "unavailable": True}
 
         if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
             detail = detail["data"]
-        sessions = [
+        all_sessions = [
             {"id": s.get("id"), "started_at": s.get("started_at")}
             for s in (detail.get("sessions") or [])
             if isinstance(s, dict)
-        ][:_RECORDINGS_MAX_SESSIONS]
+        ]
+        sessions = all_sessions[:_RECORDINGS_MAX_SESSIONS]
+        if len(all_sessions) > len(sessions):
+            logger.warning(
+                "recordings session list truncated interview=%s total=%d kept=%d",
+                interview_id, len(all_sessions), len(sessions),
+            )
 
         result = await asyncio.to_thread(
             call_recordings.find_recordings, sessions, jobdiva_id, fallback_day
@@ -3768,7 +3811,7 @@ async def get_interview_recordings(
         for rec in result.get("recordings", []):
             rec = dict(rec)
             raw_key = rec.pop("key", "")
-            rec["id"] = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
+            rec["id"] = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
             recordings.append(rec)
         result = {**result, "recordings": recordings}
         return {"success": True, "enabled": True, **result}
