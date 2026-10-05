@@ -60,6 +60,7 @@ from services.profile_resume import (
 from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
 from core.auth import UserIdentity, get_current_user
+from routers.jobs import _verify_job_access_by_id
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -784,6 +785,8 @@ def _ensure_audit_table():
 async def init_engagement_tables() -> None:
     """Async wrapper for the sync migration. Called from main.py lifespan."""
     await asyncio.to_thread(_ensure_audit_table)
+    from services import call_recordings
+    call_recordings.warn_if_misconfigured()
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -3680,6 +3683,12 @@ def _recording_audit_row(interview_id: str) -> Optional[Dict[str, Any]]:
             return cur.fetchone()
 
 
+# Cap sequential S3 list_objects_v2 calls per request: when a session has no
+# started_at, each one lists up to 6 prefixes (unknown-date plus a ±days
+# fallback window around the interview's creation day).
+_RECORDINGS_MAX_SESSIONS = 20
+
+
 @router.get("/interviews/{interview_id}/recordings")
 async def get_interview_recordings(
     interview_id: str,
@@ -3688,9 +3697,10 @@ async def get_interview_recordings(
     """Call recordings (S3) of an interview, with presigned playback URLs.
 
     Requires a signed-in user and only serves interviews Curate itself
-    launched (present in engage_interview_audit). Disabled unless
-    ENVIRONMENT=production and S3_RECORDINGS_BUCKET is set, matching when
-    pair-bot uploads recordings.
+    launched (present in engage_interview_audit), scoped to the same
+    recruiter/team access as the rest of the job's /interviews/{id}/...
+    routes. Disabled unless ENVIRONMENT=production and S3_RECORDINGS_BUCKET
+    is set, matching when pair-bot uploads recordings.
     """
     from services import call_recordings
 
@@ -3709,27 +3719,58 @@ async def get_interview_recordings(
         if not row:
             raise HTTPException(status_code=404, detail="Interview not found")
         jobdiva_id = (row.get("jobdiva_id") or "").strip() or None
+
+        # Scope to the same job-level recruiter/team access as other
+        # /interviews/{id}/... routes. An interview with no jobdiva_id on its
+        # audit row can't be scoped to any job, so only admins may read it.
+        if jobdiva_id:
+            await asyncio.to_thread(_verify_job_access_by_id, jobdiva_id, user)
+        elif not user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied. You do not have permission to access this interview.",
+            )
+
         created = row.get("created_at")
         fallback_day = created.date() if created else None
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.get(
-                f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/detail",
-                headers=get_pair_auth_headers(),
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                res = await client.get(
+                    f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/detail",
+                    headers=get_pair_auth_headers(),
+                )
+                res.raise_for_status()
+                detail = res.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            # Upstream PAIR outage: degrade the same way an S3 outage does
+            # (unavailable: true) instead of surfacing a 500, so the modal
+            # shows the "temporarily unavailable" hint rather than an error.
+            logger.warning(
+                "recordings detail lookup failed for interview %s: %s", interview_id, exc
             )
-            res.raise_for_status()
-            detail = res.json()
+            return {"success": True, "enabled": True, "recordings": [], "unavailable": True}
+
         if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
             detail = detail["data"]
         sessions = [
             {"id": s.get("id"), "started_at": s.get("started_at")}
             for s in (detail.get("sessions") or [])
             if isinstance(s, dict)
-        ]
+        ][:_RECORDINGS_MAX_SESSIONS]
 
         result = await asyncio.to_thread(
             call_recordings.find_recordings, sessions, jobdiva_id, fallback_day
         )
+        # The raw S3 key is internal detail the client never needs — only an
+        # opaque, stable id (used as a React list key) and the presigned url.
+        recordings = []
+        for rec in result.get("recordings", []):
+            rec = dict(rec)
+            raw_key = rec.pop("key", "")
+            rec["id"] = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
+            recordings.append(rec)
+        result = {**result, "recordings": recordings}
         return {"success": True, "enabled": True, **result}
     except HTTPException:
         raise

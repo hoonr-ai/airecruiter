@@ -6,7 +6,7 @@ import { API_BASE, authFetch } from "@/lib/api";
 import { RecordingPlayer } from "@/components/RecordingPlayer";
 
 interface CallRecording {
-  key: string;
+  id: string;
   session_id: number;
   url: string;
   started_at?: string | null;
@@ -23,6 +23,9 @@ interface CallRecordingsProps {
 export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
   const [unavailable, setUnavailable] = useState(false);
+  // Bumped to force a refetch — e.g. a player's Retry after its presigned
+  // URL's 15-minute TTL has expired, which a plain remount can't fix.
+  const [refetchToken, setRefetchToken] = useState(0);
 
   useEffect(() => {
     setRecordings([]);
@@ -37,8 +40,12 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
         );
         if (cancelled) return;
         if (!response.ok) {
-          console.warn("Call recordings request failed:", response.status);
-          setUnavailable(true);
+          // 404 means this interview simply has no recordings on file (not
+          // an outage) — show nothing rather than an "unavailable" hint.
+          if (response.status !== 404) {
+            console.warn("Call recordings request failed:", response.status);
+            setUnavailable(true);
+          }
           return;
         }
         const result = await response.json();
@@ -53,7 +60,9 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
     return () => {
       cancelled = true;
     };
-  }, [open, interviewId]);
+  }, [open, interviewId, refetchToken]);
+
+  const refetch = () => setRefetchToken((n) => n + 1);
 
   if (!unavailable && recordings.length === 0) return null;
 
@@ -69,7 +78,7 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
         </p>
       )}
       {recordings.map((rec, idx) => (
-        <div key={rec.key} className="rounded-lg border border-slate-200 p-3">
+        <div key={rec.id} className="rounded-lg border border-slate-200 p-3">
           <p className="text-[11px] text-slate-500 font-semibold mb-1.5">
             {recordings.length > 1 ? `Recording ${idx + 1} · ` : ""}
             {new Date(rec.started_at || rec.recorded_at).toLocaleString()}
@@ -77,6 +86,7 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
           <RecordingPlayer
             src={rec.url.startsWith("/") ? `${API_BASE}${rec.url}` : rec.url}
             label={`call recording ${idx + 1}`}
+            onRetry={refetch}
           />
         </div>
       ))}
