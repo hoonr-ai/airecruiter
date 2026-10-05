@@ -5,7 +5,7 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from exa_py import Exa
-from services.location import _NON_PLACE_TOKENS, extract_us_location_from_text
+from services.location import is_plausible_city_token, extract_us_location_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -110,21 +110,9 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
 
-    def _is_plausible_city(city: str) -> bool:
-        """Reject headline/tool names and short uppercase fragments as cities.
-
-        This parser runs before the broader location helper for structured
-        Exa fields, so it must apply the same tech-brand guard itself.
-        """
-        value = city.strip()
-        if not value or value.lower() in _NON_PLACE_TOKENS:
-            return False
-        # Two-letter uppercase fragments such as "PS, PR" can be picked up
-        # from initials or resume text. Real two-letter city names are rare;
-        # keep mixed/title-case values such as "La Mesa" valid.
-        if re.fullmatch(r"[A-Z]{2}", value):
-            return False
-        return True
+    # Shared with extract_us_location_from_text (services/location.py) so
+    # every provider rejects brand names / bare initials the same way.
+    _is_plausible_city = is_plausible_city_token
 
     # 1. Strict "Located/Based/Lives/etc. in CITY, ST"
     m = _LOCATED_IN_RE.search(text)

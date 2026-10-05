@@ -75,7 +75,11 @@ def sanitize_candidate_location(value) -> str:
     """
     text = re.sub(r"\s+", " ", str(value or "").strip())
     if not text or not _ARRANGEMENT_HINT_RE.search(text):
-        return text
+        # Display/storage paths also receive parser-produced city/state
+        # strings. Apply the shared false-city guard here so a bad upstream
+        # parse such as "Salesforce, MS" or "PS, PR" cannot survive simply
+        # because it was already formatted as a location.
+        return _sanitize_city_state_display(text)
 
     cleaned = _ARRANGEMENT_PHRASE_RE.sub(" ", text)
     cleaned = _ARRANGEMENT_WORD_RE.sub(" ", cleaned)
@@ -100,7 +104,15 @@ def sanitize_candidate_location(value) -> str:
     if cleaned.lower() in broad_names:
         return ""
         
-    return cleaned
+    return _sanitize_city_state_display(cleaned)
+
+
+def _sanitize_city_state_display(value: str) -> str:
+    """Blank city/state-shaped strings whose city token is known to be noise."""
+    match = re.fullmatch(r"(.+?),\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?", value)
+    if match and not is_plausible_city_token(match.group(1)):
+        return ""
+    return value
 
 
 def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -291,6 +303,25 @@ _NON_PLACE_TOKENS: frozenset = frozenset({
     "linkedin", "github", "gitlab", "jira", "confluence", "slack",
 })
 
+
+def is_plausible_city_token(value: str) -> bool:
+    """Reject brand/tool names and bare two-letter initials as a city token.
+
+    Shared by every caller of ``extract_us_location_from_text`` and by
+    Exa's own highlight parser (``exa_service._extract_city_from_highlights``)
+    so "Salesforce, MS" and "PS, PR"-style resume initials are rejected the
+    same way regardless of which provider's text is being scanned. Real
+    two-letter city names are rare and title/mixed-case (e.g. "La Mesa"),
+    so only all-uppercase two-letter fragments are rejected here.
+    """
+    token = value.strip()
+    if not token or token.lower() in _NON_PLACE_TOKENS:
+        return False
+    if re.fullmatch(r"[A-Z]{2}", token):
+        return False
+    return True
+
+
 def extract_us_location_from_text(text: str) -> str:
     """Best-effort: pull a location string out of free text.
 
@@ -325,7 +356,7 @@ def extract_us_location_from_text(text: str) -> str:
         if state not in _US_STATE_CODES:
             continue
         city_token = match.group(1).strip()
-        if city_token.lower() in _NON_PLACE_TOKENS:
+        if not is_plausible_city_token(city_token):
             continue
         return normalize_location_string(f"{city_token}, {state}")
 
@@ -336,7 +367,7 @@ def extract_us_location_from_text(text: str) -> str:
         if not state_code:
             continue
         city_token = match.group(1).strip()
-        if city_token.lower() in _NON_PLACE_TOKENS:
+        if not is_plausible_city_token(city_token):
             continue
         return normalize_location_string(f"{city_token}, {state_code}")
 

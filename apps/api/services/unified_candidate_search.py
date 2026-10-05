@@ -1159,6 +1159,28 @@ class UnifiedCandidateSearch:
                     })
                 return False
 
+            # Résumé enrichment (_apply_resume_location) can overwrite
+            # cand["location"] with a value the first-paint gate in
+            # emit_jobdiva_agent_result never saw — re-check here so a
+            # résumé-recovered location outside every configured radius
+            # still gets dropped instead of reaching Step 5.
+            scored_location_veto = self._location_hard_gate(cand, criteria)
+            if scored_location_veto:
+                summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
+                self._log_stage(
+                    "LocationGate",
+                    f"dropping candidate_id={cid} reason={cand.get('location_veto_reason') or scored_location_veto} "
+                    f"distance={cand.get('distance_miles')}",
+                )
+                if not as_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "location_mismatch"},
+                    })
+                return False
+
             cand["screening_summary"] = build_screening(assessment)
 
             if embedding_skill_match_for_family(self._current_family):
@@ -2169,11 +2191,16 @@ class UnifiedCandidateSearch:
                             jd_title=agent_titles[0] if agent_titles else "",
                             jd_role=" or ".join(agent_titles[:2]),
                             skills=criteria.skill_only_values(),
-                            # Remote-aware: US-wide for remote jobs, else the
-                            # US-scoped job location.
-                            location=self._search_location_for_source(criteria),
+                            # Remote-aware: US-wide for remote jobs; else all
+                            # configured locations "or"-joined (Pass B is one
+                            # call per request, so additional locations ride
+                            # in the same prompt rather than a fan-out).
+                            location=self._search_location_for_deep_research(criteria),
                             seed_urls=seed_urls,
-                            within_miles=getattr(criteria, "within_miles", 25),
+                            within_miles=max(
+                                [getattr(criteria, "within_miles", 25) or 25]
+                                + [entry.within_miles for entry in (criteria.additional_locations or [])]
+                            ),
                             exclude_company=str(getattr(criteria, "client_name", "") or ""),
                         )
                     except Exception as e:
@@ -4011,6 +4038,24 @@ class UnifiedCandidateSearch:
             return self._country_display_name(country)
         return self._scope_location_to_country(criteria.location, country)
 
+    def _search_location_for_deep_research(self, criteria: SearchCriteria) -> str:
+        """Location string for the Exa Pass B agent (a single prompt-based
+        call, unlike the fan-out used by the other external sources).
+
+        Pass B is a multi-minute sweep, so it runs once per request rather
+        than once per configured location. All configured locations are
+        combined into one "or"-joined string so the agent is still aware of
+        every additional location instead of only the primary one.
+        """
+        base = self._search_location_for_source(criteria)
+        if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+            return base
+        extra = [str(entry.value or "").strip() for entry in (criteria.additional_locations or [])]
+        extra = [value for value in extra if value]
+        if not extra:
+            return base
+        return " or ".join([base, *extra]) if base else " or ".join(extra)
+
     def _location_criteria_variants(self, criteria: SearchCriteria) -> List[SearchCriteria]:
         """Return one independent query criterion per selected location.
 
@@ -5374,6 +5419,13 @@ class UnifiedCandidateSearch:
             candidate["location_veto_reason"] = "outside_radius_confirmed"
             return f"location {round(float(distance))}mi outside every configured radius"
 
+        # Every other reason ends in "_keep" (candidate_location_missing_keep,
+        # geocode_unavailable_keep, candidate_state_unknown_keep): the
+        # emission gate still vetoes it (location is unverified, not
+        # confirmed fine), but callers scoring the candidate (see
+        # _score_candidate / _score_candidate_matrix) treat only
+        # "state_mismatch" / "outside_radius_confirmed" as score-zeroing —
+        # an unverifiable location must not read as a confirmed mismatch.
         candidate["location_veto_reason"] = reason or "location_unverified"
         if distance == _UNKNOWN_DISTANCE_SENTINEL:
             candidate["distance_miles"] = None
@@ -6047,8 +6099,15 @@ class UnifiedCandidateSearch:
             hard_filters["certifications"] = "n/a"
 
         # ── Hard filter: mandatory location (evidence-based) ─────────────
+        # _location_hard_gate vetoes any unverified location too (the
+        # emission gates need that to drop unknowns outright), but scoring
+        # only hard-fails a *confirmed* mismatch — an unverifiable location
+        # must not read the same as "definitely somewhere else".
         location_veto = self._location_hard_gate(candidate, criteria)
-        if location_veto:
+        confirmed_location_veto = location_veto and candidate.get("location_veto_reason") in (
+            "state_mismatch", "outside_radius_confirmed",
+        )
+        if confirmed_location_veto:
             hard_fail_reasons.append(location_veto)
             hard_filters["location"] = "fail"
         else:
@@ -6118,26 +6177,9 @@ class UnifiedCandidateSearch:
             score_details["band"] = band
             explainability.insert(0, _MATRIX_BAND_LINES.get(band["tier"], ""))
 
-        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
-        # _location_hard_gate exemption) — say so in the score popup, so the
-        # distance badge and a non-zero score don't read as a contradiction.
-        if (
-            not hard_fail_reasons
-            and candidate.get("location_out_of_radius")
-            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
-        ):
-            _dist = candidate.get("distance_miles")
-            _note = (
-                f"~{round(float(_dist))} mi from the job location"
-                if isinstance(_dist, (int, float))
-                else "Outside the job's location radius"
-            )
-            explainability.insert(
-                1,
-                f"{_note} — kept: JobDiva agent results follow the "
-                "recruiter's own criteria, so location isn't hard-enforced",
-            )
-
+        # Step 5 enforces the configured radius for every source, including
+        # JobDiva-JobAgent — a confirmed-outside location is already a
+        # hard_fail_reasons entry by this point, so no per-source carve-out.
         explainability = [line for line in explainability if line]
         if not explainability or (len(explainability) == 1 and not buckets):
             explainability = ["No active rubric criteria were available for scoring"]
@@ -6365,8 +6407,24 @@ class UnifiedCandidateSearch:
                 matched_required_skills.append(f"{label}: {round(s * 100)}%")
 
         # ---- Location hard gate (evidence-based). Only vetoes when the
-        # candidate's location is known AND confirmed outside the radius. ----
+        # candidate's location is known AND confirmed outside the radius —
+        # an unverifiable location (_location_hard_gate still vetoes those
+        # for the emission gates) must not read as a confirmed mismatch here.
         location_veto = self._location_hard_gate(candidate, criteria)
+        if location_veto and candidate.get("location_veto_reason") not in (
+            "state_mismatch", "outside_radius_confirmed",
+        ):
+            location_veto = None
+        # JobDiva-JobAgent rows follow the recruiter's own JobDiva criteria —
+        # a location veto here must not zero an otherwise-strong score (the
+        # 2026-08-25 "sea of 0%" fix); Step 5 emission still enforces the
+        # radius uniformly for every source at drop time, independent of this.
+        jobagent_location_exempt = (
+            bool(location_veto)
+            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
+        )
+        if jobagent_location_exempt:
+            location_veto = None
 
         score = 0
         if weighted_max > 0:
@@ -6395,15 +6453,7 @@ class UnifiedCandidateSearch:
         else:
             explainability.insert(0, "Limited fit against active rubric and sourcing filters")
 
-        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
-        # _location_hard_gate exemption) — say so in the score popup, so the
-        # distance badge and a non-zero score don't read as a contradiction.
-        if (
-            not hard_veto_hits
-            and not location_veto
-            and candidate.get("location_out_of_radius")
-            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
-        ):
+        if jobagent_location_exempt and candidate.get("location_out_of_radius"):
             _dist = candidate.get("distance_miles")
             _note = (
                 f"~{round(float(_dist))} mi from the job location"

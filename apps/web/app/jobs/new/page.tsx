@@ -2863,93 +2863,99 @@ function NewJobPageContent() {
       const data = await response.json();
       setJobPosting(data.description);
       if (data.locations && Array.isArray(data.locations) && data.locations.length > 0) {
-        setSourceLocations(prev => {
-          const newLocs = [...prev];
-          const existingValues = new Set(prev.map(l => l.value.toLowerCase()));
-          for (const loc of data.locations) {
-            if (!existingValues.has(loc.toLowerCase())) {
-              newLocs.push({
-                id: crypto.randomUUID(),
-                value: loc,
-                radius: "within 25 mi"
-              });
-              existingValues.add(loc.toLowerCase());
-            }
+        // Computed directly from the current state snapshot (not inside a
+        // setState updater) so the exact same values can be handed to
+        // saveJobDraft below — a setTimeout + closure over component state
+        // here previously saved whatever sourceLocations/resumeMatchFilters/
+        // screenQuestions were BEFORE this update, silently reverting the
+        // newly extracted locations on the next reload.
+        const newLocs = [...sourceLocations];
+        const existingValues = new Set(sourceLocations.map(l => l.value.toLowerCase()));
+        for (const loc of data.locations) {
+          if (!existingValues.has(loc.toLowerCase())) {
+            newLocs.push({
+              id: crypto.randomUUID(),
+              value: loc,
+              radius: "within 25 mi"
+            });
+            existingValues.add(loc.toLowerCase());
           }
-          return newLocs;
-        });
-        
-        setResumeMatchFilters(prev => {
-          const newFilters = [...prev];
-          const existingLocs = new Set(prev.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
-          for (const loc of data.locations) {
-            if (!existingLocs.has(loc.toLowerCase())) {
-              newFilters.push({
-                id: crypto.randomUUID(),
-                category: "Location",
-                value: loc,
-                active: true,
-                weight: 5,
-                ai: true,
-                fromRubric: true
-              });
-              existingLocs.add(loc.toLowerCase());
-            }
-          }
-          return newFilters;
-        });
+        }
+        setSourceLocations(newLocs);
 
-        setScreenQuestions(prev => {
-          const newQuestions = [...prev];
-          const existingLocIndex = newQuestions.findIndex(
-            q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
-          );
-
-          if (existingLocIndex !== -1) {
-            const existingQ = { ...newQuestions[existingLocIndex] };
-            const newLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
-            
-            if (newLocs.length > 0) {
-              const additions = newLocs.join(" or ");
-              const primaryLoc = sourceLocations[0]?.value;
-              
-              if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
-                const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-                const match = existingQ.question_text.match(regex);
-                const matchedText = match ? match[0] : primaryLoc;
-                existingQ.question_text = existingQ.question_text.replace(regex, `${matchedText} or ${additions}`);
-              } else if (existingQ.question_text.includes(". Are you")) {
-                existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
-              } else if (existingQ.question_text.includes("?")) {
-                existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
-              } else {
-                existingQ.question_text += ` (or ${additions})`;
-              }
-              newQuestions[existingLocIndex] = existingQ;
-            }
-          } else {
-            if (data.locations.length > 0) {
-              const combinedLocs = data.locations.join(" or ");
-              newQuestions.push({
-                id: Date.now() + Math.random(),
-                question_text: `Are you located in or able to commute to ${combinedLocs}?`,
-                pass_criteria: "Yes",
-                is_default: false,
-                category: "Location",
-                order_index: newQuestions.length,
-                is_hard_filter: true,
-                question_type: "hard_filter"
-              });
-            }
+        const newFilters = [...resumeMatchFilters];
+        const existingLocs = new Set(resumeMatchFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+        for (const loc of data.locations) {
+          if (!existingLocs.has(loc.toLowerCase())) {
+            newFilters.push({
+              id: crypto.randomUUID(),
+              category: "Location",
+              value: loc,
+              active: true,
+              weight: 5,
+              ai: true,
+              fromRubric: true
+            });
+            existingLocs.add(loc.toLowerCase());
           }
-          return newQuestions;
-        });
-        
-        // Explicitly trigger a silent auto-save to persist these newly generated states
-        // since we are on Step 2 and the hooks for Step 3/4/5 won't detect this change.
-        setTimeout(() => {
-          saveJobDraft({ currentStep, saveType: "auto", skipToast: true, keepalive: false }).catch(() => {});
-        }, 500);
+        }
+        setResumeMatchFilters(newFilters);
+
+        const newQuestions = [...screenQuestions];
+        const existingLocIndex = newQuestions.findIndex(
+          q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
+        );
+
+        if (existingLocIndex !== -1) {
+          const existingQ = { ...newQuestions[existingLocIndex] };
+          const additionalLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
+
+          if (additionalLocs.length > 0) {
+            const additions = additionalLocs.join(" or ");
+            const primaryLoc = sourceLocations[0]?.value;
+
+            if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
+              const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+              const match = existingQ.question_text.match(regex);
+              const matchedText = match ? match[0] : primaryLoc;
+              existingQ.question_text = existingQ.question_text.replace(regex, `${matchedText} or ${additions}`);
+            } else if (existingQ.question_text.includes(". Are you")) {
+              existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
+            } else if (existingQ.question_text.includes("?")) {
+              existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
+            } else {
+              existingQ.question_text += ` (or ${additions})`;
+            }
+            newQuestions[existingLocIndex] = existingQ;
+          }
+        } else if (data.locations.length > 0) {
+          const combinedLocs = data.locations.join(" or ");
+          newQuestions.push({
+            id: Date.now() + Math.random(),
+            question_text: `Are you located in or able to commute to ${combinedLocs}?`,
+            pass_criteria: "Yes",
+            is_default: false,
+            category: "Location",
+            order_index: newQuestions.length,
+            is_hard_filter: true,
+            question_type: "hard_filter"
+          });
+        }
+        setScreenQuestions(newQuestions);
+
+        // Explicitly trigger a silent auto-save to persist these newly generated
+        // states since we are on Step 2 and the hooks for Step 3/4/5 won't detect
+        // this change. Pass the computed arrays as overrides so the save reflects
+        // this update even though the setState calls above haven't flushed yet.
+        saveJobDraft({
+          currentStep,
+          saveType: "auto",
+          skipToast: true,
+          keepalive: false,
+          sourceLocationsOverride: newLocs,
+          resumeMatchFiltersOverride: newFilters,
+          screenQuestionsOverride: newQuestions,
+        }).catch(() => {});
       }
       const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
       if (syncedTitle) {
@@ -3141,7 +3147,13 @@ function NewJobPageContent() {
     currentStep: number,
     saveType?: string,
     skipToast?: boolean,
-    keepalive?: boolean
+    keepalive?: boolean,
+    // Explicit overrides so a caller mid-update (e.g. the JD-generation
+    // locations merge below) can save the just-computed values instead of
+    // the stale closure that would otherwise race the setState batch.
+    sourceLocationsOverride?: typeof sourceLocations,
+    resumeMatchFiltersOverride?: typeof resumeMatchFilters,
+    screenQuestionsOverride?: typeof screenQuestions,
   }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
@@ -3193,10 +3205,10 @@ function NewJobPageContent() {
           selected_job_boards: selectedJobBoards,
           rubric: {
             ...getNormalizedRubricPayload(),
-            screen_questions: screenQuestions
+            screen_questions: stepData.screenQuestionsOverride ?? screenQuestions
           }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
           bot_introduction: botIntroduction,
-          resume_match_filters: resumeMatchFilters.map(f => ({
+          resume_match_filters: (stepData.resumeMatchFiltersOverride ?? resumeMatchFilters).map(f => ({
             id: f.id,
             category: f.category,
             value: f.value,
@@ -3209,7 +3221,7 @@ function NewJobPageContent() {
             sources_version: SEARCH_SOURCES_VERSION,
             titles: sourceTitles,
             skills: sourceSkills,
-            locations: sourceLocations,
+            locations: stepData.sourceLocationsOverride ?? sourceLocations,
             companies: sourceCompanies,
             keywords: sourceKeywords,
             recentDaysFilter,
@@ -5013,8 +5025,14 @@ function NewJobPageContent() {
     defaultQs.push({ text: "What is your current location?", criteria: "" });
 
     if (!isRemote) {
+      // Reflect every configured sourcing location (not just the single
+      // JobDiva address) so a Regenerate on Step 4 doesn't drop the "or"
+      // locations a recruiter added or that were extracted from notes.
+      const arrangementLocations = sourceLocations.length > 0
+        ? Array.from(new Set(sourceLocations.map(l => l.value).filter(Boolean)))
+        : [addressStr || location || "the job location"];
       defaultQs.push({
-        text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
+        text: `This role follows ${arrangementLabel} work arrangement based in ${arrangementLocations.join(" or ")}. Are you open to working in this setup?`,
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }

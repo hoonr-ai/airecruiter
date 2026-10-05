@@ -72,10 +72,16 @@ def test_pure_arrangement_strings_blank_out(value):
     ("Remote, New York, NY", "New York, NY"),
     ("Hybrid – Chicago, IL", "Chicago, IL"),
     ("REMOTE, GA", "GA"),          # CRM rows with "REMOTE" typed as the city
-    ("Remote, USA", "USA"),        # country evidence survives for the country gate
 ])
 def test_mixed_strings_keep_the_place(value, expected):
     assert sanitize_candidate_location(value) == expected
+
+
+def test_bare_country_name_blanks_so_llm_extraction_can_recover_the_city():
+    """A broad country name alone ("Remote, USA" → "USA") carries no city
+    for the radius gate, so it is blanked rather than kept — see the
+    broad-country fallback added alongside the multi-location radius fix."""
+    assert sanitize_candidate_location("Remote, USA") == ""
 
 
 # ------------------------------------------------------------- passthrough
@@ -89,6 +95,24 @@ def test_mixed_strings_keep_the_place(value, expected):
     "Reading, PA",   # contains no arrangement token — must not be touched
 ])
 def test_real_places_pass_through_unchanged(value):
+    assert sanitize_candidate_location(value) == value
+
+
+@pytest.mark.parametrize("value", [
+    "Salesforce, MS",
+    "PS, PR",
+    "Remote, Salesforce, MS",
+])
+def test_false_city_state_values_are_blank_in_shared_display_sanitizer(value):
+    assert sanitize_candidate_location(value) == ""
+
+
+@pytest.mark.parametrize("value", [
+    "Chicago, IL",
+    "Reading, PA",
+    "New York, NY 10018",
+])
+def test_real_city_state_values_survive_shared_display_sanitizer(value):
     assert sanitize_candidate_location(value) == value
 
 
