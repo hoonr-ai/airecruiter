@@ -3152,6 +3152,7 @@ function NewJobPageContent() {
     // locations merge below) can save the just-computed values instead of
     // the stale closure that would otherwise race the setState batch.
     sourceLocationsOverride?: typeof sourceLocations,
+    sourceLocationMilesOverride?: number,
     resumeMatchFiltersOverride?: typeof resumeMatchFilters,
     screenQuestionsOverride?: typeof screenQuestions,
   }): Promise<{ ok: boolean, message?: string }> => {
@@ -3228,7 +3229,7 @@ function NewJobPageContent() {
             includeNoResume,
             minExperienceYears,
             maxExperienceYears,
-            sourceLocationMiles,
+            sourceLocationMiles: stepData.sourceLocationMilesOverride ?? sourceLocationMiles,
           },
           step1_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 1 : undefined,
           step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
@@ -5685,14 +5686,21 @@ function NewJobPageContent() {
   const addSourceLocation = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
-    setSourceLocations(prev => [
-      ...prev,
+    const nextLocations = [
+      ...sourceLocations,
       {
         id: Date.now(),
         value: cleanValue,
         radius: `within ${sourceLocationMiles} mi`
       }
-    ]);
+    ];
+    setSourceLocations(nextLocations);
+    void saveJobDraft({
+      currentStep,
+      saveType: "auto",
+      skipToast: true,
+      sourceLocationsOverride: nextLocations,
+    }).catch(() => {});
     setSourceLocationInput("");
     setGeneratedBoolean("");
     trackEvent("job_wizard_step5_source_location_added", {
@@ -9731,7 +9739,14 @@ function NewJobPageContent() {
                           <button
                             className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                             onClick={() => {
-                              setSourceLocations(prev => prev.filter(l => l.id !== loc.id));
+                              const nextLocations = sourceLocations.filter(l => l.id !== loc.id);
+                              setSourceLocations(nextLocations);
+                              void saveJobDraft({
+                                currentStep,
+                                saveType: "auto",
+                                skipToast: true,
+                                sourceLocationsOverride: nextLocations,
+                              }).catch(() => {});
                               trackEvent("job_wizard_step5_source_location_removed", {
                                 step: 5,
                                 value: truncateForTelemetry(loc.value, 100),
@@ -9776,8 +9791,8 @@ function NewJobPageContent() {
                           }
                         }}
                         onBlur={() => {
+                          const clamped = Math.min(100, Math.max(1, Math.round(sourceLocationMiles || 25)));
                           setSourceLocationMiles((prev) => {
-                            const clamped = Math.min(100, Math.max(1, Math.round(prev || 25)));
                             if (clamped !== prev) {
                               trackEvent("job_wizard_step5_location_radius_changed", {
                                 step: 5,
@@ -9786,6 +9801,12 @@ function NewJobPageContent() {
                             }
                             return clamped;
                           });
+                          void saveJobDraft({
+                            currentStep,
+                            saveType: "auto",
+                            skipToast: true,
+                            sourceLocationMilesOverride: clamped,
+                          }).catch(() => {});
                           setGeneratedBoolean("");
                         }}
                         className="h-7 w-14 px-1 text-center text-[13px] font-bold border-0 focus:ring-0 focus-visible:ring-0 shadow-none p-0"
