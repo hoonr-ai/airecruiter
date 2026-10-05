@@ -2901,12 +2901,29 @@ function NewJobPageContent() {
 
         setScreenQuestions(prev => {
           const newQuestions = [...prev];
-          for (const loc of data.locations) {
-            const questionText = `Are you located in or able to commute to ${loc}?`;
-            if (!prev.some(q => q.question_text === questionText)) {
+          const existingLocIndex = newQuestions.findIndex(
+            q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
+          );
+
+          if (existingLocIndex !== -1) {
+            const existingQ = { ...newQuestions[existingLocIndex] };
+            const newLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
+            
+            if (newLocs.length > 0) {
+              const additions = newLocs.join(" or ");
+              if (existingQ.question_text.includes("?")) {
+                existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
+              } else {
+                existingQ.question_text += ` (or ${additions})`;
+              }
+              newQuestions[existingLocIndex] = existingQ;
+            }
+          } else {
+            if (data.locations.length > 0) {
+              const combinedLocs = data.locations.join(" or ");
               newQuestions.push({
                 id: Date.now() + Math.random(),
-                question_text: questionText,
+                question_text: `Are you located in or able to commute to ${combinedLocs}?`,
                 pass_criteria: "Yes",
                 is_default: false,
                 category: "Location",
