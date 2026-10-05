@@ -956,6 +956,18 @@ class UnifiedCandidateSearch:
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             if cid and cid in seen_ids:
                 return False
+
+            final_location_veto = self._location_hard_gate(cand, criteria)
+            if final_location_veto:
+                summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
+                self._log_stage(
+                    "LocationGate",
+                    f"dropping JobDiva candidate_id={cid} source={source_label} "
+                    f"reason={cand.get('location_veto_reason') or final_location_veto} "
+                    f"distance={cand.get('distance_miles')}",
+                )
+                return False
+
             if cid:
                 seen_ids.add(cid)
 
