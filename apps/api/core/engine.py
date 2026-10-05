@@ -565,7 +565,13 @@ async def calculate_match(candidate: CandidateProfile, jd: JobDescription) -> Ma
     mode = jd.job_metadata.work_mode
     
     if mode != "remote":
-        loc_verdict = await location_service.check_proximity(cand_loc, job_loc, mode)
+        # JD radius config, default to 50 if missing or invalid
+        try:
+            miles = int(getattr(jd.job_metadata, "within_miles", 50) or 50)
+        except Exception:
+            miles = 50
+            
+        loc_verdict = await location_service.check_proximity(cand_loc, job_loc, mode, within_miles=miles)
         
         loc_status = "met"
         if not loc_verdict.is_within_range:

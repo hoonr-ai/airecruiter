@@ -365,7 +365,9 @@ class LocationService:
         self.api_key = OPENAI_API_KEY
         self.client = get_openai_client()
         
-    async def check_proximity(self, candidate_loc: str, job_loc: str, work_mode: str) -> LocationVerdict:
+    async def check_proximity(
+        self, candidate_loc: str, job_loc: str, work_mode: str, within_miles: int = 50
+    ) -> LocationVerdict:
         """
         Semantically checks if candidate is within commuting distance.
         """
@@ -381,7 +383,7 @@ class LocationService:
         # in-process dict that died on every worker restart.
         cand_key = (candidate_loc or "").strip().lower()
         job_key = (job_loc or "").strip().lower()
-        cache_key = llm_cache.make_key("location", 1, cand_key, job_key)
+        cache_key = llm_cache.make_key("location", 2, cand_key, job_key, str(within_miles))
         cached = await llm_cache.get_json(cache_key)
         if cached is not None:
             try:
@@ -390,7 +392,7 @@ class LocationService:
                 pass  # fall through to LLM on schema drift
 
         prompt = f"""
-        Determine if the Candidate Location is within commuting distance (approx 50 miles / 80 km) of the Job Location.
+        Determine if the Candidate Location is within commuting distance (approx {within_miles} miles) of the Job Location.
 
         Candidate Location: {candidate_loc}
         Job Location: {job_loc}
