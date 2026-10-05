@@ -443,9 +443,9 @@ def build_deep_research_output_schema(include_contact_fields: Optional[bool] = N
             "type": "string",
             "description": (
                 "Candidate's CURRENT residence from the LinkedIn profile's own "
-                "location line, e.g. 'Tempe, Arizona' or 'New York, NY'. Not a company HQ, "
-                "not a past position's city. IMPORTANT: Do not extract names, companies, or unrelated "
-                "text. Empty string if the profile shows no location or if it is ambiguous."
+                "location line, e.g. 'Tempe, Arizona', 'New York, NY', or 'San Francisco Bay Area'. "
+                "Not a company HQ, not a past position's city. IMPORTANT: Do not extract names, companies, or unrelated "
+                "text. Empty string only if the profile shows no geographic location."
             ),
         },
         "last_activity": {"type": ["string", "null"]},
@@ -850,10 +850,9 @@ class ExaService:
             )
         location_clause = (
             f"  {6 if include_contacts else 5}. location: the candidate's CURRENT residence exactly as the "
-            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona' or "
-            "'New York, NY'). Never substitute a company HQ, a past position's city, "
-            "a person's name, or unrelated text; leave empty if the profile shows no "
-            "location or is ambiguous.\n"
+            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona', 'New York, NY', or 'San Francisco Bay Area'). "
+            "Never substitute a company HQ, a past position's city, a person's name, or unrelated text; "
+            "leave empty only if the profile shows no geographic location.\n"
         )
         exclude_clause = ""
         exclude_clean = str(exclude_company or "").strip()
