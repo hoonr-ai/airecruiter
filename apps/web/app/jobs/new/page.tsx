@@ -2862,6 +2862,23 @@ function NewJobPageContent() {
 
       const data = await response.json();
       setJobPosting(data.description);
+      if (data.locations && Array.isArray(data.locations) && data.locations.length > 0) {
+        setSourceLocations(prev => {
+          const newLocs = [...prev];
+          const existingValues = new Set(prev.map(l => l.value.toLowerCase()));
+          for (const loc of data.locations) {
+            if (!existingValues.has(loc.toLowerCase())) {
+              newLocs.push({
+                id: crypto.randomUUID(),
+                value: loc,
+                radius: "within 25 mi"
+              });
+              existingValues.add(loc.toLowerCase());
+            }
+          }
+          return newLocs;
+        });
+      }
       const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
       if (syncedTitle) {
         lastSyncedTitleForJDRef.current = syncedTitle;

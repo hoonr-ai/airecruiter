@@ -15,6 +15,7 @@ from datetime import datetime
 
 from services.jobdiva import jobdiva_service, strip_job_version_suffix
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
+from services.extractor import LLMExtractor
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
 from services.screening_question_generator import generate_screening_questions
@@ -325,20 +326,34 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set in environment variables.")
 
     description = None
+    locations = []
     try:
         print(f"DEBUG: Attempting JD generation with OpenAI: {OPENAI_MODEL}")
-        completion = await client.chat.completions.create(
+        llm_extractor = LLMExtractor()
+        
+        completion_task = client.chat.completions.create(
             model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an expert recruitment copywriter."},
                 {"role": "user", "content": prompt}
             ],
-            # Lower temperature keeps recruiter-notes facts (exact years, tools,
-            # certifications) from being paraphrased away.
             temperature=0.3,
             timeout=45,
             prompt_cache_key="jd-gen-v1",
         )
+        
+        extract_task = llm_extractor.extract_from_jd(req.jobNotes) if req.jobNotes.strip() else None
+        
+        if extract_task:
+            completion, extracted = await asyncio.gather(completion_task, extract_task, return_exceptions=True)
+            if not isinstance(extracted, Exception) and hasattr(extracted, 'locations'):
+                locations = extracted.locations
+        else:
+            completion = await completion_task
+            
+        if isinstance(completion, Exception):
+            raise completion
+            
         description = completion.choices[0].message.content
         print("DEBUG: OpenAI JD generation successful.")
     except Exception as e:
@@ -382,7 +397,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
             {"ai_description": description},
         )
 
-    return {"description": description}
+    return {"description": description, "locations": locations}
 
 @router.post("/jobs/generate-title")
 async def generate_job_title(req: JobDescriptionRequest):

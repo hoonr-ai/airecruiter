@@ -447,7 +447,8 @@ async def parse_job_description(request: ParsedJobRequest):
             hard_skills=data.hard_skills,
             soft_skills=data.soft_skills,
             experience_level=data.experience_level,
-            location_type=data.location_type
+            location_type=data.location_type,
+            locations=getattr(data, 'locations', [])
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -305,7 +305,7 @@ class LocationEntry(BaseModel):
 
 # Maximum number of additional locations accepted per request to cap
 # provider fan-out and protect latency and quota.
-_MAX_LOCATIONS: int = 5
+_MAX_LOCATIONS: int = 10
 
 
 class SearchCriteria(BaseModel):
