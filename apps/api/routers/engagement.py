@@ -11,6 +11,7 @@ Auto-creates the engage_interview_audit table on startup.
 """
 
 import asyncio
+import hashlib
 import html
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
