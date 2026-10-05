@@ -2878,6 +2878,52 @@ function NewJobPageContent() {
           }
           return newLocs;
         });
+        
+        setResumeMatchFilters(prev => {
+          const newFilters = [...prev];
+          const existingLocs = new Set(prev.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+          for (const loc of data.locations) {
+            if (!existingLocs.has(loc.toLowerCase())) {
+              newFilters.push({
+                id: crypto.randomUUID(),
+                category: "Location",
+                value: loc,
+                active: true,
+                weight: 5,
+                ai: true,
+                fromRubric: true
+              });
+              existingLocs.add(loc.toLowerCase());
+            }
+          }
+          return newFilters;
+        });
+
+        setScreenQuestions(prev => {
+          const newQuestions = [...prev];
+          for (const loc of data.locations) {
+            const questionText = `Are you located in or able to commute to ${loc}?`;
+            if (!prev.some(q => q.question_text === questionText)) {
+              newQuestions.push({
+                id: Date.now() + Math.random(),
+                question_text: questionText,
+                pass_criteria: "Yes",
+                is_default: false,
+                category: "Location",
+                order_index: newQuestions.length,
+                is_hard_filter: true,
+                question_type: "hard_filter"
+              });
+            }
+          }
+          return newQuestions;
+        });
+        
+        // Explicitly trigger a silent auto-save to persist these newly generated states
+        // since we are on Step 2 and the hooks for Step 3/4/5 won't detect this change.
+        setTimeout(() => {
+          saveJobDraft({ currentStep, saveType: "auto", skipToast: true, keepalive: false }).catch(() => {});
+        }, 500);
       }
       const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
       if (syncedTitle) {

@@ -93,6 +93,13 @@ def sanitize_candidate_location(value) -> str:
         return ""
     if all(t.lower() in _ARRANGEMENT_RESIDUE_WORDS for t in alpha_tokens):
         return ""
+        
+    # If the remaining location is just a broad country name, treat it as unknown
+    # so that the LLM extraction (which often finds the exact city) can take over.
+    broad_names = {"united states", "usa", "us", "u.s.", "u.s.a.", "india", "canada", "uk", "united kingdom", "unknown"}
+    if cleaned.lower() in broad_names:
+        return ""
+        
     return cleaned
 
 
