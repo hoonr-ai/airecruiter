@@ -752,8 +752,15 @@ def created_profile_fill(
         return str(get_field(current, list(keys)) or "").strip()
 
     out: Dict[str, Any] = {}
+    from services.profile_resume import is_stand_in_name  # local: profile_resume owns the name lists
+
     cur_first, cur_last = _cur("FIRSTNAME", "firstName"), _cur("LASTNAME", "lastName")
-    placeholder_name = (not cur_first and not cur_last) or "unknown" in (cur_first.lower(), cur_last.lower())
+    placeholder_name = (
+        (not cur_first and not cur_last)
+        or "unknown" in (cur_first.lower(), cur_last.lower())
+        # e.g. "Linkedin" / "Member" -- LinkedIn's stand-in for a hidden name
+        or is_stand_in_name(f"{cur_first} {cur_last}")
+    )
     if (first_name or last_name) and (fresh or placeholder_name) and (cur_first, cur_last) != (first_name, last_name):
         if first_name:
             out["firstName"] = first_name

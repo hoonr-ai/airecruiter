@@ -384,6 +384,20 @@ class UnipileService:
 
         return raw
 
+    @staticmethod
+    def _is_hidden_linkedin_member(item: Dict[str, Any]) -> bool:
+        """True when LinkedIn withheld the name ("LinkedIn Member")."""
+        def _norm(value: Any) -> str:
+            return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+        if _norm(item.get("name")) == "linkedin member":
+            return True
+        if _norm(item.get("name")):
+            return False
+        first = item.get("first_name") or item.get("firstName")
+        last = item.get("last_name") or item.get("lastName")
+        return _norm(f"{first or ''} {last or ''}") == "linkedin member"
+
     def _derive_name_from_profile_url(self, profile_url: Optional[str]) -> Optional[str]:
         if not profile_url:
             return None
@@ -415,6 +429,15 @@ class UnipileService:
         return self._clean_candidate_name(candidate_name)
 
     def _resolve_candidate_name(self, item: Dict[str, Any]) -> str:
+        # LinkedIn shows an out-of-network person as "LinkedIn Member" (or
+        # first "LinkedIn", last "Member"). That is not a name: try the vanity
+        # URL, else keep the honest placeholder -- never promote the headline,
+        # which would then pass for a real name on the JobDiva profile.
+        if self._is_hidden_linkedin_member(item):
+            from services.profile_resume import name_from_linkedin_url  # local: light import
+
+            return name_from_linkedin_url(self._public_profile_url(item)) or "LinkedIn Member"
+
         # Try multiple fallbacks before using generic name
         explicit_name = self._clean_candidate_name(item.get("name"))
         if explicit_name:
@@ -424,7 +447,7 @@ class UnipileService:
         first_name = self._clean_candidate_name(item.get("first_name") or item.get("firstName"))
         last_name = self._clean_candidate_name(item.get("last_name") or item.get("lastName"))
         if first_name or last_name:
-            return f"{first_name} {last_name}".strip()
+            return f"{first_name or ''} {last_name or ''}".strip()
 
         # Only the PUBLIC vanity URL carries a name slug. The recruiter-mode
         # `profile_url` is `/talent/search/profile/<AEMAA… hash>`, which used

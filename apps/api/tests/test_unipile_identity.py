@@ -212,6 +212,30 @@ def test_resolve_candidate_name_ignores_digit_free_hash_in_rps_link():
     assert svc._resolve_candidate_name(item) == "Data Engineer"
 
 
+def test_hidden_linkedin_member_is_named_from_the_vanity_url():
+    # LinkedIn shows out-of-network people as "LinkedIn Member".
+    svc = UnipileService()
+    item = {"id": HASH_2, "name": "LinkedIn Member", "public_identifier": "jane-doe-8a7b6c5",
+            "profile_url": _rps(HASH_2), "headline": "Product Manager"}
+    assert svc._resolve_candidate_name(item) == "Jane Doe"
+
+
+def test_hidden_linkedin_member_keeps_the_placeholder_not_the_headline():
+    # A headline promoted to a name would pass for a real one on the JobDiva
+    # profile; "LinkedIn Member" is caught and refused there.
+    svc = UnipileService()
+    for item in (
+        {"id": HASH_2, "name": "LinkedIn Member", "profile_url": _rps(HASH_2), "headline": "Product Manager"},
+        {"id": HASH_2, "first_name": "LinkedIn", "last_name": "Member", "profile_url": _rps(HASH_2),
+         "headline": "Product Manager"},
+    ):
+        assert svc._resolve_candidate_name(item) == "LinkedIn Member", item
+
+
+def test_first_name_only_is_not_suffixed_with_none():
+    assert UnipileService()._resolve_candidate_name({"first_name": "Madonna", "last_name": None}) == "Madonna"
+
+
 def test_public_profile_url_helper_only_returns_public_links():
     svc = UnipileService()
     assert svc._public_profile_url({"profile_url": _rps(HASH_1)}) is None
