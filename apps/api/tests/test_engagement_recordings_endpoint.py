@@ -179,6 +179,11 @@ def test_recording_response_hashes_s3_key_and_omits_raw_key():
         result = _run_recordings("interview-5", _admin())
 
     recording = result["recordings"][0]
+    # Recomputing sha256 here would pass even if the endpoint silently
+    # switched hash algorithms or truncation length, since the test and the
+    # implementation would drift together. Pin a literal too, computed once
+    # independently, so a change to the hashing scheme actually gets noticed.
+    assert recording["id"] == "d1edd0dd515880ce"
     assert recording["id"] == hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
     assert "key" not in recording
 
