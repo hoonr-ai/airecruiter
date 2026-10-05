@@ -14,6 +14,7 @@ to prove the guard actually runs and actually blocks/allows the right users.
 """
 import ast
 import asyncio
+import hashlib
 from pathlib import Path
 from typing import Dict
 from unittest.mock import MagicMock, patch
@@ -163,6 +164,23 @@ def test_admin_gets_200_even_with_no_jobdiva_id():
         result = _run_recordings("interview-4", _admin())
     assert result["success"] is True
     assert result["enabled"] is True
+
+
+def test_recording_response_hashes_s3_key_and_omits_raw_key():
+    raw_key = "recordings/2026-10-05/job-1/0001/1234_session.ogg"
+    with patch("routers.engagement._recording_audit_row", return_value=_audit_row(None)), \
+         patch(
+             "services.call_recordings.find_recordings",
+             return_value={
+                 "recordings": [{"key": raw_key, "url": "https://example.com/audio.ogg"}],
+                 "unavailable": False,
+             },
+         ):
+        result = _run_recordings("interview-5", _admin())
+
+    recording = result["recordings"][0]
+    assert recording["id"] == hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+    assert "key" not in recording
 
 
 def test_denied_access_is_checked_against_the_audit_rows_job_and_short_circuits():
