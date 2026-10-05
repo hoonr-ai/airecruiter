@@ -505,7 +505,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
         city = ""
         state = ""
         loc_type = "Onsite"
-        screening_lvl = "L1.5"
+        screening_lvl = "L0.5"
         job_recruiter_notes = None
         ai_description = ""
         customer_name = campaign.get("customer_name") or ""
@@ -527,7 +527,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                     job_desc = row[2] or ""
                     city = row[3] or ""
                     loc_type = row[4] or "Onsite"
-                    screening_lvl = row[5] or "L1.5"
+                    screening_lvl = row[5] or "L0.5"
                     job_recruiter_notes = row[7] if len(row) > 7 else None
                     ai_description = row[8] or ""
                     state = row[9] or ""
@@ -997,7 +997,7 @@ async def _create_campaign_job(
         "selected_job_boards": (
             selected_job_boards if selected_job_boards is not None else (campaign.get("selected_job_boards") or [])
         ),
-        "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
+        "screening_level": screening_level or campaign.get("screening_level") or "L0.5",
         "bot_introduction": raw_intro,
         "processing_status": "campaign_created",
         "sourcing_filters": data.get("sourcing_filters") or None,
