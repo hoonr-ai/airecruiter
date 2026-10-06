@@ -307,6 +307,9 @@ class LocationEntry(BaseModel):
 # Maximum number of additional locations accepted per request to cap
 # provider fan-out and protect latency and quota.
 _MAX_LOCATIONS: int = 10
+# Unipile is paused for new sourcing searches. Keep its implementation and
+# profile-enrichment path available for focused tests and a future re-enable.
+LINKEDIN_UNIPILE_SEARCH_ENABLED = False
 
 
 class SearchCriteria(BaseModel):
@@ -2434,7 +2437,7 @@ class UnifiedCandidateSearch:
             # LinkedIn sourcing is currently paused because this path uses
             # Unipile. Ignore stale clients and saved criteria that still
             # submit LinkedIn; LinkedIn-Exa remains a separate active source.
-            if ext_name == "LinkedIn":
+            if ext_name == "LinkedIn" and not LINKEDIN_UNIPILE_SEARCH_ENABLED:
                 continue
             if ext_name in criteria.sources:
                 producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))

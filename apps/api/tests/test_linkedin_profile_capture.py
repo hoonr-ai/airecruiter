@@ -34,6 +34,9 @@ class _FakeUnipile:
 
 
 def _run_linkedin_search(monkeypatch, profile):
+    # These tests cover the retained Unipile result-enrichment path, which is
+    # intentionally disabled for normal sourcing by default.
+    monkeypatch.setattr(ucs, "LINKEDIN_UNIPILE_SEARCH_ENABLED", True)
     svc = UnifiedCandidateSearch()
     search_row = {
         "id": "unipile_AEMAA1", "provider_id": "AEMAA1", "name": "Ada Lovelace",
