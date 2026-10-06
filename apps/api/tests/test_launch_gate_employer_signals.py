@@ -380,3 +380,44 @@ def test_exa_resume_text_client_conflict():
     excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
     assert excluded is True
     assert reason == "Employed by Hiring Client (Exa profile text)"
+
+
+def test_exa_resume_text_nested_source_and_empty_text():
+    """Tolerates `source` nested under `data` and empty `resume_text`."""
+    cand = {
+        "candidate_id": "999",
+        "data": {
+            "source": "LinkedIn-Exa",
+            "resume_text": "",
+        },
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
+    assert excluded is False
+
+
+def test_exa_former_employee_not_blocked():
+    """A former client employee with a different current employer should stay contactable.
+    Lines without 'Present'/'Current' are routed to the last-employer ladder, which
+    is skipped if there is already a structured current employer."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Experience:\nSoftware Engineer at Google (2022 - Present)\nEngineer at Bank of America (2015-2018)",
+        "headline": "Software Engineer",
+        "company_experience": [{"company": "Google", "is_current": True}],
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
+    assert excluded is False
+
+
+def test_exa_incidental_client_substring():
+    """Incidental client name appearances (e.g. as a substring of another company)
+    should not falsely block candidates."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Experience:\nSenior Developer at Metadata Solutions (2020-Present)",
+        "headline": "Senior Developer",
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, "Meta") # the client is 'Meta', but text has 'Metadata Solutions'
+    assert excluded is False
