@@ -23,7 +23,7 @@ import {
   MapPin,
   Briefcase,
 } from "lucide-react";
-import { getCandidateLocations } from "@/lib/candidate-location";
+import { getCandidateLocations, hasUnverifiedCandidateLocation } from "@/lib/candidate-location";
 
 interface SourcedCandidate {
   id: string;
@@ -351,6 +351,14 @@ export function SourcedCandidatesView({
                       </div>
                     );
                   })()}
+                  {hasUnverifiedCandidateLocation(candidate) && (
+                    <span
+                      className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-medium"
+                      title="The profile location could not be verified against the configured search radius."
+                    >
+                      Location unverified
+                    </span>
+                  )}
                   <div className="flex items-center space-x-1">
                     {getSourceIcon(candidate.source)}
                     <span>{candidate.source}</span>

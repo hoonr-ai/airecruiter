@@ -209,11 +209,15 @@ def test_location_hard_gate_stamps_confirmed_outside_radius(svc):
     assert cand.get("location_out_of_radius") is True
 
 
-def test_location_hard_gate_unknown_location_is_rejected(svc):
+def test_location_hard_gate_unknown_location_is_soft_kept(svc):
+    # Blank/unresolvable locations are soft-kept (not hard-dropped) because
+    # a missing location string is not evidence that the candidate is outside
+    # the radius. The recruiter sees an "unverified location" badge instead.
     cand = {"location": ""}
     veto = svc._location_hard_gate(cand, _criteria())
-    assert veto is not None
-    assert cand.get("location_veto_reason") == "candidate_location_missing"
+    assert veto is None  # soft-keep
+    assert cand.get("location_match_reason") == "candidate_location_missing"
+    assert cand.get("location_veto_reason") is None  # no veto stamped
 
 
 # ------------------------------------------- all-source strict radius gate

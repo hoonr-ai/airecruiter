@@ -7,10 +7,10 @@
   with the Step 5 sourcing locations.
 - Confirmed out-of-radius candidates are excluded from Step 5 for JobDiva
   Agent, JobDiva Talent, LinkedIn, and Exa. Remote jobs do not apply a
-  geographic radius. For local jobs, candidates still missing a usable
-  location after enrichment are excluded because their radius cannot be
-  confirmed. A nonempty location that cannot be geocoded is retained as
-  unverifiable rather than treated as proof that the candidate is outside.
+  geographic radius. For local jobs, candidates with blank, broad, or
+  unresolvable locations are retained with a "Location unverified" indicator;
+  they are not treated as confirmed radius matches. Known out-of-radius
+  candidates are still excluded.
 - JobDiva's server-side `withinMiles` now uses the configured radius without
   the former 2x headroom. Candidate-to-location checks use straight-line
   ZIP/city centroid distances, followed by best-effort geocoding when the

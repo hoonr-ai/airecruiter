@@ -3264,10 +3264,10 @@ class UnifiedCandidateSearch:
         failures are rejected.
 
         Confirmed out-of-radius and state-mismatch candidates are removed
-        before Step 5. Missing locations can continue through enrichment, but
-        the final emission gate rejects them if location is still unknown. A
-        location string that could not be geocoded is retained as unverified
-        rather than misclassified as a confirmed radius failure.
+        before Step 5. Missing locations can continue through enrichment; if
+        still unknown, the final emission gate retains them as unverified. A
+        location string that could not be geocoded is likewise retained rather
+        than misclassified as a confirmed radius failure.
         """
         if not candidates:
             return candidates
@@ -4343,7 +4343,7 @@ class UnifiedCandidateSearch:
                         return True, "state_match", None
             if not seen_states:
                 # Defer unparseable text to résumé enrichment. If it remains
-                # unknown, the final Step 5 gate rejects it.
+                # unknown, the final Step 5 gate retains it as unverified.
                 return False, "candidate_state_unknown", _UNKNOWN_DISTANCE_SENTINEL
             return False, "state_mismatch", None
 

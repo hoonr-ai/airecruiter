@@ -30,7 +30,7 @@ import {
   GraduationCap,
   Sparkles,
 } from "lucide-react";
-import { getCandidateLocations } from "@/lib/candidate-location";
+import { getCandidateLocations, hasUnverifiedCandidateLocation } from "@/lib/candidate-location";
 
 export type CandidateMatchSortKey =
   | "match"
@@ -387,6 +387,7 @@ export function CandidateMatchTable({
                 typeof candidate.match_score === "number" ? candidate.match_score : null;
               const tone = getMatchTone(matchScore);
               const { home: homeLocation, work: workLocation } = getCandidateLocations(candidate);
+              const locationUnverified = hasUnverifiedCandidateLocation(candidate);
               const lastActiveDate = getLastActiveDate(candidate);
               const lastActiveShort = formatLastActiveShort(lastActiveDate);
               const sourceBadge = getSourceBadge(candidate.source, candidate.sources);
@@ -651,11 +652,29 @@ export function CandidateMatchTable({
                               ~{Math.round(candidate.distance_miles)} mi away
                             </span>
                           )}
+                        {locationUnverified && (
+                          <span
+                            className="inline-flex items-center w-fit px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-semibold border border-amber-200"
+                            title="The profile location could not be verified against the configured search radius."
+                          >
+                            Location unverified
+                          </span>
+                        )}
                       </div>
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-28" data-testid="shimmer-location" />
                     ) : (
-                      <span className="text-slate-400">Location unavailable</span>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-slate-400">Location unavailable</span>
+                        {locationUnverified && (
+                          <span
+                            className="inline-flex items-center w-fit px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-semibold border border-amber-200"
+                            title="The profile location could not be verified against the configured search radius."
+                          >
+                            Location unverified
+                          </span>
+                        )}
+                      </div>
                     )}
                   </TableCell>
                   <TableCell>
