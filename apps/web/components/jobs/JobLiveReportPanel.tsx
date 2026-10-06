@@ -121,11 +121,18 @@ export function JobLiveReportPanel({
 
   // Aggregate helper across multiple launch snapshots
   const mergeSnapshots = useCallback((snapshots: Snapshot[], jdId: string): Snapshot => {
+    // Sort snapshots chronologically by created_at ascending so later runs take precedence
+    const sortedSnapshots = [...snapshots].sort((a, b) => {
+      const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return timeA - timeB;
+    });
+
     const candidateMap = new Map<number, CandidateRow>();
     const anomalyList: Anomaly[] = [];
     const seenAnomalyKeys = new Set<string>();
 
-    for (const snap of snapshots) {
+    for (const snap of sortedSnapshots) {
       if (!snap) continue;
       for (const a of snap.anomalies || []) {
         const k = `${a.kind}_${a.interview_id}`;
@@ -137,17 +144,31 @@ export function JobLiveReportPanel({
 
       for (const j of snap.jobs || []) {
         for (const c of j.candidates || []) {
-          if (!candidateMap.has(c.interview_id)) {
-            candidateMap.set(c.interview_id, c);
+          const existing = candidateMap.get(c.interview_id);
+          if (!existing) {
+            // Sort initial events by timestamp
+            const sortedEvents = [...(c.events || [])].sort((e1, e2) => {
+              const t1 = e1.ts ? new Date(e1.ts).getTime() : 0;
+              const t2 = e2.ts ? new Date(e2.ts).getTime() : 0;
+              return t1 - t2;
+            });
+            candidateMap.set(c.interview_id, { ...c, events: sortedEvents });
           } else {
-            // Merge events or keep latest non-empty status
-            const existing = candidateMap.get(c.interview_id)!;
+            // Merge events deduplicated by (ts + type) and sorted chronologically
+            const mergedEvents = [...(existing.events || []), ...(c.events || [])].filter(
+              (evt, idx, arr) => arr.findIndex((x) => x.ts === evt.ts && x.type === evt.type) === idx
+            );
+            mergedEvents.sort((e1, e2) => {
+              const t1 = e1.ts ? new Date(e1.ts).getTime() : 0;
+              const t2 = e2.ts ? new Date(e2.ts).getTime() : 0;
+              return t1 - t2;
+            });
+
+            // Since snapshots are sorted chronologically, newer snapshot attributes (c) take precedence over existing
             candidateMap.set(c.interview_id, {
               ...existing,
               ...c,
-              events: [...(existing.events || []), ...(c.events || [])].filter(
-                (evt, idx, arr) => arr.findIndex((x) => x.ts === evt.ts && x.type === evt.type) === idx
-              ),
+              events: mergedEvents,
             });
           }
         }
@@ -155,13 +176,14 @@ export function JobLiveReportPanel({
     }
 
     const aggregatedCandidates = Array.from(candidateMap.values());
-    const primaryTitle = snapshots[0]?.jobs?.[0]?.title || jobTitle || "Untitled job";
-    const primaryCustomer = snapshots[0]?.jobs?.[0]?.customer_name || null;
+    const primaryTitle = sortedSnapshots[0]?.jobs?.[0]?.title || jobTitle || "Untitled job";
+    const primaryCustomer = sortedSnapshots[0]?.jobs?.[0]?.customer_name || null;
+    const primaryBulkId = sortedSnapshots[sortedSnapshots.length - 1]?.bulk_id || sortedSnapshots[0]?.bulk_id || "aggregated";
 
     return {
-      bulk_id: snapshots.map((s) => s.bulk_id).join(","),
-      created_at: snapshots[0]?.created_at || null,
-      state: snapshots.some((s) => s.state === "live") ? "live" : "archived",
+      bulk_id: primaryBulkId,
+      created_at: sortedSnapshots[sortedSnapshots.length - 1]?.created_at || sortedSnapshots[0]?.created_at || null,
+      state: sortedSnapshots.some((s) => s.state === "live") ? "live" : "archived",
       jobs: [
         {
           bulk_jd_id: null,
@@ -175,6 +197,8 @@ export function JobLiveReportPanel({
     };
   }, [jobTitle]);
 
+  const activeFetchAbortRef = useRef<AbortController | null>(null);
+
   // Load and aggregate all launches for this job
   const fetchAllLaunchSnapshots = useCallback(
     async (launchList: LaunchListItem[], jdId: string, mask: boolean) => {
@@ -182,6 +206,13 @@ export function JobLiveReportPanel({
         setAggregatedSnapshot(null);
         return;
       }
+
+      if (activeFetchAbortRef.current) {
+        activeFetchAbortRef.current.abort();
+      }
+      const abortCtrl = new AbortController();
+      activeFetchAbortRef.current = abortCtrl;
+
       setIsRefreshing(true);
       try {
         const snapshotPromises = launchList.map((l) =>
@@ -191,6 +222,8 @@ export function JobLiveReportPanel({
           })
         );
         const results = await Promise.all(snapshotPromises);
+        if (abortCtrl.signal.aborted) return;
+
         const validSnapshots: Snapshot[] = results.filter((s): s is Snapshot => Boolean(s));
         if (validSnapshots.length > 0) {
           setAggregatedSnapshot(mergeSnapshots(validSnapshots, jdId));
@@ -199,16 +232,24 @@ export function JobLiveReportPanel({
         }
         setError(null);
       } catch (err: any) {
-        console.error("Failed to aggregate launches for job live report:", err);
-        setError(err?.message || "Failed to load live report data");
+        if (!abortCtrl.signal.aborted) {
+          console.error("Failed to aggregate launches for job live report:", err);
+          setError(err?.message || "Failed to load live report data");
+        }
       } finally {
-        setIsRefreshing(false);
+        if (!abortCtrl.signal.aborted) {
+          setIsRefreshing(false);
+        }
       }
     },
     [mergeSnapshots]
   );
 
-  // Initialize job and fetch all launches
+  // Store stable ref for snapshot fetcher
+  const fetchAllLaunchSnapshotsRef = useRef(fetchAllLaunchSnapshots);
+  fetchAllLaunchSnapshotsRef.current = fetchAllLaunchSnapshots;
+
+  // Initialize job and fetch all launches (only runs once per jobId/jobdivaId change)
   useEffect(() => {
     let isCancelled = false;
 
@@ -260,7 +301,7 @@ export function JobLiveReportPanel({
         setLaunches(launchList);
 
         if (launchList.length > 0) {
-          await fetchAllLaunchSnapshots(launchList, jdId, revealPii);
+          await fetchAllLaunchSnapshotsRef.current(launchList, jdId, revealPii);
         } else {
           setAggregatedSnapshot(null);
         }
@@ -278,44 +319,95 @@ export function JobLiveReportPanel({
     return () => {
       isCancelled = true;
     };
-  }, [jobId, jobdivaId, revealPii, fetchAllLaunchSnapshots]);
+  }, [jobId, jobdivaId]);
 
-  // Connect SSE streams for all launches
-  const [streamConnectedCount, setStreamConnectedCount] = useState<number>(0);
-  const isConnected = streamConnectedCount > 0;
+  // Handle revealPii toggling without re-running full initJobData
+  const isInitialMountRef = useRef(true);
+  useEffect(() => {
+    if (isInitialMountRef.current) {
+      isInitialMountRef.current = false;
+      return;
+    }
+    if (launches.length > 0) {
+      fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, revealPii);
+    }
+  }, [revealPii]);
+
+  // Compute live launches to stream (avoids HTTP/1.1 socket exhaustion from archived runs)
+  const liveLaunchBulkIds = useMemo(() => {
+    const liveItems = launches.filter((l) => l.state === "live");
+    // If no explicit live state exists, connect only to the newest 2 launches as fallback
+    const targets = liveItems.length > 0 ? liveItems : launches.slice(0, 2);
+    return targets.map((l) => l.bulk_id);
+  }, [launches]);
+
+  // Connect SSE streams with auto-reconnect, exponential backoff, and watchdog
+  const [activeConnections, setActiveConnections] = useState<Set<string>>(new Set());
+  const isConnected = activeConnections.size > 0;
 
   useEffect(() => {
-    if (!launches || launches.length === 0 || typeof window === "undefined") {
-      setStreamConnectedCount(0);
+    if (liveLaunchBulkIds.length === 0 || typeof window === "undefined") {
+      setActiveConnections(new Set());
       return;
     }
 
-    const abortControllers: AbortController[] = [];
+    const abortControllers = new Map<string, AbortController>();
+    const retryTimeouts = new Map<string, NodeJS.Timeout>();
+    const watchdogs = new Map<string, NodeJS.Timeout>();
+    const retryCounts = new Map<string, number>();
+    let isDisposed = false;
 
-    launches.forEach((launch) => {
+    const startStream = (bulkId: string) => {
+      if (isDisposed) return;
+
       const ac = new AbortController();
-      abortControllers.push(ac);
+      abortControllers.set(bulkId, ac);
 
-      const streamUrl = api.liveReport.streamUrl(launch.bulk_id);
+      const resetWatchdog = () => {
+        const existingWd = watchdogs.get(bulkId);
+        if (existingWd) clearTimeout(existingWd);
+        const wd = setTimeout(() => {
+          console.warn(`Watchdog timeout for live stream ${bulkId}. Recycling...`);
+          ac.abort();
+          if (!isDisposed) {
+            fetchAllLaunchSnapshotsRef.current(launches, resolvedJobDivaId || jobId, revealPii);
+            startStream(bulkId);
+          }
+        }, 35000);
+        watchdogs.set(bulkId, wd);
+      };
+
+      const streamUrl = api.liveReport.streamUrl(bulkId);
+
       authFetch(streamUrl, {
         signal: ac.signal,
         headers: { Accept: "text/event-stream" },
       })
         .then(async (response) => {
-          if (!response.ok || !response.body) return;
-          setStreamConnectedCount((prev) => prev + 1);
+          if (!response.ok || !response.body) {
+            if (response.status === 404 || response.status === 403) {
+              console.warn(`Live report stream non-retriable status (${response.status}) for ${bulkId}.`);
+              return;
+            }
+            throw new Error(`Stream rejected: ${response.status}`);
+          }
+
+          setActiveConnections((prev) => new Set(prev).add(bulkId));
+          retryCounts.set(bulkId, 0);
+          resetWatchdog();
 
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
 
           const handleRawChunk = (rawEvent: string) => {
+            resetWatchdog();
             const trimmed = rawEvent.trim();
             if (!trimmed || trimmed.startsWith(":")) return;
-            const lines = trimmed.split("\n");
+            const lines = trimmed.split(/\r?\n/);
             const dataLines = lines
               .filter((l) => l.startsWith("data:"))
-              .map((l) => l.slice(5).trim());
+              .map((l) => l.replace(/^data:\s?/, ""));
             if (dataLines.length === 0) return;
             const jsonStr = dataLines.join("");
             try {
@@ -343,26 +435,55 @@ export function JobLiveReportPanel({
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             let sepIdx: number;
-            while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+            while ((sepIdx = buffer.search(/\r?\n\r?\n/)) !== -1) {
+              const match = buffer.match(/\r?\n\r?\n/);
+              const matchLen = match ? match[0].length : 2;
               const raw = buffer.slice(0, sepIdx);
-              buffer = buffer.slice(sepIdx + 2);
+              buffer = buffer.slice(sepIdx + matchLen);
               handleRawChunk(raw);
             }
           }
           if (buffer.trim()) handleRawChunk(buffer);
         })
-        .catch(() => {
-          // Expected when aborted or connection ends
+        .catch((err) => {
+          if (ac.signal.aborted || isDisposed) return;
+          console.warn(`Live report SSE connection dropped for ${bulkId}:`, err);
         })
         .finally(() => {
-          setStreamConnectedCount((prev) => Math.max(0, prev - 1));
+          setActiveConnections((prev) => {
+            const next = new Set(prev);
+            next.delete(bulkId);
+            return next;
+          });
+
+          const existingWd = watchdogs.get(bulkId);
+          if (existingWd) clearTimeout(existingWd);
+
+          if (!ac.signal.aborted && !isDisposed) {
+            const currentRetry = retryCounts.get(bulkId) || 0;
+            retryCounts.set(bulkId, Math.min(currentRetry + 1, 6));
+            const delay = Math.min(1000 * Math.pow(2, currentRetry), 15000) + Math.random() * 1000;
+
+            const t = setTimeout(() => {
+              if (!isDisposed) {
+                fetchAllLaunchSnapshotsRef.current(launches, resolvedJobDivaId || jobId, revealPii);
+                startStream(bulkId);
+              }
+            }, delay);
+            retryTimeouts.set(bulkId, t);
+          }
         });
-    });
+    };
+
+    liveLaunchBulkIds.forEach(startStream);
 
     return () => {
+      isDisposed = true;
       abortControllers.forEach((ac) => ac.abort());
+      retryTimeouts.forEach((t) => clearTimeout(t));
+      watchdogs.forEach((wd) => clearTimeout(wd));
     };
-  }, [launches]);
+  }, [liveLaunchBulkIds]);
 
   // Tab visibility reconciliation
   useEffect(() => {
