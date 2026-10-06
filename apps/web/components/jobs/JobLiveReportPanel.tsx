@@ -29,6 +29,7 @@ interface FeedItem {
   text: string;
   critical: boolean;
   tone?: "good" | "critical" | "neutral";
+  dedupeKey?: string;
 }
 
 interface JobLiveReportPanelProps {
@@ -58,6 +59,8 @@ export function JobLiveReportPanel({
   // In-memory cache for raw candidate names (interview_id -> rawName)
   // Cleaned up on jobId switch or unmount to prevent SPA memory leaks
   const rawNamesMapRef = useRef<Map<number, string>>(new Map());
+  // Version counter to trigger scopedJob / feed updates when rawNamesMapRef is updated
+  const [rawNamesVersion, setRawNamesVersion] = useState<number>(0);
 
   // Track if we have already fetched unmasked names from the backend
   const hasFetchedUnmaskedRef = useRef<boolean>(false);
@@ -77,7 +80,7 @@ export function JobLiveReportPanel({
 
   // Push into feed
   const pushFeed = useCallback(
-    (text: string, critical = false, tone?: "good" | "critical" | "neutral") => {
+    (text: string, critical = false, tone?: "good" | "critical" | "neutral", dedupeKey?: string) => {
       feedIdCounterRef.current += 1;
       const currentId = feedIdCounterRef.current;
       const resolvedTone = tone || (critical ? "critical" : "neutral");
@@ -85,10 +88,11 @@ export function JobLiveReportPanel({
       setFeed((prev) => [
         {
           id: currentId,
-          ts: new Date().toLocaleTimeString(),
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
           text,
           critical,
           tone: resolvedTone,
+          dedupeKey,
         },
         ...prev.slice(0, 49),
       ]);
@@ -117,15 +121,26 @@ export function JobLiveReportPanel({
         ? "good"
         : "neutral";
 
-      const subject = event.name || `#${event.interviewId}`;
+      // If SSE sends an unmasked candidate name, only cache it into rawNamesMapRef when revealPii is true
+      if (event.name && event.interviewId) {
+        if (revealPiiRef.current) {
+          rawNamesMapRef.current.set(event.interviewId, event.name);
+          setRawNamesVersion((v) => v + 1);
+        }
+      }
+
+      // Safe subject name for feed: mask name if revealPii is false to prevent PII leakage
+      const rawSubject = event.name || rawNamesMapRef.current.get(event.interviewId);
+      const safeSubject = revealPiiRef.current
+        ? rawSubject || `#${event.interviewId}`
+        : rawSubject
+        ? maskCandidateName(rawSubject)
+        : `#${event.interviewId}`;
+
       const action = event.type.replace(/_/g, " ");
       const statusText = isFailed ? " [Failed]" : isPassed ? " [Passed]" : "";
-      pushFeed(`${subject}: ${action}${statusText}`, isFailed, tone);
-
-      // If SSE event contains a candidate name, cache it in memory
-      if (event.name && event.interviewId) {
-        rawNamesMapRef.current.set(event.interviewId, event.name);
-      }
+      const eventKey = `${event.interviewId}_${event.type}_${event.subtype || ""}_${event.phase || ""}`;
+      pushFeed(`${safeSubject}: ${action}${statusText}`, isFailed, tone, eventKey);
 
       // Mutate candidate in real-time in aggregatedSnapshot
       setAggregatedSnapshot((prev) => {
@@ -142,7 +157,7 @@ export function JobLiveReportPanel({
 
               return {
                 ...cand,
-                name: event.name || cand.name,
+                name: (revealPiiRef.current && event.name) ? event.name : cand.name,
                 phase: updatedPhase,
                 outreach_status: event.status || cand.outreach_status,
                 call_outcome: isDone ? "completed" : cand.call_outcome,
@@ -162,6 +177,7 @@ export function JobLiveReportPanel({
   useEffect(() => {
     activityEventRef.current = handleActivityEvent;
   }, [handleActivityEvent]);
+
 
   const activeFetchAbortRef = useRef<AbortController | null>(null);
 
@@ -222,6 +238,7 @@ export function JobLiveReportPanel({
                 }
               }
             }
+            setRawNamesVersion((v) => v + 1);
           }
 
           setAggregatedSnapshot(merged);
@@ -348,13 +365,22 @@ export function JobLiveReportPanel({
   // Handle revealPii toggling: if reveal=true and we haven't fetched unmasked names yet, fetch once;
   // otherwise toggle instantly in memory with zero network requests
   const handleToggleRevealPii = useCallback(async () => {
-    const nextState = !revealPii;
-    setRevealPii(nextState);
-
-    if (nextState && !hasFetchedUnmaskedRef.current && launches.length > 0) {
-      await fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, true);
+    if (!revealPii) {
+      if (!hasFetchedUnmaskedRef.current && launches.length > 0) {
+        try {
+          await fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, true);
+          setRevealPii(true);
+        } catch (err) {
+          console.error("Failed to reveal candidate names:", err);
+        }
+      } else {
+        setRevealPii(true);
+      }
+    } else {
+      setRevealPii(false);
     }
   }, [revealPii, launches, resolvedJobDivaId, jobId, fetchAllLaunchSnapshots]);
+
 
   // Only stream launches that are ACTUALLY live (no archived fallback)
   const liveLaunchBulkIds = useMemo(() => {
@@ -574,7 +600,7 @@ export function JobLiveReportPanel({
       ...baseJob,
       candidates: transformedCandidates,
     };
-  }, [aggregatedSnapshot, revealPii]);
+  }, [aggregatedSnapshot, revealPii, rawNamesVersion]);
 
   // Recruiter-friendly event formatter matching admin/live-report
   const formatRecruiterEvent = useCallback((event: {
@@ -637,20 +663,23 @@ export function JobLiveReportPanel({
   // Hydrate activity feed from snapshot events on load (matching admin/live-report behavior)
   useEffect(() => {
     if (!aggregatedSnapshot?.jobs || aggregatedSnapshot.jobs.length === 0) return;
+    const MAX_FEED_ITEMS = 50;
     const allRecentEvents: Array<{
       id: number;
+      parsedTime: number;
       ts: string;
-      rawTs: string;
       text: string;
       critical: boolean;
       tone?: "good" | "critical" | "neutral";
+      dedupeKey: string;
     }> = [];
 
     for (const job of aggregatedSnapshot.jobs) {
       for (const cand of job.candidates) {
+        const rawCandName = rawNamesMapRef.current.get(cand.interview_id) || cand.name;
         const resolvedName = revealPii
-          ? (rawNamesMapRef.current.get(cand.interview_id) || cand.name)
-          : maskCandidateName(rawNamesMapRef.current.get(cand.interview_id) || cand.name);
+          ? rawCandName
+          : maskCandidateName(rawCandName);
 
         for (const evt of cand.events || []) {
           const formatted = formatRecruiterEvent({
@@ -675,40 +704,45 @@ export function JobLiveReportPanel({
             ? "good"
             : "neutral";
 
-          const d = evt.ts ? new Date(evt.ts) : new Date();
-          const tsStr = !Number.isNaN(d.getTime())
+          const d = evt.ts ? new Date(evt.ts) : new Date(0);
+          const parsedTime = !Number.isNaN(d.getTime()) ? d.getTime() : 0;
+          const tsStr = parsedTime > 0
             ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
             : "—";
 
           feedIdCounterRef.current += 1;
+          const dedupeKey = `${cand.interview_id}_${evt.type}_${evt.subtype || ""}_${evt.phase || ""}_${evt.ts || ""}`;
           allRecentEvents.push({
             id: feedIdCounterRef.current,
-            rawTs: evt.ts || "",
+            parsedTime,
             ts: tsStr,
             text: formatted,
             critical: isFailed,
             tone,
+            dedupeKey,
           });
         }
       }
     }
 
-    // Sort newest first, keep top 50
-    allRecentEvents.sort((a, b) => b.rawTs.localeCompare(a.rawTs));
+    // Sort newest first by timestamp numerically
+    allRecentEvents.sort((a, b) => b.parsedTime - a.parsedTime);
     if (allRecentEvents.length > 0) {
       setFeed((prev) => {
         if (prev.length === 0) {
-          return allRecentEvents.slice(0, 30).map(({ rawTs, ...item }) => item);
+          return allRecentEvents.slice(0, MAX_FEED_ITEMS).map(({ parsedTime, ...item }) => item);
         }
-        const existingTexts = new Set(prev.map((p) => p.text));
+        // Deduplicate using stable event key if available, fallback to text
+        const existingKeys = new Set(prev.map((p) => p.dedupeKey || p.text));
         const newItems = allRecentEvents
-          .filter((item) => !existingTexts.has(item.text))
-          .map(({ rawTs, ...item }) => item);
+          .filter((item) => !existingKeys.has(item.dedupeKey))
+          .map(({ parsedTime, ...item }) => item);
         if (newItems.length === 0) return prev;
-        return [...newItems, ...prev].slice(0, 50);
+        return [...newItems, ...prev].slice(0, MAX_FEED_ITEMS);
       });
     }
-  }, [aggregatedSnapshot, formatRecruiterEvent, revealPii]);
+  }, [aggregatedSnapshot, formatRecruiterEvent, revealPii, rawNamesVersion]);
+
 
   // Scoped Anomalies
   const scopedAnomalies = useMemo(() => {
