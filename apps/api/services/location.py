@@ -291,10 +291,8 @@ _RE_BASED_LOCATED = re.compile(
 # Tech brand names, tools, and common proper-noun words that the City regex
 # can mistakenly capture from headline / resume text
 # (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
-# (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
-# NOTE: This list is now FALLBACK-ONLY. When a state is provided and the zip
-# index is loaded, unrecognised tokens are rejected automatically. Entries
-# here can be pruned if they never occur in resumes without a state code attached.
+# The index is authoritative for known cities; these heuristics also protect
+# locations absent from or aliased differently in the offline index.
 _NON_PLACE_TOKENS: frozenset = frozenset({
     # CRM / cloud platforms
     "salesforce", "servicenow", "workday", "oracle", "sap", "dynamics",
@@ -338,7 +336,8 @@ _CANADIAN_PROVINCE_CODES = frozenset({
 
 def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
     """Reject brand/tool names and bare two-letter initials as a city token.
-    Uses the offline zip index when a state is provided, with fallbacks otherwise.
+    Use the offline city index as positive evidence, then heuristics for misses.
+    A missing index entry alone is not enough to reject a real city.
     """
     token = value.strip()
     if not token:
@@ -370,19 +369,16 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
         if is_known_city(lookup_token, state):
             return True
             
-        if state:
-            if state_upper in _CANADIAN_PROVINCE_CODES:
-                # Defend against brand names matching CA province codes ("Parasoft, ON")
-                if token_lower in _NON_PLACE_TOKENS or _CAMEL_CASE_RE.search(token):
-                    return False
-                return True
-            
-            # Broad regions are explicitly supported by downstream logic
-            if token_lower.endswith(" area") or token_lower.endswith(" metroplex"):
-                return True
-                
-            # Definitively not a real US place
-            return False
+        if state_upper in _CANADIAN_PROVINCE_CODES:
+            # The ZIP index is US-only; apply the false-positive guards before
+            # accepting a city paired with a Canadian province.
+            if token_lower in _NON_PLACE_TOKENS or _CAMEL_CASE_RE.search(token):
+                return False
+            return True
+
+        # Broad regions are not represented in the ZIP index.
+        if state and (token_lower.endswith(" area") or token_lower.endswith(" metroplex")):
+            return True
     except Exception:
         pass
 
@@ -396,9 +392,6 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
         return False
         
     if re.fullmatch(r"[A-Z]{2}", token):
-        # The District of Columbia is often exported as "DC, DC".
-        if token == state and token == "DC":
-            return True
         return False
         
     return True
