@@ -172,6 +172,51 @@ def test_verdict_missing_location_soft_keep_sentinel(svc):
     assert not ok and reason == "candidate_location_missing" and dist == 9999.0
 
 
+@pytest.mark.parametrize("location", [
+    "San Francisco Bay Area",
+    "Greater Chicago Area",
+    "Los Angeles Metropolitan Area",
+    "Seattle Metro Area",
+])
+def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, location):
+    import services.unified_candidate_search as ucs
+
+    def unexpected_geocode(*args, **kwargs):
+        raise AssertionError("broad region labels must not be treated as point locations")
+
+    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    ok, reason, distance = svc._location_match_verdict(
+        {"location": location}, _criteria()
+    )
+    assert not ok
+    assert reason == "broad_region_unverified"
+    assert distance == 9999.0
+
+
+def test_broad_region_with_state_suffix_still_uses_state_but_not_radius(svc, monkeypatch):
+    import services.unified_candidate_search as ucs
+
+    def unexpected_geocode(*args, **kwargs):
+        raise AssertionError("a broad region label must not be geocoded as a point")
+
+    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    ok, reason, distance = svc._location_match_verdict(
+        {"location": "San Francisco Bay Area, CA"},
+        _criteria(location="Mountain View, CA 94043"),
+    )
+    assert not ok and reason == "broad_region_unverified"
+    assert distance == 9999.0
+
+
+def test_precise_city_signal_overrides_broad_region_label(svc):
+    ok, reason, distance = svc._location_match_verdict(
+        {"location": "San Francisco Bay Area", "city": "Tucson", "state": "AZ"},
+        _criteria(),
+    )
+    assert not ok and reason == "outside_radius_confirmed"
+    assert distance is not None and distance > 25
+
+
 def test_verdict_state_only_matches_via_direct_zip(svc):
     ok, reason, _ = svc._location_match_verdict(
         {"zipcode": "85004"}, _criteria(location="AZ")
@@ -246,6 +291,14 @@ def test_hard_gate_vetoes_offline_confirmed_outside(svc):
     assert isinstance(cand.get("distance_miles"), float)
 
 
+def test_hard_gate_soft_keeps_broad_region_as_unverified(svc):
+    candidate = {"location": "San Francisco Bay Area"}
+    assert svc._location_hard_gate(candidate, _criteria()) is None
+    assert candidate.get("location_match_reason") == "broad_region_unverified"
+    assert candidate.get("location_out_of_radius") is not True
+    assert candidate.get("distance_miles") is None
+
+
 def test_hard_gate_no_veto_for_remote_job(svc):
     assert svc._location_hard_gate(
         {"location": "Miami, FL"}, _criteria(location_type="Remote")
@@ -285,11 +338,11 @@ def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
 
     geocoded = []
 
-    def fake_within_radius(candidate_loc, target, miles):
+    def unexpected_geocode(candidate_loc, target, miles):
         geocoded.append(candidate_loc)
-        return True, "ok", 16.3
+        raise AssertionError("a broad metro label must not be geocoded as an exact point")
 
-    monkeypatch.setattr(ucs, "within_radius", fake_within_radius)
+    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -297,10 +350,12 @@ def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
         },
         _criteria(),
     )
-    # The résumé string is what gets geocoded; Tucson never enters the verdict.
-    assert ok
-    assert dist == 16.3
-    assert len(geocoded) == 1 and "phoenix" in geocoded[0].lower()
+    # The broad résumé region remains visible but cannot replace an exact
+    # point or condemn the candidate; the structured Tucson location is
+    # intentionally ignored under the résumé-authoritative policy.
+    assert not ok and reason == "broad_region_unverified"
+    assert dist == 9999.0
+    assert geocoded == []
 
 
 def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, monkeypatch):
@@ -335,18 +390,18 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
     assert geocoded == []
 
 
-def test_verdict_llm_location_used_only_when_source_blank(svc, monkeypatch):
-    """When the source provides NO location at all, the LLM-extracted
-    string is still a usable last-resort signal (geocoded as before)."""
+def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monkeypatch):
+    """A broad résumé location is displayable, but not precise enough to
+    confirm or reject a configured radius."""
     import services.unified_candidate_search as ucs
 
     geocoded = []
 
-    def fake_within_radius(candidate_loc, target, miles):
+    def unexpected_geocode(candidate_loc, target, miles):
         geocoded.append(candidate_loc)
-        return True, "ok", 16.3
+        raise AssertionError("broad metro label must not be geocoded")
 
-    monkeypatch.setattr(ucs, "within_radius", fake_within_radius)
+    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -354,9 +409,9 @@ def test_verdict_llm_location_used_only_when_source_blank(svc, monkeypatch):
         },
         _criteria(),
     )
-    assert ok and reason == "within_radius"
-    assert dist == 16.3
-    assert geocoded == ["Phoenix Metropolitan Area"]
+    assert not ok and reason == "broad_region_unverified"
+    assert dist == 9999.0
+    assert geocoded == []
 
 
 def test_verdict_all_signals_offline_skips_nominatim(svc, monkeypatch):

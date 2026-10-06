@@ -259,6 +259,19 @@ def test_location_hard_gate_operational_kill_switch_soft_keeps_confirmed_mismatc
     assert cand.get("location_out_of_radius") is True
 
 
+def test_location_radius_kill_switch_also_bypasses_pre_filter(svc, monkeypatch):
+    from unittest.mock import MagicMock
+    from core import sourcing_config
+
+    monkeypatch.setattr(
+        sourcing_config, "LOCATION_RADIUS_HARD_GATE_ENABLED", False, raising=False
+    )
+    svc._log_stage = MagicMock()
+    candidate = {"location": "Miami, FL", "candidate_id": "miami"}
+    kept = svc._filter_by_state([candidate], _criteria(location="Tempe, AZ"))
+    assert kept == [candidate]
+
+
 def test_location_hard_gate_clears_stale_veto_markers_after_location_changes(svc):
     cand = {
         "location": "Tempe, AZ",

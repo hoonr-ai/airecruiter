@@ -62,6 +62,21 @@ _ARRANGEMENT_RESIDUE_WORDS = frozenset({
     "week", "weeks", "willing", "with", "work", "working", "x",
 })
 
+# These strings describe a metro/region rather than a candidate's exact
+# locality. A geocoder may return a representative point for them, but that
+# point is not precise enough to hard-reject someone against a small radius.
+_BROAD_REGION_RE = re.compile(
+    r"(?:^greater\s+.+\s+area|.+\s+(?:bay\s+area|metro(?:politan)?(?:\s+area)?|metropolitan\s+area|area))"
+    r"(?:,\s*[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?$",
+    re.IGNORECASE,
+)
+
+
+def is_broad_region_location(value) -> bool:
+    """Whether a location label denotes a broad metro/region, not a city."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return bool(text and _BROAD_REGION_RE.fullmatch(text))
+
 
 def sanitize_candidate_location(value) -> str:
     """Strip work-arrangement noise from a candidate-location string.

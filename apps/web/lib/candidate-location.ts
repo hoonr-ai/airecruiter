@@ -41,6 +41,7 @@ export function hasUnverifiedCandidateLocation(c: CandidateLocationInput): boole
   return [
     "candidate_location_missing",
     "candidate_state_unknown",
+    "broad_region_unverified",
     "geocode_unavailable",
     "location_unverified",
   ].includes(String(c.location_match_reason || ""));

@@ -17,6 +17,7 @@ from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import (
     haversine_miles,
+    is_broad_region_location,
     normalize_location_string,
     sanitize_candidate_location,
     within_radius,
@@ -3274,6 +3275,10 @@ class UnifiedCandidateSearch:
 
         enforce_location = self._should_enforce_location(criteria)
         job_country = self._target_country(criteria)
+        from core import sourcing_config as _sc_location
+        radius_gate_enabled = getattr(
+            _sc_location, "LOCATION_RADIUS_HARD_GATE_ENABLED", True
+        )
 
         kept: List[Dict[str, Any]] = []
         non_us_dropped = 0
@@ -3287,6 +3292,13 @@ class UnifiedCandidateSearch:
                 continue
 
             if not enforce_location:
+                kept.append(c)
+                continue
+
+            # The operational rollback must cover the early provider gate as
+            # well as the final Step 5 gate. Otherwise turning the switch off
+            # cannot recover candidates already discarded here.
+            if not radius_gate_enabled:
                 kept.append(c)
                 continue
 
@@ -4322,9 +4334,36 @@ class UnifiedCandidateSearch:
         if not candidate_locs and not direct_zip:
             # A candidate without a usable location cannot be confirmed
             # inside any configured radius. It may pass the early source
-            # screen so résumé enrichment can recover the location, but the
-            # Step 5 emission gate will reject it if it remains unknown.
+            # screen so résumé enrichment can recover the location; if it
+            # remains unknown, the final gate retains it as unverified.
             return False, "candidate_location_missing", _UNKNOWN_DISTANCE_SENTINEL
+
+        # Metro/region labels (Bay Area, Greater Chicago Area, etc.) are
+        # intentionally retained for display but do not identify a precise
+        # point. Never use a geocoder's representative centroid to hard-drop
+        # these candidates for a small radius. If a separate precise city/ZIP
+        # is present, keep evaluating that stronger evidence instead.
+        broad_locs = [loc for loc in candidate_locs if is_broad_region_location(loc)]
+        precise_locs = []
+        precise_candidate_locs = []
+        for loc in candidate_locs:
+            if is_broad_region_location(loc):
+                continue
+            parsed_loc = self._parse_location(loc)
+            if parsed_loc.get("zip") or (parsed_loc.get("city") and parsed_loc.get("state")):
+                precise_locs.append(parsed_loc)
+                precise_candidate_locs.append(loc)
+        if broad_locs and not direct_zip and not precise_locs:
+            known_states = set()
+            for loc in broad_locs:
+                state = self._parse_location(loc).get("state")
+                if state:
+                    known_states.add(state)
+            if required.get("state") and known_states and required["state"] not in known_states:
+                return False, "state_mismatch", None
+            if required.get("state") and known_states and not required.get("city"):
+                return True, "state_match", None
+            return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
@@ -4376,7 +4415,12 @@ class UnifiedCandidateSearch:
         best_offline_distance: Optional[float] = None
         unresolved_locs: List[str] = []
 
-        parse_targets = list(candidate_locs)
+        # When an exact city/state signal accompanies a broad region label,
+        # evaluate the exact signal and avoid using the region centroid as a
+        # second, misleading candidate point.
+        parse_targets = list(
+            precise_candidate_locs if broad_locs and precise_candidate_locs else candidate_locs
+        )
         if direct_zip:
             parse_targets.append(direct_zip)
 
