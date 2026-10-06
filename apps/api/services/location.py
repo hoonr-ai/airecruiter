@@ -312,7 +312,21 @@ _NON_PLACE_TOKENS: frozenset = frozenset({
     "scrum", "agile", "itil", "cobit", "togaf",
     # Misc proper nouns that look like city names but are never places
     "linkedin", "github", "gitlab", "jira", "confluence", "slack",
+    # Bio-lab / life-sciences software and testing tools. These appear in
+    # resume skill/software sections and get mis-parsed as city names when
+    # followed by a comma-separated state abbreviation (e.g. "Parasoft, CA",
+    # "SoftMaxPro, MS"). None of these are US place names.
+    "parasoft", "softmaxpro", "graphpad", "graphpadprism", "prism",
+    "imagej", "imagepro", "facsdiva", "flowjo", "cellquest", "kaluza",
+    "modfit", "winnonlin", "phoenix", "nonmem", "simcyp", "gastroplus",
+    "certara", "nca", "pksolver", "bioanalytical",
+    # Additional cloud / devops tools
+    "appdynamics", "dynatrace", "nagios", "zabbix", "pagerduty",
 })
+
+
+# Compiled once at import time for the CamelCase brand guard below.
+_CAMEL_CASE_RE = re.compile(r"[a-z][A-Z]")
 
 
 def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
@@ -330,7 +344,9 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
         return False
     # The offline city/ZIP index is authoritative when available. This avoids
     # rejecting real place names that collide with brand/tool words (Spring,
-    # Oracle, Cassandra) or arrive in uppercase CRM exports.
+    # Oracle, Cassandra) or arrive in uppercase CRM exports. All real Mc*
+    # cities (McKinney TX, McAllen TX, McMinnville TN …) are in the index
+    # so the CamelCase guard below never fires for them.
     try:
         from services.zip_index import is_known_city
         if is_known_city(token, state):
@@ -343,6 +359,14 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
     if token == "LA" and str(state or "").upper() == "CA":
         return True
     if token.lower() in _NON_PLACE_TOKENS:
+        return False
+    # CamelCase guard: product/brand names frequently appear as
+    # "SoftMaxPro, MS" or "ServiceNow, CA" in resume skill sections.
+    # Real US city names are title-cased (one capitalised word per part)
+    # and never have an internal lowercase→uppercase transition. Tokens
+    # not recognised by the zip index that exhibit CamelCase are almost
+    # certainly software products, not places.
+    if _CAMEL_CASE_RE.search(token):
         return False
     if re.fullmatch(r"[A-Z]{2}", token):
         # The District of Columbia is often exported as "DC, DC".

@@ -103,8 +103,23 @@ def test_real_places_pass_through_unchanged(value):
     "Salesforce, MS",
     "PS, PR",
     "Remote, Salesforce, MS",
+    # Bio-lab software names mis-parsed as cities (QA-reported)
+    "Parasoft, CA",
+    "SoftMaxPro, MS",
+    # CamelCase brand names that are never US places
+    "ServiceNow, CA",
+    "PowerBI, TX",
+    "FlowJo, CA",
+    "FACSDiva, NY",
+    "GraphPad, CA",
 ])
 def test_false_city_state_values_are_blank_in_shared_display_sanitizer(value):
+    """Brand/tool names must not be retained as city strings.
+
+    QA caught 'SoftMaxPro, MS' appearing as a candidate location because
+    it was extracted from a resume skill section. This test ensures the
+    _NON_PLACE_TOKENS denylist and the CamelCase guard together reject them.
+    """
     assert sanitize_candidate_location(value) == ""
 
 
@@ -119,6 +134,8 @@ def test_real_city_state_values_survive_shared_display_sanitizer(value):
 
 @pytest.mark.parametrize("value", [
     "Spring, TX", "Oracle, AZ", "Cassandra, PA", "DC, DC", "LA, CA",
+    # Mc* cities are real places — must not be blocked by the CamelCase guard
+    "McKinney, TX", "McAllen, TX",
 ])
 def test_real_cities_that_collide_with_denylist_or_initials_survive(value):
     assert sanitize_candidate_location(value) == value
