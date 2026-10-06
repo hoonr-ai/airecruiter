@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { api, authFetch } from "@/lib/api";
 import { JobBlock } from "@/app/admin/live-report/JobBlock";
-import { mergeLaunchSnapshots } from "@/lib/live-report-merge";
 import type { LaunchListItem, JobBlockData, Snapshot, CandidateRow, Anomaly, TerminalReason } from "@/app/admin/live-report/types";
 
 // Robust candidate name masking utility handling single names, hyphens, and whitespace edge cases
@@ -369,7 +368,20 @@ export function JobLiveReportPanel({
     const retryTimeouts = new Map<string, NodeJS.Timeout>();
     const watchdogs = new Map<string, NodeJS.Timeout>();
     const retryCounts = new Map<string, number>();
+    let lastWatchdogRefreshAt = 0;
     let isDisposed = false;
+
+    // Single-flight debounced refresh to avoid duplicate fetches if multiple streams timeout together
+    const triggerDebouncedJobRefresh = () => {
+      const now = Date.now();
+      if (now - lastWatchdogRefreshAt > 4000) {
+        lastWatchdogRefreshAt = now;
+        fetchJobSnapshotRef.current(
+          resolvedJobDivaIdRef.current || jobIdRef.current,
+          revealPiiRef.current
+        );
+      }
+    };
 
     const startStream = (bulkId: string) => {
       if (isDisposed) return;
@@ -384,11 +396,7 @@ export function JobLiveReportPanel({
           console.warn(`Watchdog timeout for live stream ${bulkId}. Recycling...`);
           ac.abort();
           if (!isDisposed) {
-            // Read fresh values from refs to prevent stale closure PII unmasking
-            fetchJobSnapshotRef.current(
-              resolvedJobDivaIdRef.current || jobIdRef.current,
-              revealPiiRef.current
-            );
+            triggerDebouncedJobRefresh();
             startStream(bulkId);
           }
         }, 35000);
