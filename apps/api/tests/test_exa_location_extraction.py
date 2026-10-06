@@ -91,12 +91,12 @@ CASES = [
         "Director of Engineering — Dallas, Texas. Built three platforms.",
         ("Dallas", "TX"),
     ),
-    # 6. LinkedIn "Greater <City> Area" header pattern.
+    # 6. LinkedIn "Greater <City> Area" header pattern — full label is preserved.
     (
         "Greater Boston Area · Senior Data Scientist · 6+ years machine learning.",
-        ("Boston", ""),
+        ("Greater Boston Area", ""),
     ),
-    # 7. "<City>, <State> Area" LinkedIn pattern.
+    # 7. "<City>, <State> Area" LinkedIn pattern — state IS resolvable → (city, code).
     (
         "Atlanta, Georgia Area | Vice President, Product",
         ("Atlanta", "GA"),
@@ -115,6 +115,35 @@ CASES = [
     (
         "Resides in Miami, FL. Bilingual sales leader.",
         ("Miami", "FL"),
+    ),
+    # 11. Ignore a headline technology brand + state-code-looking suffix and
+    # continue to the actual LinkedIn location header.
+    # Full "Greater Chicago Area" label preserved for display.
+    (
+        "John Lash - Salesforce, MS Dynamics. Greater Chicago Area",
+        ("Greater Chicago Area", ""),
+    ),
+    # 12. Ignore a two-letter resume fragment that resembles a city, then
+    # recover the broad LinkedIn metro location. Full label preserved.
+    (
+        "Yuhong Ouyang - PS, PR. Los Angeles Metropolitan Area",
+        ("Los Angeles Metropolitan Area", ""),
+    ),
+    # 13. Devlin Rocha / Laura Wood scenario: Bay Area label is preserved so the
+    # candidate card shows "San Francisco Bay Area" instead of being blank.
+    (
+        "Devlin Rocha - Software Engineer. San Francisco Bay Area",
+        ("San Francisco Bay Area", ""),
+    ),
+    # 14. Multi-word city names: Greater prefix + Bay suffix both preserved.
+    (
+        "Senior Product Manager · Greater San Francisco Bay Area",
+        ("Greater San Francisco Bay Area", ""),
+    ),
+    # 15. Laura Wood scenario: exact LinkedIn header string.
+    (
+        "Laura Wood - San Jose State University - San Francisco Bay Area",
+        ("San Francisco Bay Area", ""),
     ),
 ]
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useLayoutEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
@@ -992,6 +992,8 @@ function NewJobPageContent() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
+  const rubricDataRef = useRef(rubricData);
+  useLayoutEffect(() => { rubricDataRef.current = rubricData; }, [rubricData]);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
   // Covers the entire Step-2 → Step-3 advance (draft save + rubric fetch) so
   // the Next button stays in a loading state continuously. `isGeneratingRubric`
@@ -1015,10 +1017,14 @@ function NewJobPageContent() {
     // ratio. Clamped to [0.1, 5] at the input layer.
     weight?: number;
   }>>([]);
+  const resumeMatchFiltersRef = useRef(resumeMatchFilters);
+  useLayoutEffect(() => { resumeMatchFiltersRef.current = resumeMatchFilters; }, [resumeMatchFilters]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
+  const screenQuestionsRef = useRef(screenQuestions);
+  useLayoutEffect(() => { screenQuestionsRef.current = screenQuestions; }, [screenQuestions]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
   // AI policy check (NSFW / rude / discriminatory / nonsensical) for
   // recruiter-added questions — shows a warning under the row, never blocks.
@@ -1093,6 +1099,8 @@ function NewJobPageContent() {
     value: string;
     radius: string;
   }>>([]);
+  const sourceLocationsRef = useRef(sourceLocations);
+  useLayoutEffect(() => { sourceLocationsRef.current = sourceLocations; }, [sourceLocations]);
   const [hasSeededSourceLocation, setHasSeededSourceLocation] = useState(false);
   const [sourceCompanies, setSourceCompanies] = useState<string[]>([]);
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
@@ -1100,6 +1108,8 @@ function NewJobPageContent() {
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
+  const sourceLocationMilesRef = useRef(sourceLocationMiles);
+  useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   // PR-B: top-level minimum years of experience floor for sourcing.
@@ -2862,6 +2872,134 @@ function NewJobPageContent() {
 
       const data = await response.json();
       setJobPosting(data.description);
+      if (data.locations && Array.isArray(data.locations) && data.locations.length > 0) {
+        // Read refs after the async generation request so recruiter edits
+        // made while it was running are included in both state and the draft
+        // payload instead of being overwritten by stale render closures.
+        const latestLocations = sourceLocationsRef.current;
+        const latestFilters = resumeMatchFiltersRef.current;
+        const latestQuestions = screenQuestionsRef.current;
+        const nextRubricData = { ...(rubricDataRef.current || {}) };
+        const nextOtherRequirements = [
+          ...(Array.isArray(nextRubricData.other_requirements)
+            ? nextRubricData.other_requirements
+            : []),
+        ];
+        const normalizeRequirementLocation = (value: unknown) =>
+          String(value || "")
+            .trim()
+            .replace(/^location\s*:\s*/i, "")
+            .replace(/[\s.,;]+$/, "")
+            .trim()
+            .toLowerCase();
+        const existingRequirementLocations = new Set(
+          nextOtherRequirements.map((item: any) =>
+            normalizeRequirementLocation(typeof item === "string" ? item : item?.value)
+          )
+        );
+        for (const loc of data.locations) {
+          const key = normalizeRequirementLocation(loc);
+          if (!key || existingRequirementLocations.has(key)) continue;
+          nextOtherRequirements.push({
+            value: `Location: ${loc}.`,
+            required: "Required",
+          });
+          existingRequirementLocations.add(key);
+        }
+        nextRubricData.other_requirements = nextOtherRequirements;
+        rubricDataRef.current = nextRubricData;
+        setRubricData(nextRubricData);
+        const newLocs = [...latestLocations];
+        const existingValues = new Set(latestLocations.map(l => l.value.toLowerCase()));
+        let nextLocationId = Math.max(Date.now(), ...newLocs.map(loc => loc.id + 1));
+        for (const loc of data.locations) {
+          if (!existingValues.has(loc.toLowerCase())) {
+            newLocs.push({
+              id: nextLocationId++,
+              value: loc,
+              radius: `within ${sourceLocationMilesRef.current} mi`
+            });
+            existingValues.add(loc.toLowerCase());
+          }
+        }
+        setSourceLocations(newLocs);
+
+        const newFilters = [...latestFilters];
+        const existingLocs = new Set(latestFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+        let nextFilterId = Math.max(Date.now(), ...newFilters.map(filter => filter.id + 1));
+        for (const loc of data.locations) {
+          if (!existingLocs.has(loc.toLowerCase())) {
+            newFilters.push({
+              id: nextFilterId++,
+              category: "Location",
+              value: loc,
+              active: true,
+              weight: 5,
+              ai: true,
+              fromRubric: true
+            });
+            existingLocs.add(loc.toLowerCase());
+          }
+        }
+        setResumeMatchFilters(newFilters);
+
+        const newQuestions = [...latestQuestions];
+        const existingLocIndex = newQuestions.findIndex(
+          q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
+        );
+
+        if (existingLocIndex !== -1) {
+          const existingQ = { ...newQuestions[existingLocIndex] };
+          const additionalLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
+
+          if (additionalLocs.length > 0) {
+            const additions = additionalLocs.join(" or ");
+            const primaryLoc = newLocs[0]?.value;
+
+            if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
+              const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+              const match = existingQ.question_text.match(regex);
+              const matchedText = match ? match[0] : primaryLoc;
+              existingQ.question_text = existingQ.question_text.replace(regex, `${matchedText} or ${additions}`);
+            } else if (existingQ.question_text.includes(". Are you")) {
+              existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
+            } else if (existingQ.question_text.includes("?")) {
+              existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
+            } else {
+              existingQ.question_text += ` (or ${additions})`;
+            }
+            newQuestions[existingLocIndex] = existingQ;
+          }
+        } else if (data.locations.length > 0) {
+          const combinedLocs = data.locations.join(" or ");
+          newQuestions.push({
+            id: Date.now() + Math.random(),
+            question_text: `Are you located in or able to commute to ${combinedLocs}?`,
+            pass_criteria: "Yes",
+            is_default: false,
+            category: "Location",
+            order_index: newQuestions.length,
+            is_hard_filter: true,
+            question_type: "hard_filter"
+          });
+        }
+        setScreenQuestions(newQuestions);
+
+        // Explicitly trigger a silent auto-save to persist these newly generated
+        // states since we are on Step 2 and the hooks for Step 3/4/5 won't detect
+        // this change. Pass the computed arrays as overrides so the save reflects
+        // this update even though the setState calls above haven't flushed yet.
+        saveJobDraft({
+          currentStep,
+          saveType: "auto",
+          skipToast: true,
+          keepalive: false,
+          sourceLocationsOverride: newLocs,
+          resumeMatchFiltersOverride: newFilters,
+          screenQuestionsOverride: newQuestions,
+          rubricDataOverride: nextRubricData,
+        }).catch(() => {});
+      }
       const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
       if (syncedTitle) {
         lastSyncedTitleForJDRef.current = syncedTitle;
@@ -3052,7 +3190,15 @@ function NewJobPageContent() {
     currentStep: number,
     saveType?: string,
     skipToast?: boolean,
-    keepalive?: boolean
+    keepalive?: boolean,
+    // Explicit overrides so a caller mid-update (e.g. the JD-generation
+    // locations merge below) can save the just-computed values instead of
+    // the stale closure that would otherwise race the setState batch.
+    sourceLocationsOverride?: typeof sourceLocations,
+    sourceLocationMilesOverride?: number,
+    resumeMatchFiltersOverride?: typeof resumeMatchFilters,
+    screenQuestionsOverride?: typeof screenQuestions,
+    rubricDataOverride?: any,
   }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
@@ -3103,11 +3249,11 @@ function NewJobPageContent() {
           screening_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
           rubric: {
-            ...getNormalizedRubricPayload(),
-            screen_questions: screenQuestions
+            ...getNormalizedRubricPayload(stepData.rubricDataOverride ?? rubricData),
+            screen_questions: stepData.screenQuestionsOverride ?? screenQuestions
           }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
           bot_introduction: botIntroduction,
-          resume_match_filters: resumeMatchFilters.map(f => ({
+          resume_match_filters: (stepData.resumeMatchFiltersOverride ?? resumeMatchFilters).map(f => ({
             id: f.id,
             category: f.category,
             value: f.value,
@@ -3120,14 +3266,14 @@ function NewJobPageContent() {
             sources_version: SEARCH_SOURCES_VERSION,
             titles: sourceTitles,
             skills: sourceSkills,
-            locations: sourceLocations,
+            locations: stepData.sourceLocationsOverride ?? sourceLocations,
             companies: sourceCompanies,
             keywords: sourceKeywords,
             recentDaysFilter,
             includeNoResume,
             minExperienceYears,
             maxExperienceYears,
-            sourceLocationMiles,
+            sourceLocationMiles: stepData.sourceLocationMilesOverride ?? sourceLocationMiles,
           },
           step1_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 1 : undefined,
           step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
@@ -3965,14 +4111,14 @@ function NewJobPageContent() {
     matchType: normalizeMatchType(skillItem.matchType),
   });
 
-  const getNormalizedRubricPayload = () => {
-    if (!rubricData) return rubricData;
+  const getNormalizedRubricPayload = (rubric: any = rubricData) => {
+    if (!rubric) return rubric;
 
     return {
-      ...rubricData,
-      titles: (rubricData.titles || []).map((title: any) => getNormalizedTitleItem(title)),
-      skills: (rubricData.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
-      soft_skills: (rubricData.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      ...rubric,
+      titles: (rubric.titles || []).map((title: any) => getNormalizedTitleItem(title)),
+      skills: (rubric.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      soft_skills: (rubric.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
     };
   };
 
@@ -4924,8 +5070,14 @@ function NewJobPageContent() {
     defaultQs.push({ text: "What is your current location?", criteria: "" });
 
     if (!isRemote) {
+      // Reflect every configured sourcing location (not just the single
+      // JobDiva address) so a Regenerate on Step 4 doesn't drop the "or"
+      // locations a recruiter added or that were extracted from notes.
+      const arrangementLocations = sourceLocations.length > 0
+        ? Array.from(new Set(sourceLocations.map(l => l.value).filter(Boolean)))
+        : [addressStr || location || "the job location"];
       defaultQs.push({
-        text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
+        text: `This role follows ${arrangementLabel} work arrangement based in ${arrangementLocations.join(" or ")}. Are you open to working in this setup?`,
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }
@@ -5578,14 +5730,21 @@ function NewJobPageContent() {
   const addSourceLocation = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
-    setSourceLocations(prev => [
-      ...prev,
+    const nextLocations = [
+      ...sourceLocations,
       {
         id: Date.now(),
         value: cleanValue,
         radius: `within ${sourceLocationMiles} mi`
       }
-    ]);
+    ];
+    setSourceLocations(nextLocations);
+    void saveJobDraft({
+      currentStep,
+      saveType: "auto",
+      skipToast: true,
+      sourceLocationsOverride: nextLocations,
+    }).catch(() => {});
     setSourceLocationInput("");
     setGeneratedBoolean("");
     trackEvent("job_wizard_step5_source_location_added", {
@@ -9624,7 +9783,14 @@ function NewJobPageContent() {
                           <button
                             className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                             onClick={() => {
-                              setSourceLocations(prev => prev.filter(l => l.id !== loc.id));
+                              const nextLocations = sourceLocations.filter(l => l.id !== loc.id);
+                              setSourceLocations(nextLocations);
+                              void saveJobDraft({
+                                currentStep,
+                                saveType: "auto",
+                                skipToast: true,
+                                sourceLocationsOverride: nextLocations,
+                              }).catch(() => {});
                               trackEvent("job_wizard_step5_source_location_removed", {
                                 step: 5,
                                 value: truncateForTelemetry(loc.value, 100),
@@ -9669,8 +9835,8 @@ function NewJobPageContent() {
                           }
                         }}
                         onBlur={() => {
+                          const clamped = Math.min(100, Math.max(1, Math.round(sourceLocationMiles || 25)));
                           setSourceLocationMiles((prev) => {
-                            const clamped = Math.min(100, Math.max(1, Math.round(prev || 25)));
                             if (clamped !== prev) {
                               trackEvent("job_wizard_step5_location_radius_changed", {
                                 step: 5,
@@ -9679,6 +9845,12 @@ function NewJobPageContent() {
                             }
                             return clamped;
                           });
+                          void saveJobDraft({
+                            currentStep,
+                            saveType: "auto",
+                            skipToast: true,
+                            sourceLocationMilesOverride: clamped,
+                          }).catch(() => {});
                           setGeneratedBoolean("");
                         }}
                         className="h-7 w-14 px-1 text-center text-[13px] font-bold border-0 focus:ring-0 focus-visible:ring-0 shadow-none p-0"

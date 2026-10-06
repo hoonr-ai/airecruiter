@@ -66,6 +66,39 @@ def test_location_variants_capped_at_max_locations():
     assert len(variants) <= _MAX_LOCATIONS
 
 
+def test_multi_location_provider_fanout_bounds_concurrency():
+    """A larger location cap must not increase simultaneous provider calls."""
+    service = _service()
+    active = 0
+    peak_active = 0
+    calls = 0
+
+    async def search_one_location(criteria):
+        nonlocal active, peak_active, calls
+        calls += 1
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.005)
+        active -= 1
+        return {"candidates": []}
+
+    criteria = SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        additional_locations=[
+            LocationEntry(value=f"City {index}, CA", within_miles=25)
+            for index in range(_MAX_LOCATIONS + 2)
+        ],
+    )
+
+    asyncio.run(service._fan_out_multi_location_search(
+        criteria, search_one_location, "test-provider"
+    ))
+
+    assert calls == _MAX_LOCATIONS
+    assert peak_active <= 3
+
+
 # ---------------------------------------------------------------------------
 # _build_boolean_string
 # ---------------------------------------------------------------------------
@@ -136,14 +169,14 @@ def test_location_match_verdict_candidate_matches_only_second_location():
     candidate = {"location": "San Jose, CA"}
 
     # Stub _single_location_match_verdict to simulate:
-    #   - primary (NY): outside radius soft-keep (not a hard match)
+    #   - primary (NY): outside radius
     #   - San Jose: hard within-radius match
     call_count = [0]
 
     def _stub_verdict(cand, crit):
         call_count[0] += 1
         if "New York" in crit.location:
-            return True, "outside_radius_soft_keep", 2900.0
+            return False, "outside_radius_confirmed", 2900.0
         # San Jose matches within radius
         return True, "within_radius", 5.0
 

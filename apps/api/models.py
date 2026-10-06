@@ -44,6 +44,7 @@ class ExtractedData(BaseModel):
     soft_skills: List[str]
     experience_level: str
     location_type: str = "Onsite" # Remote, Hybrid, Onsite
+    locations: List[str] = Field(default_factory=list, description="Extracted locations in 'City, State' format")
     grounded_titles: List[GroundedTitle] = []
 
 # Used for frontend response mainly

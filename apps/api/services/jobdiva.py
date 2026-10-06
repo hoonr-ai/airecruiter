@@ -2129,12 +2129,10 @@ class JobDivaService:
             and len(zip5) == 5 and zip5.isdigit()
             and count_location_clauses(boolean_string or "") < 2
         ):
-            # 2x headroom: the server radius is a coarse recall gate — it
-            # must not empty the UI's BEYOND-radius soft-keep bucket. The
-            # client-side verdict still measures true distance against the
-            # recruiter's exact radius; this just cuts the wrong-coast noise
-            # while keeping the near-miss band.
-            zip_radius_miles = max(1, min(100, int(within_miles or 25) * 2))
+            # Enforce the recruiter's exact radius without headroom. The previous
+            # 2x multiplier caused recruiter confusion by returning "BEYOND"
+            # candidates outside the configured radius.
+            zip_radius_miles = max(1, min(100, int(within_miles or 25)))
             base_body["zipCode"] = zip5
             base_body["withinMiles"] = zip_radius_miles
 

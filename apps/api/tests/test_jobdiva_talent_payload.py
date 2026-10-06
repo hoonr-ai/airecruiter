@@ -161,7 +161,7 @@ def test_body_top_level_arrays_and_zip(monkeypatch):
     body = cap["base_body"]
     assert body["countries"] == ["US"]
     assert body["zipCode"] == "75019"
-    assert body["withinMiles"] == 50  # 2x headroom
+    assert body["withinMiles"] == 25  # Exact radius (no 2x headroom)
     assert "skills" not in body  # terms ride separately, per-pull
     assert cap["must_terms"] == ["Java"]  # exclude term stays client-side
     assert cap["title"] == "Java Developer"
@@ -186,7 +186,7 @@ def test_terms_fall_back_to_boolean(monkeypatch):
 
 
 def test_radius_clamped_to_100(monkeypatch):
-    cap = _run_pool(monkeypatch, skills=["Java"], zip_code="75019", within_miles=80)
+    cap = _run_pool(monkeypatch, skills=["Java"], zip_code="75019", within_miles=150)
     assert cap["base_body"]["withinMiles"] == 100
 
 

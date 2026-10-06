@@ -138,10 +138,8 @@ def test_location_confirmed_outside_state_vetoes(scorer):
     assert res["score"] == 0
 
 
-def test_location_outside_state_does_not_veto_jobagent(scorer):
-    """JobDiva-JobAgent rows follow the recruiter's own criteria inside
-    JobDiva — a confirmed location mismatch keeps its badge but must not
-    zero the score (2026-08-25 'sea of 0%' fix)."""
+def test_location_outside_state_vetoes_jobagent_consistently(scorer):
+    """A confirmed location mismatch is scored consistently across sources."""
     crit = _criteria(
         location="CA", within_miles=25,
         skill_criteria=[{"value": "Python", "match_type": "must"}],
@@ -152,13 +150,12 @@ def test_location_outside_state_does_not_veto_jobagent(scorer):
         "city": "Austin", "state": "TX",
     }
     res = scorer._score_candidate(cand, crit)
-    assert res["score_details"]["hard_veto"]["triggered"] is False
-    assert res["score"] >= 95  # perfect skill match, nothing else gated
+    assert res["score_details"]["hard_veto"]["triggered"] is True
+    assert res["score"] == 0
 
 
-def test_location_outside_radius_jobagent_scores_with_note(scorer):
-    """Out-of-radius JobAgent row: real score + an explainability line that
-    says why it was kept, so the popup explains the distance badge."""
+def test_location_outside_radius_jobagent_vetoes_consistently(scorer):
+    """JobAgent cannot bypass the same configured radius used by other sources."""
     crit = _criteria(
         location="Plano, TX", within_miles=25,
         skill_criteria=[{"value": "Python", "match_type": "must"}],
@@ -169,10 +166,19 @@ def test_location_outside_radius_jobagent_scores_with_note(scorer):
         "city": "Houston", "state": "TX",  # ~240 mi from Plano, offline-resolvable
     }
     res = scorer._score_candidate(cand, crit)
-    assert res["score_details"]["hard_veto"]["triggered"] is False
-    assert res["score"] > 0
+    assert res["score_details"]["hard_veto"]["triggered"] is True
+    assert res["score"] == 0
     assert cand.get("location_out_of_radius") is True
-    assert any("location isn't hard-enforced" in line for line in res["explainability"])
+
+
+def test_relocation_candidate_option_controls_relocation_availability_signal(scorer):
+    candidate = {"open_to_relocation": True}
+    assert scorer._score_availability(
+        candidate, _criteria(include_relocation_candidates=True)
+    ) == 0.8
+    assert scorer._score_availability(
+        candidate, _criteria(include_relocation_candidates=False)
+    ) is None
 
 
 # ---------------------------------------------------------------- client veto
