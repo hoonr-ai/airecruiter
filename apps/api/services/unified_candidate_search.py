@@ -4281,9 +4281,23 @@ class UnifiedCandidateSearch:
             # location (with a known distance) is preferred over an unknown one.
             # This is intentional: known distances rank above unknowns.
             if alt_distance is not None:
+                # If the alternative is a soft-keep (9999.0), it MUST win over a
+                # confirmed hard drop (e.g. 3000.0) from a previous location, because
+                # "unknown" means they might be a perfect match for this location.
+                from services.unified_candidate_search import _UNKNOWN_DISTANCE_SENTINEL
+                is_alt_soft_keep = (alt_distance == _UNKNOWN_DISTANCE_SENTINEL)
+                is_best_hard_drop = (
+                    best_distance is not None
+                    and best_distance != _UNKNOWN_DISTANCE_SENTINEL
+                    and best_reason in ("outside_radius_confirmed", "state_mismatch")
+                )
+
                 if best_distance is None or (
+                    is_alt_soft_keep and is_best_hard_drop
+                ) or (
                     isinstance(alt_distance, (int, float))
                     and isinstance(best_distance, (int, float))
+                    and not is_alt_soft_keep
                     and alt_distance < best_distance
                 ):
                     best_ok, best_reason, best_distance = alt_ok, alt_reason, alt_distance
