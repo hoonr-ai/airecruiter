@@ -365,3 +365,18 @@ def test_clean_applicant_still_launches():
         {"candidate_id": "999", "available": True, "title": "QA Engineer"}
     )
     assert is_candidate_excluded_from_pair(persisted, CLIENT) == (False, "")
+
+
+def test_exa_resume_text_client_conflict():
+    """Exa candidates lack structured company signals when the headline is vague,
+    so their `resume_text` (LinkedIn highlights) MUST be scanned as a fallback.
+    Otherwise, current employees slip through."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Experience: Senior Engineer at Bank Of America (2020-Present)",
+        "headline": "Senior Engineer",  # Vague headline
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
+    assert excluded is True
+    assert reason == "Employed by Hiring Client (Exa profile text)"

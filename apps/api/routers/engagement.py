@@ -385,6 +385,18 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         profile_current_texts, profile_last_texts = candidate_profile_texts(candidate)
     except Exception:  # noqa: BLE001 — profile parsing must not block launches
         pass
+
+    # For Exa candidates, structured company data is often absent (vague headline),
+    # but their current employer is almost always present in the raw `resume_text`
+    # (LinkedIn highlights). We treat this text exactly like a JobDiva profile line
+    # for the outreach gate's fallback text matching.
+    cand_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    cand_source = str(candidate.get("source") or cand_data.get("source") or candidate.get("source_type") or "").lower()
+    if "exa" in cand_source:
+        exa_resume_text = str(candidate.get("resume_text") or cand_data.get("resume_text") or "").strip()
+        if exa_resume_text:
+            profile_current_texts.append(exa_resume_text)
+
     if profile_current_texts or profile_last_texts:
         try:
             from services.no_contact import matches_no_contact_company
@@ -402,7 +414,8 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
             if not current_companies:
                 for text in profile_current_texts:
                     if client_appears_in_text(text, client_name):
-                        return True, "Employed by Hiring Client (JobDiva profile)"
+                        suffix = "Exa profile text" if "exa" in cand_source else "JobDiva profile"
+                        return True, f"Employed by Hiring Client ({suffix})"
                 # Last-resort ladder rung: consulted only when NO structured
                 # signal of any kind exists — a structured last employer that
                 # already cleared employed_by_client must not be second-guessed
@@ -410,9 +423,10 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
                 if not profile_current_texts and not _collect_last(candidate):
                     for text in profile_last_texts:
                         if client_appears_in_text(text, client_name):
+                            suffix = "Exa profile text" if "exa" in cand_source else "JobDiva profile"
                             return True, (
                                 "Employed by Hiring Client "
-                                "(last known employer, JobDiva profile)"
+                                f"(last known employer, {suffix})"
                             )
 
     # Visibility for the failure mode that put a Bank of America employee into
