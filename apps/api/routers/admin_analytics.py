@@ -7,7 +7,7 @@ import statistics
 from typing import Dict, Any, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Depends, Query
 
-from core.auth import get_current_user, UserIdentity
+from core.auth import get_current_user, resolve_report_scope, UserIdentity
 from routers._helpers import (
     get_db_connection,
     _int,
@@ -956,18 +956,11 @@ async def get_admin_analytics(
     Analytics for administrators and team leads.
 
     - Admins: system-wide by default; pass ?team_id=... to scope to one team.
-    - Team leads: always scoped to their own team (team_id is ignored).
+    - Team leads and org-hierarchy managers: always scoped to their own team /
+      organisation — everyone beneath them (team_id is ignored).
     - Recruiters: 403.
     """
-    if user.is_admin:
-        scope_team_id = (team_id or "").strip() or None
-    elif user.is_team_lead and user.team_id:
-        scope_team_id = user.team_id
-    else:
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied. Admin or team lead access required to view analytics."
-        )
+    scope_team_id = resolve_report_scope(user, team_id, "analytics")
 
     try:
         data = await asyncio.to_thread(_compute_analytics_sync, scope_team_id)

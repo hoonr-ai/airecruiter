@@ -56,7 +56,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from core.auth import UserIdentity, get_current_user
+from core.auth import UserIdentity, get_current_user, resolve_report_scope
 from routers._helpers import (
     get_db_connection,
     _load_team_scope,
@@ -1359,7 +1359,8 @@ async def get_launch_report(
     that only ever want one day.
 
     - Admins: system-wide by default; pass ?team_id=... to scope to one team.
-    - Team leads: always scoped to their own team (team_id is ignored).
+    - Team leads and org-hierarchy managers: always scoped to their own team /
+      organisation — everyone beneath them (team_id is ignored).
     - Recruiters: 403.
     """
     # A report contains live Pair-bot status. Never let a browser, CDN, or
@@ -1367,15 +1368,7 @@ async def get_launch_report(
     if response is not None:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
-    if user.is_admin:
-        scope_team_id = (team_id or "").strip() or None
-    elif user.is_team_lead and user.team_id:
-        scope_team_id = user.team_id
-    else:
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied. Admin or team lead access required to view the launch report.",
-        )
+    scope_team_id = resolve_report_scope(user, team_id, "the launch report")
 
     # Today (Eastern) is requestable: its row set is simply the jobs whose first
     # successful launch has happened so far today, and every number is read

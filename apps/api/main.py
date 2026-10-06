@@ -219,6 +219,18 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"teams_schema_init_failed: {e}; continuing")
 
+    # Provision org_members (the Recruiter → Resource Manager → Delivery Manager
+    # → Delivery Director → AVP tree that decides whose jobs and admin analytics
+    # each person sees). Idempotent. If this times out, identity lookups fail
+    # CLOSED (no extra visibility), never open.
+    if org_hierarchy_router is not None and hasattr(org_hierarchy_router, "init_org_hierarchy_schema"):
+        try:
+            await asyncio.wait_for(org_hierarchy_router.init_org_hierarchy_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("org_hierarchy_schema_init_timeout (10s); continuing")
+        except Exception as e:
+            logger.error(f"org_hierarchy_schema_init_failed: {e}; continuing")
+
     # Provision the JobDiva BI mirror (all Pyramid reqs, submittal / interview
     # / start activity, the user directory) behind the PAIR Dashboard, and
     # schedule its sync. Every worker schedules it; an advisory lock lets one
@@ -394,6 +406,7 @@ recruiter_analytics_router = _safe_import("recruiter_analytics")
 job_step_time_router = _safe_import("job_step_time")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
+org_hierarchy_router = _safe_import("org_hierarchy")
 cross_submissions_router = _safe_import("cross_submissions")
 live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
@@ -451,6 +464,7 @@ _mount(launch_report_router, "launch_report")
 _mount(recruiter_analytics_router, "recruiter_analytics")
 _mount(job_step_time_router, "job_step_time")
 _mount(teams_router, "teams")
+_mount(org_hierarchy_router, "org_hierarchy")
 _mount(cross_submissions_router, "cross_submissions")
 _mount(live_report_router, "live_report")
 _mount(pair_dashboard_router, "pair_dashboard")

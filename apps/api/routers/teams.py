@@ -43,10 +43,14 @@ async def init_teams_schema() -> None:
 
 @router.get("/teams")
 async def list_teams(user: UserIdentity = Depends(get_current_user)):
-    """Admins see every team; team leads see only their own team."""
+    """Admins see every team; team leads see only the team they lead.
+
+    leads_team, not just team_id: an org-hierarchy manager who is merely a
+    member of a team must not be handed that team's roster.
+    """
     if user.is_admin:
         teams = await asyncio.to_thread(teams_db.list_teams)
-    elif user.is_team_lead and user.team_id:
+    elif user.leads_team:
         team = await asyncio.to_thread(teams_db.get_team, user.team_id)
         teams = [team] if team else []
     else:

@@ -144,26 +144,61 @@ def _parse_recruiter_emails(raw_emails: Any) -> List[str]:
 # Team scoping
 # ---------------------------------------------------------------------------
 # When a team scope is active (admin clicked a team tab, or the caller is a
-# team lead), every section is restricted to the jobs assigned to that team's
-# emails via monitored_jobs.recruiter_emails. sourced_candidates /
+# team lead or an org-hierarchy manager), every section is restricted to the
+# jobs assigned to that scope's emails via monitored_jobs.recruiter_emails. A
+# scope is a Teams-page team and/or a person's organisation (`org:<id>`, see
+# services/org_hierarchy.py), so "team" below means either. sourced_candidates /
 # engage_interview_audit rows key on either the alphanumeric JobDiva ref or
 # the job_id uuid text, so the scope carries both key sets.
 
-def _load_team_scope(conn, team_id: str) -> Dict[str, Any]:
-    """Resolve a team into its email list + scoped job key sets.
+def _clean_emails(raw: Any) -> List[str]:
+    return [str(e).strip().lower() for e in (raw or []) if e and str(e).strip()]
 
-    Raises LookupError for an unknown team — callers translate to 404.
+
+def _load_scope_part(part: str) -> Dict[str, Any]:
+    """One scope part → {id, name, lead_emails, member_emails}.
+
+    `org:<id>` is a person's organisation in the hierarchy; anything else is a
+    Teams-page team id. LookupError when it does not exist.
     """
-    from services import teams_db
+    from services import org_hierarchy, teams_db
 
-    team = teams_db.get_team(team_id)
+    if part.lower().startswith(org_hierarchy.ORG_SCOPE_PREFIX):
+        member_id = org_hierarchy.parse_org_part(part)
+        loaded = org_hierarchy.load_scope_part(part)
+        return {"id": f"{org_hierarchy.ORG_SCOPE_PREFIX}{member_id}", **loaded}
+    team = teams_db.get_team(part)
     if not team:
+        raise LookupError(f"Team '{part}' not found.")
+    return {
+        "id": team["id"],
+        "name": team["name"],
+        "lead_emails": _clean_emails(team.get("lead_emails")),
+        "member_emails": _clean_emails(team.get("member_emails")),
+    }
+
+
+def _load_team_scope(conn, team_id: str) -> Dict[str, Any]:
+    """Resolve a scope key into its email list + scoped job key sets.
+
+    A key is one or more parts joined by "+": a Teams-page team id and/or
+    `org:<member id>` (that person and everyone beneath them). Several parts
+    are a union — core.auth.report_scope_parts builds one for a manager who
+    also leads a team, so their reports cover exactly what their jobs list does.
+
+    Raises LookupError for an unknown scope — callers translate to 404.
+    """
+    parts = list(dict.fromkeys(p.strip() for p in str(team_id or "").split("+") if p.strip()))
+    if not parts:
         raise LookupError(f"Team '{team_id}' not found.")
-    emails = set(
-        e.strip().lower()
-        for e in (team.get("lead_emails") or []) + (team.get("member_emails") or [])
-        if e and str(e).strip()
-    )
+    loaded = [_load_scope_part(p) for p in parts]
+    lead_emails = {e for part in loaded for e in part["lead_emails"]}
+    member_emails = {e for part in loaded for e in part["member_emails"]}
+    emails = lead_emails | member_emails
+    team = {
+        "id": "+".join(part["id"] for part in loaded),
+        "name": " + ".join(part["name"] for part in loaded),
+    }
 
     job_ids: List[str] = []
     jobdiva_ids: List[str] = []
@@ -181,6 +216,10 @@ def _load_team_scope(conn, team_id: str) -> Dict[str, Any]:
         "team_id": team["id"],
         "team_name": team["name"],
         "emails": sorted(emails),
+        # The managers vs the people they manage — the split the Dashboard's
+        # Productivity tab averages over (a team's leads are not recruiters).
+        "lead_emails": sorted(lead_emails),
+        "member_emails": sorted(member_emails),
         # monitored_jobs rows are matched on job_id::text
         "job_ids": sorted(set(job_ids)),
         # sourced_candidates / engage_interview_audit rows were written under

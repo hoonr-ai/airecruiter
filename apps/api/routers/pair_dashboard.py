@@ -8,9 +8,11 @@
 Definitions live in services/pair_dashboard.py; JobDiva facts come from the
 mirror services/jobdiva_bi_sync.py keeps.
 
-Access is the other admin reports' rule (routers.recruiter_analytics
-._resolve_scope_team_id): admins see everything or one team (?team_id), team
-leads (Recruiting Managers) are pinned to their own team, everyone else is 403.
+Access is the other admin reports' rule (core.auth.resolve_report_scope, via
+routers.recruiter_analytics._resolve_scope_team_id): admins see everything or
+one team (?team_id); team leads (Recruiting Managers) and org-hierarchy managers
+are pinned to their own team / organisation (everyone beneath them); everyone
+else is 403.
 """
 
 import asyncio
@@ -318,6 +320,17 @@ def _productivity_sync(scope_team_id, date_range, filters, refresh, teams) -> Di
         mirror = _mirror_state(conn)
 
         chosen = [t for t in teams if scope is None or t["id"] == scope["team_id"]]
+        if scope is not None and not chosen:
+            # An org-hierarchy scope (alone, or unioned with a team the person
+            # leads) is not a Teams-page team, so nothing above matched: build
+            # the "team" from the scope itself. Its leads are everyone who
+            # manages people, its members the recruiters they manage.
+            chosen = [{
+                "id": scope["team_id"],
+                "name": scope["team_name"],
+                "lead_emails": list(scope.get("lead_emails") or []),
+                "member_emails": list(scope.get("member_emails") or []),
+            }]
         recruiters, everyone = set(), set()
         for team in chosen:
             leads = {e.strip().lower() for e in team.get("lead_emails") or [] if e}
@@ -328,7 +341,7 @@ def _productivity_sync(scope_team_id, date_range, filters, refresh, teams) -> Di
             everyone |= leads | members
         base = {
             "team_scope": _scope_payload(scope),
-            "teams_configured": len(teams),
+            "teams_configured": max(len(teams), len(chosen)),
             "jobdiva": mirror,
             "range": {"start": _iso(period.start), "end": _iso(period.end)} if period.start else None,
         }
