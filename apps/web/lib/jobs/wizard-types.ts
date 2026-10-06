@@ -24,4 +24,6 @@ export type ScreenQuestion = {
   is_hard_filter?: boolean;
   question_type?: RecruiterQuestionType;
   is_locked?: boolean;
+  generated_source?: "work-arrangement-location" | "note-location-commute";
+  location_values?: string[];
 };

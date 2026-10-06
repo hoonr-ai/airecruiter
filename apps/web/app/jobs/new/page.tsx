@@ -4,6 +4,12 @@ import { useState, useEffect, useLayoutEffect, useEffectEvent, useCallback, useM
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
+import {
+  isGeneratedCommuteQuestion,
+  mergeArrangementQuestionLocations,
+  mergeSourceLocations,
+  normalizeLocationKey,
+} from "@/lib/location-propagation";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
 import {
@@ -1101,6 +1107,7 @@ function NewJobPageContent() {
   }>>([]);
   const sourceLocationsRef = useRef(sourceLocations);
   useLayoutEffect(() => { sourceLocationsRef.current = sourceLocations; }, [sourceLocations]);
+  const excludedSourceLocationKeysRef = useRef<Set<string>>(new Set());
   const [hasSeededSourceLocation, setHasSeededSourceLocation] = useState(false);
   const [sourceCompanies, setSourceCompanies] = useState<string[]>([]);
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
@@ -1959,6 +1966,7 @@ function NewJobPageContent() {
 
   useEffect(() => {
     setHasSeededSourceLocation(false);
+    excludedSourceLocationKeysRef.current = new Set();
   }, [numericJobId, jobdivaId]);
 
   // Pull the (candidate_id, source) keys for everyone already launched (i.e.
@@ -2423,6 +2431,11 @@ function NewJobPageContent() {
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
         if (sf.locations) setSourceLocations(sf.locations);
+        excludedSourceLocationKeysRef.current = new Set(
+          Array.isArray(sf.excludedSourceLocationKeys)
+            ? sf.excludedSourceLocationKeys.map((value: unknown) => normalizeLocationKey(String(value || "")))
+            : []
+        );
         if (sf.companies) setSourceCompanies(sf.companies);
         if (sf.keywords) setSourceKeywords(sf.keywords);
         if (typeof sf.recentDaysFilter === "number") setRecentDaysFilter(sf.recentDaysFilter);
@@ -2909,26 +2922,29 @@ function NewJobPageContent() {
         nextRubricData.other_requirements = nextOtherRequirements;
         rubricDataRef.current = nextRubricData;
         setRubricData(nextRubricData);
-        const newLocs = [...latestLocations];
-        const existingValues = new Set(latestLocations.map(l => l.value.toLowerCase()));
-        let nextLocationId = Math.max(Date.now(), ...newLocs.map(loc => loc.id + 1));
-        for (const loc of data.locations) {
-          if (!existingValues.has(loc.toLowerCase())) {
-            newLocs.push({
-              id: nextLocationId++,
-              value: loc,
-              radius: `within ${sourceLocationMilesRef.current} mi`
-            });
-            existingValues.add(loc.toLowerCase());
-          }
-        }
+        const newLocs = mergeSourceLocations({
+          jobCity: jobData?.city,
+          jobState: jobData?.state,
+          jobZip: jobData?.zip_code,
+          existing: latestLocations,
+          noteLocations: data.locations,
+          defaultRadius: `within ${sourceLocationMilesRef.current} mi`,
+          excludedLocationKeys: Array.from(excludedSourceLocationKeysRef.current),
+          remote: isRemoteJob(jobData),
+        });
         setSourceLocations(newLocs);
 
         const newFilters = [...latestFilters];
-        const existingLocs = new Set(latestFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+        const existingLocs = new Set(latestFilters
+          .filter(f => f.category === "Location")
+          .map(f => normalizeLocationKey(f.value)));
         let nextFilterId = Math.max(Date.now(), ...newFilters.map(filter => filter.id + 1));
+        // The JobDiva primary location is the sourcing origin, not an
+        // additional resume-match requirement. Only explicit note locations
+        // become location resume filters; all source locations stay in Step 5.
         for (const loc of data.locations) {
-          if (!existingLocs.has(loc.toLowerCase())) {
+          const key = normalizeLocationKey(loc);
+          if (key && !excludedSourceLocationKeysRef.current.has(key) && !existingLocs.has(key)) {
             newFilters.push({
               id: nextFilterId++,
               category: "Location",
@@ -2938,50 +2954,29 @@ function NewJobPageContent() {
               ai: true,
               fromRubric: true
             });
-            existingLocs.add(loc.toLowerCase());
+            existingLocs.add(key);
           }
         }
         setResumeMatchFilters(newFilters);
 
         const newQuestions = [...latestQuestions];
-        const existingLocIndex = newQuestions.findIndex(
-          q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
+        const arrangementQuestionIndex = newQuestions.findIndex(q =>
+          q.generated_source === "work-arrangement-location"
+          || /work arrangement based in .*\. are you open to working in this setup\?/i.test(q.question_text)
         );
-
-        if (existingLocIndex !== -1) {
-          const existingQ = { ...newQuestions[existingLocIndex] };
-          const additionalLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
-
-          if (additionalLocs.length > 0) {
-            const additions = additionalLocs.join(" or ");
-            const primaryLoc = newLocs[0]?.value;
-
-            if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
-              const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-              const match = existingQ.question_text.match(regex);
-              const matchedText = match ? match[0] : primaryLoc;
-              existingQ.question_text = existingQ.question_text.replace(regex, `${matchedText} or ${additions}`);
-            } else if (existingQ.question_text.includes(". Are you")) {
-              existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
-            } else if (existingQ.question_text.includes("?")) {
-              existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
-            } else {
-              existingQ.question_text += ` (or ${additions})`;
+        if (arrangementQuestionIndex >= 0) {
+          newQuestions[arrangementQuestionIndex] = mergeArrangementQuestionLocations(
+            newQuestions[arrangementQuestionIndex],
+            newLocs.map(location => location.value),
+          );
+          // Remove every generated duplicate from previous builds. Matching
+          // requires explicit provenance or the exact legacy auto-generated
+          // shape, so ordinary recruiter-authored screening questions survive.
+          for (let index = newQuestions.length - 1; index >= 0; index--) {
+            if (index !== arrangementQuestionIndex && isGeneratedCommuteQuestion(newQuestions[index])) {
+              newQuestions.splice(index, 1);
             }
-            newQuestions[existingLocIndex] = existingQ;
           }
-        } else if (data.locations.length > 0) {
-          const combinedLocs = data.locations.join(" or ");
-          newQuestions.push({
-            id: Date.now() + Math.random(),
-            question_text: `Are you located in or able to commute to ${combinedLocs}?`,
-            pass_criteria: "Yes",
-            is_default: false,
-            category: "Location",
-            order_index: newQuestions.length,
-            is_hard_filter: true,
-            question_type: "hard_filter"
-          });
         }
         setScreenQuestions(newQuestions);
 
@@ -3267,6 +3262,7 @@ function NewJobPageContent() {
             titles: sourceTitles,
             skills: sourceSkills,
             locations: stepData.sourceLocationsOverride ?? sourceLocations,
+            excludedSourceLocationKeys: Array.from(excludedSourceLocationKeysRef.current),
             companies: sourceCompanies,
             keywords: sourceKeywords,
             recentDaysFilter,
@@ -5042,7 +5038,11 @@ function NewJobPageContent() {
             : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
         : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
-      question => question.category !== "default" && question.category !== "role-specific"
+      question => question.category !== "default"
+        && question.category !== "role-specific"
+        // Suppress only marked or exact legacy generated duplicates when the
+        // default onsite/hybrid arrangement question will cover the locations.
+        && (isRemote || !isGeneratedCommuteQuestion(question))
     );
     const isIt = isLikelyItRole(
       enhancedTitle || jobTitle || "",
@@ -5059,7 +5059,13 @@ function NewJobPageContent() {
     // question is a preference check, not a hard filter; recruiters can flip
     // it to a hard filter manually if disqualification should be automatic.
     const availabilityDate = jobData.start_date || 'ASAP';
-    const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
+    const defaultQs: Array<{
+      text: string;
+      criteria: string;
+      is_hard_filter?: boolean;
+      generated_source?: ScreenQuestion["generated_source"];
+      location_values?: string[];
+    }> = [
       { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" }
     ];
 
@@ -5074,11 +5080,15 @@ function NewJobPageContent() {
       // JobDiva address) so a Regenerate on Step 4 doesn't drop the "or"
       // locations a recruiter added or that were extracted from notes.
       const arrangementLocations = sourceLocations.length > 0
-        ? Array.from(new Set(sourceLocations.map(l => l.value).filter(Boolean)))
+        ? sourceLocations.map(l => l.value).filter((value, index, values) =>
+            values.findIndex(candidate => normalizeLocationKey(candidate) === normalizeLocationKey(value)) === index
+          )
         : [addressStr || location || "the job location"];
       defaultQs.push({
         text: `This role follows ${arrangementLabel} work arrangement based in ${arrangementLocations.join(" or ")}. Are you open to working in this setup?`,
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
+        generated_source: "work-arrangement-location",
+        location_values: arrangementLocations,
       });
     }
     
@@ -5102,6 +5112,8 @@ function NewJobPageContent() {
         order_index: index,
         is_hard_filter: !!q.is_hard_filter,
         is_locked: isLockedDefaultQuestion(q.text),
+        generated_source: q.generated_source,
+        location_values: q.location_values,
       });
     });
 
@@ -5410,7 +5422,11 @@ function NewJobPageContent() {
     // 3. Locations
     if (!hasSeededSourceLocation) {
       setHasSeededSourceLocation(true);
-      if (jobData && sourceLocations.length === 0 && !isRemoteJob(jobData)) {
+      if (
+        jobData
+        && sourceLocations.length === 0
+        && !isRemoteJob(jobData)
+      ) {
         // Format: "City, State Zip" (e.g. "Tempe, AZ 85281"). Including the
         // zip narrows sourcing-provider matches that mishandle short state
         // codes alone. Falls back to "City, State" when the zip is missing.
@@ -5419,7 +5435,7 @@ function NewJobPageContent() {
         const zip = (jobData.zip_code || "").trim();
         const cityState = [city, state].filter(Boolean).join(", ");
         const loc = [cityState, zip].filter(Boolean).join(" ");
-        if (loc) {
+        if (loc && !excludedSourceLocationKeysRef.current.has(normalizeLocationKey(cityState))) {
           setSourceLocations([{
             id: 1,
             value: loc,
@@ -5730,6 +5746,7 @@ function NewJobPageContent() {
   const addSourceLocation = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
     const nextLocations = [
       ...sourceLocations,
       {
@@ -9784,6 +9801,7 @@ function NewJobPageContent() {
                             className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                             onClick={() => {
                               const nextLocations = sourceLocations.filter(l => l.id !== loc.id);
+                              excludedSourceLocationKeysRef.current.add(normalizeLocationKey(loc.value));
                               setSourceLocations(nextLocations);
                               void saveJobDraft({
                                 currentStep,
