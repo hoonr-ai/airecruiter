@@ -291,10 +291,10 @@ _RE_BASED_LOCATED = re.compile(
 # Tech brand names, tools, and common proper-noun words that the City regex
 # can mistakenly capture from headline / resume text
 # (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
-# NOTE: this denylist is now FALLBACK-ONLY. When a state is provided,
-# is_plausible_city_token uses the offline zip index as the primary gate and
-# rejects any unrecognised city+state pair without consulting this list.
-# The list is consulted only on the state-less fallback path.
+# (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
+# NOTE: This list is now FALLBACK-ONLY. When a state is provided and the zip
+# index is loaded, unrecognised tokens are rejected automatically. Entries
+# here can be pruned if they never occur in resumes without a state code attached.
 _NON_PLACE_TOKENS: frozenset = frozenset({
     # CRM / cloud platforms
     "salesforce", "servicenow", "workday", "oracle", "sap", "dynamics",
@@ -318,10 +318,10 @@ _NON_PLACE_TOKENS: frozenset = frozenset({
     # resume skill/software sections and get mis-parsed as city names when
     # followed by a comma-separated state abbreviation (e.g. "Parasoft, CA",
     # "SoftMaxPro, MS"). None of these are US place names.
-    "parasoft", "softmaxpro", "graphpad", "graphpadprism", "prism",
+    "parasoft", "softmaxpro", "graphpad", "graphpadprism",
     "imagej", "imagepro", "facsdiva", "flowjo", "cellquest", "kaluza",
-    "modfit", "winnonlin", "phoenix", "nonmem", "simcyp", "gastroplus",
-    "certara", "nca", "pksolver", "bioanalytical",
+    "modfit", "winnonlin", "nonmem", "simcyp", "gastroplus",
+    "certara", "pksolver", "bioanalytical",
     # Additional cloud / devops tools
     "appdynamics", "dynatrace", "nagios", "zabbix", "pagerduty",
 })
@@ -330,106 +330,77 @@ _NON_PLACE_TOKENS: frozenset = frozenset({
 # Compiled once at import time for the CamelCase brand guard below.
 _CAMEL_CASE_RE = re.compile(r"[a-z][A-Z]")
 
+_CANADIAN_PROVINCE_CODES = frozenset({
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON",
+    "PE", "QC", "SK", "YT",
+})
+
 
 def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
     """Reject brand/tool names and bare two-letter initials as a city token.
-
-    **Primary gate — offline zip/city index (state-supplied path)**
-
-    When ``state`` is provided every call goes through ``is_known_city``:
-
-    * ``True``  → accept immediately.  Handles real place names that also look
-      like brand/tool words (Spring TX, Oracle AZ, Snowflake AZ, Cisco TX).
-    * ``False`` → **reject immediately, no fallthrough**.  This is the
-      permanent fix for false locations such as "Parasoft, CA",
-      "Databricks, CA", etc.  Any future brand+state false positive is blocked
-      automatically without needing to be added to _NON_PLACE_TOKENS.
-
-    **Fallback heuristics (state-less path only)**
-
-    When no state is available the heuristics below serve as defence-in-depth.
-    They are consulted only when ``is_known_city`` raised an exception (index
-    unavailable) or when the caller genuinely has no state to supply.
-
-    Shared by every caller of ``extract_us_location_from_text`` and by
-    Exa's own highlight parser (``exa_service._extract_city_from_highlights``).
+    Uses the offline zip index when a state is provided, with fallbacks otherwise.
     """
     token = value.strip()
     if not token:
         return False
-    # ------------------------------------------------------------------ #
-    # Primary gate: offline zip/city index.                               #
-    # ------------------------------------------------------------------ #
+        
+    state_upper = str(state or "").upper()
+    
+    # Stable explicit allowlist for abbreviations / non-US cities
+    if token == "LA" and state_upper == "CA":
+        return True
+    if token == "DC" and state_upper == "DC":
+        return True
+
+    # Primary gate: offline zip/city index
     try:
-        from services.zip_index import is_known_city
-        zip_known = is_known_city(token, state)
-        if zip_known:
+        from services.zip_index import is_known_city, _load
+        if not _load():
+            # Treat empty/unavailable index like an exception (fall through to heuristics)
+            raise RuntimeError("Zip index is unavailable")
+            
+        # Normalise common abbreviations before lookup
+        lookup_token = token
+        token_lower = token.lower()
+        if token_lower.startswith("st. "):
+            lookup_token = "Saint " + token[4:]
+        elif token_lower.startswith("ft. "):
+            lookup_token = "Fort " + token[4:]
+            
+        if is_known_city(lookup_token, state):
             return True
+            
         if state:
-            state_upper = str(state).upper()
-            # Stable explicit allowlist for abbreviations / non-US cities that
-            # the US zip index doesn't store under the abbreviated form.
-            # Kept deliberately small — each entry needs a concrete test case.
-            #   LA/CA  → "Los Angeles" abbreviated (CRM/LinkedIn exports)
-            #   DC/DC  → Washington DC exported as "DC, DC"
-            #   Canadian provinces → Ajax ON, Toronto ON, etc. The zip index
-            #     only covers US; CA province codes are 2-letter and valid.
-            _CA_PROVINCE_CODES = frozenset({
-                "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON",
-                "PE", "QC", "SK", "YT",
-            })
-            if token == "LA" and state_upper == "CA":
-                return True
-            if token == "DC" and state_upper == "DC":
-                return True
-            if state_upper in _CA_PROVINCE_CODES:
-                # Canadian city+province — defer to downstream country check;
-                # don't hard-reject here just because it's not in the US index.
+            if state_upper in _CANADIAN_PROVINCE_CODES:
+                # Defend against brand names matching CA province codes ("Parasoft, ON")
+                if token_lower in _NON_PLACE_TOKENS or _CAMEL_CASE_RE.search(token):
+                    return False
                 return True
             
-            # Broad regions ("San Francisco Bay Area", "Dallas-Fort Worth Metroplex")
-            # are explicitly supported by downstream logic. Do not wipe them out.
-            token_lower = token.lower()
+            # Broad regions are explicitly supported by downstream logic
             if token_lower.endswith(" area") or token_lower.endswith(" metroplex"):
                 return True
-            # Index doesn't recognise this city+state pair → definitively not
-            # a real US place. Do NOT fall through to the heuristics — that
-            # would re-admit false positives like "Parasoft, CA" or
-            # "Databricks, CA" that happen not to be in _NON_PLACE_TOKENS yet.
+                
+            # Definitively not a real US place
             return False
     except Exception:
-        # Index unavailable → fall through to the heuristics below.
         pass
 
-    # ------------------------------------------------------------------ #
-    # Fallback heuristics (state-less path only).                         #
-    # ------------------------------------------------------------------ #
-
-    # LinkedIn/CRM exports commonly abbreviate Los Angeles as "LA". Keep
-    # this only when paired with California so the two-letter false-city
-    # guard still rejects fragments such as "MS, MS" and "PS, PR".
-    if token == "LA" and str(state or "").upper() == "CA":
-        return True
+    # Fallback heuristics (state-less path or index unavailable)
     if token.lower() in _NON_PLACE_TOKENS:
         return False
-    # CamelCase guard: product/brand names frequently appear as
-    # "SoftMaxPro, MS" or "ServiceNow, CA" in resume skill sections.
-    # Real US city names are title-cased (one capitalised word per part)
-    # and never have an internal lowercase→uppercase transition. Tokens
-    # not recognised by the zip index that exhibit CamelCase are almost
-    # certainly software products, not places.
-    if _CAMEL_CASE_RE.search(token):
+        
+    # Prevent CamelCase brands ("SoftMaxPro"), but allow valid prefixes ("McKinney", "DeKalb")
+    test_token = re.sub(r"\b(Mc|Mac|De|La|Di|Le)([A-Z])", r"\1 \2", token, flags=re.IGNORECASE)
+    if _CAMEL_CASE_RE.search(test_token):
         return False
+        
     if re.fullmatch(r"[A-Z]{2}", token):
         # The District of Columbia is often exported as "DC, DC".
         if token == state and token == "DC":
             return True
         return False
-    # CamelCase guard: internal lowercase→uppercase transitions (e.g.
-    # "SoftMaxPro", "ServiceNow", "PowerBI") indicate a brand name.
-    # Real multi-word cities arrive title-cased with spaces, not fused.
-    if re.search(r"[a-z][A-Z]", token):
-        return False
+        
     return True
 
 
