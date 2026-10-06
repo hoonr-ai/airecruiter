@@ -2230,7 +2230,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "mj.complete_submissions, mj.pass_submissions, "
                 "mj.jobdiva_total_subs, "
                 "mj.jobdiva_criteria_unconfigured, "
-                "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "mj.pair_launched_at, mj.pair_launched_by, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj"
             )
 
@@ -2331,7 +2331,8 @@ def _filter_jobs_for_user(
         else:
             emails = []
         clean_emails = [str(e).strip().lower() for e in emails if e]
-        if not allowed_emails.isdisjoint(clean_emails):
+        launcher_email = str(job.get("pair_launched_by") or "").strip().lower()
+        if not allowed_emails.isdisjoint(clean_emails) or launcher_email in allowed_emails:
             filtered_jobs[jid] = job
 
     res = dict(payload)

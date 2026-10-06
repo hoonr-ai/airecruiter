@@ -4452,6 +4452,13 @@ class JobDivaService:
                             # Skip None values always
                             if v is None:
                                 continue
+                            # JobDiva frequently omits recruiter ownership from
+                            # its response. An empty extraction is not an
+                            # instruction to clear PAIR's recruiter assignment;
+                            # keep the existing value so dashboard access and
+                            # launch notifications remain stable across syncs.
+                            if k == "recruiter_emails" and not v:
+                                continue
                             # For cleared-UDF fields, allow empty strings through
                             if v == "" and k not in allow_empty_fields:
                                 continue
