@@ -29,6 +29,38 @@ from core.llm_client import get_openai_client, log_usage, model_for
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+
+def _propagate_note_locations_to_rubric(rubric_obj: Any, recruiter_notes: str) -> None:
+    """Include validated recruiter-note locations in Step 3 Other Requirements.
+
+    Location extraction also feeds Steps 4 and 5, but the rubric extractor may
+    use the generated JD as its grounding text and omit recruiter notes. Add
+    validated note locations deterministically so the Step 3 summary cannot
+    silently lose them.
+    """
+    locations = extract_us_locations_from_text(recruiter_notes, limit=10)
+    if not locations:
+        return
+
+    requirements = list(getattr(rubric_obj, "other_requirements", None) or [])
+
+    def normalize(value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"^location\s*:\s*", "", text)
+        return re.sub(r"[\s.,;]+$", "", text).strip()
+
+    existing = {
+        normalize(item.get("value") if isinstance(item, dict) else item)
+        for item in requirements
+    }
+    for location in locations:
+        key = normalize(location)
+        if key in existing:
+            continue
+        requirements.append({"value": f"Location: {location}.", "required": "Required"})
+        existing.add(key)
+    rubric_obj.other_requirements = requirements
+
 # Singleton OpenAI client — module-level reference for legacy code paths.
 # New code should call get_openai_client() directly.
 client = get_openai_client()
@@ -488,6 +520,12 @@ async def generate_rubric(req: RubricGenerationRequest):
             job_location=f"{req.jobCity}, {req.jobState}".strip(", "),
             location_type=req.locationType
         )
+
+        # Recruiter-note locations are also surfaced as explicit Step 3
+        # requirements, even when the rubric model grounded itself on the JD
+        # and omitted the notes. The same values feed the Step 4/5 location
+        # chips through the JD-generation response.
+        _propagate_note_locations_to_rubric(rubric_obj, req.jobNotes)
         
         # If JobDiva has a structured degree, and AI found nothing, use it
         if not rubric_obj.education and req.requiredDegree:

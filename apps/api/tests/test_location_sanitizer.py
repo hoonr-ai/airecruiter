@@ -118,7 +118,7 @@ def test_real_city_state_values_survive_shared_display_sanitizer(value):
 
 
 @pytest.mark.parametrize("value", [
-    "Spring, TX", "Oracle, AZ", "Cassandra, PA", "DC, DC",
+    "Spring, TX", "Oracle, AZ", "Cassandra, PA", "DC, DC", "LA, CA",
 ])
 def test_real_cities_that_collide_with_denylist_or_initials_survive(value):
     assert sanitize_candidate_location(value) == value

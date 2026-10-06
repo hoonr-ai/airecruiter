@@ -992,6 +992,8 @@ function NewJobPageContent() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
+  const rubricDataRef = useRef(rubricData);
+  useLayoutEffect(() => { rubricDataRef.current = rubricData; }, [rubricData]);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
   // Covers the entire Step-2 → Step-3 advance (draft save + rubric fetch) so
   // the Next button stays in a loading state continuously. `isGeneratingRubric`
@@ -2877,6 +2879,36 @@ function NewJobPageContent() {
         const latestLocations = sourceLocationsRef.current;
         const latestFilters = resumeMatchFiltersRef.current;
         const latestQuestions = screenQuestionsRef.current;
+        const nextRubricData = { ...(rubricDataRef.current || {}) };
+        const nextOtherRequirements = [
+          ...(Array.isArray(nextRubricData.other_requirements)
+            ? nextRubricData.other_requirements
+            : []),
+        ];
+        const normalizeRequirementLocation = (value: unknown) =>
+          String(value || "")
+            .trim()
+            .replace(/^location\s*:\s*/i, "")
+            .replace(/[\s.,;]+$/, "")
+            .trim()
+            .toLowerCase();
+        const existingRequirementLocations = new Set(
+          nextOtherRequirements.map((item: any) =>
+            normalizeRequirementLocation(typeof item === "string" ? item : item?.value)
+          )
+        );
+        for (const loc of data.locations) {
+          const key = normalizeRequirementLocation(loc);
+          if (!key || existingRequirementLocations.has(key)) continue;
+          nextOtherRequirements.push({
+            value: `Location: ${loc}.`,
+            required: "Required",
+          });
+          existingRequirementLocations.add(key);
+        }
+        nextRubricData.other_requirements = nextOtherRequirements;
+        rubricDataRef.current = nextRubricData;
+        setRubricData(nextRubricData);
         const newLocs = [...latestLocations];
         const existingValues = new Set(latestLocations.map(l => l.value.toLowerCase()));
         let nextLocationId = Math.max(Date.now(), ...newLocs.map(loc => loc.id + 1));
@@ -2965,6 +2997,7 @@ function NewJobPageContent() {
           sourceLocationsOverride: newLocs,
           resumeMatchFiltersOverride: newFilters,
           screenQuestionsOverride: newQuestions,
+          rubricDataOverride: nextRubricData,
         }).catch(() => {});
       }
       const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
@@ -3165,6 +3198,7 @@ function NewJobPageContent() {
     sourceLocationMilesOverride?: number,
     resumeMatchFiltersOverride?: typeof resumeMatchFilters,
     screenQuestionsOverride?: typeof screenQuestions,
+    rubricDataOverride?: any,
   }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
@@ -3215,7 +3249,7 @@ function NewJobPageContent() {
           screening_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
           rubric: {
-            ...getNormalizedRubricPayload(),
+            ...getNormalizedRubricPayload(stepData.rubricDataOverride ?? rubricData),
             screen_questions: stepData.screenQuestionsOverride ?? screenQuestions
           }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
           bot_introduction: botIntroduction,
@@ -4077,14 +4111,14 @@ function NewJobPageContent() {
     matchType: normalizeMatchType(skillItem.matchType),
   });
 
-  const getNormalizedRubricPayload = () => {
-    if (!rubricData) return rubricData;
+  const getNormalizedRubricPayload = (rubric: any = rubricData) => {
+    if (!rubric) return rubric;
 
     return {
-      ...rubricData,
-      titles: (rubricData.titles || []).map((title: any) => getNormalizedTitleItem(title)),
-      skills: (rubricData.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
-      soft_skills: (rubricData.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      ...rubric,
+      titles: (rubric.titles || []).map((title: any) => getNormalizedTitleItem(title)),
+      skills: (rubric.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      soft_skills: (rubric.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
     };
   };
 

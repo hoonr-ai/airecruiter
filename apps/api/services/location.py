@@ -322,6 +322,11 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
             return True
     except Exception:
         pass
+    # LinkedIn/CRM exports commonly abbreviate Los Angeles as "LA". Keep
+    # this only when paired with California so the two-letter false-city
+    # guard still rejects fragments such as "MS, MS" and "PS, PR".
+    if token == "LA" and str(state or "").upper() == "CA":
+        return True
     if token.lower() in _NON_PLACE_TOKENS:
         return False
     if re.fullmatch(r"[A-Z]{2}", token):

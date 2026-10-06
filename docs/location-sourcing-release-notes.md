@@ -2,6 +2,9 @@
 
 - Search supports up to 10 configured locations. Provider query fan-out is
   capped at that limit; six locations, including Jacksonville, are supported.
+- Validated US locations extracted from recruiter notes are added to Step 3
+  Other Requirements, carried into Step 4 as OR alternatives, and persisted
+  with the Step 5 sourcing locations.
 - Confirmed out-of-radius candidates are excluded from Step 5 for JobDiva
   Agent, JobDiva Talent, LinkedIn, and Exa. Remote jobs do not apply a
   geographic radius. A temporary geocoder failure is treated as unverifiable,
