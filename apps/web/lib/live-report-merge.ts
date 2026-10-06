@@ -8,6 +8,10 @@ export interface MergeSnapshotsOptions {
  * Merge and deduplicate multiple launch snapshots for a single jobdiva_id.
  * Snapshots are sorted chronologically so newer launches take precedence.
  * Events are deduplicated on (ts | type | subtype | interviewId) and sorted by timestamp.
+ *
+ * NOTE: Retained for client-side offline merging, test suites, or any multi-launch aggregations
+ * if per-launch snapshot replay is ever utilized. Primary live report UI now uses single
+ * server-side job snapshot via getJobSnapshot.
  */
 export function mergeLaunchSnapshots(
   snapshots: Snapshot[],

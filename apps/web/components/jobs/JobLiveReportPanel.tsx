@@ -182,11 +182,11 @@ export function JobLiveReportPanel({
 
   // Load snapshot for the entire JobDiva ID in a single API call (zero iteration, zero rate-limit 503s)
   const fetchJobSnapshot = useCallback(
-    async (jdId: string, reveal: boolean) => {
+    async (jdId: string, reveal: boolean): Promise<boolean> => {
       const cleanJd = (jdId || "").trim();
       if (!cleanJd) {
         setAggregatedSnapshot(null);
-        return;
+        return false;
       }
 
       if (activeFetchAbortRef.current) {
@@ -199,13 +199,23 @@ export function JobLiveReportPanel({
       setError(null);
 
       try {
-        const snapshot = await api.liveReport.getJobSnapshot(cleanJd, reveal, abortCtrl.signal);
-        if (abortCtrl.signal.aborted) return;
+        const rawSnapshot = await api.liveReport.getJobSnapshot(cleanJd, reveal, abortCtrl.signal);
+        if (abortCtrl.signal.aborted) return false;
 
-        if (snapshot && snapshot.status !== "not_found") {
-          // If job Title is provided via prop and missing in backend, supply it
-          if (snapshot.jobs && snapshot.jobs.length > 0 && jobTitle && !snapshot.jobs[0].title) {
-            snapshot.jobs[0].title = jobTitle;
+        if (rawSnapshot && rawSnapshot.status !== "not_found") {
+          // If job Title is provided via prop and missing in backend, supply it via shallow clone
+          let snapshot = rawSnapshot;
+          if (rawSnapshot.jobs && rawSnapshot.jobs.length > 0 && jobTitle && !rawSnapshot.jobs[0].title) {
+            snapshot = {
+              ...rawSnapshot,
+              jobs: [
+                {
+                  ...rawSnapshot.jobs[0],
+                  title: jobTitle,
+                },
+                ...rawSnapshot.jobs.slice(1),
+              ],
+            };
           }
 
           if (reveal) {
@@ -221,8 +231,11 @@ export function JobLiveReportPanel({
           }
 
           setAggregatedSnapshot(snapshot);
+          return true;
         } else {
           setAggregatedSnapshot(null);
+          setError(`No telemetry recorded for Job #${cleanJd}.`);
+          return false;
         }
       } catch (err: unknown) {
         if (!abortCtrl.signal.aborted) {
@@ -230,6 +243,7 @@ export function JobLiveReportPanel({
           console.error("Failed to load job live report:", err);
           setError(msg);
         }
+        return false;
       } finally {
         if (!abortCtrl.signal.aborted) {
           setIsRefreshing(false);
@@ -336,8 +350,10 @@ export function JobLiveReportPanel({
     if (!revealPii) {
       if (!hasFetchedUnmaskedRef.current) {
         try {
-          await fetchJobSnapshot(resolvedJobDivaId || jobId, true);
-          setRevealPii(true);
+          const ok = await fetchJobSnapshot(resolvedJobDivaId || jobId, true);
+          if (ok) {
+            setRevealPii(true);
+          }
         } catch (err) {
           console.error("Failed to reveal candidate names:", err);
         }
@@ -369,9 +385,10 @@ export function JobLiveReportPanel({
     const watchdogs = new Map<string, NodeJS.Timeout>();
     const retryCounts = new Map<string, number>();
     let lastWatchdogRefreshAt = 0;
+    let trailingWatchdogTimeout: NodeJS.Timeout | null = null;
     let isDisposed = false;
 
-    // Single-flight debounced refresh to avoid duplicate fetches if multiple streams timeout together
+    // Single-flight debounced refresh with trailing call to avoid dropping streams recycled close together
     const triggerDebouncedJobRefresh = () => {
       const now = Date.now();
       if (now - lastWatchdogRefreshAt > 4000) {
@@ -380,6 +397,17 @@ export function JobLiveReportPanel({
           resolvedJobDivaIdRef.current || jobIdRef.current,
           revealPiiRef.current
         );
+      } else {
+        if (trailingWatchdogTimeout) clearTimeout(trailingWatchdogTimeout);
+        trailingWatchdogTimeout = setTimeout(() => {
+          if (!isDisposed) {
+            lastWatchdogRefreshAt = Date.now();
+            fetchJobSnapshotRef.current(
+              resolvedJobDivaIdRef.current || jobIdRef.current,
+              revealPiiRef.current
+            );
+          }
+        }, 4100);
       }
     };
 

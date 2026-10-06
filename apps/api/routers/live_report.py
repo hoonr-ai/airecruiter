@@ -315,9 +315,12 @@ async def get_live_report_job_snapshot(
             if resp.status_code == 404:
                 raise HTTPException(status_code=404, detail="Job not found")
             if resp.status_code != 200:
-                logger.error(f"Failed to fetch job snapshot from PairBot: {resp.status_code} {resp.text}")
-                raise HTTPException(status_code=resp.status_code, detail="Failed to fetch job snapshot")
+                truncated_text = (resp.text or "")[:200]
+                logger.error(f"Failed to fetch job snapshot from PairBot: {resp.status_code} {truncated_text}")
+                raise HTTPException(status_code=502, detail="PairBot service error fetching job snapshot")
             snapshot = resp.json()
+    except HTTPException:
+        raise
     except httpx.RequestError as e:
         logger.error(f"Network error contacting PairBot job snapshot: {e}")
         raise HTTPException(status_code=502, detail="Failed to connect to PairBot service")
