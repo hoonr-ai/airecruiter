@@ -254,9 +254,11 @@ def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     Exa candidates often lack structured company data (vague headline), but
     their `resume_text` (LinkedIn highlights) almost always has it. This helper
-    splits the text block by line, routing lines that look current ("Present",
-    "Current") to the current-employer ladder, and the rest to the last-employer
-    ladder. This stops former employees from being falsely blocked.
+    splits highlights into experience fragments and routes only fragments with
+    an explicit current marker or an open-ended date range to the
+    current-employer ladder. Other fragments go to the last-employer ladder.
+    This keeps a former client role from being mistaken for a current one when
+    Exa returns multiple roles in the same highlight line.
     """
     cand_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
     source = str(
@@ -270,16 +272,32 @@ def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     if not text:
         return [], []
 
-    current = []
-    last = []
+    current: List[str] = []
+    last: List[str] = []
+    current_marker = re.compile(
+        r"\b(?:19|20)\d{2}\s*(?:[-–—]|to)\s*(?:present|current|now)\b"
+        r"|[\(\[]\s*(?:present|current|now)\s*[\)\]]"
+        r"|\bcurrent\s+(?:role|position|employer|employment)\b"
+        r"|\bcurrently\s+(?:at|with|employed|working)\b",
+        re.IGNORECASE,
+    )
+    open_ended_date = re.compile(
+        r"\b(?:19|20)\d{2}\s*(?:[-–—]|to)\s*"
+        r"(?:present|current|now)?\s*[\])}.,;:]*\s*$",
+        re.IGNORECASE,
+    )
     for line in text.splitlines():
-        line_clean = line.strip()
-        if not line_clean:
-            continue
-        if "present" in line_clean.lower() or "current" in line_clean.lower():
-            current.append(line_clean)
-        else:
-            last.append(line_clean)
+        # Exa may place two roles on one line. Split at semicolons so a
+        # current role's date does not make a former role on that same line
+        # look current too.
+        for fragment in re.split(r";\s*", line):
+            fragment = fragment.strip()
+            if not fragment:
+                continue
+            if current_marker.search(fragment) or open_ended_date.search(fragment):
+                current.append(fragment)
+            else:
+                last.append(fragment)
 
     return current, last
 
