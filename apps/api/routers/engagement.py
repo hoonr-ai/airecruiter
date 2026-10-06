@@ -249,7 +249,7 @@ def _merge_employer_signals(
     return merged
 
 
-def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str], bool]:
     """Extract Exa highlights as unstructured text for the launch gate.
 
     Exa candidates often lack structured company data (vague headline), but
@@ -266,11 +266,11 @@ def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     ).strip().lower()
 
     if source not in ("linkedin-exa", "exa"):
-        return [], []
+        return [], [], False
 
     text = str(candidate.get("resume_text") or cand_data.get("resume_text") or "").strip()
     if not text:
-        return [], []
+        return [], [], True
 
     current: List[str] = []
     last: List[str] = []
@@ -299,7 +299,7 @@ def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             else:
                 last.append(fragment)
 
-    return current, last
+    return current, last, True
 
 
 def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
@@ -441,15 +441,13 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
 
     # For Exa candidates, structured company data is often absent (vague headline),
     # but their current employer is almost always present in the raw `resume_text`.
-    exa_current, exa_last = _exa_resume_texts(candidate)
+    exa_current, exa_last, is_exa_source = _exa_resume_texts(candidate)
     profile_current_texts.extend(exa_current)
     profile_last_texts.extend(exa_last)
 
-    cand_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
-    cand_source = str(
-        candidate.get("source") or cand_data.get("source") or candidate.get("source_type") or ""
-    ).strip().lower()
-    conflict_suffix = "Exa profile text" if cand_source in ("linkedin-exa", "exa") else "JobDiva profile"
+    # Reuse the source classification from the parser rather than normalizing
+    # nested source fields a second time.
+    conflict_suffix = "Exa profile text" if is_exa_source else "JobDiva profile"
 
     if profile_current_texts or profile_last_texts:
         try:
