@@ -14,6 +14,8 @@ import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
 import {
   DEFAULT_SEARCH_SOURCES,
+  DISABLED_SEARCH_SOURCE_IDS,
+  getEnabledSearchSourceIds,
   SEARCH_SOURCES_VERSION,
   restoreSavedSearchSources,
   type SearchSources,
@@ -351,7 +353,7 @@ function isRecruiterSource(source: string | null | undefined): boolean {
 // events by the unified search backend.
 type SourceStatusInfo = {
   source: string;
-  status: "ok" | "empty" | "failed";
+  status: "ok" | "empty" | "failed" | "disabled";
   count: number;
   reason?: string;
   criteria_unconfigured?: boolean;
@@ -1042,11 +1044,10 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. The two JobDiva talent pools, LinkedIn and Exa are
-  // pre-ticked (LinkedIn sourcing round-robins across all attached Unipile
-  // accounts, so default-on no longer risks burning a single account; Exa
-  // had been opt-in since the April QA punch list, which in practice meant
-  // it never ran — re-enabled 2026-09). Dice stays opt-in and hidden.
+  // switchboard now. The two JobDiva talent pools and Exa are pre-ticked;
+  // LinkedIn-Unipile stays off while its provider is paused. Exa was re-enabled
+  // in 2026-09 after the April QA default-off behavior suppressed its searches.
+  // Dice stays opt-in and hidden.
   // Defaults + saved-draft migration live in lib/search-sources.ts.
   //
   // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
@@ -6339,7 +6340,7 @@ function NewJobPageContent() {
   }
 
   const buildStep5FilterContext = () => ({
-    search_sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+    search_sources: getEnabledSearchSourceIds(searchSources),
     recent_days: recentDaysFilter,
     include_no_resume: includeNoResume,
     active_resume_filters_count: resumeMatchFilters.filter(f => f.active).length,
@@ -6412,8 +6413,7 @@ function NewJobPageContent() {
         active: f.active,
         weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
       }));
-    const selectedSourcesArray = Object.keys(searchSources)
-      .filter(k => (searchSources as any)[k])
+    const selectedSourcesArray = getEnabledSearchSourceIds(searchSources)
       .map(k => {
         // `jobdiva_applicants` was removed as a toggle (5.1). Applicants
         // still land via the auto-sync path; they're just not gated by a
@@ -6422,7 +6422,6 @@ function NewJobPageContent() {
         // we always send the explicit pool names so only what's ticked runs.
         if (k === 'jobdiva_agent') return 'JobDiva-JobAgent';
         if (k === 'jobdiva_talent') return 'JobDiva-TalentSearch';
-        if (k === 'linkedin') return 'LinkedIn';
         if (k === 'dice') return 'Dice';
         if (k === 'exa') return 'Exa';
         return k;
@@ -6852,7 +6851,7 @@ function NewJobPageContent() {
     trackEvent("job_wizard_step5_sample_search_started", {
       step: 5,
       sample_per_source: SAMPLE_PER_SOURCE,
-      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+      sources: getEnabledSearchSourceIds(searchSources),
       recent_days: recentDaysFilter,
       include_no_resume: includeNoResume,
     });
@@ -6913,7 +6912,7 @@ function NewJobPageContent() {
     trackEvent("job_wizard_step5_candidate_search_started", {
       step: 5,
       query: truncateForTelemetry(resolvedGeneratedBoolean, 260),
-      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+      sources: getEnabledSearchSourceIds(searchSources),
       recent_days: recentDaysFilter,
       include_no_resume: includeNoResume,
     });
@@ -9242,7 +9241,7 @@ function NewJobPageContent() {
                       // default; untick one to skip that search entirely.
                       { id: 'jobdiva_agent', label: 'JobDiva Agent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false, hint: "JobDiva's AI matcher, using the search criteria set on this req inside JobDiva" },
                       { id: 'jobdiva_talent', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#8b5cf6]" />, disabled: false, hint: "JobDiva Talent Search, using the Boolean string generated below" },
-                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false, hint: "" },
+                      { id: 'linkedin', label: 'LinkedIn (temporarily disabled)', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: DISABLED_SEARCH_SOURCE_IDS.has('linkedin'), hint: "LinkedIn sourcing through Unipile is temporarily paused" },
                       // Dice source hidden from the sourcing switchboard. Backend
                       // wiring (`Dice` source string, `_search_dice`) is left intact
                       // so re-enabling is a one-line revert; the results chip below

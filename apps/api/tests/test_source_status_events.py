@@ -52,6 +52,26 @@ def test_jobagent_ok_status_carries_matched_count():
     assert status["criteria_unconfigured"] is False
 
 
+def test_linkedin_only_selection_reports_disabled_without_dispatching_unipile():
+    svc = UnifiedCandidateSearch()
+    state = {"calls": [], "full_returned": False}
+    _patch_service_for_orchestration(svc, state)
+    linkedin_calls = []
+
+    async def _unexpected_linkedin(criteria):
+        linkedin_calls.append(criteria)
+        raise AssertionError("Unipile must remain disabled")
+
+    svc._search_linkedin = _unexpected_linkedin
+    events = _drive(svc, _criteria(sources=["LinkedIn"]))
+
+    assert linkedin_calls == []
+    status = _statuses(events)["LinkedIn-Unipile"]
+    assert status["status"] == "disabled"
+    assert status["count"] == 0
+    assert "temporarily disabled" in status["reason"]
+
+
 def test_jobagent_zero_rows_reports_empty():
     svc = UnifiedCandidateSearch()
     state = {"calls": [], "full_returned": False}
@@ -212,37 +232,35 @@ def test_jobagent_partial_failure_waits_for_quick_phase():
     assert "incomplete" in status["reason"]
 
 
-def test_external_source_failure_reports_failed():
+def test_exa_failure_reports_failed_status():
     svc = UnifiedCandidateSearch()
     state = {"calls": [], "full_returned": False}
     _patch_service_for_orchestration(svc, state)
 
-    async def _broken_linkedin(criteria):
-        raise RuntimeError("unipile down")
+    async def _broken_exa(criteria):
+        raise RuntimeError("exa backend down")
 
-    svc._search_linkedin = _broken_linkedin
+    svc._search_exa = _broken_exa
+    events = _drive(svc, _criteria(sources=["Exa"]))
 
-    events = _drive(svc, _criteria(sources=["LinkedIn"]))
-
-    status = _statuses(events)["LinkedIn-Unipile"]
+    status = _statuses(events)["LinkedIn-Exa"]
     assert status["status"] == "failed"
-    assert "unipile down" not in status["reason"]
+    assert "exa backend down" not in status["reason"]
     assert "RuntimeError" in status["reason"]
 
 
-def test_external_source_empty_reports_empty():
+def test_exa_empty_results_report_empty_status():
     svc = UnifiedCandidateSearch()
     state = {"calls": [], "full_returned": False}
     _patch_service_for_orchestration(svc, state)
 
-    async def _empty_linkedin(criteria):
-        return {"candidates": [], "source_type": "LinkedIn-Unipile"}
+    async def _empty_exa(criteria):
+        return {"candidates": [], "source_type": "LinkedIn-Exa"}
 
-    svc._search_linkedin = _empty_linkedin
+    svc._search_exa = _empty_exa
+    events = _drive(svc, _criteria(sources=["Exa"]))
 
-    events = _drive(svc, _criteria(sources=["LinkedIn"]))
-
-    status = _statuses(events)["LinkedIn-Unipile"]
+    status = _statuses(events)["LinkedIn-Exa"]
     assert status["status"] == "empty"
     assert status["count"] == 0
 
