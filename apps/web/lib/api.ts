@@ -251,6 +251,78 @@ export type CrossSubmissionsResponse = {
   candidates: CrossSubmission[];
 };
 
+// ---- Org hierarchy (admin) -------------------------------------------------
+
+export type OrgHierarchyMember = {
+  id: number;
+  name: string;
+  email: string | null;
+  role: string;
+  role_label: string;
+  reports_to_id: number | null;
+  vertical: string;
+  title: string;
+  direct_reports: number;
+  total_reports: number;
+};
+
+export type OrgHierarchyLevel = { role: string; label: string; rank: number };
+
+export type OrgHierarchyOverview = {
+  members: OrgHierarchyMember[];
+  levels: OrgHierarchyLevel[];
+  counts: {
+    total: number;
+    with_email: number;
+    without_email: number;
+    by_role: Record<string, number>;
+  };
+  last_import: { imported_by: string; imported_at: string } | null;
+};
+
+export type OrgImportNeedsEmail = {
+  name: string;
+  role: string;
+  role_label: string;
+  vertical: string;
+  direct_reports: number;
+  total_reports: number;
+  named_only: boolean;
+};
+
+export type OrgImportPreview = {
+  dry_run: boolean;
+  applied: boolean;
+  blocking: boolean;
+  summary: {
+    rows: number;
+    people: number;
+    with_email: number;
+    without_email: number;
+    by_role: Record<string, number>;
+    needs_email: OrgImportNeedsEmail[];
+    top_level: {
+      name: string;
+      email: string | null;
+      role: string;
+      role_label: string;
+      vertical: string;
+      total_reports: number;
+    }[];
+    titles_treated_as_recruiter: { title: string; count: number }[];
+  };
+  issues: { severity: "error" | "warning" | "info"; row: number | null; message: string }[];
+  diff: {
+    current_people_with_email: number;
+    emails_added: number;
+    emails_removed: number;
+    removed_sample: string[];
+  } | null;
+  coverage: { people_with_email: number; assigned_to_a_job: number } | null;
+};
+
+type ApiEnvelope<T> = { status: string; data?: T; message?: string };
+
 export type DashboardQuery = {
   startDate?: string | null;
   endDate?: string | null;
@@ -470,6 +542,16 @@ export const api = {
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "PUT", body }),
     remove: (teamId: string) =>
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
+  },
+  // Admin: the Recruiter → Resource Manager → Delivery Manager → Delivery Director → AVP
+  // tree that decides whose jobs and admin analytics each person sees.
+  orgHierarchy: {
+    get: () => req<ApiEnvelope<OrgHierarchyOverview>>(`/api/v1/org-hierarchy`),
+    // dry_run defaults to a preview server-side; pass false to replace the tree.
+    import: (body: { csv: string; dry_run: boolean; head_role: string }) =>
+      req<ApiEnvelope<OrgImportPreview>>(`/api/v1/org-hierarchy/import`, { method: "POST", body }),
+    // The current tree in the importer's own format.
+    export: () => req<ApiEnvelope<{ filename: string; csv: string }>>(`/api/v1/org-hierarchy/export`),
   },
   liveReport: {
     getLaunches: () => req<any>(`/api/analytics/live-report/launches`),

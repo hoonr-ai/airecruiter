@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from core.auth import UserIdentity, get_current_user, get_user_scope_emails
+from core.auth import UserIdentity, get_current_user, get_user_scope_emails, resolve_report_scope
 from routers._helpers import (
     _int,
     _load_team_scope,
@@ -130,16 +130,12 @@ _ALL_TIME_DESCRIPTION = "All jobs, launched or not."
 # ---------------------------------------------------------------------------
 
 def _resolve_scope_team_id(user: UserIdentity, team_id: Optional[str]) -> Optional[str]:
-    """Same rule as Admin Analytics and the Launch Report."""
-    if user.is_admin:
-        return (team_id or "").strip() or None
-    if user.is_team_lead and user.team_id:
-        # A team lead's team_id param is ignored, never honoured.
-        return user.team_id
-    raise HTTPException(
-        status_code=403,
-        detail="Access denied. Admin or team lead access required to view recruiter analytics.",
-    )
+    """Same rule as Admin Analytics and the Launch Report (core.auth.resolve_report_scope).
+
+    A team lead's or org manager's team_id param is ignored, never honoured:
+    they are pinned to their own scope.
+    """
+    return resolve_report_scope(user, team_id, "recruiter analytics")
 
 
 def _parse_range(
@@ -404,10 +400,15 @@ def _fetch_job_rows(
 def _load_directory(conn) -> Dict[str, Any]:
     """Who has a PAIR login, and which team each email is on.
 
-    There is no users table. A "PAIR account" is anyone an admin put on a team
-    or in user_roles, plus ADMIN_EMAILS (added by the caller). JobDiva fills
-    recruiter_emails from recruiter / owner / account-manager / contact fields,
-    so some assigned emails will never sign in to PAIR; the UI can hide them.
+    There is no users table. A "PAIR account" is anyone an admin put on a team,
+    in the org hierarchy or in user_roles, plus ADMIN_EMAILS (added by the
+    caller). JobDiva fills recruiter_emails from recruiter / owner /
+    account-manager / contact fields, so some assigned emails will never sign
+    in to PAIR; the UI can hide them.
+
+    For someone in the org hierarchy but on no team, the "team" shown is who
+    they report to, and "lead" means they manage people. A Teams-page team,
+    where there is one, wins.
     """
     team_by_email: Dict[str, Dict[str, Any]] = {}
     accounts: Set[str] = set()
@@ -427,6 +428,26 @@ def _load_directory(conn) -> Dict[str, Any]:
             team_by_email[email] = {"team_name": team_name, "is_team_lead": member_role == "lead"}
         cur.execute("SELECT LOWER(TRIM(email)) FROM user_roles")
         accounts.update(r[0] for r in cur.fetchall() or [] if r[0])
+        # to_regclass yields NULL instead of raising when startup schema init
+        # has not created the table yet — a raise would abort this transaction
+        # and take the team lookups above down with it.
+        cur.execute("SELECT to_regclass('org_members') IS NOT NULL")
+        if cur.fetchone()[0]:
+            cur.execute(
+                """
+                SELECT LOWER(TRIM(m.email)), boss.name, m.role
+                FROM org_members m
+                LEFT JOIN org_members boss ON boss.id = m.reports_to_id
+                WHERE m.email IS NOT NULL
+                """
+            )
+            for email, boss_name, role in cur.fetchall() or []:
+                if not email:
+                    continue
+                accounts.add(email)
+                team_by_email.setdefault(
+                    email, {"team_name": boss_name, "is_team_lead": str(role or "") != "recruiter"}
+                )
     return {"team_by_email": team_by_email, "accounts": accounts}
 
 
@@ -705,7 +726,9 @@ def _build_payload(
         team = team_by_email.get(email) or {}
         recruiters.append({
             "email": email,
-            "team_name": (scope or {}).get("team_name") or team.get("team_name"),
+            # The person's own team (or, in the hierarchy, their manager) first:
+            # an org scope spans many teams, so its name would label everyone alike.
+            "team_name": team.get("team_name") or (scope or {}).get("team_name"),
             "is_team_lead": bool(team.get("is_team_lead")),
             # None = unknown: without the directory most real recruiters would
             # read as "no PAIR login" and the UI's hide toggle would drop them.
