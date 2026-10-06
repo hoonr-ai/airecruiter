@@ -2909,26 +2909,57 @@ function NewJobPageContent() {
         nextRubricData.other_requirements = nextOtherRequirements;
         rubricDataRef.current = nextRubricData;
         setRubricData(nextRubricData);
-        const newLocs = [...latestLocations];
-        const existingValues = new Set(latestLocations.map(l => l.value.toLowerCase()));
+        // Keep the JobDiva job location alongside note-derived alternatives.
+        // JD generation can finish before the async draft seeding effect has
+        // populated sourceLocations, so relying on latestLocations alone can
+        // leave Step 5 with only the recruiter-note location.
+        const newLocs: typeof latestLocations = [];
+        const normalizeLocationKey = (value: string) => value
+          .replace(/\b\d{5}(?:-\d{4})?\b/g, "")
+          .replace(/\s+/g, " ")
+          .replace(/[.,\s]+$/g, "")
+          .trim()
+          .toLowerCase();
+        const existingValues = new Set<string>();
+        const addLocation = (value: string, radius: string) => {
+          const cleanValue = String(value || "").trim();
+          const key = normalizeLocationKey(cleanValue);
+          if (!key || existingValues.has(key)) return;
+          newLocs.push({ id: Date.now() + newLocs.length, value: cleanValue, radius });
+          existingValues.add(key);
+        };
+        const jobCity = String(jobData?.city || "").trim();
+        const jobState = String(jobData?.state || "").trim();
+        const jobZip = String(jobData?.zip_code || "").trim();
+        const jobCityState = [jobCity, jobState].filter(Boolean).join(", ");
+        if (jobCityState && !isRemoteJob(jobData)) {
+          const primaryKey = normalizeLocationKey(jobCityState);
+          const savedPrimary = latestLocations.find(loc => normalizeLocationKey(loc.value) === primaryKey);
+          addLocation(
+            savedPrimary?.value || [jobCityState, jobZip].filter(Boolean).join(" "),
+            savedPrimary?.radius || "within 25 mi"
+          );
+        }
+        for (const location of latestLocations) {
+          addLocation(location.value, location.radius || `within ${sourceLocationMilesRef.current} mi`);
+        }
         let nextLocationId = Math.max(Date.now(), ...newLocs.map(loc => loc.id + 1));
         for (const loc of data.locations) {
-          if (!existingValues.has(loc.toLowerCase())) {
-            newLocs.push({
-              id: nextLocationId++,
-              value: loc,
-              radius: `within ${sourceLocationMilesRef.current} mi`
-            });
-            existingValues.add(loc.toLowerCase());
-          }
+          const key = normalizeLocationKey(loc);
+          if (!key || existingValues.has(key)) continue;
+          newLocs.push({ id: nextLocationId++, value: loc, radius: `within ${sourceLocationMilesRef.current} mi` });
+          existingValues.add(key);
         }
         setSourceLocations(newLocs);
 
         const newFilters = [...latestFilters];
-        const existingLocs = new Set(latestFilters.filter(f => f.category === "Location").map(f => f.value.toLowerCase()));
+        const existingLocs = new Set(latestFilters
+          .filter(f => f.category === "Location")
+          .map(f => normalizeLocationKey(f.value)));
         let nextFilterId = Math.max(Date.now(), ...newFilters.map(filter => filter.id + 1));
-        for (const loc of data.locations) {
-          if (!existingLocs.has(loc.toLowerCase())) {
+        for (const { value: loc } of newLocs) {
+          const key = normalizeLocationKey(loc);
+          if (key && !existingLocs.has(key)) {
             newFilters.push({
               id: nextFilterId++,
               category: "Location",
@@ -2938,37 +2969,57 @@ function NewJobPageContent() {
               ai: true,
               fromRubric: true
             });
-            existingLocs.add(loc.toLowerCase());
+            existingLocs.add(key);
           }
         }
         setResumeMatchFilters(newFilters);
 
         const newQuestions = [...latestQuestions];
-        const existingLocIndex = newQuestions.findIndex(
-          q => q.category === "Location" || q.question_text.toLowerCase().includes("commute to") || q.question_text.toLowerCase().includes("hybrid work arrangement based in")
+        const arrangementQuestionIndex = newQuestions.findIndex(q =>
+          /work arrangement based in .*\. are you open to working in this setup\?/i.test(q.question_text)
         );
+        const commuteQuestionIndex = newQuestions.findIndex(q =>
+          q.category === "Location" || /are you located in or able to commute to/i.test(q.question_text)
+        );
+        const existingLocIndex = arrangementQuestionIndex >= 0
+          ? arrangementQuestionIndex
+          : commuteQuestionIndex;
 
         if (existingLocIndex !== -1) {
           const existingQ = { ...newQuestions[existingLocIndex] };
-          const additionalLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
-
-          if (additionalLocs.length > 0) {
-            const additions = additionalLocs.join(" or ");
-            const primaryLoc = newLocs[0]?.value;
-
-            if (primaryLoc && existingQ.question_text.toLowerCase().includes(primaryLoc.toLowerCase())) {
-              const regex = new RegExp(primaryLoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-              const match = existingQ.question_text.match(regex);
-              const matchedText = match ? match[0] : primaryLoc;
-              existingQ.question_text = existingQ.question_text.replace(regex, `${matchedText} or ${additions}`);
-            } else if (existingQ.question_text.includes(". Are you")) {
-              existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
-            } else if (existingQ.question_text.includes("?")) {
-              existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
-            } else {
-              existingQ.question_text += ` (or ${additions})`;
+          const configuredLocations = Array.from(new Set(newLocs.map(loc => loc.value).filter(Boolean)));
+          const arrangementPattern = /(work arrangement based in )(.+?)(\. are you open to working in this setup\?)/i;
+          if (arrangementQuestionIndex >= 0 && arrangementPattern.test(existingQ.question_text)) {
+            existingQ.question_text = existingQ.question_text.replace(
+              arrangementPattern,
+              (_match, prefix, _oldLocations, suffix) => `${prefix}${configuredLocations.join(" or ")}${suffix}`
+            );
+          } else {
+            const additionalLocs = data.locations.filter((loc: string) => !existingQ.question_text.toLowerCase().includes(loc.toLowerCase()));
+            if (additionalLocs.length > 0) {
+              const additions = additionalLocs.join(" or ");
+              if (existingQ.question_text.includes(". Are you")) {
+                existingQ.question_text = existingQ.question_text.replace(". Are you", ` or ${additions}. Are you`);
+              } else if (existingQ.question_text.includes("?")) {
+                existingQ.question_text = existingQ.question_text.replace("?", ` or ${additions}?`);
+              } else {
+                existingQ.question_text += ` (or ${additions})`;
+              }
             }
-            newQuestions[existingLocIndex] = existingQ;
+          }
+          newQuestions[existingLocIndex] = existingQ;
+          // Older builds could append this second hard filter when they failed
+          // to recognize the onsite question. The onsite question already
+          // covers all configured locations, so remove only our generated
+          // duplicate and preserve recruiter-authored questions.
+          const duplicateGeneratedLocationQuestionId = newQuestions.find(q =>
+            q.id !== existingQ.id && /are you located in or able to commute to/i.test(q.question_text)
+          )?.id;
+          if (duplicateGeneratedLocationQuestionId !== undefined) {
+            const duplicate = newQuestions.find(q => q.id === duplicateGeneratedLocationQuestionId);
+            if (duplicate?.category === "Location") {
+              newQuestions.splice(newQuestions.findIndex(q => q.id === duplicateGeneratedLocationQuestionId), 1);
+            }
           }
         } else if (data.locations.length > 0) {
           const combinedLocs = data.locations.join(" or ");
@@ -5042,7 +5093,11 @@ function NewJobPageContent() {
             : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
         : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
-      question => question.category !== "default" && question.category !== "role-specific"
+      question => question.category !== "default"
+        && question.category !== "role-specific"
+        // Older note propagation created this separate hard filter even when
+        // an onsite/hybrid arrangement question already covered the locations.
+        && (isRemote || !/are you located in or able to commute to/i.test(question.question_text))
     );
     const isIt = isLikelyItRole(
       enhancedTitle || jobTitle || "",
