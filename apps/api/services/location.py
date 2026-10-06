@@ -256,7 +256,7 @@ _RE_BAY_AREA = re.compile(
     rf"\b{_CITY_RE}\s+Bay\s+Area\b"
 )
 _RE_METRO_AREA = re.compile(
-    rf"\b{_CITY_RE}\s+(?:Metro(?:politan)?|Metropolitan)\s+Area\b",
+    rf"\b{_CITY_RE}\s+Metro(?:politan)?\s+Area\b",
     re.IGNORECASE,
 )
 _RE_CITY_STATE_CODE = re.compile(
