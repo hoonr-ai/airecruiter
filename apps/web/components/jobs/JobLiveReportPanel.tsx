@@ -13,12 +13,23 @@ import { JobBlock } from "@/app/admin/live-report/JobBlock";
 import { mergeLaunchSnapshots } from "@/lib/live-report-merge";
 import type { LaunchListItem, JobBlockData, Snapshot, CandidateRow, Anomaly, TerminalReason } from "@/app/admin/live-report/types";
 
+// Robust candidate name masking utility handling single names, hyphens, and whitespace edge cases
+export function maskCandidateName(name: string | null | undefined): string {
+  if (!name || typeof name !== "string") return "—";
+  const cleaned = name.replace(/[,;]/g, " ").trim();
+  if (!cleaned) return "—";
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "—";
+  return parts.slice(0, 3).map((p) => p[0]?.toUpperCase() || "").filter(Boolean).join(".") + ".";
+}
+
 interface FeedItem {
   id: number;
   ts: string;
   text: string;
   critical: boolean;
   tone?: "good" | "critical" | "neutral";
+  dedupeKey?: string;
 }
 
 interface JobLiveReportPanelProps {
@@ -45,6 +56,15 @@ export function JobLiveReportPanel({
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const feedIdCounterRef = useRef<number>(0);
 
+  // In-memory cache for raw candidate names (interview_id -> rawName)
+  // Cleaned up on jobId switch or unmount to prevent SPA memory leaks
+  const rawNamesMapRef = useRef<Map<number, string>>(new Map());
+  // Version counter to trigger scopedJob / feed updates when rawNamesMapRef is updated
+  const [rawNamesVersion, setRawNamesVersion] = useState<number>(0);
+
+  // Track if we have already fetched unmasked names from the backend
+  const hasFetchedUnmaskedRef = useRef<boolean>(false);
+
   // Live state refs to prevent stale closures in long-running streaming/watchdog callbacks
   const revealPiiRef = useRef(revealPii);
   revealPiiRef.current = revealPii;
@@ -60,17 +80,19 @@ export function JobLiveReportPanel({
 
   // Push into feed
   const pushFeed = useCallback(
-    (text: string, critical = false, tone?: "good" | "critical" | "neutral") => {
+    (text: string, critical = false, tone?: "good" | "critical" | "neutral", dedupeKey?: string) => {
       feedIdCounterRef.current += 1;
       const currentId = feedIdCounterRef.current;
       const resolvedTone = tone || (critical ? "critical" : "neutral");
+
       setFeed((prev) => [
         {
           id: currentId,
-          ts: new Date().toLocaleTimeString(),
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
           text,
           critical,
           tone: resolvedTone,
+          dedupeKey,
         },
         ...prev.slice(0, 49),
       ]);
@@ -99,10 +121,26 @@ export function JobLiveReportPanel({
         ? "good"
         : "neutral";
 
-      const subject = event.name || `#${event.interviewId}`;
+      // If SSE sends an unmasked candidate name, only cache it into rawNamesMapRef when revealPii is true
+      if (event.name && event.interviewId) {
+        if (revealPiiRef.current) {
+          rawNamesMapRef.current.set(event.interviewId, event.name);
+          setRawNamesVersion((v) => v + 1);
+        }
+      }
+
+      // Safe subject name for feed: mask name if revealPii is false to prevent PII leakage
+      const rawSubject = event.name || rawNamesMapRef.current.get(event.interviewId);
+      const safeSubject = revealPiiRef.current
+        ? rawSubject || `#${event.interviewId}`
+        : rawSubject
+        ? maskCandidateName(rawSubject)
+        : `#${event.interviewId}`;
+
       const action = event.type.replace(/_/g, " ");
       const statusText = isFailed ? " [Failed]" : isPassed ? " [Passed]" : "";
-      pushFeed(`${subject}: ${action}${statusText}`, isFailed, tone);
+      const eventKey = `${event.interviewId}_${event.type}_${event.subtype || ""}_${event.phase || ""}`;
+      pushFeed(`${safeSubject}: ${action}${statusText}`, isFailed, tone, eventKey);
 
       // Mutate candidate in real-time in aggregatedSnapshot
       setAggregatedSnapshot((prev) => {
@@ -119,6 +157,7 @@ export function JobLiveReportPanel({
 
               return {
                 ...cand,
+                name: (revealPiiRef.current && event.name) ? event.name : cand.name,
                 phase: updatedPhase,
                 outreach_status: event.status || cand.outreach_status,
                 call_outcome: isDone ? "completed" : cand.call_outcome,
@@ -139,11 +178,12 @@ export function JobLiveReportPanel({
     activityEventRef.current = handleActivityEvent;
   }, [handleActivityEvent]);
 
+
   const activeFetchAbortRef = useRef<AbortController | null>(null);
 
   // Load and aggregate launches in bounded concurrency batches of 6, passing AbortSignal
   const fetchAllLaunchSnapshots = useCallback(
-    async (launchList: LaunchListItem[], jdId: string, mask: boolean) => {
+    async (launchList: LaunchListItem[], jdId: string, reveal: boolean) => {
       if (!launchList || launchList.length === 0) {
         setAggregatedSnapshot(null);
         return;
@@ -169,7 +209,7 @@ export function JobLiveReportPanel({
           const batchResults = await Promise.all(
             batch.map(async (l) => {
               try {
-                return await api.liveReport.getSnapshot(l.bulk_id, mask, abortCtrl.signal);
+                return await api.liveReport.getSnapshot(l.bulk_id, reveal, abortCtrl.signal);
               } catch (e: unknown) {
                 if (abortCtrl.signal.aborted) return null;
                 console.warn(`Failed to fetch snapshot for launch ${l.bulk_id}:`, e);
@@ -187,7 +227,21 @@ export function JobLiveReportPanel({
         if (abortCtrl.signal.aborted) return;
 
         if (validSnapshots.length > 0) {
-          setAggregatedSnapshot(mergeLaunchSnapshots(validSnapshots, jdId, { jobTitle }));
+          const merged = mergeLaunchSnapshots(validSnapshots, jdId, { jobTitle });
+
+          if (reveal) {
+            hasFetchedUnmaskedRef.current = true;
+            for (const j of merged.jobs || []) {
+              for (const c of j.candidates || []) {
+                if (c.interview_id && c.name) {
+                  rawNamesMapRef.current.set(c.interview_id, c.name);
+                }
+              }
+            }
+            setRawNamesVersion((v) => v + 1);
+          }
+
+          setAggregatedSnapshot(merged);
           if (failedCount > 0) {
             setError(`Warning: ${failedCount} of ${launchList.length} launches failed to load.`);
           }
@@ -221,6 +275,11 @@ export function JobLiveReportPanel({
   useEffect(() => {
     const initAbortController = new AbortController();
     let isCancelled = false;
+
+    // Reset in-memory name cache and reveal state whenever jobId changes
+    rawNamesMapRef.current.clear();
+    hasFetchedUnmaskedRef.current = false;
+    setRevealPii(false);
 
     async function initJobData() {
       if (!jobId) return;
@@ -269,10 +328,12 @@ export function JobLiveReportPanel({
         }
 
         if (isCancelled || initAbortController.signal.aborted) return;
+
+        // Keep all launches so historical archived and in-flight batches are preserved
         setLaunches(launchList);
 
         if (launchList.length > 0) {
-          await fetchAllLaunchSnapshotsRef.current(launchList, jdId, revealPiiRef.current);
+          await fetchAllLaunchSnapshotsRef.current(launchList, jdId, false);
         } else {
           setAggregatedSnapshot(null);
         }
@@ -296,20 +357,30 @@ export function JobLiveReportPanel({
       if (activeFetchAbortRef.current) {
         activeFetchAbortRef.current.abort();
       }
+      rawNamesMapRef.current.clear();
+      hasFetchedUnmaskedRef.current = false;
     };
   }, [jobId, jobdivaId]);
 
-  // Handle revealPii toggling without re-running full initJobData
-  const isInitialMountRef = useRef(true);
-  useEffect(() => {
-    if (isInitialMountRef.current) {
-      isInitialMountRef.current = false;
-      return;
+  // Handle revealPii toggling: if reveal=true and we haven't fetched unmasked names yet, fetch once;
+  // otherwise toggle instantly in memory with zero network requests
+  const handleToggleRevealPii = useCallback(async () => {
+    if (!revealPii) {
+      if (!hasFetchedUnmaskedRef.current && launches.length > 0) {
+        try {
+          await fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, true);
+          setRevealPii(true);
+        } catch (err) {
+          console.error("Failed to reveal candidate names:", err);
+        }
+      } else {
+        setRevealPii(true);
+      }
+    } else {
+      setRevealPii(false);
     }
-    if (launches.length > 0) {
-      fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, revealPii);
-    }
-  }, [revealPii, fetchAllLaunchSnapshots, launches, resolvedJobDivaId, jobId]);
+  }, [revealPii, launches, resolvedJobDivaId, jobId, fetchAllLaunchSnapshots]);
+
 
   // Only stream launches that are ACTUALLY live (no archived fallback)
   const liveLaunchBulkIds = useMemo(() => {
@@ -499,18 +570,186 @@ export function JobLiveReportPanel({
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
 
-  // Scoped Job from aggregatedSnapshot
+  // Scoped Job from aggregatedSnapshot with in-memory candidate name resolution
   const scopedJob: JobBlockData | null = useMemo(() => {
     if (!aggregatedSnapshot?.jobs || aggregatedSnapshot.jobs.length === 0) return null;
-    return aggregatedSnapshot.jobs[0];
-  }, [aggregatedSnapshot]);
+    const baseJob = aggregatedSnapshot.jobs[0];
+
+    // Apply in-memory masking / unmasking to candidates
+    const transformedCandidates = (baseJob.candidates || []).map((cand) => {
+      const rawName = rawNamesMapRef.current.get(cand.interview_id);
+      if (revealPii) {
+        // Unmasked mode: use raw name from memory if available
+        return {
+          ...cand,
+          name: rawName || cand.name,
+          name_masked: false,
+        };
+      } else {
+        // Masked mode: apply robust initials masking
+        const sourceName = rawName || cand.name;
+        return {
+          ...cand,
+          name: maskCandidateName(sourceName),
+          name_masked: true,
+        };
+      }
+    });
+
+    return {
+      ...baseJob,
+      candidates: transformedCandidates,
+    };
+  }, [aggregatedSnapshot, revealPii, rawNamesVersion]);
+
+  // Recruiter-friendly event formatter matching admin/live-report
+  const formatRecruiterEvent = useCallback((event: {
+    interviewId?: number;
+    name?: string;
+    type: string;
+    subtype?: string | null;
+    phase?: string | null;
+    status?: string | null;
+  }): string | null => {
+    const p = (event.phase || "").toLowerCase();
+    let phaseName = "Outreach";
+    if (p === "phase1") phaseName = "Phase 1";
+    else if (p === "phase1_6hr" || p.includes("6hr")) phaseName = "Phase 2";
+    else if (p === "phase2") phaseName = "Phase 3";
+    else if (p === "phase3") phaseName = "Phase 4";
+    else if (p === "phase1_extra") phaseName = "Extra 1";
+    else if (p === "phase1_6hr_extra") phaseName = "Extra 2";
+    else if (p === "phase2_extra") phaseName = "Extra 3";
+    else if (p === "contact_check") phaseName = "Contact Check";
+    else if (p === "pass") phaseName = "Passed";
+    else if (p === "fail") phaseName = "Failed";
+
+    const t = (event.type || "").toLowerCase();
+    const st = (event.subtype || "").toLowerCase();
+
+    // Hide internal noise
+    if (t.includes("stt_tts") || t.includes("phase_transition") || t.includes("teams_alert")) {
+      return null;
+    }
+
+    const isOutcomePassed = event.status === "passed" || p === "pass";
+
+    let action = t.replace(/_/g, " ");
+    if (t.includes("interview_started")) {
+      action = "Interview Started";
+    } else if (t.includes("interview_completed")) {
+      action = isOutcomePassed ? "Passed Interview" : "Interview Completed";
+    } else if (t.includes("evaluation_completed")) {
+      action = isOutcomePassed ? "Passed Evaluation" : "Evaluation Completed";
+    } else if (t.includes("interview_partial")) {
+      action = "Interview Partial";
+    } else if (t.includes("voice_pipeline")) {
+      action = st.includes("hangup") || event.status?.includes("hangup") ? "Call Ended (Hangup)" : "Voice Call Completed";
+    } else if (t.includes("email_sms") || (t.includes("email") && t.includes("sms"))) {
+      action = "Email & SMS Sent";
+    } else if (t.includes("email")) {
+      action = "Email Sent";
+    } else if (t.includes("sms")) {
+      action = "SMS Sent";
+    } else if (t.includes("call")) {
+      action = "Call Placed";
+    }
+
+    const subject = event.name || (event.interviewId ? `#${event.interviewId}` : "Candidate");
+    const statusText = event.status === "failed" ? " [Failed]" : isOutcomePassed ? " [Passed]" : "";
+    return `${subject} (${phaseName}): ${action}${statusText}`;
+  }, []);
+
+  // Hydrate activity feed from snapshot events on load (matching admin/live-report behavior)
+  useEffect(() => {
+    if (!aggregatedSnapshot?.jobs || aggregatedSnapshot.jobs.length === 0) return;
+    const MAX_FEED_ITEMS = 50;
+    const allRecentEvents: Array<{
+      id: number;
+      parsedTime: number;
+      ts: string;
+      text: string;
+      critical: boolean;
+      tone?: "good" | "critical" | "neutral";
+      dedupeKey: string;
+    }> = [];
+
+    for (const job of aggregatedSnapshot.jobs) {
+      for (const cand of job.candidates) {
+        const rawCandName = rawNamesMapRef.current.get(cand.interview_id) || cand.name;
+        const resolvedName = revealPii
+          ? rawCandName
+          : maskCandidateName(rawCandName);
+
+        for (const evt of cand.events || []) {
+          const formatted = formatRecruiterEvent({
+            interviewId: cand.interview_id,
+            name: resolvedName,
+            type: evt.type,
+            subtype: evt.subtype,
+            phase: evt.phase,
+            status: evt.status,
+          });
+          if (!formatted) continue;
+
+          const isFailed = evt.status === "failed";
+          const isPassed =
+            evt.status === "passed" ||
+            evt.phase === "pass" ||
+            cand.terminal_reason === "passed" ||
+            (cand.phase === "pass" && (evt.type.includes("evaluation") || evt.type.includes("interview")));
+          const tone: "good" | "critical" | "neutral" = isFailed
+            ? "critical"
+            : isPassed
+            ? "good"
+            : "neutral";
+
+          const d = evt.ts ? new Date(evt.ts) : new Date(0);
+          const parsedTime = !Number.isNaN(d.getTime()) ? d.getTime() : 0;
+          const tsStr = parsedTime > 0
+            ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "—";
+
+          feedIdCounterRef.current += 1;
+          const dedupeKey = `${cand.interview_id}_${evt.type}_${evt.subtype || ""}_${evt.phase || ""}_${evt.ts || ""}`;
+          allRecentEvents.push({
+            id: feedIdCounterRef.current,
+            parsedTime,
+            ts: tsStr,
+            text: formatted,
+            critical: isFailed,
+            tone,
+            dedupeKey,
+          });
+        }
+      }
+    }
+
+    // Sort newest first by timestamp numerically
+    allRecentEvents.sort((a, b) => b.parsedTime - a.parsedTime);
+    if (allRecentEvents.length > 0) {
+      setFeed((prev) => {
+        if (prev.length === 0) {
+          return allRecentEvents.slice(0, MAX_FEED_ITEMS).map(({ parsedTime, ...item }) => item);
+        }
+        // Deduplicate using stable event key if available, fallback to text
+        const existingKeys = new Set(prev.map((p) => p.dedupeKey || p.text));
+        const newItems = allRecentEvents
+          .filter((item) => !existingKeys.has(item.dedupeKey))
+          .map(({ parsedTime, ...item }) => item);
+        if (newItems.length === 0) return prev;
+        return [...newItems, ...prev].slice(0, MAX_FEED_ITEMS);
+      });
+    }
+  }, [aggregatedSnapshot, formatRecruiterEvent, revealPii, rawNamesVersion]);
+
 
   // Scoped Anomalies
   const scopedAnomalies = useMemo(() => {
     return aggregatedSnapshot?.anomalies || [];
   }, [aggregatedSnapshot]);
 
-  // Memoize candidate name resolution map
+  // Memoize candidate name resolution map for activity feed / anomalies
   const candidateNameMap = useMemo(() => {
     const map = new Map<number, string>();
     for (const c of scopedJob?.candidates || []) {
@@ -523,24 +762,39 @@ export function JobLiveReportPanel({
 
   const totalCandidatesCount = scopedJob?.candidates?.length || 0;
 
+  // Status badge calculation: green if streaming, slate if no active runs, amber if connecting
+  const badgeConfig = useMemo(() => {
+    if (isConnected) {
+      return {
+        label: "Live Telemetry Active",
+        containerClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+        iconClass: "animate-pulse text-emerald-600",
+      };
+    }
+    if (liveLaunchBulkIds.length === 0) {
+      return {
+        label: "No active runs",
+        containerClass: "bg-slate-50 text-slate-600 border-slate-200",
+        iconClass: "text-slate-400",
+      };
+    }
+    return {
+      label: "Connecting to stream...",
+      containerClass: "bg-amber-50 text-amber-700 border-amber-200",
+      iconClass: "text-amber-500",
+    };
+  }, [isConnected, liveLaunchBulkIds.length]);
+
   return (
     <div className="flex flex-col gap-4 w-full">
       {/* Top Controls Strip */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
         <div className="flex items-center gap-3">
           <div
-            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${
-              isConnected
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-amber-50 text-amber-700 border-amber-200"
-            }`}
+            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${badgeConfig.containerClass}`}
           >
-            <Radio
-              className={`h-3 w-3 ${
-                isConnected ? "animate-pulse text-emerald-600" : "text-amber-500"
-              }`}
-            />
-            <span>{isConnected ? "Live Telemetry Active" : "Connecting to stream..."}</span>
+            <Radio className={`h-3 w-3 ${badgeConfig.iconClass}`} />
+            <span>{badgeConfig.label}</span>
           </div>
           <span className="text-xs text-slate-500 font-medium">
             Job <span className="font-mono text-slate-800 font-semibold">#{resolvedJobDivaId || jobId}</span>
@@ -555,7 +809,7 @@ export function JobLiveReportPanel({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
-            onClick={() => setRevealPii((prev) => !prev)}
+            onClick={handleToggleRevealPii}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs cursor-pointer"
           >
             {revealPii ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
@@ -566,7 +820,7 @@ export function JobLiveReportPanel({
             type="button"
             onClick={() => fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, revealPii)}
             disabled={isRefreshing}
-            className="p-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs cursor-pointer"
+            className="p-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             title="Refresh All Launches"
           >
             <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
