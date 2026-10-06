@@ -249,6 +249,59 @@ def _merge_employer_signals(
     return merged
 
 
+def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str], bool]:
+    """Extract Exa highlights as unstructured text for the launch gate.
+
+    Exa candidates often lack structured company data (vague headline), but
+    their `resume_text` (LinkedIn highlights) almost always has it. This helper
+    splits highlights into experience fragments and routes only fragments with
+    an explicit current marker or an open-ended date range to the
+    current-employer ladder. Other fragments go to the last-employer ladder.
+    This keeps a former client role from being mistaken for a current one when
+    Exa returns multiple roles in the same highlight line.
+    """
+    cand_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    source = str(
+        candidate.get("source") or cand_data.get("source") or candidate.get("source_type") or ""
+    ).strip().lower()
+
+    if source not in ("linkedin-exa", "exa"):
+        return [], [], False
+
+    text = str(candidate.get("resume_text") or cand_data.get("resume_text") or "").strip()
+    if not text:
+        return [], [], True
+
+    current: List[str] = []
+    last: List[str] = []
+    current_marker = re.compile(
+        r"\b(?:19|20)\d{2}\s*(?:[-–—]|to)\s*(?:present|current|now)\b"
+        r"|[\(\[]\s*(?:present|current|now)\s*[\)\]]"
+        r"|\bcurrent\s+(?:role|position|employer|employment)\b"
+        r"|\bcurrently\s+(?:at|with|employed|working)\b",
+        re.IGNORECASE,
+    )
+    open_ended_date = re.compile(
+        r"\b(?:19|20)\d{2}\s*(?:[-–—]|to)\s*"
+        r"(?:present|current|now)?\s*[\])}.,;:]*\s*$",
+        re.IGNORECASE,
+    )
+    for line in text.splitlines():
+        # Exa may place two roles on one line. Split at semicolons so a
+        # current role's date does not make a former role on that same line
+        # look current too.
+        for fragment in re.split(r";\s*", line):
+            fragment = fragment.strip()
+            if not fragment:
+                continue
+            if current_marker.search(fragment) or open_ended_date.search(fragment):
+                current.append(fragment)
+            else:
+                last.append(fragment)
+
+    return current, last, True
+
+
 def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
     """Check if a candidate should be excluded from PAIR outreach.
 
@@ -385,6 +438,17 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         profile_current_texts, profile_last_texts = candidate_profile_texts(candidate)
     except Exception:  # noqa: BLE001 — profile parsing must not block launches
         pass
+
+    # For Exa candidates, structured company data is often absent (vague headline),
+    # but their current employer is almost always present in the raw `resume_text`.
+    exa_current, exa_last, is_exa_source = _exa_resume_texts(candidate)
+    profile_current_texts.extend(exa_current)
+    profile_last_texts.extend(exa_last)
+
+    # Reuse the source classification from the parser rather than normalizing
+    # nested source fields a second time.
+    conflict_suffix = "Exa profile text" if is_exa_source else "JobDiva profile"
+
     if profile_current_texts or profile_last_texts:
         try:
             from services.no_contact import matches_no_contact_company
@@ -402,7 +466,7 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
             if not current_companies:
                 for text in profile_current_texts:
                     if client_appears_in_text(text, client_name):
-                        return True, "Employed by Hiring Client (JobDiva profile)"
+                        return True, f"Employed by Hiring Client ({conflict_suffix})"
                 # Last-resort ladder rung: consulted only when NO structured
                 # signal of any kind exists — a structured last employer that
                 # already cleared employed_by_client must not be second-guessed
@@ -412,7 +476,7 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
                         if client_appears_in_text(text, client_name):
                             return True, (
                                 "Employed by Hiring Client "
-                                "(last known employer, JobDiva profile)"
+                                f"(last known employer, {conflict_suffix})"
                             )
 
     # Visibility for the failure mode that put a Bank of America employee into

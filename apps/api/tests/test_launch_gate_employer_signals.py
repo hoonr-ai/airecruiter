@@ -365,3 +365,78 @@ def test_clean_applicant_still_launches():
         {"candidate_id": "999", "available": True, "title": "QA Engineer"}
     )
     assert is_candidate_excluded_from_pair(persisted, CLIENT) == (False, "")
+
+
+def test_exa_resume_text_client_conflict():
+    """Exa candidates lack structured company signals when the headline is vague,
+    so their `resume_text` (LinkedIn highlights) MUST be scanned as a fallback.
+    Otherwise, current employees slip through."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Experience: Senior Engineer at Bank Of America (2020-Present)",
+        "headline": "Senior Engineer",  # Vague headline
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
+    assert excluded is True
+    assert reason == "Employed by Hiring Client (Exa profile text)"
+
+
+def test_exa_resume_text_nested_source_is_scanned():
+    """A positive client match is found when Exa fields are nested under data."""
+    cand = {
+        "candidate_id": "999",
+        "data": {
+            "source": "LinkedIn-Exa",
+            "resume_text": "Engineer at Bank of America (2020-Present)",
+        },
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
+    assert excluded is True
+    assert reason == "Employed by Hiring Client (Exa profile text)"
+
+
+def test_exa_resume_text_empty_is_ignored():
+    """An empty nested Exa resume does not create an employer conflict."""
+    cand = {
+        "candidate_id": "999",
+        "data": {"source": "LinkedIn-Exa", "resume_text": ""},
+    }
+    assert is_candidate_excluded_from_pair(cand, CLIENT) == (False, "")
+
+
+def test_exa_former_employee_not_blocked():
+    """A former client role stays contactable when Exa text shows a current job."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Experience:\nSoftware Engineer at Google (2022 - Present); Engineer at Bank of America (2015-2018) — currently seeking a new role",
+        "headline": "Software Engineer",
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, CLIENT)
+    assert excluded is False
+
+
+def test_exa_open_ended_date_marks_current_role():
+    """An open-ended year range identifies the current employer without relying
+    on structured company data or the literal word 'Present'."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Software Engineer at Google (2022–); Engineer at Bank of America (2015–2018)",
+        "headline": "Software Engineer",
+    }
+    assert is_candidate_excluded_from_pair(cand, CLIENT) == (False, "")
+
+
+def test_exa_incidental_client_substring():
+    """Incidental client name appearances (e.g. as a substring of another company)
+    should not falsely block candidates."""
+    cand = {
+        "candidate_id": "999",
+        "source": "LinkedIn-Exa",
+        "resume_text": "Experience:\nSenior Developer at Metadata Solutions (2020-Present)",
+        "headline": "Senior Developer",
+    }
+    excluded, reason = is_candidate_excluded_from_pair(cand, "Meta") # the client is 'Meta', but text has 'Metadata Solutions'
+    assert excluded is False
