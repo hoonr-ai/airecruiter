@@ -5434,11 +5434,21 @@ class UnifiedCandidateSearch:
             return None
 
     def _location_hard_gate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Optional[str]:
-        """Veto confirmed radius failures and unknown local locations.
+        """Hard-drop only candidates *confirmed* outside the radius; soft-keep everything else.
 
-        A geocoder outage is not evidence that a candidate is outside the
-        radius, so it is soft-kept after résumé enrichment. The strict gate
-        can be disabled operationally with LOCATION_RADIUS_HARD_GATE_ENABLED.
+        The two hard-drop cases are:
+          - ``state_mismatch``: candidate's state is known and differs from the
+            required state.
+          - ``outside_radius_confirmed``: geocoding succeeded and the measured
+            distance exceeds every configured radius.
+
+        Candidates whose location is blank, broad (e.g. "San Francisco Bay Area"),
+        or temporarily unresolvable (geocoder outage) are soft-kept so that a
+        data gap is never mistaken for a confirmed out-of-radius result. The
+        recruiter sees an "unverified location" badge for these rows.
+
+        The strict gate can be disabled operationally with
+        LOCATION_RADIUS_HARD_GATE_ENABLED.
         """
         for key in (
             "location_veto_reason", "location_out_of_radius",
@@ -5491,15 +5501,20 @@ class UnifiedCandidateSearch:
             candidate["location_veto_reason"] = "outside_radius_confirmed"
             return f"location {round(float(distance))}mi outside every configured radius"
 
-        # Missing/unknown locations are vetoed for local jobs. Geocoder
-        # failures were handled above: they are retained as unverified so a
-        # transient geodata outage does not masquerade as a confirmed
-        # out-of-radius result. Scoring treats only confirmed state or radius
-        # mismatches as score-zeroing.
-        candidate["location_veto_reason"] = reason or "location_unverified"
+        # Unresolvable locations (blank profile, broad region like "San Francisco
+        # Bay Area", or any other case where we cannot confirm the candidate is
+        # outside the radius) are soft-kept. Hard-drop is reserved exclusively
+        # for candidates whose distance is *confirmed* to exceed the limit
+        # (outside_radius_confirmed above) or who are in the wrong state
+        # (state_mismatch above). Dropping on mere inability to geocode would
+        # incorrectly remove valid local candidates whose location strings are
+        # imprecise (e.g. "Greater Chicago Area") or temporarily unavailable.
+        # The recruiter sees an "unverified location" badge instead.
+        candidate["location_match_reason"] = reason or "location_unverified"
         if distance == _UNKNOWN_DISTANCE_SENTINEL:
             candidate["distance_miles"] = None
-        return f"location could not be verified within every configured radius ({reason or 'unknown'})"
+        # Do NOT return a veto string — soft-keep the candidate.
+        return None
 
     # ------------------------------------------------------------------
     # Scoring Matrix v2 (recruiter rubric, 2026-09-11) — see core.config
