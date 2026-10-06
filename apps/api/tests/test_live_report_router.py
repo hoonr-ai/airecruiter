@@ -202,3 +202,90 @@ def test_stream_live_report_recruiter_filters_unassigned_events():
                 assert "100" in stream_content
                 assert "200" not in stream_content  # 200 should be filtered out!
                 assert "secret_fleet_info" not in stream_content  # ambiguous/system broadcast filtered out!
+
+
+def test_get_live_report_job_snapshot_admin_access():
+    admin = UserIdentity(email="admin@example.com", role="admin")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": "ok",
+        "jobdiva_id": "26-11111",
+        "jobs": [
+            {
+                "jobdiva_id": "26-11111",
+                "candidates": [
+                    {"interview_id": 1, "name": "Alice"}
+                ]
+            }
+        ]
+    }
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_resp):
+        res = asyncio.run(lr.get_live_report_job_snapshot(jobdiva_id="26-11111", reveal=False, user=admin))
+        assert res["status"] == "ok"
+        assert res["jobdiva_id"] == "26-11111"
+        assert len(res["jobs"][0]["candidates"]) == 1
+
+
+def test_get_live_report_job_snapshot_recruiter_forbidden():
+    recruiter = UserIdentity(email="recruiter@example.com", role="recruiter")
+
+    with patch("routers.live_report._get_user_accessible_jobdiva_ids", return_value={"26-22222"}):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(lr.get_live_report_job_snapshot(jobdiva_id="26-11111", reveal=False, user=recruiter))
+        assert exc.value.status_code == 403
+        assert "Access denied" in exc.value.detail
+
+
+def test_get_live_report_job_snapshot_404_passthrough():
+    admin = UserIdentity(email="admin@example.com", role="admin")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_resp):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(lr.get_live_report_job_snapshot(jobdiva_id="26-99999", reveal=False, user=admin))
+        assert exc.value.status_code == 404
+        assert "Job not found" in exc.value.detail
+
+
+def test_get_live_report_job_snapshot_upstream_error_maps_to_502():
+    admin = UserIdentity(email="admin@example.com", role="admin")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 500
+    mock_resp.text = "Internal PairBot error"
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_resp):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(lr.get_live_report_job_snapshot(jobdiva_id="26-11111", reveal=False, user=admin))
+        assert exc.value.status_code == 502
+        assert "PairBot service error" in exc.value.detail
+
+
+def test_get_live_report_job_snapshot_dnc_augmentation():
+    admin = UserIdentity(email="admin@example.com", role="admin")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": "ok",
+        "jobdiva_id": "26-11111",
+        "jobs": [
+            {
+                "jobdiva_id": "26-11111",
+                "candidates": [
+                    {"interview_id": 1, "name": "Alice"}
+                ]
+            }
+        ]
+    }
+
+    def fake_augment(snapshot):
+        snapshot["jobs"][0]["candidates"][0]["is_dnc"] = True
+        return snapshot
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_resp):
+        with patch("routers.live_report._augment_snapshot_with_dnc", side_effect=fake_augment):
+            res = asyncio.run(lr.get_live_report_job_snapshot(jobdiva_id="26-11111", reveal=False, user=admin))
+            assert res["jobs"][0]["candidates"][0]["is_dnc"] is True
+

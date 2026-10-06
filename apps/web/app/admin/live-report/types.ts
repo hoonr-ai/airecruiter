@@ -129,6 +129,7 @@ export type Anomaly =
   | HandoffExpiredAnomaly;
 
 export interface Snapshot {
+  status?: string;
   bulk_id: string;
   created_at: string | null;
   state: LaunchState;

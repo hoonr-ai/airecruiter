@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { api, authFetch } from "@/lib/api";
 import { JobBlock } from "@/app/admin/live-report/JobBlock";
-import { mergeLaunchSnapshots } from "@/lib/live-report-merge";
 import type { LaunchListItem, JobBlockData, Snapshot, CandidateRow, Anomaly, TerminalReason } from "@/app/admin/live-report/types";
 
 // Robust candidate name masking utility handling single names, hyphens, and whitespace edge cases
@@ -181,12 +180,13 @@ export function JobLiveReportPanel({
 
   const activeFetchAbortRef = useRef<AbortController | null>(null);
 
-  // Load and aggregate launches in bounded concurrency batches of 6, passing AbortSignal
-  const fetchAllLaunchSnapshots = useCallback(
-    async (launchList: LaunchListItem[], jdId: string, reveal: boolean) => {
-      if (!launchList || launchList.length === 0) {
+  // Load snapshot for the entire JobDiva ID in a single API call (zero iteration, zero rate-limit 503s)
+  const fetchJobSnapshot = useCallback(
+    async (jdId: string, reveal: boolean): Promise<boolean> => {
+      const cleanJd = (jdId || "").trim();
+      if (!cleanJd) {
         setAggregatedSnapshot(null);
-        return;
+        return false;
       }
 
       if (activeFetchAbortRef.current) {
@@ -199,39 +199,28 @@ export function JobLiveReportPanel({
       setError(null);
 
       try {
-        const BATCH_SIZE = 6;
-        const validSnapshots: Snapshot[] = [];
-        let failedCount = 0;
+        const rawSnapshot = await api.liveReport.getJobSnapshot(cleanJd, reveal, abortCtrl.signal);
+        if (abortCtrl.signal.aborted) return false;
 
-        for (let i = 0; i < launchList.length; i += BATCH_SIZE) {
-          if (abortCtrl.signal.aborted) return;
-          const batch = launchList.slice(i, i + BATCH_SIZE);
-          const batchResults = await Promise.all(
-            batch.map(async (l) => {
-              try {
-                return await api.liveReport.getSnapshot(l.bulk_id, reveal, abortCtrl.signal);
-              } catch (e: unknown) {
-                if (abortCtrl.signal.aborted) return null;
-                console.warn(`Failed to fetch snapshot for launch ${l.bulk_id}:`, e);
-                failedCount++;
-                return null;
-              }
-            })
-          );
-          if (abortCtrl.signal.aborted) return;
-          for (const s of batchResults) {
-            if (s) validSnapshots.push(s);
+        if (rawSnapshot && rawSnapshot.status !== "not_found") {
+          // If job Title is provided via prop and missing in backend, supply it via shallow clone
+          let snapshot = rawSnapshot;
+          if (rawSnapshot.jobs && rawSnapshot.jobs.length > 0 && jobTitle && !rawSnapshot.jobs[0].title) {
+            snapshot = {
+              ...rawSnapshot,
+              jobs: [
+                {
+                  ...rawSnapshot.jobs[0],
+                  title: jobTitle,
+                },
+                ...rawSnapshot.jobs.slice(1),
+              ],
+            };
           }
-        }
-
-        if (abortCtrl.signal.aborted) return;
-
-        if (validSnapshots.length > 0) {
-          const merged = mergeLaunchSnapshots(validSnapshots, jdId, { jobTitle });
 
           if (reveal) {
             hasFetchedUnmaskedRef.current = true;
-            for (const j of merged.jobs || []) {
+            for (const j of snapshot.jobs || []) {
               for (const c of j.candidates || []) {
                 if (c.interview_id && c.name) {
                   rawNamesMapRef.current.set(c.interview_id, c.name);
@@ -241,22 +230,20 @@ export function JobLiveReportPanel({
             setRawNamesVersion((v) => v + 1);
           }
 
-          setAggregatedSnapshot(merged);
-          if (failedCount > 0) {
-            setError(`Warning: ${failedCount} of ${launchList.length} launches failed to load.`);
-          }
+          setAggregatedSnapshot(snapshot);
+          return true;
         } else {
           setAggregatedSnapshot(null);
-          if (failedCount > 0) {
-            setError(`Failed to load launch snapshots (${failedCount} failed).`);
-          }
+          setError(`No telemetry recorded for Job #${cleanJd}.`);
+          return false;
         }
       } catch (err: unknown) {
         if (!abortCtrl.signal.aborted) {
           const msg = err instanceof Error ? err.message : "Failed to load live report data";
-          console.error("Failed to aggregate launches for job live report:", err);
+          console.error("Failed to load job live report:", err);
           setError(msg);
         }
+        return false;
       } finally {
         if (!abortCtrl.signal.aborted) {
           setIsRefreshing(false);
@@ -266,10 +253,10 @@ export function JobLiveReportPanel({
     [jobTitle]
   );
 
-  const fetchAllLaunchSnapshotsRef = useRef(fetchAllLaunchSnapshots);
+  const fetchJobSnapshotRef = useRef(fetchJobSnapshot);
   useEffect(() => {
-    fetchAllLaunchSnapshotsRef.current = fetchAllLaunchSnapshots;
-  }, [fetchAllLaunchSnapshots]);
+    fetchJobSnapshotRef.current = fetchJobSnapshot;
+  }, [fetchJobSnapshot]);
 
   // Initialize job and fetch launches with abort controller cleanup
   useEffect(() => {
@@ -306,7 +293,7 @@ export function JobLiveReportPanel({
         if (isCancelled || initAbortController.signal.aborted) return;
         setResolvedJobDivaId(jdId);
 
-        // Fetch all launches for this jobdiva_id with abort signal
+        // Fetch launches for metadata (total launches count, active stream bulk IDs)
         const launchData = await api.liveReport.getLaunches({
           jobdiva_id: jdId,
           limit: 100,
@@ -328,18 +315,13 @@ export function JobLiveReportPanel({
         }
 
         if (isCancelled || initAbortController.signal.aborted) return;
-
-        // Keep all launches so historical archived and in-flight batches are preserved
         setLaunches(launchList);
 
-        if (launchList.length > 0) {
-          await fetchAllLaunchSnapshotsRef.current(launchList, jdId, false);
-        } else {
-          setAggregatedSnapshot(null);
-        }
+        // Fetch comprehensive snapshot in 1 single API call by JobDiva ID
+        await fetchJobSnapshotRef.current(jdId, false);
       } catch (err: unknown) {
         if (!isCancelled && !initAbortController.signal.aborted) {
-          const msg = err instanceof Error ? err.message : "Failed to load live launches for this job";
+          const msg = err instanceof Error ? err.message : "Failed to load live report for this job";
           console.error("Failed to initialize job live report:", err);
           setError(msg);
         }
@@ -366,10 +348,12 @@ export function JobLiveReportPanel({
   // otherwise toggle instantly in memory with zero network requests
   const handleToggleRevealPii = useCallback(async () => {
     if (!revealPii) {
-      if (!hasFetchedUnmaskedRef.current && launches.length > 0) {
+      if (!hasFetchedUnmaskedRef.current) {
         try {
-          await fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, true);
-          setRevealPii(true);
+          const ok = await fetchJobSnapshot(resolvedJobDivaId || jobId, true);
+          if (ok) {
+            setRevealPii(true);
+          }
         } catch (err) {
           console.error("Failed to reveal candidate names:", err);
         }
@@ -379,7 +363,7 @@ export function JobLiveReportPanel({
     } else {
       setRevealPii(false);
     }
-  }, [revealPii, launches, resolvedJobDivaId, jobId, fetchAllLaunchSnapshots]);
+  }, [revealPii, resolvedJobDivaId, jobId, fetchJobSnapshot]);
 
 
   // Only stream launches that are ACTUALLY live (no archived fallback)
@@ -400,7 +384,32 @@ export function JobLiveReportPanel({
     const retryTimeouts = new Map<string, NodeJS.Timeout>();
     const watchdogs = new Map<string, NodeJS.Timeout>();
     const retryCounts = new Map<string, number>();
+    let lastWatchdogRefreshAt = 0;
+    let trailingWatchdogTimeout: NodeJS.Timeout | null = null;
     let isDisposed = false;
+
+    // Single-flight debounced refresh with trailing call to avoid dropping streams recycled close together
+    const triggerDebouncedJobRefresh = () => {
+      const now = Date.now();
+      if (now - lastWatchdogRefreshAt > 4000) {
+        lastWatchdogRefreshAt = now;
+        fetchJobSnapshotRef.current(
+          resolvedJobDivaIdRef.current || jobIdRef.current,
+          revealPiiRef.current
+        );
+      } else {
+        if (trailingWatchdogTimeout) clearTimeout(trailingWatchdogTimeout);
+        trailingWatchdogTimeout = setTimeout(() => {
+          if (!isDisposed) {
+            lastWatchdogRefreshAt = Date.now();
+            fetchJobSnapshotRef.current(
+              resolvedJobDivaIdRef.current || jobIdRef.current,
+              revealPiiRef.current
+            );
+          }
+        }, 4100);
+      }
+    };
 
     const startStream = (bulkId: string) => {
       if (isDisposed) return;
@@ -415,12 +424,7 @@ export function JobLiveReportPanel({
           console.warn(`Watchdog timeout for live stream ${bulkId}. Recycling...`);
           ac.abort();
           if (!isDisposed) {
-            // Read fresh values from refs to prevent stale closure PII unmasking
-            fetchAllLaunchSnapshotsRef.current(
-              launchesRef.current,
-              resolvedJobDivaIdRef.current || jobIdRef.current,
-              revealPiiRef.current
-            );
+            triggerDebouncedJobRefresh();
             startStream(bulkId);
           }
         }, 35000);
@@ -532,8 +536,7 @@ export function JobLiveReportPanel({
             const t = setTimeout(() => {
               if (!isDisposed) {
                 // Read fresh values from refs to prevent stale closure PII unmasking
-                fetchAllLaunchSnapshotsRef.current(
-                  launchesRef.current,
+                fetchJobSnapshotRef.current(
                   resolvedJobDivaIdRef.current || jobIdRef.current,
                   revealPiiRef.current
                 );
@@ -558,9 +561,8 @@ export function JobLiveReportPanel({
   // Tab visibility reconciliation
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible" && launchesRef.current.length > 0) {
-        fetchAllLaunchSnapshotsRef.current(
-          launchesRef.current,
+      if (document.visibilityState === "visible") {
+        fetchJobSnapshotRef.current(
           resolvedJobDivaIdRef.current || jobIdRef.current,
           revealPiiRef.current
         );
@@ -818,10 +820,10 @@ export function JobLiveReportPanel({
 
           <button
             type="button"
-            onClick={() => fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, revealPii)}
+            onClick={() => fetchJobSnapshot(resolvedJobDivaId || jobId, revealPii)}
             disabled={isRefreshing}
             className="p-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Refresh All Launches"
+            title="Refresh Live Report"
           >
             <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </button>

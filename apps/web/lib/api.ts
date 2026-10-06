@@ -4,6 +4,7 @@
 
 import { trackEvent } from "@/lib/analytics";
 import { msalInstance } from "@/lib/msal-config";
+import type { Snapshot } from "@/app/admin/live-report/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL!;
 
@@ -566,7 +567,9 @@ export const api = {
     },
     getHealth: () => req<any>(`/api/analytics/live-report/health`),
     getSnapshot: (bulkId: string, reveal = false, signal?: AbortSignal) =>
-      req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`, { signal }),
+      req<Snapshot>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`, { signal }),
+    getJobSnapshot: (jobdivaId: string, reveal = false, signal?: AbortSignal) =>
+      req<Snapshot>(`/api/analytics/live-report/job/${encodeURIComponent(jobdivaId)}${reveal ? "?reveal=true" : ""}`, { signal }),
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
