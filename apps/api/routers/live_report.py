@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -49,6 +50,72 @@ def _get_pair_headers() -> Dict[str, str]:
     elif os.getenv("ENVIRONMENT", "production").lower() in {"production", "prod"}:
         logger.warning("PAIR_API_KEY is not configured in production environment!")
     return headers
+
+
+def _augment_snapshot_with_dnc(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Augment snapshot candidates with local DNC / suppression status from PAIR's database.
+
+    Avoids loading PairBot DB and ensures suppressed candidates are highlighted with red status.
+    """
+    if not isinstance(snapshot, dict) or "jobs" not in snapshot:
+        return snapshot
+
+    interview_ids: Set[int] = set()
+    for j in snapshot.get("jobs", []):
+        for c in j.get("candidates", []):
+            iid = c.get("interview_id")
+            if iid and isinstance(iid, int):
+                interview_ids.add(iid)
+
+    if not interview_ids:
+        return snapshot
+
+    dnc_matches: Dict[int, Dict[str, Any]] = {}
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ea.interview_id::int, sc.dnc_stopped_at, sc.data->'dnc'
+                    FROM engage_interview_audit ea
+                    JOIN sourced_candidates sc ON sc.candidate_id = ea.candidate_id
+                    WHERE ea.interview_id = ANY(%s::text[])
+                      AND (sc.dnc_stopped_at IS NOT NULL OR (sc.data->'dnc'->>'is_dnc')::boolean IS TRUE)
+                    """,
+                    ([str(x) for x in interview_ids],),
+                )
+                for row in cur.fetchall():
+                    matched_iid = row[0]
+                    dnc_stopped_at = row[1]
+                    dnc_json = row[2] or {}
+                    dnc_matches[matched_iid] = {
+                        "is_dnc": True,
+                        "dnc_stopped_at": dnc_stopped_at.isoformat() if dnc_stopped_at else None,
+                        "trigger": dnc_json.get("trigger") or "dnc_suppressed",
+                        "blocked_channels": dnc_json.get("blocked_channels") or ["email", "sms", "call"],
+                        "reasons": dnc_json.get("reasons") or {},
+                        "message": dnc_json.get("message") or "Candidate is on DNC / Opt-Out suppression list",
+                    }
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Failed to check local DNC matches for snapshot: {e}")
+
+    # Decorate candidate rows with DNC metadata
+    for j in snapshot.get("jobs", []):
+        for c in j.get("candidates", []):
+            iid = c.get("interview_id")
+            if iid in dnc_matches:
+                info = dnc_matches[iid]
+                c["is_dnc"] = True
+                c["dnc_stopped_at"] = info.get("dnc_stopped_at")
+                c["dnc_trigger"] = info.get("trigger")
+                c["dnc_reasons"] = info.get("reasons")
+                c["dnc_blocked_channels"] = info.get("blocked_channels")
+                c["dnc_message"] = info.get("message")
+
+    return snapshot
 
 
 def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
@@ -135,9 +202,37 @@ def _get_user_accessible_jobdiva_ids(user: UserIdentity) -> Optional[Set[str]]:
 
 
 @router.get("/api/analytics/live-report/launches")
-async def get_live_report_launches(user: UserIdentity = Depends(get_current_user)):
-    """Fetch all bulk launches, isolated so recruiters only see their launched jobs."""
-    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
+async def get_live_report_launches(
+    search: Optional[str] = Query(None, max_length=100, description="Optional search term matching job title, JobDiva ID, bulk ID"),
+    jobdiva_id: Optional[str] = Query(None, max_length=50, description="Filter launches by specific JobDiva job ID"),
+    limit: int = Query(100, ge=1, le=500, description="Max launches to return (between 1 and 500)"),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Fetch bulk launches, with optional search, isolated so recruiters only see their launched jobs."""
+    # When called directly in unit tests without FastAPI dependency resolution,
+    # parameters default to the Query() field object. Extract real values cleanly:
+    clean_search: Optional[str] = search if isinstance(search, str) else None
+    clean_jobdiva_id: Optional[str] = jobdiva_id if isinstance(jobdiva_id, str) else None
+    clean_limit: int = limit if isinstance(limit, int) else 100
+
+    base_target = f"{_get_external_interview_api_url()}/api/analytics/live-report/launches"
+    params = {"limit": str(clean_limit)}
+    if clean_search:
+        params["search"] = clean_search
+    if clean_jobdiva_id:
+        params["jobdiva_id"] = clean_jobdiva_id
+
+    # If Recruiter / Team Lead, scope accessible jobs before querying PairBot
+    if not user.is_admin:
+        accessible_ids = _get_user_accessible_jobdiva_ids(user)
+        if not accessible_ids:
+            return {"launches": [], "retention_days": 14}
+        if clean_jobdiva_id and clean_jobdiva_id.strip() not in accessible_ids:
+            return {"launches": [], "retention_days": 14}
+        params["accessible_jobdiva_ids"] = ",".join(sorted(accessible_ids))
+
+    query_str = urllib.parse.urlencode(params)
+    target_url = f"{base_target}?{query_str}"
     headers = _get_pair_headers()
 
     try:
@@ -158,11 +253,8 @@ async def get_live_report_launches(user: UserIdentity = Depends(get_current_user
     if user.is_admin:
         return {"launches": launch_list, "retention_days": retention_days}
 
-    # If Recruiter / Team Lead, filter by accessible jobdiva_ids
+    # Defensive double-check filter for recruiter / team lead
     accessible_ids = _get_user_accessible_jobdiva_ids(user)
-    if not accessible_ids:
-        return {"launches": [], "retention_days": retention_days}
-
     filtered = []
     for item in launch_list:
         item_jobdivas = {str(j).strip() for j in item.get("jobdiva_ids", [])}
@@ -218,27 +310,26 @@ async def get_live_report_snapshot(
         logger.error(f"Network error contacting PairBot snapshot: {e}")
         raise HTTPException(status_code=502, detail="Failed to connect to PairBot service")
 
-    # If Admin, return unmodified snapshot
-    if user.is_admin:
-        return snapshot
+    # Scoped snapshot jobs for recruiters
+    if not user.is_admin:
+        accessible_ids = _get_user_accessible_jobdiva_ids(user)
+        scoped_jobs = []
+        if accessible_ids and "jobs" in snapshot:
+            for j in snapshot.get("jobs", []):
+                if str(j.get("jobdiva_id", "")).strip() in accessible_ids:
+                    scoped_jobs.append(j)
 
-    # If Recruiter / Team Lead, filter snapshot jobs
-    accessible_ids = _get_user_accessible_jobdiva_ids(user)
-    scoped_jobs = []
-    if accessible_ids and "jobs" in snapshot:
-        for j in snapshot.get("jobs", []):
-            if str(j.get("jobdiva_id", "")).strip() in accessible_ids:
-                scoped_jobs.append(j)
+        if not scoped_jobs:
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied. You do not have access to any jobs in this launch.",
+            )
 
-    if not scoped_jobs:
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied. You do not have access to any jobs in this launch.",
-        )
+        snapshot = dict(snapshot)
+        snapshot["jobs"] = scoped_jobs
 
-    scoped_snapshot = dict(snapshot)
-    scoped_snapshot["jobs"] = scoped_jobs
-    return scoped_snapshot
+    # Augment candidates with local DNC status so DNC candidates are highlighted in red
+    return _augment_snapshot_with_dnc(snapshot)
 
 
 @router.get("/api/analytics/live-report/{bulk_id}/stream")

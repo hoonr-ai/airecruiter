@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { api, authFetch, isNotFoundError, LIVE_REPORT_PROD_ONLY_MESSAGE } from "@/lib/api";
+import {
+  api,
+  authFetch,
+  isNotFoundError,
+  LIVE_REPORT_NOT_FOUND_MESSAGE,
+  LIVE_REPORT_FORBIDDEN_MESSAGE,
+} from "@/lib/api";
 import type { Snapshot } from "../app/admin/live-report/types";
 
 interface UseLiveReportStreamOptions {
@@ -50,8 +56,10 @@ export function useLiveReportStream({
       setError(null);
     } catch (err: any) {
       console.error("Failed to fetch live report snapshot:", err);
-      if (isNotFoundError(err)) {
-        setError(LIVE_REPORT_PROD_ONLY_MESSAGE);
+      if (err?.status === 403 || String(err?.message || "").includes("403")) {
+        setError(LIVE_REPORT_FORBIDDEN_MESSAGE);
+      } else if (isNotFoundError(err)) {
+        setError(LIVE_REPORT_NOT_FOUND_MESSAGE);
       } else {
         setError(err?.message || "Failed to load launch snapshot");
       }

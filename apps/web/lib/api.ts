@@ -92,6 +92,8 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
 export {
   ApiError,
   isNotFoundError,
+  LIVE_REPORT_NOT_FOUND_MESSAGE,
+  LIVE_REPORT_FORBIDDEN_MESSAGE,
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
   recordRedirectTimestamp,
@@ -554,7 +556,14 @@ export const api = {
     export: () => req<ApiEnvelope<{ filename: string; csv: string }>>(`/api/v1/org-hierarchy/export`),
   },
   liveReport: {
-    getLaunches: () => req<any>(`/api/analytics/live-report/launches`),
+    getLaunches: (params?: { search?: string; jobdiva_id?: string; limit?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.jobdiva_id) qs.set("jobdiva_id", params.jobdiva_id);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      const queryStr = qs.toString();
+      return req<any>(`/api/analytics/live-report/launches${queryStr ? `?${queryStr}` : ""}`);
+    },
     getHealth: () => req<any>(`/api/analytics/live-report/health`),
     getSnapshot: (bulkId: string, reveal = false) =>
       req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`),
