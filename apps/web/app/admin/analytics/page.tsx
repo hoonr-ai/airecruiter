@@ -552,6 +552,7 @@ export default function AdminAnalyticsPage() {
     isAdmin,
     isTeamLead,
     teamName,
+    orgRoleLabel,
     isLoading: isRoleLoading,
     email,
     role,
@@ -1103,7 +1104,7 @@ export default function AdminAnalyticsPage() {
       <div className="flex items-center justify-between mt-2">
         <div className="flex items-center gap-3">
           <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">
-            {isAdmin ? "Admin Analytics" : "Team Lead Dashboard"}
+            {isAdmin ? "Admin Analytics" : `${orgRoleLabel ?? "Team Lead"} Dashboard`}
           </h1>
           {isAdmin && !teamScope && (
             <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
@@ -1123,7 +1124,7 @@ export default function AdminAnalyticsPage() {
           )}
           {!isAdmin && (
             <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200 uppercase tracking-wide">
-              Team Lead
+              {orgRoleLabel ?? "Team Lead"}
             </span>
           )}
           {data?.warning && (

@@ -13,6 +13,12 @@ export interface UserRoleInfo {
   isTeamLead: boolean;
   teamId: string | null;
   teamName: string | null;
+  /** Level in the org hierarchy ("resource_manager", "avp", ...); null when not in it. */
+  orgRole: string | null;
+  /** Display name of that level ("Resource Manager", "AVP"); use it instead of "Team Lead". */
+  orgRoleLabel: string | null;
+  /** Someone reports to them — the server gives them analytics scoped to everyone beneath. */
+  managesPeople: boolean;
   isLoading: boolean;
 }
 
@@ -22,6 +28,9 @@ interface RoleData {
   isTeamLead: boolean;
   teamId: string | null;
   teamName: string | null;
+  orgRole: string | null;
+  orgRoleLabel: string | null;
+  managesPeople: boolean;
 }
 
 const DEFAULT_ROLE: RoleData = {
@@ -30,6 +39,9 @@ const DEFAULT_ROLE: RoleData = {
   isTeamLead: false,
   teamId: null,
   teamName: null,
+  orgRole: null,
+  orgRoleLabel: null,
+  managesPeople: false,
 };
 
 const roleCache: Record<string, RoleData> = {};
@@ -57,6 +69,9 @@ async function fetchRoleForEmail(email: string): Promise<RoleData | null> {
         isTeamLead: role === "team_lead" || data.is_team_lead === true,
         teamId: data.team_id || null,
         teamName: data.team_name || null,
+        orgRole: data.org_role || null,
+        orgRoleLabel: data.org_role_label || null,
+        managesPeople: data.manages_people === true,
       };
       roleCache[email] = resolved;
       return resolved;
@@ -123,6 +138,9 @@ export function useUserRole(): UserRoleInfo {
     isTeamLead: roleInfo.isTeamLead,
     teamId: roleInfo.teamId,
     teamName: roleInfo.teamName,
+    orgRole: roleInfo.orgRole,
+    orgRoleLabel: roleInfo.orgRoleLabel,
+    managesPeople: roleInfo.managesPeople,
     isLoading,
   };
 }
