@@ -319,6 +319,8 @@ def test_hard_gate_soft_keeps_transient_geocoder_failure(svc, monkeypatch):
         ucs, "within_radius",
         lambda *args, **kwargs: (False, "candidate_ungeocodable", None),
     )
+    import services.location as loc
+    monkeypatch.setattr(loc, "is_plausible_city_token", lambda *args, **kwargs: True)
     candidate = {"location": "Nopeville, CA"}
     assert svc._location_hard_gate(candidate, _criteria()) is None
     assert candidate.get("location_match_reason") == "geocode_unavailable"

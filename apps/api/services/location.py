@@ -386,6 +386,12 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
                 # Canadian city+province — defer to downstream country check;
                 # don't hard-reject here just because it's not in the US index.
                 return True
+            
+            # Broad regions ("San Francisco Bay Area", "Dallas-Fort Worth Metroplex")
+            # are explicitly supported by downstream logic. Do not wipe them out.
+            token_lower = token.lower()
+            if token_lower.endswith(" area") or token_lower.endswith(" metroplex"):
+                return True
             # Index doesn't recognise this city+state pair → definitively not
             # a real US place. Do NOT fall through to the heuristics — that
             # would re-admit false positives like "Parasoft, CA" or
