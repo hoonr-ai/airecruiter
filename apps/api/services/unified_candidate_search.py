@@ -2418,7 +2418,7 @@ class UnifiedCandidateSearch:
 
         # Build producer tasks for all selected sources — run in parallel.
         # JobDiva Applicants and JobDiva Talent are now independent producers,
-        # each with its own SENTINEL, so they stream concurrently alongside Exa/Unipile/Dice.
+        # each with its own SENTINEL, so they stream concurrently alongside Exa/Dice.
         producers = []
         if applicants_selected:
             producers.append(asyncio.create_task(produce_jobdiva_applicants()))
@@ -2431,6 +2431,11 @@ class UnifiedCandidateSearch:
             ("Exa", self._search_exa),
         ]
         for ext_name, ext_method in external_order:
+            # LinkedIn sourcing is currently paused because this path uses
+            # Unipile. Ignore stale clients and saved criteria that still
+            # submit LinkedIn; LinkedIn-Exa remains a separate active source.
+            if ext_name == "LinkedIn":
+                continue
             if ext_name in criteria.sources:
                 producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
 

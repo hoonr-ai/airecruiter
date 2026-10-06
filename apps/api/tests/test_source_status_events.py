@@ -52,6 +52,23 @@ def test_jobagent_ok_status_carries_matched_count():
     assert status["criteria_unconfigured"] is False
 
 
+def test_stale_linkedin_source_selection_does_not_dispatch_unipile():
+    svc = UnifiedCandidateSearch()
+    state = {"calls": [], "full_returned": False}
+    _patch_service_for_orchestration(svc, state)
+    linkedin_calls = []
+
+    async def _unexpected_linkedin(criteria):
+        linkedin_calls.append(criteria)
+        raise AssertionError("Unipile must remain disabled")
+
+    svc._search_linkedin = _unexpected_linkedin
+    events = _drive(svc, _criteria(sources=["JobDiva-JobAgent", "LinkedIn"]))
+
+    assert linkedin_calls == []
+    assert "LinkedIn-Unipile" not in _statuses(events)
+
+
 def test_jobagent_zero_rows_reports_empty():
     svc = UnifiedCandidateSearch()
     state = {"calls": [], "full_returned": False}
@@ -210,41 +227,6 @@ def test_jobagent_partial_failure_waits_for_quick_phase():
     assert status["status"] == "failed"
     assert status["count"] == 20
     assert "incomplete" in status["reason"]
-
-
-def test_external_source_failure_reports_failed():
-    svc = UnifiedCandidateSearch()
-    state = {"calls": [], "full_returned": False}
-    _patch_service_for_orchestration(svc, state)
-
-    async def _broken_linkedin(criteria):
-        raise RuntimeError("unipile down")
-
-    svc._search_linkedin = _broken_linkedin
-
-    events = _drive(svc, _criteria(sources=["LinkedIn"]))
-
-    status = _statuses(events)["LinkedIn-Unipile"]
-    assert status["status"] == "failed"
-    assert "unipile down" not in status["reason"]
-    assert "RuntimeError" in status["reason"]
-
-
-def test_external_source_empty_reports_empty():
-    svc = UnifiedCandidateSearch()
-    state = {"calls": [], "full_returned": False}
-    _patch_service_for_orchestration(svc, state)
-
-    async def _empty_linkedin(criteria):
-        return {"candidates": [], "source_type": "LinkedIn-Unipile"}
-
-    svc._search_linkedin = _empty_linkedin
-
-    events = _drive(svc, _criteria(sources=["LinkedIn"]))
-
-    status = _statuses(events)["LinkedIn-Unipile"]
-    assert status["status"] == "empty"
-    assert status["count"] == 0
 
 
 def test_applicants_failure_reports_failed():

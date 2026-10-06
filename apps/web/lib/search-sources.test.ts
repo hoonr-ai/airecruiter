@@ -3,20 +3,28 @@ import { test } from "node:test";
 
 import {
   DEFAULT_SEARCH_SOURCES,
+  getEnabledSearchSourceIds,
   SEARCH_SOURCES_VERSION,
   restoreSavedSearchSources,
 } from "./search-sources.ts";
 
 // --- defaults ---------------------------------------------------------------
 
-test("defaults: both JobDiva pools, LinkedIn and Exa on; Dice off", () => {
+test("defaults: both JobDiva pools and Exa on; LinkedIn and Dice off", () => {
   assert.deepEqual(DEFAULT_SEARCH_SOURCES, {
     jobdiva_agent: true,
     jobdiva_talent: true,
-    linkedin: true,
+    linkedin: false,
     dice: false,
     exa: true,
   });
+});
+
+test("Unipile is excluded from submitted sources even if state says enabled", () => {
+  assert.deepEqual(
+    getEnabledSearchSourceIds({ ...DEFAULT_SEARCH_SOURCES, linkedin: true }),
+    ["jobdiva_agent", "jobdiva_talent", "exa"],
+  );
 });
 
 test("restore with nothing saved returns the defaults", () => {
@@ -24,6 +32,15 @@ test("restore with nothing saved returns the defaults", () => {
   assert.deepEqual(restoreSavedSearchSources(undefined, undefined), DEFAULT_SEARCH_SOURCES);
   assert.deepEqual(restoreSavedSearchSources("junk", undefined), DEFAULT_SEARCH_SOURCES);
   assert.deepEqual(restoreSavedSearchSources([true], undefined), DEFAULT_SEARCH_SOURCES);
+});
+
+test("a previously saved LinkedIn preference cannot re-enable Unipile", () => {
+  const out = restoreSavedSearchSources(
+    { linkedin: true, exa: true },
+    SEARCH_SOURCES_VERSION,
+  );
+  assert.equal(out.linkedin, false);
+  assert.equal(out.exa, true);
 });
 
 // --- Exa re-enable migration ----------------------------------------------------
@@ -101,7 +118,7 @@ test("non-boolean values are ignored", () => {
     { linkedin: "no", dice: 1, exa: null },
     SEARCH_SOURCES_VERSION,
   );
-  assert.equal(out.linkedin, true);
+  assert.equal(out.linkedin, false);
   assert.equal(out.dice, false);
   assert.equal(out.exa, true);
 });
