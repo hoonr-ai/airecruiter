@@ -285,6 +285,47 @@ async def get_live_report_health(user: UserIdentity = Depends(get_current_user))
         return {"healthy": False, "error": "PairBot service unavailable"}
 
 
+@router.get("/api/analytics/live-report/job/{jobdiva_id}")
+async def get_live_report_job_snapshot(
+    jobdiva_id: str,
+    reveal: bool = Query(default=False),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Fetch baseline snapshot of all candidates and launches for a specific JobDiva ID in one call."""
+    clean_jid = str(jobdiva_id).strip()
+    if not clean_jid:
+        raise HTTPException(status_code=400, detail="Invalid jobdiva_id parameter")
+
+    # Recruiter / Team Lead access check
+    if not user.is_admin:
+        accessible_ids = _get_user_accessible_jobdiva_ids(user)
+        if clean_jid not in accessible_ids:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied. You do not have access to job {clean_jid}.",
+            )
+
+    target_url = f"{_get_external_interview_api_url()}/api/analytics/live-report/job/{urllib.parse.quote(clean_jid)}"
+    headers = _get_pair_headers()
+    params = {"reveal": "true" if reveal else "false"}
+
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            resp = await client.get(target_url, headers=headers, params=params)
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail="Job not found")
+            if resp.status_code != 200:
+                logger.error(f"Failed to fetch job snapshot from PairBot: {resp.status_code} {resp.text}")
+                raise HTTPException(status_code=resp.status_code, detail="Failed to fetch job snapshot")
+            snapshot = resp.json()
+    except httpx.RequestError as e:
+        logger.error(f"Network error contacting PairBot job snapshot: {e}")
+        raise HTTPException(status_code=502, detail="Failed to connect to PairBot service")
+
+    # Augment candidates with local DNC status so DNC candidates are highlighted in red
+    return _augment_snapshot_with_dnc(snapshot)
+
+
 @router.get("/api/analytics/live-report/{bulk_id}")
 async def get_live_report_snapshot(
     bulk_id: str,

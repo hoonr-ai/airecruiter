@@ -567,6 +567,8 @@ export const api = {
     getHealth: () => req<any>(`/api/analytics/live-report/health`),
     getSnapshot: (bulkId: string, reveal = false, signal?: AbortSignal) =>
       req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`, { signal }),
+    getJobSnapshot: (jobdivaId: string, reveal = false, signal?: AbortSignal) =>
+      req<any>(`/api/analytics/live-report/job/${encodeURIComponent(jobdivaId)}${reveal ? "?reveal=true" : ""}`, { signal }),
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
