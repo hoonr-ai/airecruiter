@@ -17,6 +17,7 @@ from services.unified_candidate_search import (
     SearchCriteria,
     UnifiedCandidateSearch,
     _MAX_LOCATIONS,
+    _UNKNOWN_DISTANCE_SENTINEL,
 )
 
 
@@ -287,3 +288,103 @@ def test_jobdiva_multi_location_partial_failure_is_logged():
         if "failed" in str(call).lower()
     ]
     assert failure_calls, "_log_stage was not called for the failing location"
+
+
+# ---------------------------------------------------------------------------
+# _location_match_verdict — verdict precedence ordering (PR #763)
+#
+# Covers the four cases requested in Akarsh's review:
+#   1. hard-drop then soft-keep  → soft-keep wins
+#   2. soft-keep then hard-drop  → soft-keep wins
+#   3. two hard-drops            → closest distance wins
+#   4. soft-keep then in-radius  → in-radius wins (returned immediately)
+# ---------------------------------------------------------------------------
+
+def _make_criteria(*additional_locs):
+    """Build a two-or-more-location SearchCriteria for verdict tests."""
+    return SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        within_miles=25,
+        additional_locations=list(additional_locs),
+    )
+
+
+def _stub_verdicts(*sequence):
+    """Return a _single_location_match_verdict stub that replays a fixed
+    sequence of (ok, reason, distance) tuples in call order."""
+    iterator = iter(sequence)
+
+    def _stub(cand, crit):
+        return next(iterator)
+
+    return _stub
+
+
+def test_verdict_hard_drop_then_soft_keep_soft_keep_wins():
+    """Primary: hard-drop at 2900 mi. Additional: soft-keep (geocode_unavailable).
+    The soft-keep must win — the candidate may well be local."""
+    service = _service()
+    service._single_location_match_verdict = _stub_verdicts(
+        (False, "outside_radius_confirmed", 2900.0),  # primary → hard-drop
+        (False, "geocode_unavailable", _UNKNOWN_DISTANCE_SENTINEL),  # alt → soft-keep
+    )
+
+    criteria = _make_criteria(LocationEntry(value="Seattle, WA", within_miles=25))
+    ok, reason, distance = service._location_match_verdict({}, criteria)
+
+    assert ok is False
+    assert reason == "geocode_unavailable"
+    assert distance == _UNKNOWN_DISTANCE_SENTINEL
+
+
+def test_verdict_soft_keep_then_hard_drop_soft_keep_wins():
+    """Primary: soft-keep. Additional: confirmed hard-drop at 3000 mi.
+    The hard-drop must NOT overwrite the soft-keep regardless of order."""
+    service = _service()
+    service._single_location_match_verdict = _stub_verdicts(
+        (False, "geocode_unavailable", _UNKNOWN_DISTANCE_SENTINEL),  # primary → soft-keep
+        (False, "outside_radius_confirmed", 3000.0),  # alt → hard-drop
+    )
+
+    criteria = _make_criteria(LocationEntry(value="Dallas, TX", within_miles=25))
+    ok, reason, distance = service._location_match_verdict({}, criteria)
+
+    assert ok is False
+    assert reason == "geocode_unavailable"
+    assert distance == _UNKNOWN_DISTANCE_SENTINEL
+
+
+def test_verdict_two_hard_drops_closest_wins():
+    """Primary: outside at 2900 mi. Additional: outside at 200 mi.
+    Both are hard-drops; the shorter distance (200 mi) must be preferred."""
+    service = _service()
+    service._single_location_match_verdict = _stub_verdicts(
+        (False, "outside_radius_confirmed", 2900.0),  # primary
+        (False, "outside_radius_confirmed", 200.0),   # additional — closer
+    )
+
+    criteria = _make_criteria(LocationEntry(value="Chicago, IL", within_miles=25))
+    ok, reason, distance = service._location_match_verdict({}, criteria)
+
+    assert ok is False
+    assert reason == "outside_radius_confirmed"
+    assert distance == 200.0
+
+
+def test_verdict_soft_keep_then_in_radius_in_radius_wins():
+    """Primary: soft-keep. Additional: confirmed within-radius at 8 mi.
+    in-radius is returned immediately with the multi_loc_ prefix."""
+    service = _service()
+    service._single_location_match_verdict = _stub_verdicts(
+        (False, "geocode_unavailable", _UNKNOWN_DISTANCE_SENTINEL),  # primary → soft-keep
+        (True, "within_radius", 8.0),  # additional → in-radius
+    )
+
+    criteria = _make_criteria(LocationEntry(value="Bellevue, WA", within_miles=25))
+    ok, reason, distance = service._location_match_verdict({}, criteria)
+
+    assert ok is True
+    assert "multi_loc_" in reason
+    assert distance == 8.0
+

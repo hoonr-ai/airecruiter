@@ -4256,6 +4256,30 @@ class UnifiedCandidateSearch:
         # Try each additional location — build a temporary criteria with
         # the additional location's value and radius. Return the closest
         # match found across all locations.
+        #
+        # Precedence (high → low) — order-independent:
+        #   1. in-radius (returned immediately above/below)
+        #   2. soft-keep  (distance == _UNKNOWN_DISTANCE_SENTINEL)
+        #   3. confirmed hard-drop (real distance > radius)
+        # Within the same tier, pick the smallest distance.
+        # A soft-keep must NEVER be replaced by a hard-drop regardless of
+        # which location was evaluated first.
+        _SOFT_KEEP_REASONS = frozenset({
+            "geocode_unavailable",
+            "candidate_location_missing",
+            "broad_region_unverified",
+            "candidate_state_unknown",
+        })
+        _HARD_DROP_REASONS = frozenset({"outside_radius_confirmed", "state_mismatch"})
+
+        def _verdict_rank(r: str, d: Optional[float]) -> int:
+            """Lower rank = higher priority."""
+            if r not in _SOFT_KEEP_REASONS and r not in _HARD_DROP_REASONS:
+                return 0  # in-radius (shouldn't be best yet, but be safe)
+            if r in _SOFT_KEEP_REASONS or d == _UNKNOWN_DISTANCE_SENTINEL:
+                return 1  # soft-keep
+            return 2  # hard-drop
+
         best_ok, best_reason, best_distance = ok, reason, distance
         for loc_entry in additional:
             loc_value = str(loc_entry.value or "").strip()
@@ -4276,31 +4300,19 @@ class UnifiedCandidateSearch:
                                               "geocode_unavailable",
                                               "candidate_location_missing"):
                 return alt_ok, f"multi_loc_{alt_reason}", alt_distance
-            # When alt_distance is None the zip-index lookup failed for this
-            # location; we skip updating best so a soft-keep on another
-            # location (with a known distance) is preferred over an unknown one.
-            # This is intentional: known distances rank above unknowns.
-            if alt_distance is not None:
-                # If the alternative is a soft-keep (9999.0), it MUST win over a
-                # confirmed hard drop (e.g. 3000.0) from a previous location, because
-                # "unknown" means they might be a perfect match for this location.
-                from services.unified_candidate_search import _UNKNOWN_DISTANCE_SENTINEL
-                is_alt_soft_keep = (alt_distance == _UNKNOWN_DISTANCE_SENTINEL)
-                is_best_hard_drop = (
-                    best_distance is not None
-                    and best_distance != _UNKNOWN_DISTANCE_SENTINEL
-                    and best_reason in ("outside_radius_confirmed", "state_mismatch")
-                )
-
-                if best_distance is None or (
-                    is_alt_soft_keep and is_best_hard_drop
-                ) or (
-                    isinstance(alt_distance, (int, float))
-                    and isinstance(best_distance, (int, float))
-                    and not is_alt_soft_keep
-                    and alt_distance < best_distance
-                ):
-                    best_ok, best_reason, best_distance = alt_ok, alt_reason, alt_distance
+            # Skip results where the zip-index entirely failed (distance is None):
+            # we can't compare them against an existing soft-keep or hard-drop.
+            if alt_distance is None:
+                continue
+            # Promote to best if it is higher-priority, or same tier but closer.
+            alt_rank = _verdict_rank(alt_reason, alt_distance)
+            best_rank = _verdict_rank(best_reason, best_distance) if best_distance is not None else 3
+            if alt_rank < best_rank or (
+                alt_rank == best_rank
+                and alt_distance != _UNKNOWN_DISTANCE_SENTINEL
+                and (best_distance is None or alt_distance < best_distance)
+            ):
+                best_ok, best_reason, best_distance = alt_ok, alt_reason, alt_distance
 
         return best_ok, best_reason, best_distance
 
