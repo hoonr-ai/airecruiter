@@ -8,10 +8,9 @@ import {
   EyeOff,
   AlertTriangle,
 } from "lucide-react";
-import { api } from "@/lib/api";
-import { useLiveReportStream } from "@/hooks/use-live-report-stream";
+import { api, authFetch } from "@/lib/api";
 import { JobBlock } from "@/app/admin/live-report/JobBlock";
-import type { LaunchListItem, JobBlockData } from "@/app/admin/live-report/types";
+import type { LaunchListItem, JobBlockData, Snapshot, CandidateRow, Anomaly } from "@/app/admin/live-report/types";
 
 interface FeedItem {
   id: number;
@@ -37,11 +36,12 @@ export function JobLiveReportPanel({
   const [jobTitle, setJobTitle] = useState<string>(initialTitle || "");
   const [resolvedJobDivaId, setResolvedJobDivaId] = useState<string>(jobdivaId || "");
   const [launches, setLaunches] = useState<LaunchListItem[]>([]);
-  const [selectedBulkId, setSelectedBulkId] = useState<string | null>(null);
+  const [aggregatedSnapshot, setAggregatedSnapshot] = useState<Snapshot | null>(null);
   const [revealPii, setRevealPii] = useState<boolean>(false);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState<boolean>(true);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const feedIdCounterRef = useRef<number>(0);
 
   // Push into feed
@@ -63,21 +63,6 @@ export function JobLiveReportPanel({
     },
     []
   );
-
-  // SSE Stream
-  const activityEventRef = useRef<((event: any) => void) | null>(null);
-
-  const {
-    snapshot,
-    isLoading: isSnapshotLoading,
-    isConnected,
-    error: snapshotError,
-    refreshSnapshot,
-  } = useLiveReportStream({
-    bulkId: selectedBulkId,
-    revealPii,
-    onActivityEvent: (evt) => activityEventRef.current?.(evt),
-  });
 
   const handleActivityEvent = useCallback(
     (event: {
@@ -104,15 +89,126 @@ export function JobLiveReportPanel({
       const action = event.type.replace(/_/g, " ");
       const statusText = isFailed ? " [Failed]" : isPassed ? " [Passed]" : "";
       pushFeed(`${subject}: ${action}${statusText}`, isFailed, tone);
+
+      // Mutate candidate in real-time in aggregatedSnapshot
+      setAggregatedSnapshot((prev) => {
+        if (!prev || !prev.jobs) return prev;
+        const updatedJobs = prev.jobs.map((job) => ({
+          ...job,
+          candidates: job.candidates.map((cand) => {
+            if (cand.interview_id === event.interviewId) {
+              const updatedPhase = event.phase || cand.phase;
+              const isDone = updatedPhase === "completed" || event.type === "evaluation_completed";
+              return {
+                ...cand,
+                phase: updatedPhase,
+                outreach_status: event.status || cand.outreach_status,
+                call_outcome: isDone ? "completed" : cand.call_outcome,
+                terminal_reason: (event.terminalReason as any) || (event.status === "failed" ? "outreach_failed" : event.status === "passed" ? "passed" : cand.terminal_reason),
+              };
+            }
+            return cand;
+          }),
+        }));
+        return { ...prev, jobs: updatedJobs };
+      });
     },
     [pushFeed]
   );
 
-  useEffect(() => {
-    activityEventRef.current = handleActivityEvent;
-  }, [handleActivityEvent]);
+  const activityEventRef = useRef(handleActivityEvent);
+  activityEventRef.current = handleActivityEvent;
 
-  // Load launches for this job
+  // Aggregate helper across multiple launch snapshots
+  const mergeSnapshots = useCallback((snapshots: Snapshot[], jdId: string): Snapshot => {
+    const candidateMap = new Map<number, CandidateRow>();
+    const anomalyList: Anomaly[] = [];
+    const seenAnomalyKeys = new Set<string>();
+
+    for (const snap of snapshots) {
+      if (!snap) continue;
+      for (const a of snap.anomalies || []) {
+        const k = `${a.kind}_${a.interview_id}`;
+        if (!seenAnomalyKeys.has(k)) {
+          seenAnomalyKeys.add(k);
+          anomalyList.push(a);
+        }
+      }
+
+      for (const j of snap.jobs || []) {
+        for (const c of j.candidates || []) {
+          if (!candidateMap.has(c.interview_id)) {
+            candidateMap.set(c.interview_id, c);
+          } else {
+            // Merge events or keep latest non-empty status
+            const existing = candidateMap.get(c.interview_id)!;
+            candidateMap.set(c.interview_id, {
+              ...existing,
+              ...c,
+              events: [...(existing.events || []), ...(c.events || [])].filter(
+                (evt, idx, arr) => arr.findIndex((x) => x.ts === evt.ts && x.type === evt.type) === idx
+              ),
+            });
+          }
+        }
+      }
+    }
+
+    const aggregatedCandidates = Array.from(candidateMap.values());
+    const primaryTitle = snapshots[0]?.jobs?.[0]?.title || jobTitle || "Untitled job";
+    const primaryCustomer = snapshots[0]?.jobs?.[0]?.customer_name || null;
+
+    return {
+      bulk_id: snapshots.map((s) => s.bulk_id).join(","),
+      created_at: snapshots[0]?.created_at || null,
+      state: snapshots.some((s) => s.state === "live") ? "live" : "archived",
+      jobs: [
+        {
+          bulk_jd_id: null,
+          jobdiva_id: jdId,
+          title: primaryTitle,
+          customer_name: primaryCustomer,
+          candidates: aggregatedCandidates,
+        },
+      ],
+      anomalies: anomalyList,
+    };
+  }, [jobTitle]);
+
+  // Load and aggregate all launches for this job
+  const fetchAllLaunchSnapshots = useCallback(
+    async (launchList: LaunchListItem[], jdId: string, mask: boolean) => {
+      if (!launchList || launchList.length === 0) {
+        setAggregatedSnapshot(null);
+        return;
+      }
+      setIsRefreshing(true);
+      try {
+        const snapshotPromises = launchList.map((l) =>
+          api.liveReport.getSnapshot(l.bulk_id, mask).catch((e: any) => {
+            console.warn(`Failed to fetch snapshot for launch ${l.bulk_id}:`, e);
+            return null;
+          })
+        );
+        const results = await Promise.all(snapshotPromises);
+        const validSnapshots: Snapshot[] = results.filter((s): s is Snapshot => Boolean(s));
+        if (validSnapshots.length > 0) {
+          setAggregatedSnapshot(mergeSnapshots(validSnapshots, jdId));
+        } else {
+          setAggregatedSnapshot(null);
+        }
+        setError(null);
+      } catch (err: any) {
+        console.error("Failed to aggregate launches for job live report:", err);
+        setError(err?.message || "Failed to load live report data");
+      } finally {
+        setIsRefreshing(false);
+      }
+    },
+    [mergeSnapshots]
+  );
+
+  // Initialize job and fetch all launches
   useEffect(() => {
     let isCancelled = false;
 
@@ -141,27 +237,32 @@ export function JobLiveReportPanel({
         if (isCancelled) return;
         setResolvedJobDivaId(jdId);
 
-        // Fetch launches for this jobdiva_id
+        // Fetch all launches for this jobdiva_id
         const launchData = await api.liveReport.getLaunches({
           jobdiva_id: jdId,
-          limit: 20,
+          limit: 100,
         });
 
         if (isCancelled) return;
-        const launchList: LaunchListItem[] = launchData?.launches || [];
+        let launchList: LaunchListItem[] = launchData?.launches || [];
+
+        if (launchList.length === 0 && jdId !== jobId) {
+          const fallback = await api.liveReport.getLaunches({
+            jobdiva_id: jobId,
+            limit: 100,
+          });
+          if (fallback?.launches?.length > 0) {
+            launchList = fallback.launches;
+          }
+        }
+
+        if (isCancelled) return;
         setLaunches(launchList);
 
         if (launchList.length > 0) {
-          setSelectedBulkId(launchList[0].bulk_id);
-        } else if (jdId !== jobId) {
-          const fallback = await api.liveReport.getLaunches({
-            jobdiva_id: jobId,
-            limit: 20,
-          });
-          if (!isCancelled && fallback?.launches?.length > 0) {
-            setLaunches(fallback.launches);
-            setSelectedBulkId(fallback.launches[0].bulk_id);
-          }
+          await fetchAllLaunchSnapshots(launchList, jdId, revealPii);
+        } else {
+          setAggregatedSnapshot(null);
         }
       } catch (err: any) {
         if (!isCancelled) {
@@ -177,47 +278,126 @@ export function JobLiveReportPanel({
     return () => {
       isCancelled = true;
     };
-  }, [jobId, jobdivaId]);
+  }, [jobId, jobdivaId, revealPii, fetchAllLaunchSnapshots]);
 
-  // Scoped Job
+  // Connect SSE streams for all launches
+  const [streamConnectedCount, setStreamConnectedCount] = useState<number>(0);
+  const isConnected = streamConnectedCount > 0;
+
+  useEffect(() => {
+    if (!launches || launches.length === 0 || typeof window === "undefined") {
+      setStreamConnectedCount(0);
+      return;
+    }
+
+    const abortControllers: AbortController[] = [];
+
+    launches.forEach((launch) => {
+      const ac = new AbortController();
+      abortControllers.push(ac);
+
+      const streamUrl = api.liveReport.streamUrl(launch.bulk_id);
+      authFetch(streamUrl, {
+        signal: ac.signal,
+        headers: { Accept: "text/event-stream" },
+      })
+        .then(async (response) => {
+          if (!response.ok || !response.body) return;
+          setStreamConnectedCount((prev) => prev + 1);
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          const handleRawChunk = (rawEvent: string) => {
+            const trimmed = rawEvent.trim();
+            if (!trimmed || trimmed.startsWith(":")) return;
+            const lines = trimmed.split("\n");
+            const dataLines = lines
+              .filter((l) => l.startsWith("data:"))
+              .map((l) => l.slice(5).trim());
+            if (dataLines.length === 0) return;
+            const jsonStr = dataLines.join("");
+            try {
+              const payload = JSON.parse(jsonStr);
+              if (payload.type === "connected") return;
+              const interviewId = payload.interview_id ?? payload.interviewId;
+              const eventType = payload.event_type ?? payload.type;
+              if (interviewId && eventType && eventType !== "connected") {
+                activityEventRef.current({
+                  interviewId: Number(interviewId),
+                  type: eventType,
+                  subtype: payload.subtype ?? null,
+                  phase: payload.phase ?? null,
+                  status: payload.status ?? null,
+                  terminalReason: payload.terminal_reason ?? payload.terminalReason ?? null,
+                });
+              }
+            } catch (err) {
+              // Ignore unparseable SSE
+            }
+          };
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let sepIdx: number;
+            while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+              const raw = buffer.slice(0, sepIdx);
+              buffer = buffer.slice(sepIdx + 2);
+              handleRawChunk(raw);
+            }
+          }
+          if (buffer.trim()) handleRawChunk(buffer);
+        })
+        .catch(() => {
+          // Expected when aborted or connection ends
+        })
+        .finally(() => {
+          setStreamConnectedCount((prev) => Math.max(0, prev - 1));
+        });
+    });
+
+    return () => {
+      abortControllers.forEach((ac) => ac.abort());
+    };
+  }, [launches]);
+
+  // Tab visibility reconciliation
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && launches.length > 0) {
+        fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, revealPii);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [launches, resolvedJobDivaId, jobId, revealPii, fetchAllLaunchSnapshots]);
+
+  // Scoped Job from aggregatedSnapshot
   const scopedJob: JobBlockData | null = useMemo(() => {
-    if (!snapshot?.jobs || snapshot.jobs.length === 0) return null;
-    const cleanJdId = (resolvedJobDivaId || jobId || "").trim().toLowerCase();
-
-    const matched = snapshot.jobs.find(
-      (j) =>
-        String(j.jobdiva_id || "").trim().toLowerCase() === cleanJdId ||
-        String(j.bulk_jd_id || "").trim().toLowerCase() === cleanJdId
-    );
-    if (matched) return matched;
-
-    if (snapshot.jobs.length === 1) return snapshot.jobs[0];
-    return null;
-  }, [snapshot, resolvedJobDivaId, jobId]);
+    if (!aggregatedSnapshot?.jobs || aggregatedSnapshot.jobs.length === 0) return null;
+    return aggregatedSnapshot.jobs[0];
+  }, [aggregatedSnapshot]);
 
   // Scoped Anomalies
   const scopedAnomalies = useMemo(() => {
-    if (!snapshot?.anomalies || !scopedJob) return [];
-    const jobCandidateInterviewIds = new Set(
-      scopedJob.candidates.map((c) => c.interview_id)
-    );
-    return snapshot.anomalies.filter((a) =>
-      jobCandidateInterviewIds.has(a.interview_id)
-    );
-  }, [snapshot?.anomalies, scopedJob]);
+    return aggregatedSnapshot?.anomalies || [];
+  }, [aggregatedSnapshot]);
 
   // Memoize candidate name resolution map
   const candidateNameMap = useMemo(() => {
     const map = new Map<number, string>();
-    for (const j of snapshot?.jobs || []) {
-      for (const c of j.candidates || []) {
-        if (c.interview_id && c.name) {
-          map.set(c.interview_id, c.name);
-        }
+    for (const c of scopedJob?.candidates || []) {
+      if (c.interview_id && c.name) {
+        map.set(c.interview_id, c.name);
       }
     }
     return map;
-  }, [snapshot?.jobs]);
+  }, [scopedJob]);
+
+  const totalCandidatesCount = scopedJob?.candidates?.length || 0;
 
   return (
     <div className="flex flex-col gap-4 w-full">
@@ -241,23 +421,14 @@ export function JobLiveReportPanel({
           <span className="text-xs text-slate-500 font-medium">
             Job <span className="font-mono text-slate-800 font-semibold">#{resolvedJobDivaId || jobId}</span>
           </span>
+          {launches.length > 0 && (
+            <span className="text-xs text-slate-400 font-medium">
+              ({launches.length} {launches.length === 1 ? "launch" : "launches"} aggregated • {totalCandidatesCount} total candidates)
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2.5">
-          {launches.length > 1 && (
-            <select
-              value={selectedBulkId || ""}
-              onChange={(e) => setSelectedBulkId(e.target.value)}
-              className="text-xs font-medium bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 shadow-2xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-            >
-              {launches.map((l) => (
-                <option key={l.bulk_id} value={l.bulk_id}>
-                  Launch {l.bulk_id.slice(0, 8)} ({l.total_candidates} candidates)
-                </option>
-              ))}
-            </select>
-          )}
-
           <button
             type="button"
             onClick={() => setRevealPii((prev) => !prev)}
@@ -269,12 +440,12 @@ export function JobLiveReportPanel({
 
           <button
             type="button"
-            onClick={() => refreshSnapshot()}
-            disabled={isSnapshotLoading}
+            onClick={() => fetchAllLaunchSnapshots(launches, resolvedJobDivaId || jobId, revealPii)}
+            disabled={isRefreshing}
             className="p-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs cursor-pointer"
-            title="Refresh Snapshot"
+            title="Refresh All Launches"
           >
-            <RefreshCw className={`h-4 w-4 ${isSnapshotLoading ? "animate-spin" : ""}`} />
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </button>
         </div>
       </div>
@@ -293,7 +464,7 @@ export function JobLiveReportPanel({
             <div className="py-16 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl bg-white">
               Loading live report for this job...
             </div>
-          ) : !selectedBulkId || launches.length === 0 ? (
+          ) : launches.length === 0 ? (
             <div className="py-16 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl bg-white">
               No live telemetry launch recorded for Job #{resolvedJobDivaId || jobId} yet.
             </div>
