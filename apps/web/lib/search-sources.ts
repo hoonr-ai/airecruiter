@@ -36,6 +36,12 @@ export const SEARCH_SOURCE_IDS: readonly SearchSourceId[] = [
   "exa",
 ];
 
+// TODO(re-enable Unipile, #761): remove this pause after LinkedIn sourcing is
+// approved for reactivation. Keep one frontend list for restore and submit.
+export const DISABLED_SEARCH_SOURCE_IDS: ReadonlySet<SearchSourceId> = new Set([
+  "linkedin",
+]);
+
 export const SEARCH_SOURCES_VERSION = 2;
 
 /**
@@ -92,11 +98,11 @@ export function restoreSavedSearchSources(
   }
   // Older drafts may have persisted LinkedIn as enabled. Do not let restoring
   // them silently restart Unipile while this provider is paused.
-  out.linkedin = false;
+  for (const id of DISABLED_SEARCH_SOURCE_IDS) out[id] = false;
   return out;
 }
 
 /** Source IDs allowed to be submitted to a new search. */
 export function getEnabledSearchSourceIds(sources: Readonly<SearchSources>): SearchSourceId[] {
-  return SEARCH_SOURCE_IDS.filter((id) => id !== "linkedin" && sources[id]);
+  return SEARCH_SOURCE_IDS.filter((id) => !DISABLED_SEARCH_SOURCE_IDS.has(id) && sources[id]);
 }

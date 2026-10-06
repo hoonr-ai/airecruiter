@@ -14,6 +14,7 @@ import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
 import {
   DEFAULT_SEARCH_SOURCES,
+  DISABLED_SEARCH_SOURCE_IDS,
   getEnabledSearchSourceIds,
   SEARCH_SOURCES_VERSION,
   restoreSavedSearchSources,
@@ -352,7 +353,7 @@ function isRecruiterSource(source: string | null | undefined): boolean {
 // events by the unified search backend.
 type SourceStatusInfo = {
   source: string;
-  status: "ok" | "empty" | "failed";
+  status: "ok" | "empty" | "failed" | "disabled";
   count: number;
   reason?: string;
   criteria_unconfigured?: boolean;
@@ -1044,9 +1045,9 @@ function NewJobPageContent() {
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
   // switchboard now. The two JobDiva talent pools and Exa are pre-ticked;
-  // LinkedIn-Unipile is temporarily disabled. Exa had been opt-in since the
-  // April QA punch list, which in practice meant
-  // it never ran — re-enabled 2026-09). Dice stays opt-in and hidden.
+  // LinkedIn-Unipile stays off while its provider is paused. Exa was re-enabled
+  // in 2026-09 after the April QA default-off behavior suppressed its searches.
+  // Dice stays opt-in and hidden.
   // Defaults + saved-draft migration live in lib/search-sources.ts.
   //
   // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
@@ -9240,7 +9241,7 @@ function NewJobPageContent() {
                       // default; untick one to skip that search entirely.
                       { id: 'jobdiva_agent', label: 'JobDiva Agent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false, hint: "JobDiva's AI matcher, using the search criteria set on this req inside JobDiva" },
                       { id: 'jobdiva_talent', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#8b5cf6]" />, disabled: false, hint: "JobDiva Talent Search, using the Boolean string generated below" },
-                      { id: 'linkedin', label: 'LinkedIn (temporarily disabled)', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: true, hint: "LinkedIn sourcing through Unipile is temporarily paused" },
+                      { id: 'linkedin', label: 'LinkedIn (temporarily disabled)', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: DISABLED_SEARCH_SOURCE_IDS.has('linkedin'), hint: "LinkedIn sourcing through Unipile is temporarily paused" },
                       // Dice source hidden from the sourcing switchboard. Backend
                       // wiring (`Dice` source string, `_search_dice`) is left intact
                       // so re-enabling is a one-line revert; the results chip below

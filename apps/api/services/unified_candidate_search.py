@@ -310,6 +310,7 @@ _MAX_LOCATIONS: int = 10
 # Unipile is paused for new sourcing searches. Keep its implementation and
 # profile-enrichment path available for focused tests and a future re-enable.
 LINKEDIN_UNIPILE_SEARCH_ENABLED = False
+DISABLED_EXTERNAL_SOURCES = frozenset({"LinkedIn"})
 
 
 class SearchCriteria(BaseModel):
@@ -2433,14 +2434,34 @@ class UnifiedCandidateSearch:
             ("Dice", self._search_dice),
             ("Exa", self._search_exa),
         ]
+        disabled_source_events = []
         for ext_name, ext_method in external_order:
             # LinkedIn sourcing is currently paused because this path uses
             # Unipile. Ignore stale clients and saved criteria that still
             # submit LinkedIn; LinkedIn-Exa remains a separate active source.
-            if ext_name == "LinkedIn" and not LINKEDIN_UNIPILE_SEARCH_ENABLED:
+            if (
+                ext_name in criteria.sources
+                and ext_name in DISABLED_EXTERNAL_SOURCES
+                and not LINKEDIN_UNIPILE_SEARCH_ENABLED
+            ):
+                label = {"LinkedIn": "LinkedIn-Unipile"}.get(ext_name, ext_name)
+                disabled_source_events.append({
+                    "type": "source_status",
+                    "data": {
+                        "source": label,
+                        "status": "disabled",
+                        "count": 0,
+                        "reason": f"{label} sourcing is temporarily disabled.",
+                    },
+                })
                 continue
             if ext_name in criteria.sources:
                 producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
+
+        # Surface disabled sources even when no provider producers remain
+        # (for example, a stale client submitting only LinkedIn).
+        for event in disabled_source_events:
+            await queue.put(event)
 
         # Exa Research API Pass B — depends on Pass A (`produce_external("Exa")`),
         # so only schedule when both the agent is enabled AND Exa is selected.
@@ -2469,7 +2490,7 @@ class UnifiedCandidateSearch:
         hydration_targets: List[Dict[str, Any]] = []
         hydration_task: Optional[asyncio.Task] = None
         try:
-            while active > 0:
+            while active > 0 or not queue.empty():
                 event = await queue.get()
                 if event is SENTINEL:
                     active -= 1
