@@ -135,13 +135,24 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
         if code and _is_plausible_city(cand.group(1), code):
             return cand.group(1).strip(), code
 
-    # 4. "Greater <City> Area" / "<City>, <State> Area" (LinkedIn header)
+    # 4. "Greater <City> Area" / "<City> Bay Area" / "<City> Metro Area" (LinkedIn header)
+    # When a state code IS available (e.g. "Atlanta, Georgia Area") we return
+    # (city, code) as usual.  When the match is a pure regional label with no
+    # resolvable state (e.g. "San Francisco Bay Area", "Greater Chicago Area")
+    # we return (full_area_label, "") so the caller can display the original
+    # string rather than silently stripping "Bay Area" and showing only "San
+    # Francisco".
     for cand in _AREA_RE.finditer(head):
         city = cand.group(1).strip()
         state_token = (cand.group(2) or "").strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_token) if state_token else ""
         if city and _is_plausible_city(city, code or None):
-            return city, code or ""
+            if code:
+                # Precise match: city + resolved state code.
+                return city, code
+            # Broad-region match: preserve the full area label for display.
+            area_label = cand.group(0).strip()
+            return area_label, ""
 
     # 5. Delegate to the broader helper (used by Step-5 elsewhere) and split.
     full = extract_us_location_from_text(text)
@@ -507,15 +518,25 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
     # city/state everywhere downstream.
     extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
     if extracted_city or extracted_state:
-        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
+        if extracted_state:
+            # Precise city + state: store as "City, ST".
+            extracted_location = f"{extracted_city}, {extracted_state}"
+            city_for_field = extracted_city
+        else:
+            # Broad region (e.g. "San Francisco Bay Area"): the area label IS
+            # the location — display it as-is so recruiters see the original
+            # LinkedIn string rather than a bare city with no context.
+            extracted_location = extracted_city
+            city_for_field = ""
     else:
         extracted_location = extract_us_location_from_text(f"{title}\n{highlights_text}")
+        city_for_field = ""
 
     return {
         "firstName": first_name,
         "lastName": last_name,
         "email": "",
-        "city": extracted_city,
+        "city": city_for_field,
         "state": extracted_state,
         "location": extracted_location,
         "title": title,
