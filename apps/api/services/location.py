@@ -291,8 +291,8 @@ _RE_BASED_LOCATED = re.compile(
 # Tech brand names, tools, and common proper-noun words that the City regex
 # can mistakenly capture from headline / resume text
 # (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
-# Any City, ST match whose city token is in this set is rejected so we fall
-# through to the next extraction pattern. Lower-cased; comparisons use .lower().
+# The index is authoritative for known cities; these heuristics also protect
+# locations absent from or aliased differently in the offline index.
 _NON_PLACE_TOKENS: frozenset = frozenset({
     # CRM / cloud platforms
     "salesforce", "servicenow", "workday", "oracle", "sap", "dynamics",
@@ -312,43 +312,88 @@ _NON_PLACE_TOKENS: frozenset = frozenset({
     "scrum", "agile", "itil", "cobit", "togaf",
     # Misc proper nouns that look like city names but are never places
     "linkedin", "github", "gitlab", "jira", "confluence", "slack",
+    # Bio-lab / life-sciences software and testing tools. These appear in
+    # resume skill/software sections and get mis-parsed as city names when
+    # followed by a comma-separated state abbreviation (e.g. "Parasoft, CA",
+    # "SoftMaxPro, MS"). None of these are US place names.
+    "parasoft", "softmaxpro", "graphpad", "graphpadprism",
+    "imagej", "imagepro", "facsdiva", "flowjo", "cellquest", "kaluza",
+    "modfit", "winnonlin", "nonmem", "simcyp", "gastroplus",
+    "certara", "pksolver", "bioanalytical",
+    # Additional cloud / devops tools
+    "appdynamics", "dynatrace", "nagios", "zabbix", "pagerduty",
+})
+
+
+# Compiled once at import time for the CamelCase brand guard below.
+_CAMEL_CASE_RE = re.compile(r"[a-z][A-Z]")
+
+_CANADIAN_PROVINCE_CODES = frozenset({
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON",
+    "PE", "QC", "SK", "YT",
 })
 
 
 def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
     """Reject brand/tool names and bare two-letter initials as a city token.
-
-    Shared by every caller of ``extract_us_location_from_text`` and by
-    Exa's own highlight parser (``exa_service._extract_city_from_highlights``)
-    so "Salesforce, MS" and "PS, PR"-style resume initials are rejected the
-    same way regardless of which provider's text is being scanned. Real
-    two-letter city names are rare and title/mixed-case (e.g. "La Mesa"),
-    so only all-uppercase two-letter fragments are rejected here.
+    Use the offline city index as positive evidence, then heuristics for misses.
+    A missing index entry alone is not enough to reject a real city.
     """
     token = value.strip()
     if not token:
         return False
-    # The offline city/ZIP index is authoritative when available. This avoids
-    # rejecting real place names that collide with brand/tool words (Spring,
-    # Oracle, Cassandra) or arrive in uppercase CRM exports.
+        
+    state_upper = str(state or "").upper()
+    
+    # Stable explicit allowlist for abbreviations / non-US cities
+    if token == "LA" and state_upper == "CA":
+        return True
+    if token == "DC" and state_upper == "DC":
+        return True
+
+    # Primary gate: offline zip/city index
     try:
-        from services.zip_index import is_known_city
-        if is_known_city(token, state):
+        from services.zip_index import is_known_city, _load
+        if not _load():
+            # Treat empty/unavailable index like an exception (fall through to heuristics)
+            raise RuntimeError("Zip index is unavailable")
+            
+        # Normalise common abbreviations before lookup
+        lookup_token = token
+        token_lower = token.lower()
+        if token_lower.startswith("st. "):
+            lookup_token = "Saint " + token[4:]
+        elif token_lower.startswith("ft. "):
+            lookup_token = "Fort " + token[4:]
+            
+        if is_known_city(lookup_token, state):
+            return True
+            
+        if state_upper in _CANADIAN_PROVINCE_CODES:
+            # The ZIP index is US-only; apply the false-positive guards before
+            # accepting a city paired with a Canadian province.
+            if token_lower in _NON_PLACE_TOKENS or _CAMEL_CASE_RE.search(token):
+                return False
+            return True
+
+        # Broad regions are not represented in the ZIP index.
+        if state and (token_lower.endswith(" area") or token_lower.endswith(" metroplex")):
             return True
     except Exception:
         pass
-    # LinkedIn/CRM exports commonly abbreviate Los Angeles as "LA". Keep
-    # this only when paired with California so the two-letter false-city
-    # guard still rejects fragments such as "MS, MS" and "PS, PR".
-    if token == "LA" and str(state or "").upper() == "CA":
-        return True
+
+    # Fallback heuristics (state-less path or index unavailable)
     if token.lower() in _NON_PLACE_TOKENS:
         return False
-    if re.fullmatch(r"[A-Z]{2}", token):
-        # The District of Columbia is often exported as "DC, DC".
-        if token == state and token == "DC":
-            return True
+        
+    # Prevent CamelCase brands ("SoftMaxPro"), but allow valid prefixes ("McKinney", "DeKalb")
+    test_token = re.sub(r"\b(Mc|Mac|De|La|Di|Le)([A-Z])", r"\1 \2", token, flags=re.IGNORECASE)
+    if _CAMEL_CASE_RE.search(test_token):
         return False
+        
+    if re.fullmatch(r"[A-Z]{2}", token):
+        return False
+        
     return True
 
 

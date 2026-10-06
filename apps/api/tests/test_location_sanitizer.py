@@ -15,6 +15,7 @@ import pytest  # noqa: E402
 
 from services.location import (  # noqa: E402
     extract_us_locations_from_text,
+    is_plausible_city_token,
     sanitize_candidate_location,
 )
 from services.sourced_candidates_storage import _clean_location_value  # noqa: E402
@@ -103,8 +104,18 @@ def test_real_places_pass_through_unchanged(value):
     "Salesforce, MS",
     "PS, PR",
     "Remote, Salesforce, MS",
+    # Bio-lab software names mis-parsed as cities (QA-reported)
+    "Parasoft, CA",
+    "SoftMaxPro, MS",
+    # CamelCase brand names that are never US places
+    "ServiceNow, CA",
+    "PowerBI, TX",
+    "FlowJo, CA",
+    "FACSDiva, NY",
+    "GraphPad, CA",
 ])
 def test_false_city_state_values_are_blank_in_shared_display_sanitizer(value):
+    """Brand/tool names must not be retained as candidate city strings."""
     assert sanitize_candidate_location(value) == ""
 
 
@@ -119,9 +130,69 @@ def test_real_city_state_values_survive_shared_display_sanitizer(value):
 
 @pytest.mark.parametrize("value", [
     "Spring, TX", "Oracle, AZ", "Cassandra, PA", "DC, DC", "LA, CA",
+    # Mc* cities are real places — must not be blocked by the CamelCase guard
+    "McKinney, TX", "McAllen, TX",
 ])
 def test_real_cities_that_collide_with_denylist_or_initials_survive(value):
     assert sanitize_candidate_location(value) == value
+
+
+def test_empty_zip_index_uses_fallback_heuristics(monkeypatch):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {})
+    assert is_plausible_city_token("New Town", "TX")
+    assert not is_plausible_city_token("Parasoft", "CA")
+
+
+def test_loaded_index_miss_uses_fallback_instead_of_rejecting_city(monkeypatch):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {"90210": ["Beverly Hills", "CA", 0, 0]})
+    monkeypatch.setattr(zip_index, "is_known_city", lambda *_args: False)
+    assert is_plausible_city_token("New Town", "TX")
+    assert not is_plausible_city_token("Parasoft", "CA")
+
+
+@pytest.mark.parametrize("token,state,expected", [
+    ("Parasoft", "ON", False),
+    ("Dynatrace", "NS", False),
+    ("Ajax", "ON", True),
+])
+def test_canadian_city_tokens_apply_false_positive_guards(monkeypatch, token, state, expected):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {"90210": ["Beverly Hills", "CA", 0, 0]})
+    monkeypatch.setattr(zip_index, "is_known_city", lambda *_args: False)
+    assert is_plausible_city_token(token, state) is expected
+
+
+@pytest.mark.parametrize("token", ["St. Louis", "Ft. Worth"])
+def test_common_city_abbreviations_are_normalized_for_index_lookup(monkeypatch, token):
+    import services.zip_index as zip_index
+
+    looked_up = []
+    monkeypatch.setattr(zip_index, "_load", lambda: {"90210": ["Beverly Hills", "CA", 0, 0]})
+
+    def known_city(city, _state):
+        looked_up.append(city)
+        return city in {"Saint Louis", "Fort Worth"}
+
+    monkeypatch.setattr(zip_index, "is_known_city", known_city)
+    assert is_plausible_city_token(token, "MO" if token.startswith("St.") else "TX")
+    assert looked_up == ["Saint Louis" if token.startswith("St.") else "Fort Worth"]
+
+
+@pytest.mark.parametrize("token", ["McKinney", "McAllen", "DeKalb", "LaGrange"])
+def test_real_city_prefixes_survive_when_zip_index_is_unavailable(monkeypatch, token):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {})
+    assert is_plausible_city_token(token, "TX")
+
+
+def test_state_less_phoenix_is_not_in_false_place_denylist():
+    assert is_plausible_city_token("Phoenix")
 
 
 def test_empty_and_none_inputs():
