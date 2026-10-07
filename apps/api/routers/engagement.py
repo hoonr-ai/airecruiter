@@ -1217,17 +1217,21 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             job_t = _clean_job_title_for_intro(raw_title_str)
             raw_loc_str = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
             job_l = _clean_location_for_intro(raw_loc_str)
-            if not raw_company_intro.strip():
+            article = "an" if (job_t and job_t[0].lower() in "aeiou") else "a"
+            is_legacy_default = any(phrase in raw_company_intro for phrase in ["preliminary evaluation process", "good fit for the role", "8-12 minutes"])
+            if not raw_company_intro.strip() or is_legacy_default:
                 raw_company_intro = (
                     f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
-                    f"We are helping our client recruit for a {job_t} in {job_l}, and you seem to be a good fit for the role. "
-                    f"Please note that conversation may be recorded for verification and quality purposes. "
-                    f"Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+                    f"We are helping our client recruit for {article} {job_t} in {job_l}, and you have been shortlisted for this role. "
+                    f"Please note that this conversation may be recorded for verification and quality purposes. "
+                    f"Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?"
                 )
             else:
+                raw_company_intro = re.sub(r'\{\{\s*article\s*\}\}|\{\s*article\s*\}', article, raw_company_intro, flags=re.IGNORECASE)
                 raw_company_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_t, raw_company_intro, flags=re.IGNORECASE)
                 raw_company_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_l, raw_company_intro, flags=re.IGNORECASE)
                 raw_company_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = re.sub(r'\{\{\s*(?:candidate_name|candidate name|name)\s*\}\}|\{\s*(?:candidate_name|candidate name|name)\s*\}', '{{candidate name}}', raw_company_intro, flags=re.IGNORECASE)
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {

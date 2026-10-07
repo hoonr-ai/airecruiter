@@ -200,9 +200,9 @@ async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(g
         if not (data.get("bot_introduction") or "").strip():
             data["bot_introduction"] = (
                 f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
-                f"We are helping our client recruit for a {{{{job_title}}}} in {{{{job_location}}}}, "
-                f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
-                f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+                f"We are helping our client recruit for {{{{article}}}} {{{{job_title}}}} in {{{{job_location}}}}, "
+                f"and you have been shortlisted for this role. Please note that this conversation may be recorded "
+                f"for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?"
             )
 
         if not data.get("template_screen_questions"):
@@ -958,18 +958,22 @@ async def _create_campaign_job(
     )
     job_location_str = _clean_location_for_intro(raw_loc_str)
 
-    if not raw_intro.strip():
+    article = "an" if (job_title_str and job_title_str[0].lower() in "aeiou") else "a"
+    is_legacy_default = any(phrase in raw_intro for phrase in ["preliminary evaluation process", "good fit for the role", "8-12 minutes"])
+    if not raw_intro.strip() or is_legacy_default:
         raw_intro = (
             f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
-            f"We are helping our client recruit for a {job_title_str} in {job_location_str}, "
-            f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
-            f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+            f"We are helping our client recruit for {article} {job_title_str} in {job_location_str}, "
+            f"and you have been shortlisted for this role. Please note that this conversation may be recorded "
+            f"for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?"
         )
     else:
         import re
+        raw_intro = re.sub(r'\{\{\s*article\s*\}\}|\{\s*article\s*\}', article, raw_intro, flags=re.IGNORECASE)
         raw_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_title_str, raw_intro, flags=re.IGNORECASE)
         raw_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_location_str, raw_intro, flags=re.IGNORECASE)
         raw_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_intro, flags=re.IGNORECASE)
+        raw_intro = re.sub(r'\{\{\s*(?:candidate_name|candidate name|name)\s*\}\}|\{\s*(?:candidate_name|candidate name|name)\s*\}', '{{candidate name}}', raw_intro, flags=re.IGNORECASE)
         seed_title = campaign_seed_title
         if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
             raw_intro = raw_intro.replace(seed_title, job_title_str)

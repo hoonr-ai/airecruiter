@@ -274,6 +274,12 @@ function cleanLocationForIntro(location: string, fallback: string = "your area")
   return cleaned || fallback;
 }
 
+function getArticleForTitle(title: string): string {
+  const trimmed = title.trim();
+  if (!trimmed) return "a";
+  return /^[aeiou]/i.test(trimmed) ? "an" : "a";
+}
+
 function buildAutoBotIntroduction({
   title,
   isRemote,
@@ -287,7 +293,8 @@ function buildAutoBotIntroduction({
 }): string {
   const introTitle = cleanJobTitleForIntro(title);
   const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
-  return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+  const article = getArticleForTitle(introTitle);
+  return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for ${article} ${introTitle} in ${locStr}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
 }
 
 function matchesAutoBotIntroductionTemplate({
@@ -304,6 +311,15 @@ function matchesAutoBotIntroductionTemplate({
   location: string;
 }): boolean {
   const normalizedIntro = intro.trim().replace(/\s+/g, " ");
+  if (
+    normalizedIntro.includes("preliminary evaluation process") ||
+    normalizedIntro.includes("good fit for the role") ||
+    normalizedIntro.includes("8-12 minutes") ||
+    normalizedIntro.includes("3-5 mins") ||
+    normalizedIntro.includes("shortlisted for this role")
+  ) {
+    return true;
+  }
   const seen = new Set<string>();
   for (const rawTitle of candidateTitles) {
     const candidateTitle = (rawTitle || "").trim() || "role";
@@ -2316,7 +2332,15 @@ function NewJobPageContent() {
         setQuestionIdCounter(finalScreenQuestions.length + 1);
       }
       if (finalBotIntroduction && !draft.bot_introduction) {
-        setBotIntroduction(finalBotIntroduction);
+        if (!botIntroductionEditedRef.current) {
+          const titleToUse = draft.enhanced_title || draft.title || embeddedDetails?.enhanced_title || embeddedDetails?.title || "role";
+          const isRemote = isRemoteJob(embeddedDetails || draft);
+          const country = deriveCountry((embeddedDetails || draft)?.state);
+          const location = `${(embeddedDetails || draft)?.city || ""}, ${(embeddedDetails || draft)?.state || ""}`.trim().replace(/^, |, $/g, "");
+          setBotIntroduction(buildAutoBotIntroduction({ title: titleToUse, isRemote, country, location }));
+        } else {
+          setBotIntroduction(finalBotIntroduction);
+        }
       }
 
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
@@ -5053,7 +5077,8 @@ function NewJobPageContent() {
     // 1. Bot Introduction
     const introTitle = cleanJobTitleForIntro(enhancedTitle || jobTitle || "role");
     const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
-    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    const article = getArticleForTitle(introTitle);
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for ${article} ${introTitle} in ${locStr}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
     setBotIntroduction(prev => (prev && prev.trim().length > 0 && botIntroductionEditedRef.current ? prev : intro));
 
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
