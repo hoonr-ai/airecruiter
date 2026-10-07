@@ -60,6 +60,38 @@ def test_city_state_centroid_and_default_zip():
     assert rep and zip_index.lookup_zip(rep)["city"] == "Plano"
 
 
+def test_city_state_centroid_resolves_colloquial_aliases():
+    """"New York City" doesn't match GeoNames' "New York" entry and used to
+    silently fail offline resolution, forcing every candidate checked against
+    that anchor onto a live Nominatim call. Same class of gap for St./Ft./Mt.
+    abbreviations and a few common colloquial short names."""
+    aliased = {
+        ("New York City", "NY"): ("New York", "NY"),
+        ("St. Louis", "MO"): ("Saint Louis", "MO"),
+        ("Ft. Worth", "TX"): ("Fort Worth", "TX"),
+        ("Mt. Vernon", "NY"): ("Mount Vernon", "NY"),
+        ("SF", "CA"): ("San Francisco", "CA"),
+        ("San Fran", "CA"): ("San Francisco", "CA"),
+        ("Philly", "PA"): ("Philadelphia", "PA"),
+        ("Vegas", "NV"): ("Las Vegas", "NV"),
+        ("Nola", "LA"): ("New Orleans", "LA"),
+    }
+    for (alias_city, alias_state), (canon_city, canon_state) in aliased.items():
+        alias_point = zip_index.city_state_centroid(alias_city, alias_state)
+        canon_point = zip_index.city_state_centroid(canon_city, canon_state)
+        assert alias_point is not None, f"{alias_city}, {alias_state} did not resolve"
+        assert alias_point == canon_point, (alias_city, alias_state)
+
+    # Cities genuinely named with "City"/"St"/"Ft"/"Mt" in GeoNames must be
+    # untouched — this must stay a targeted alias table, not a suffix strip.
+    for city, state in [
+        ("Jersey City", "NJ"), ("Kansas City", "MO"), ("Oklahoma City", "OK"),
+        ("Carson City", "NV"), ("Atlantic City", "NJ"), ("Rapid City", "SD"),
+        ("Salt Lake City", "UT"),
+    ]:
+        assert zip_index.city_state_centroid(city, state) is not None, (city, state)
+
+
 # ------------------------------------------------------- _resolve_jobdiva_geo
 
 def test_resolve_geo_zip_no_longer_swallows_state(svc):
@@ -257,6 +289,54 @@ def test_configured_mountain_view_new_york_phoenix_radii(svc):
         assert ok, (location, reason, distance)
 
 
+def test_new_york_city_alias_closes_multi_location_soft_keep_leak(svc, monkeypatch):
+    """Regression for the QA-reported leak: with "New York City, NY" configured
+    as one of 5 sourcing anchors (Hartford 25mi, NYC 41mi, LA 50mi, Chicago
+    70mi, Phoenix 70mi), a candidate confirmed-outside every radius was
+    surviving as "geocode_unavailable" soft-keep. Root cause: the NYC anchor
+    didn't resolve offline, so its check fell to Nominatim; when that network
+    call failed/rate-limited, the resulting soft-keep out-ranked the other 4
+    anchors' correct hard-drops (soft-keep always beats hard-drop in
+    _location_match_verdict's precedence, by design). Fixing the alias makes
+    the NYC anchor resolve offline like the other 4, so there is no longer any
+    soft-keep left to win the race."""
+    import services.unified_candidate_search as ucs
+
+    def boom(*a, **kw):
+        raise AssertionError("all 5 anchors must resolve offline — no Nominatim needed")
+
+    monkeypatch.setattr(ucs, "within_radius", boom)
+
+    criteria = _criteria(
+        location="Hartford, CT",
+        within_miles=25,
+        additional_locations=[
+            {"value": "New York City, NY", "within_miles": 41},
+            {"value": "Los Angeles, CA", "within_miles": 50},
+            {"value": "Chicago, IL", "within_miles": 70},
+            {"value": "Phoenix, AZ", "within_miles": 70},
+        ],
+    )
+
+    # Outside all 5 configured radii — must hard-drop, not soft-keep.
+    for location in (
+        "New Haven, CT", "Branford, CT", "Mystic, CT", "North Stonington, CT",
+        "Putnam, CT", "Woodstock, CT", "Danielson, CT", "Moosup, CT",
+        "Norwich, CT", "Essex, CT", "Norwalk, CT", "Fairfield, CT",
+        "Trumbull, CT", "Stratford, CT",
+    ):
+        ok, reason, distance = svc._location_match_verdict({"location": location}, criteria)
+        assert not ok and reason == "outside_radius_confirmed", (location, reason, distance)
+
+    # Legitimately inside exactly one anchor's radius — must still pass.
+    for location, via in (
+        ("Stamford, CT", "NYC"), ("Greenwich, CT", "NYC"), ("New Canaan, CT", "NYC"),
+        ("Torrington, CT", "Hartford"), ("Waterbury, CT", "Hartford"),
+    ):
+        ok, reason, distance = svc._location_match_verdict({"location": location}, criteria)
+        assert ok, (location, via, reason, distance)
+
+
 def test_step5_location_gate_removes_candidates_outside_every_radius(svc):
     from unittest.mock import MagicMock
 
@@ -294,6 +374,21 @@ def test_hard_gate_vetoes_offline_confirmed_outside(svc):
 def test_hard_gate_soft_keeps_broad_region_as_unverified(svc):
     candidate = {"location": "San Francisco Bay Area"}
     assert svc._location_hard_gate(candidate, _criteria()) is None
+    assert candidate.get("location_match_reason") == "broad_region_unverified"
+    assert candidate.get("location_out_of_radius") is not True
+    assert candidate.get("distance_miles") is None
+
+
+def test_hard_gate_soft_keeps_county_as_unverified(svc):
+    """"Santa Clara County, CA" isn't a city — the offline index has no
+    county-level entries. Before the broad-region regex covered "County", this
+    fell through to a live Nominatim call and its soft-keep status was
+    incidental (dependent on that call failing), not deterministic like
+    "Bay Area"/"Metro Area" strings."""
+    candidate = {"location": "Santa Clara County, CA"}
+    assert svc._location_hard_gate(
+        candidate, _criteria(location="Los Angeles, CA", within_miles=50)
+    ) is None
     assert candidate.get("location_match_reason") == "broad_region_unverified"
     assert candidate.get("location_out_of_radius") is not True
     assert candidate.get("distance_miles") is None

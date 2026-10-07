@@ -142,6 +142,39 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
     return _CITY_INDEX
 
 
+# Colloquial/abbreviated names that don't match GeoNames' canonical city name
+# used to build _city_index() above — keyed and valued as (city_lower, "ST").
+# A city/state pair not listed here passes through unchanged.
+_CITY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
+    ("new york city", "NY"): ("new york", "NY"),
+    ("san fran", "CA"): ("san francisco", "CA"),
+    ("sf", "CA"): ("san francisco", "CA"),
+    ("philly", "PA"): ("philadelphia", "PA"),
+    ("vegas", "NV"): ("las vegas", "NV"),
+    ("nola", "LA"): ("new orleans", "LA"),
+}
+
+# "St./Ft./Mt." prefixes GeoNames spells out in full ("Saint/Fort/Mount").
+# Deliberately NOT a blanket "strip trailing City" rule — Jersey City, Kansas
+# City, Oklahoma City, Carson City, Atlantic City, Rapid City and Salt Lake
+# City are all genuinely named with "City" in the index.
+_ABBR_PREFIX_RE = re.compile(r"^(st|ft|mt)\.?\s+")
+_ABBR_EXPANSIONS = {"st": "saint", "ft": "fort", "mt": "mount"}
+
+
+def _normalize_city_alias(city: str, state: str) -> str:
+    """Expand a colloquial/abbreviated city name to the form GeoNames uses
+    (e.g. "new york city" -> "new york", "st. louis" -> "saint louis").
+    A no-op when no alias/abbreviation matches."""
+    alias = _CITY_ALIASES.get((city, state))
+    if alias:
+        return alias[0]
+    m = _ABBR_PREFIX_RE.match(city)
+    if m:
+        return _ABBR_EXPANSIONS[m.group(1)] + " " + city[m.end():]
+    return city
+
+
 def _city_key(city: str, state: str) -> Optional[Tuple[str, str]]:
     c = _clean(city).lower()
     s = _clean(state).upper()
@@ -155,6 +188,7 @@ def _city_key(city: str, state: str) -> Optional[Tuple[str, str]]:
             s = ""
         if not s:
             return None
+    c = _normalize_city_alias(c, s)
     return (c, s)
 
 
