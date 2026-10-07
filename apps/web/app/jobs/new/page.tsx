@@ -2864,6 +2864,7 @@ function NewJobPageContent() {
           workArrangement: jobData?.location_type || "",
           country: deriveCountry(jobData?.state),
           city: jobData?.city || "",
+          customerName: jobData?.customer_name || "",
         })
       });
 
