@@ -72,7 +72,7 @@ class JobDescriptionRequest(BaseModel):
     workAuthorization: str = ""
     jobDescription: str = ""
     payRate: str = ""
-    customerName: Optional[str] = None
+    customerName: Optional[str] = Field(default=None, max_length=120)
     # Rubric-derived context. All optional so older clients keep working.
     yearsOfExperience: Optional[int] = None
     education: List[Dict[str, Any]] = Field(default_factory=list)
@@ -305,10 +305,13 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     else:
         remote_directive_block = ""
 
+    raw_name = (req.customerName or "").strip()
+    clean_customer_name = re.sub(r'[\'\"\n\r\t]', ' ', raw_name).strip() if raw_name else ""
+
     customer_name_block = (
         "REDACT CLIENT NAME (highest priority):\n"
-        f"The client name is '{req.customerName}'. You MUST completely redact any mention of '{req.customerName}' (as well as any related brand names, products, or division names associated with it) from the entire job description. Replace it with 'our client' or 'a leading company'.\n"
-    ) if (req.customerName or "").strip() else ""
+        f"The client name is '{clean_customer_name}'. You MUST completely redact any mention of '{clean_customer_name}' (as well as any related brand names, products, or division names associated with it) from the entire job description. Replace it with 'our client' or 'a company'.\n"
+    ) if clean_customer_name else ""
 
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
@@ -384,6 +387,11 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
             prompt_cache_key="jd-gen-v1",
         )
         description = completion.choices[0].message.content
+        if description and clean_customer_name:
+            pattern = re.compile(re.escape(clean_customer_name), re.IGNORECASE)
+            if pattern.search(description):
+                logger.warning("LLM leaked customer name '%s' in description, applying deterministic redaction", clean_customer_name)
+                description = pattern.sub("our client", description)
         logger.debug("OpenAI JD generation successful")
     except Exception as e:
         logger.exception("OpenAI JD generation failed: %s", e)
