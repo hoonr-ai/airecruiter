@@ -503,10 +503,57 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    print(f"DEBUG: Incoming {request.method} {request.url.path}")
+    # Was two print() lines per request straight to stdout/syslog (no level,
+    # not filterable); DEBUG keeps them available without the volume.
+    logger.debug(f"Incoming {request.method} {request.url.path}")
     response = await call_next(request)
-    print(f"DEBUG: Response {response.status_code} for {request.url.path}")
+    logger.debug(f"Response {response.status_code} for {request.url.path}")
     return response
+
+
+@app.get("/api/health", include_in_schema=False)
+async def api_health():
+    """Unauthenticated liveness + dependency check for uptime monitoring.
+
+    503 only when Postgres is unreachable (nothing works without it). Redis
+    trouble is reported as "degraded" with 200: the app keeps serving with
+    per-worker fallbacks, and a separate Redis alert covers it.
+    """
+    from fastapi.responses import JSONResponse
+
+    def _db_ok() -> bool:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            return True
+        finally:
+            conn.close()
+
+    checks: Dict[str, str] = {}
+    try:
+        checks["db"] = "ok" if await asyncio.wait_for(asyncio.to_thread(_db_ok), timeout=5) else "error"
+    except Exception as exc:
+        checks["db"] = f"error: {type(exc).__name__}"
+
+    redis_client = jobdiva_rate_limit._get_redis()
+    if redis_client is None:
+        checks["redis"] = "unavailable"
+    else:
+        try:
+            await asyncio.wait_for(redis_client.ping(), timeout=2)
+            checks["redis"] = "ok"
+        except Exception as exc:
+            checks["redis"] = f"error: {type(exc).__name__}"
+
+    if checks["db"] != "ok":
+        status, code = "down", 503
+    elif checks["redis"] != "ok":
+        status, code = "degraded", 200
+    else:
+        status, code = "ok", 200
+    return JSONResponse({"status": status, "checks": checks}, status_code=code)
 
 @app.middleware("http")
 async def amplitude_request_tracking(request: Request, call_next):
