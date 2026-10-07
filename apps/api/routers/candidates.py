@@ -5289,7 +5289,7 @@ async def save_candidate_feedback(
             "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
         is_custom_reason = request.reason and request.reason not in rejection_mapping
-        action_string = rejection_mapping.get(request.reason, "PAIR Reject - Other")
+        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
     
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
