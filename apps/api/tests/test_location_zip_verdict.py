@@ -213,6 +213,10 @@ def test_verdict_missing_location_soft_keep_sentinel(svc):
     "Greater Chicago Area",
     "Los Angeles Metropolitan Area",
     "Seattle Metro Area",
+    "Chicagoland",
+    "Tri-State Area",
+    "Silicon Valley",
+    "Midwest Region",
 ])
 def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, location):
     import services.unified_candidate_search as ucs

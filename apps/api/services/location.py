@@ -66,7 +66,7 @@ _ARRANGEMENT_RESIDUE_WORDS = frozenset({
 # locality. A geocoder may return a representative point for them, but that
 # point is not precise enough to hard-reject someone against a small radius.
 _BROAD_REGION_RE = re.compile(
-    r"(?:^greater\s+.+\s+area|.+\s+(?:bay\s+area|metro(?:politan)?(?:\s+area)?|metropolitan\s+area|area|county|metroplex))"
+    r"(?:^greater\s+.+\s+area|chicagoland|tri-state\s+area|silicon\s+valley|.+\s+(?:bay\s+area|metro(?:politan)?(?:\s+area)?|metropolitan\s+area|area|county|metroplex|region))"
     r"(?:,\s*[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?$",
     re.IGNORECASE,
 )
