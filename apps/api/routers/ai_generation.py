@@ -72,6 +72,7 @@ class JobDescriptionRequest(BaseModel):
     workAuthorization: str = ""
     jobDescription: str = ""
     payRate: str = ""
+    customerName: Optional[str] = None
     # Rubric-derived context. All optional so older clients keep working.
     yearsOfExperience: Optional[int] = None
     education: List[Dict[str, Any]] = Field(default_factory=list)
@@ -304,6 +305,11 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     else:
         remote_directive_block = ""
 
+    customer_name_block = (
+        "REDACT CLIENT NAME (highest priority):\n"
+        f"The client name is '{req.customerName}'. You MUST completely redact any mention of '{req.customerName}' (or variants like '{req.customerName} Care+') from the entire job description. Replace it with 'our client' or 'a leading company'.\n"
+    ) if (req.customerName or "").strip() else ""
+
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
         "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
@@ -314,6 +320,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         f"Input Data:\n"
         f"{recruiter_notes_block}\n\n"
         f"{remote_directive_block}{chr(10) if remote_directive_block else ''}"
+        f"{customer_name_block}{chr(10) if customer_name_block else ''}"
         f"{canonical_title_block}\n\n"
         f"Work Authorization: {req.workAuthorization or '(not specified)'}\n\n"
         f"{pay_rate_block}\n\n"
