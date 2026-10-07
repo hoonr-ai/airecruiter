@@ -18,8 +18,11 @@ deliberately and verify with `scripts/eval_embedding_skills.py`.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
+import sys
+from array import array
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
@@ -38,6 +41,10 @@ logger = logging.getLogger(__name__)
 _CACHE: "OrderedDict[str, List[float]]" = OrderedDict()
 _CACHE_LOCK = asyncio.Lock()
 _BATCH_SIZE = 256
+# Redis L2 entries expire so `volatile-lru` / `allkeys-lru` can evict them.
+# v1 keys were written as JSON with no TTL and filled the instance.
+_EMBED_REDIS_TTL_S = 30 * 24 * 60 * 60
+_EMBED_REDIS_VERSION = 2
 
 
 def _normalize(term: str) -> str:
@@ -80,8 +87,8 @@ async def warm_terms(terms: List[str]) -> None:
             return
 
         # L2: check Redis before calling OpenAI. Embeddings are
-        # deterministic for a given (model, input) pair so we cache
-        # without a TTL. Net: a fresh worker boots warm against Redis
+        # deterministic for a given (model, input) pair so a long TTL is
+        # safe. Net: a fresh worker boots warm against Redis
         # instead of re-embedding every term that crossed any worker
         # before its restart.
         from_redis: Dict[str, List[float]] = {}
@@ -127,28 +134,41 @@ def _embed_redis_key(term: str) -> str:
     # Include model in the namespace so swapping the embedding model
     # naturally invalidates the cache (vectors from different models
     # aren't comparable).
-    return _llm_cache.make_key("embed", 1, OPENAI_EMBEDDING_MODEL, term)
+    return _llm_cache.make_key("embed", _EMBED_REDIS_VERSION, OPENAI_EMBEDDING_MODEL, term)
+
+
+def _encode_vec(vec: List[float]) -> str:
+    # base64 little-endian float32: ~8 KB per 1,536-dim vector vs ~33 KB JSON.
+    arr = array("f", vec)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+def _decode_vec(raw: str) -> Optional[List[float]]:
+    try:
+        arr = array("f")
+        arr.frombytes(base64.b64decode(raw, validate=True))
+    except Exception:
+        return None
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return arr.tolist() or None
 
 
 async def _embed_get_from_redis(term: str) -> Optional[List[float]]:
     raw = await _llm_cache.get_str(_embed_redis_key(term))
     if not raw:
         return None
-    try:
-        import json
-        vec = json.loads(raw)
-        return vec if isinstance(vec, list) else None
-    except Exception:
-        return None
+    return _decode_vec(raw)
 
 
 async def _embed_put_to_redis(term: str, vec: List[float]) -> None:
     if not vec:
         return
     try:
-        import json
         await _llm_cache.set_str(
-            _embed_redis_key(term), json.dumps(vec), ttl_seconds=None
+            _embed_redis_key(term), _encode_vec(vec), ttl_seconds=_EMBED_REDIS_TTL_S
         )
     except Exception as exc:
         logger.debug(f"embed redis write failed for {term!r}: {exc}")

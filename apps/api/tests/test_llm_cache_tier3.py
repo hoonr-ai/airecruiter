@@ -34,6 +34,7 @@ _stub_module("dotenv", load_dotenv=lambda *a, **k: None)
 
 def _install_fake_redis():
     store: dict = {}
+    ttls: dict = {}
 
     class FakeRedis:
         async def get(self, key):
@@ -41,6 +42,7 @@ def _install_fake_redis():
 
         async def set(self, key, value, ex=None):
             store[key] = value
+            ttls[key] = ex
 
         async def delete(self, key):
             store.pop(key, None)
@@ -51,6 +53,7 @@ def _install_fake_redis():
     fake_pkg.asyncio = fake_asyncio
     sys.modules["redis"] = fake_pkg
     sys.modules["redis.asyncio"] = fake_asyncio
+    store["__ttls__"] = ttls
     return store
 
 
@@ -61,11 +64,12 @@ def _reset_cache_state():
 
 
 def _enable_fake_redis():
-    _install_fake_redis()
+    store = _install_fake_redis()
     from core import config as cfg
     cfg.REDIS_URL = "redis://fake"
     cfg.LLM_CACHE_ENABLED = True
     _reset_cache_state()
+    return store
 
 
 def test_model_for_honors_env_override() -> None:
@@ -113,7 +117,8 @@ def test_embedding_l2_redis_serves_subsequent_workers() -> None:
         assert fake_client.embeddings.create.await_count == 0, (
             "second warm should have been served from Redis L2"
         )
-        assert skill_embeddings._CACHE.get("python") == [0.1, 0.2, 0.3], (
+        got = skill_embeddings._CACHE.get("python")
+        assert got and all(abs(a - b) < 1e-6 for a, b in zip(got, [0.1, 0.2, 0.3])), (
             "L1 should be repopulated from L2"
         )
 
@@ -121,10 +126,36 @@ def test_embedding_l2_redis_serves_subsequent_workers() -> None:
     print("  ok: embedding L2 (Redis) survives L1 cache clear → no extra OpenAI calls")
 
 
+def test_embedding_l2_writes_with_ttl_as_float32() -> None:
+    from unittest.mock import patch
+    import base64
+
+    store = _enable_fake_redis()
+    from services import skill_embeddings
+
+    skill_embeddings._CACHE.clear()
+    fake_resp = MagicMock()
+    fake_resp.data = [MagicMock(embedding=[0.5] * 1536)]
+    fake_client = MagicMock()
+    fake_client.embeddings.create = AsyncMock(return_value=fake_resp)
+
+    async def _go():
+        with patch("services.skill_embeddings._client", return_value=fake_client):
+            await skill_embeddings.warm_terms(["golang"])
+
+    asyncio.run(_go())
+    key = skill_embeddings._embed_redis_key("golang")
+    assert key.startswith("llm:embed:v2:"), key
+    assert store["__ttls__"][key] == skill_embeddings._EMBED_REDIS_TTL_S
+    assert len(base64.b64decode(store[key])) == 1536 * 4
+    print("  ok: embedding L2 writes float32 with a TTL")
+
+
 def main() -> None:
     tests = [
         test_model_for_honors_env_override,
         test_embedding_l2_redis_serves_subsequent_workers,
+        test_embedding_l2_writes_with_ttl_as_float32,
     ]
     failed = 0
     for t in tests:
