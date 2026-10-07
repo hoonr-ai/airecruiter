@@ -42,11 +42,11 @@ export const DISABLED_SEARCH_SOURCE_IDS: ReadonlySet<SearchSourceId> = new Set([
   "linkedin",
 ]);
 
-export const SEARCH_SOURCES_VERSION = 2;
+export const SEARCH_SOURCES_VERSION = 3;
 
 /**
- * Both JobDiva pools and Exa are pre-ticked. LinkedIn (Unipile) is temporarily
- * disabled; keep its persisted key for compatibility with existing drafts.
+ * JobDiva Agent and Exa are pre-ticked. JobDiva Talent is now default-off.
+ * LinkedIn (Unipile) is temporarily disabled; keep its persisted key for compatibility with existing drafts.
  * Dice stays opt-in (and is hidden from the switchboard; backend wiring kept).
  */
 export const DEFAULT_SEARCH_SOURCES: Readonly<SearchSources> = {
@@ -91,11 +91,18 @@ export function restoreSavedSearchSources(
     if (typeof value === "boolean") out[id] = value;
   }
 
-  if (version < SEARCH_SOURCES_VERSION && raw.exa !== true) {
+  if (version < 2 && raw.exa !== true) {
     // Legacy draft: a missing/false Exa flag is the old default-off, not a
     // decision — keep whatever the caller currently has (the new default).
     out.exa = current.exa;
   }
+  
+  if (version < 3 && raw.jobdiva_talent !== false) {
+    // Legacy draft: missing/true jobdiva_talent is the old default-on, not a
+    // deliberate choice (or indistinguishable from it). Override with the new default.
+    out.jobdiva_talent = current.jobdiva_talent;
+  }
+
   // Older drafts may have persisted LinkedIn as enabled. Do not let restoring
   // them silently restart Unipile while this provider is paused.
   for (const id of DISABLED_SEARCH_SOURCE_IDS) out[id] = false;
