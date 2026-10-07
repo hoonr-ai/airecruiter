@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { REJECTION_REASONS } from "@/lib/rejection";
 import {
   ArrowLeft,
   Search,
@@ -66,8 +67,6 @@ import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
-import { useRejectReason } from "@/hooks/use-reject-reason";
-import { RejectReasonSelect } from "@/components/RejectReasonSelect";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -556,12 +555,7 @@ export default function CandidateRankingsPage() {
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
-  const {
-    rejectReason, setRejectReason,
-    otherRejectText, setOtherRejectText,
-    reset: resetRejectReason,
-    finalReason, isReasonValid
-  } = useRejectReason();
+  const [rejectReason, setRejectReason] = useState("");
 
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
@@ -593,16 +587,17 @@ export default function CandidateRankingsPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (actionCandidateId && finalReason) {
+    const trimmedReason = rejectReason?.trim() || "";
+    if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
       const rejectedAt = new Date().toISOString();
       try {
         const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
-          reason: finalReason
+          reason: trimmedReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: finalReason }));
+        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
         if (res?.jobdiva_sync === 'error') {
           setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
@@ -616,7 +611,7 @@ export default function CandidateRankingsPage() {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
         setActionCandidateId(null);
-        resetRejectReason();
+        setRejectReason('');
       }
     }
   };
@@ -2902,7 +2897,7 @@ export default function CandidateRankingsPage() {
                               onValueChange={(val) => {
                                 if (val === "Reject") {
                                   setActionCandidateId(candidate.id);
-                                  resetRejectReason();
+                                  setRejectReason("");
                                   setIntegrationModalOpen('reject');
                                 } else if (val === "Submit") {
                                   setActionCandidateId(candidate.id);
@@ -3111,25 +3106,34 @@ export default function CandidateRankingsPage() {
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => { setIntegrationModalOpen(null); resetRejectReason(); }} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
-                  <RejectReasonSelect
-                    rejectReason={rejectReason}
-                    setRejectReason={setRejectReason}
-                    otherRejectText={otherRejectText}
-                    setOtherRejectText={setOtherRejectText}
-                  />
+                  <div className="space-y-2">
+                    <label htmlFor={`reject-reason-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <select
+                      id={`reject-reason-${actionCandidateId || "rankings"}`}
+                      aria-label="Rejection Reason"
+                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
+                      value={rejectReason}
+                      onChange={e => setRejectReason(e.target.value)}
+                    >
+                      <option value="" disabled>Select a reason...</option>
+                      {REJECTION_REASONS.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => { setIntegrationModalOpen(null); resetRejectReason(); }} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}
-                    disabled={!isReasonValid || syncingCandidateId === actionCandidateId}
+                    disabled={!rejectReason || syncingCandidateId === actionCandidateId}
                     className="font-bold"
                   >
                     {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}

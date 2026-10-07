@@ -5260,7 +5260,6 @@ async def save_candidate_feedback(
 
     # 1. Map to JobDiva Action String
     action_string = ""
-    is_custom_reason = False
     if request.feedback_type == "Submit":
         action_string = "PAIR Internal Submission" if submission_type == "internal" else "PAIR External Submission"
     elif request.feedback_type == "Reject":
@@ -5288,9 +5287,9 @@ async def save_candidate_feedback(
             "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
             "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
-        is_custom_reason = request.reason and request.reason not in rejection_mapping
-        action_string = rejection_mapping.get(request.reason, "PAIR Reject - Other")
-    
+        if request.reason and request.reason not in rejection_mapping:
+            raise HTTPException(status_code=422, detail="Invalid rejection reason provided")
+        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
@@ -5452,15 +5451,11 @@ async def save_candidate_feedback(
         logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
         jobdiva_result = {"status": "success"}
     else:
-        note_content = f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
-        if request.feedback_type == "Reject" and is_custom_reason:
-            note_content = f"Reason: {html.escape(request.reason)}<br><br>{note_content}"
-
         jobdiva_result = await jobdiva_service.create_candidate_note(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=note_content,
+            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
 
