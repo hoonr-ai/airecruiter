@@ -13,7 +13,7 @@ import {
 test("defaults: both JobDiva pools and Exa on; LinkedIn and Dice off", () => {
   assert.deepEqual(DEFAULT_SEARCH_SOURCES, {
     jobdiva_agent: true,
-    jobdiva_talent: true,
+    jobdiva_talent: false,
     linkedin: false,
     dice: false,
     exa: true,
