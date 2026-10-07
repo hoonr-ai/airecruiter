@@ -682,6 +682,15 @@ def _is_pair_synthetic_email(email: str) -> bool:
     return lowered.startswith("auto_") or "@no-email." in lowered
 
 
+def _escape_for_urldecoder(text: str) -> str:
+    """JobDiva runs Java ``URLDecoder.decode`` on ``textfile``; a bare ``%`` not
+    followed by two hex digits ("grew revenue 30% a year") makes it throw and
+    the whole CreateJobApplicationWithResume call 500s. Encoding ``%`` as
+    ``%25`` round-trips to the original text and leaves valid-looking
+    sequences like ``%41`` intact instead of letting JobDiva decode them."""
+    return (text or "").replace("%", "%25")
+
+
 def _txt_filename(filename: str) -> str:
     """``Ada_Lovelace_Resume.docx`` -> ``Ada_Lovelace_Resume.txt`` (JobDiva picks
     the parser by extension, so a text upload must be named .txt)."""
@@ -5585,7 +5594,7 @@ class JobDivaService:
                 # of who filed the application.
                 json_payload = {
                     "filename": attempt_filename,
-                    "textfile": textfile,
+                    "textfile": _escape_for_urldecoder(textfile),
                     "filecontent": base64.b64encode(attempt_bytes).decode("ascii"),
                     "jobid": int(resolved_job_id or 0),
                     "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),

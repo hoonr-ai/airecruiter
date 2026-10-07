@@ -212,6 +212,22 @@ def test_create_job_application_with_resume_payload():
     assert call["json"]["resumesource"] == 0
 
 
+@pytest.mark.parametrize("raw", ["grew revenue 50% a year", "100%", "bad %zz escape", "literal %41"])
+def test_create_job_application_with_resume_escapes_percent_for_urldecoder(raw):
+    from urllib.parse import unquote
+
+    calls = _capture(lambda s: s.create_job_application_with_resume(
+        candidate_id=None, job_id=str(JOB_ID), resume_text=raw, filename="x.txt",
+    ))
+    payload = _only(calls, "/apiv2/jobdiva/CreateJobApplicationWithResume")["json"]
+    # What JobDiva's URLDecoder yields must be the original text, and must not throw.
+    assert unquote(payload["textfile"], errors="strict") == raw
+    assert "%25" in payload["textfile"]
+    # The uploaded document itself is base64 and stays byte-exact.
+    import base64 as _b64
+    assert _b64.b64decode(payload["filecontent"]).decode("utf-8") == raw
+
+
 def test_pair_resume_source_is_schema_exact_on_both_application_endpoints(monkeypatch):
     """The provenance marker rides in `resumesource`, a field BOTH schemas define
     (CreateJobApplicationDef lists it as optional) -- so JobDiva keeps it."""
