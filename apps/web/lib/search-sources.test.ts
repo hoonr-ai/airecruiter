@@ -10,10 +10,10 @@ import {
 
 // --- defaults ---------------------------------------------------------------
 
-test("defaults: both JobDiva pools and Exa on; LinkedIn and Dice off", () => {
+test("defaults: JobDiva Agent and Exa on; JobDiva Talent, LinkedIn and Dice off", () => {
   assert.deepEqual(DEFAULT_SEARCH_SOURCES, {
     jobdiva_agent: true,
-    jobdiva_talent: true,
+    jobdiva_talent: false,
     linkedin: false,
     dice: false,
     exa: true,
@@ -23,7 +23,7 @@ test("defaults: both JobDiva pools and Exa on; LinkedIn and Dice off", () => {
 test("Unipile is excluded from submitted sources even if state says enabled", () => {
   assert.deepEqual(
     getEnabledSearchSourceIds({ ...DEFAULT_SEARCH_SOURCES, linkedin: true }),
-    ["jobdiva_agent", "jobdiva_talent", "exa"],
+    ["jobdiva_agent", "exa"],
   );
 });
 
@@ -91,6 +91,26 @@ test("a non-numeric version is treated as legacy", () => {
   assert.equal(out.exa, true);
 });
 
+// --- JobDiva Talent v3 migration ----------------------------------------------------
+
+test("legacy draft (version < 3) with missing/true jobdiva_talent gets the new default (off)", () => {
+  const out1 = restoreSavedSearchSources({ jobdiva_talent: true }, 2);
+  assert.equal(out1.jobdiva_talent, false);
+
+  const out2 = restoreSavedSearchSources({}, 2);
+  assert.equal(out2.jobdiva_talent, false);
+});
+
+test("legacy draft (version < 3) with jobdiva_talent: false keeps it off", () => {
+  const out = restoreSavedSearchSources({ jobdiva_talent: false }, 2);
+  assert.equal(out.jobdiva_talent, false);
+});
+
+test("v3 draft with jobdiva_talent: true is a deliberate opt-in and is honoured", () => {
+  const out = restoreSavedSearchSources({ jobdiva_talent: true }, SEARCH_SOURCES_VERSION);
+  assert.equal(out.jobdiva_talent, true);
+});
+
 // --- legacy JobDiva flag + retired keys -------------------------------------
 
 test("legacy single jobdiva flag drives both pools", () => {
@@ -100,7 +120,7 @@ test("legacy single jobdiva flag drives both pools", () => {
 });
 
 test("explicit per-pool flags win over the legacy jobdiva flag", () => {
-  const out = restoreSavedSearchSources({ jobdiva: false, jobdiva_talent: true }, undefined);
+  const out = restoreSavedSearchSources({ jobdiva: false, jobdiva_talent: true }, SEARCH_SOURCES_VERSION);
   assert.equal(out.jobdiva_agent, false);
   assert.equal(out.jobdiva_talent, true);
 });
