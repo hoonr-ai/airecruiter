@@ -5287,8 +5287,9 @@ async def save_candidate_feedback(
             "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
             "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
-        action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
-    
+        if request.reason and request.reason not in rejection_mapping:
+            raise HTTPException(status_code=422, detail="Invalid rejection reason provided")
+        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID

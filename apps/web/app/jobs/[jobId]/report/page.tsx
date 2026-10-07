@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { REJECTION_REASONS } from "@/lib/rejection";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -245,7 +246,8 @@ export default function CandidateEvaluationReportPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (candidateId && rejectReason) {
+    const trimmedReason = rejectReason.trim();
+    if (candidateId && trimmedReason) {
       setSyncingCandidateId(candidateId);
       try {
         const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
@@ -253,7 +255,7 @@ export default function CandidateEvaluationReportPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             feedback_type: 'Reject',
-            reason: rejectReason
+            reason: trimmedReason
           })
         });
 
@@ -273,7 +275,7 @@ export default function CandidateEvaluationReportPage() {
               candidate: {
                 ...prev.candidate,
                 feedback_type: 'Reject',
-                feedback_reason: rejectReason,
+                feedback_reason: trimmedReason,
                 feedback_at: new Date().toISOString()
               }
             };
@@ -921,35 +923,18 @@ export default function CandidateEvaluationReportPage() {
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidate?.name || "Winci Zu"}</strong>.
                   </p>
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <label htmlFor={`reject-reason-${candidate?.name || "report"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <select
+                      id={`reject-reason-${candidate?.name || "report"}`}
+                      aria-label="Rejection Reason"
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
                       onChange={e => setRejectReason(e.target.value)}
                     >
                       <option value="" disabled>Select a reason...</option>
-                      <option value="Skills do not meet requirements">Skills do not meet requirements</option>
-                      <option value="Communication skills">Communication skills</option>
-                      <option value="Domain experience mismatch">Domain experience mismatch</option>
-                      <option value="More qualified candidates identified">More qualified candidates identified</option>
-                      <option value="Overqualified for the role">Overqualified for the role</option>
-                      <option value="Compensation expectations exceed budget">Compensation expectations exceed budget</option>
-                      <option value="Not aligned with employment type (W2 / C2C / 1099)">Not aligned with employment type (W2 / C2C / 1099)</option>
-                      <option value="Work authorization / visa constraints">Work authorization / visa constraints</option>
-                      <option value="Not comfortable with background check / drug test">Not comfortable with background check / drug test</option>
-                      <option value="Not local and not open to relocation">Not local and not open to relocation</option>
-                      <option value="Open to remote only">Open to remote only</option>
-                      <option value="Not available within required timeline">Not available within required timeline</option>
-                      <option value="Accepted another offer">Accepted another offer</option>
-                      <option value="Candidate withdrew interest">Candidate withdrew interest</option>
-                      <option value="Career gap concern">Career gap concern</option>
-                      <option value="Job Hopping (short-term engagements throughout or in the last 5-7 years)">Job Hopping (short-term engagements throughout or in the last 5-7 years)</option>
-                      <option value="Fake candidate — Multiple profiles/resumes; misrepresentation of past experience">Fake candidate — Multiple profiles/resumes; misrepresentation of past experience</option>
-                      <option value="Already submitted to same client / hiring manager by another vendor">Already submitted to same client / hiring manager by another vendor</option>
-                      <option value="Previously rejected by client">Previously rejected by client</option>
-                      <option value="Not eligible for rehire">Not eligible for rehire</option>
-                      <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
-                      <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
+                      {REJECTION_REASONS.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
