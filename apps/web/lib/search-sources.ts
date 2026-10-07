@@ -51,7 +51,7 @@ export const SEARCH_SOURCES_VERSION = 2;
  */
 export const DEFAULT_SEARCH_SOURCES: Readonly<SearchSources> = {
   jobdiva_agent: true,
-  jobdiva_talent: true,
+  jobdiva_talent: false,
   linkedin: false,
   dice: false,
   exa: true,
