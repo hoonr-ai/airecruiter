@@ -687,8 +687,11 @@ def _escape_for_urldecoder(text: str) -> str:
     followed by two hex digits ("grew revenue 30% a year") makes it throw and
     the whole CreateJobApplicationWithResume call 500s. Encoding ``%`` as
     ``%25`` round-trips to the original text and leaves valid-looking
-    sequences like ``%41`` intact instead of letting JobDiva decode them."""
-    return (text or "").replace("%", "%25")
+    sequences like ``%41`` intact instead of letting JobDiva decode them.
+    ``URLDecoder`` also turns ``+`` into a space ("C++", "A+", "+1 555..."),
+    so ``+`` goes out as ``%2B``. ``%`` is encoded first so the ``%2B`` this
+    adds is not escaped again."""
+    return (text or "").replace("%", "%25").replace("+", "%2B")
 
 
 def _txt_filename(filename: str) -> str:

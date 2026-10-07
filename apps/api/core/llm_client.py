@@ -29,11 +29,14 @@ _client: Optional[AsyncOpenAI] = None
 
 
 async def _wait_for_shared_cooldown(request) -> None:
-    # Every request, including the SDK's own retries, waits out a 429
-    # cooldown that any worker started.
+    # Every request, including the SDK's own retries, waits for a 429
+    # cooldown that any worker started (one PTTL read, no pacing EVAL).
+    # Best effort: if the cooldown outlasts the wait, the request is sent
+    # anyway and the SDK's own retry/backoff handles a repeat 429.
     from core.vendor_limiter import OPENAI
 
-    await OPENAI.acquire(max_wait_s=OPENAI.cooldown_cap_s + 5)
+    if not await OPENAI.wait_cooldown(max_wait_s=OPENAI.cooldown_cap_s + 5):
+        logger.warning("OpenAI shared cooldown still active after %.0fs; sending anyway", OPENAI.cooldown_cap_s + 5)
 
 
 async def _note_429(response) -> None:

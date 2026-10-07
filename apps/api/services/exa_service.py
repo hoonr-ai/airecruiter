@@ -551,19 +551,34 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
 
 
 
-async def _exa_paced(loop, fn, *args):
+# The SDK raises ValueError("Request failed with status code 429: ...");
+# newer versions may also carry status_code / response.status_code.
+_EXA_429_RE = re.compile(r"status code 429\b|too many requests|rate limit", re.IGNORECASE)
+
+
+def _is_exa_429(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return status == 429
+    return bool(_EXA_429_RE.search(str(exc)))
+
+
+async def _exa_paced(loop, fn, *args, max_wait_s: float = 15.0):
     """Run a blocking Exa SDK call in the executor behind the shared Exa limiter.
 
     A 429 from the SDK (raised as an exception) starts the cooldown every
-    worker waits out before its next Exa call.
+    worker waits out before its next Exa call. ``max_wait_s`` stays below the
+    callers' ``wait_for`` timeouts (25-30 s), so a long cooldown gives up with
+    a clear error instead of being cancelled mid-wait.
     """
-    if not await _exa_limit.acquire():
+    if not await _exa_limit.acquire(max_wait_s=max_wait_s):
         raise RuntimeError("Exa rate-limited: no slot within budget")
     try:
         return await loop.run_in_executor(None, fn, *args)
     except Exception as exc:
-        text = str(exc)
-        if "429" in text or "rate limit" in text.lower():
+        if _is_exa_429(exc):
             await _exa_limit.note_429()
         raise
 

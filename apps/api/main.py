@@ -520,7 +520,9 @@ async def api_health():
     try:
         checks["db"] = "ok" if await asyncio.wait_for(asyncio.to_thread(_db_ok), timeout=5) else "error"
     except Exception as exc:
-        checks["db"] = f"error: {type(exc).__name__}"
+        # Public endpoint: details go to the log, not the response.
+        logger.warning(f"api_health: db check failed: {type(exc).__name__}: {exc}")
+        checks["db"] = "error"
 
     redis_client = jobdiva_rate_limit._get_redis()
     if redis_client is None:
@@ -530,7 +532,8 @@ async def api_health():
             await asyncio.wait_for(redis_client.ping(), timeout=2)
             checks["redis"] = "ok"
         except Exception as exc:
-            checks["redis"] = f"error: {type(exc).__name__}"
+            logger.warning(f"api_health: redis check failed: {type(exc).__name__}: {exc}")
+            checks["redis"] = "error"
 
     if checks["db"] != "ok":
         status, code = "down", 503

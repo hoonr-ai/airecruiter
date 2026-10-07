@@ -46,3 +46,29 @@ def test_one_decision_per_record_across_handlers():
     r = _rec("dup 1")
     assert s.filter(r) and s.filter(r)  # second handler sees the same verdict
     assert not s.filter(_rec("dup 2"))
+
+
+def test_one_off_burst_is_reported_when_another_warning_arrives(monkeypatch, caplog):
+    import core.logging as cl
+
+    now = [1000.0]
+    monkeypatch.setattr(cl.time, "monotonic", lambda: now[0])
+    s = RepeatedWarningSampler(burst=1, window_s=60)
+    for i in range(4):
+        s.filter(_rec(f"burst {i}"))
+    now[0] += 61
+    with caplog.at_level(logging.WARNING, logger="svc"):
+        assert s.filter(_rec("unrelated 1"))
+    assert any("+3 similar warnings suppressed" in m for m in caplog.messages)
+
+
+def test_eviction_drops_oldest_kind_only(monkeypatch, caplog):
+    s = RepeatedWarningSampler(burst=1, window_s=60, max_keys=2)
+    s.filter(_rec("a 1"))
+    s.filter(_rec("a 2"))  # dropped
+    s.filter(_rec("b 1"))
+    assert not s.filter(_rec("b 2"))  # b's window survives
+    with caplog.at_level(logging.WARNING, logger="svc"):
+        s.filter(_rec("c 1"))  # evicts a, reporting its drop
+    assert any("+1 similar warnings suppressed" in m for m in caplog.messages)
+    assert not s.filter(_rec("b 3"))

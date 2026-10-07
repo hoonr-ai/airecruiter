@@ -3,7 +3,7 @@ import sqlalchemy
 from sqlalchemy import text
 from typing import List, Dict, Any
 from utils.crypto import decrypt_field
-from core.config import DATABASE_URL
+from core.config import DATABASE_URL, SQLA_POOL_SIZE, SQLA_MAX_OVERFLOW
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ class VettedService:
                 # v22: add pool sizing + pre_ping + connect_timeout.
                 self.engine = sqlalchemy.create_engine(
                     self.db_url,
-                    pool_size=3,
-                    max_overflow=2,
+                    pool_size=SQLA_POOL_SIZE,
+                    max_overflow=SQLA_MAX_OVERFLOW,
                     pool_pre_ping=True,
                     pool_recycle=1800,
                     connect_args={"connect_timeout": 5},

@@ -1094,7 +1094,10 @@ class AutoAssignService:
             # Drain whatever's left after the stream ends.
             _flush_batches()
 
-            logger.debug(
+            # INFO only when something changed; the metrics line below is
+            # the one INFO line every job gets per cycle.
+            logger.log(
+                logging.INFO if total_assigned else logging.DEBUG,
                 f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}"
                 + (f" ({pair_unlinked} PAIR-filed application(s) without a local row skipped)" if pair_unlinked else "")
             )
@@ -1305,7 +1308,7 @@ class AutoAssignService:
                     logger.warning(
                         f"[AutoAssignService] Submittal persistence failed for job {target_job_id}: {persist_err}"
                     )
-            logger.debug(
+            logger.info(
                 f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: "
                 f"pass_time={time_to_pass}min ext_subs={ext_subs} "
                 f"feedback={(feedback_metrics or {}).get('feedback_completed')} "

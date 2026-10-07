@@ -13,7 +13,7 @@ from models import (
 )
 from services.jobdiva import JobDivaService
 from services.location import sanitize_candidate_location
-from core.config import DATABASE_URL, SUPABASE_DB_URL
+from core.config import DATABASE_URL, SUPABASE_DB_URL, SQLA_POOL_SIZE, SQLA_MAX_OVERFLOW
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,8 +33,8 @@ def _get_engine() -> sqlalchemy.engine.Engine:
             raise HTTPException(status_code=500, detail="Database not configured")
         _engine = sqlalchemy.create_engine(
             db_url,
-            pool_size=3,
-            max_overflow=2,
+            pool_size=SQLA_POOL_SIZE,
+            max_overflow=SQLA_MAX_OVERFLOW,
             pool_pre_ping=True,
             pool_recycle=1800,
             connect_args={"connect_timeout": 5},

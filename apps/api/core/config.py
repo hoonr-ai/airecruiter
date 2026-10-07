@@ -550,6 +550,12 @@ OPENAI_EMBEDDING_MODEL = get_env_with_default(
 # per worker.
 EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "5000"))
 
+# Side SQLAlchemy engines (routers/candidate_processing.py, services/vetted.py),
+# per worker, on top of core/db.py's psycopg2 pool. 3 + 2 keeps 8 workers well
+# under max_connections; raise via env if QueuePool timeouts show up under load.
+SQLA_POOL_SIZE = int(get_env_with_default("SQLA_POOL_SIZE", "3"))
+SQLA_MAX_OVERFLOW = int(get_env_with_default("SQLA_MAX_OVERFLOW", "2"))
+
 # Per-family override for the embedding skill matcher. Keyword fuzzy
 # matching misses non-IT synonymy ("Stakeholder Management" ↔ "Executive
 # Alignment", "Pipeline Forecasting" ↔ "Quota Attainment Planning"), so

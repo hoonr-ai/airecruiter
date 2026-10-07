@@ -227,7 +227,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 if audit_row:
                     target_candidate_id = audit_row[0]
                     target_job_id = audit_row[1]
-                    logger.debug(f"Webhook: Matched interview {payload.interview_id} to candidate {target_candidate_id} for job {target_job_id}")
+                    logger.info(f"Webhook: Matched interview {payload.interview_id} to candidate {target_candidate_id} for job {target_job_id}")
                 else:
                     logger.warning(
                         f"Webhook: No audit log found for interview {payload.interview_id}. "

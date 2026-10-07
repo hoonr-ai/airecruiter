@@ -193,6 +193,31 @@ class VendorLimiter:
                 return False
             await asyncio.sleep(wait + random.uniform(0, 0.25))
 
+    async def _cooldown_left(self) -> float:
+        wait = max(self._local_cooldown_until - time.monotonic(), 0.0)
+        client = _get_redis()
+        if client is not None:
+            try:
+                ms = int(await client.pttl(self._cooldown_key))
+                wait = max(wait, ms / 1000.0 if ms > 0 else 0.0)
+            except Exception as exc:
+                _mark_redis_down(exc)
+        return wait
+
+    async def wait_cooldown(self, max_wait_s: float = 60.0) -> bool:
+        """Wait out only the shared 429 cooldown (no pacing slot): one PTTL
+        per check instead of the pacing EVAL. For vendors with
+        ``min_interval_s == 0``. False if it outlasts ``max_wait_s``."""
+        deadline = time.monotonic() + max(0.0, max_wait_s)
+        while True:
+            wait = await self._cooldown_left()
+            if wait == 0:
+                return True
+            if wait > deadline - time.monotonic():
+                self.stats["timeouts"] += 1
+                return False
+            await asyncio.sleep(wait + random.uniform(0, 0.25))
+
     # ---- 429 -------------------------------------------------------------
 
     async def note_429(self, retry_after: Optional[str] = None) -> float:

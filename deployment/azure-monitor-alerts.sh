@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Azure Monitor alerts for Pair production (W10).
 #
-# Idempotent: re-running updates the alerts in place. Needs the Azure CLI,
+# Idempotent: re-running recreates each metric alert with the current
+# thresholds. Needs the Azure CLI,
 # logged in (`az login`) with Monitoring Contributor on the resource group.
 #
 # Usage:
@@ -42,15 +43,14 @@ metric_alert() {
   # name scope condition window severity description
   local name=$1 scope=$2 condition=$3 window=$4 severity=$5 description=$6
   echo "==> $name"
+  # `metrics alert update` can't replace a condition (only add/remove by
+  # generated name), so changed thresholds would never apply. Recreate instead.
   if az monitor metrics alert show -g "$RESOURCE_GROUP" -n "$name" -o none 2>/dev/null; then
-    az monitor metrics alert update -g "$RESOURCE_GROUP" -n "$name" \
-      --window-size "$window" --evaluation-frequency 5m --severity "$severity" \
-      --description "$description" -o none
-  else
-    az monitor metrics alert create -g "$RESOURCE_GROUP" -n "$name" --scopes "$scope" \
-      --condition "$condition" --window-size "$window" --evaluation-frequency 5m \
-      --severity "$severity" --action "$AG_ID" --description "$description" -o none
+    az monitor metrics alert delete -g "$RESOURCE_GROUP" -n "$name" -o none
   fi
+  az monitor metrics alert create -g "$RESOURCE_GROUP" -n "$name" --scopes "$scope" \
+    --condition "$condition" --window-size "$window" --evaluation-frequency 5m \
+    --severity "$severity" --action "$AG_ID" --description "$description" -o none
 }
 
 VM_ID=$(az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" --query id -o tsv)

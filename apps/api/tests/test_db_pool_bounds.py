@@ -51,4 +51,4 @@ def test_sqlalchemy_engines_are_small():
 
     for mod in (candidate_processing, vetted):
         src = inspect.getsource(mod)
-        assert "pool_size=3" in src and "max_overflow=2" in src, mod.__name__
+        assert "pool_size=SQLA_POOL_SIZE" in src and "max_overflow=SQLA_MAX_OVERFLOW" in src, mod.__name__

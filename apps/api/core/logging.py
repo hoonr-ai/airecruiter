@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
 import sys
 import threading
 import time
@@ -104,8 +105,9 @@ class RepeatedWarningSampler(logging.Filter):
         self.burst = burst
         self.window_s = window_s
         self.max_keys = max_keys
-        self._seen: dict = {}
+        self._seen: "OrderedDict[tuple, tuple]" = OrderedDict()
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
 
     def _key(self, record: logging.LogRecord) -> tuple:
         try:
@@ -119,29 +121,57 @@ class RepeatedWarningSampler(logging.Filter):
         decided = getattr(record, "_sampled_keep", None)
         if decided is not None:
             return decided
-        keep = self._decide(record)
+        keep, summaries = self._decide(record)
         record._sampled_keep = keep
+        # Emitted outside the lock; marked kept so they skip sampling.
+        for logger_name, pattern, dropped, age in summaries:
+            logging.getLogger(logger_name).warning(
+                "[+%d similar warnings suppressed in the last %ds] %s",
+                dropped, age, pattern, extra={"_sampled_keep": True},
+            )
         return keep
 
-    def _decide(self, record: logging.LogRecord) -> bool:
+    def _sweep(self, now: float, current: tuple) -> list:
+        """Close windows that ended without the warning recurring, so their
+        dropped counts are still reported (a one-off burst used to lose them)."""
+        out = []
+        for key in list(self._seen):
+            start, _count, dropped = self._seen[key]
+            if key != current and now - start >= self.window_s:
+                del self._seen[key]
+                if dropped:
+                    out.append((key[0], key[1], dropped, int(now - start)))
+        return out
+
+    def _decide(self, record: logging.LogRecord):
         if record.levelno != logging.WARNING:
-            return True
+            return True, []
         key = self._key(record)
         now = time.monotonic()
+        summaries = []
         with self._lock:
+            if now - self._last_sweep >= 1.0:
+                self._last_sweep = now
+                summaries = self._sweep(now, key)
             start, count, dropped = self._seen.get(key, (now, 0, 0))
+            self._seen[key] = (start, count, dropped)
+            self._seen.move_to_end(key)
+            # Evict least-recently-seen kinds one at a time instead of
+            # resetting every window at once; report what they had dropped.
+            while len(self._seen) > self.max_keys:
+                old_key, (old_start, _c, old_dropped) = self._seen.popitem(last=False)
+                if old_dropped:
+                    summaries.append((old_key[0], old_key[1], old_dropped, int(now - old_start)))
             if now - start >= self.window_s:
                 if dropped:
                     record.msg = f"{record.msg} [+{dropped} similar warnings suppressed in the last {int(now - start)}s]"
                 self._seen[key] = (now, 1, 0)
-                return True
+                return True, summaries
             if count < self.burst:
                 self._seen[key] = (start, count + 1, dropped)
-                return True
+                return True, summaries
             self._seen[key] = (start, count, dropped + 1)
-            if len(self._seen) > self.max_keys:
-                self._seen.clear()
-            return False
+            return False, summaries
 
 
 class AmplitudeLogHandler(logging.Handler):

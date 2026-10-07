@@ -11,9 +11,12 @@ worker is recycled by ``--limit-max-requests``). Two helpers:
 - ``claim_once`` — fire-and-forget work (backfills, first sync). The first
   worker to insert the boot marker runs it; the rest skip.
 
-A "boot" is one uvicorn master process on one host: workers, including
-recycled ones, share the master's pid (``os.getppid()``). A redeploy starts a
-new master, so it runs everything again.
+A "boot" is one uvicorn master process on one host running one release:
+workers, including recycled ones, share the master's pid (``os.getppid()``).
+The id also carries the master's start time (so a reused pid after a reboot
+is a new boot) and the release (``STARTUP_RELEASE_ID``, else the git commit),
+because ``systemctl reload`` (SIGHUP) respawns workers under the same master
+with new code — a deploy that ships new schema DDL must not be skipped.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import asyncio
 import logging
 import os
 import socket
+import subprocess
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -32,7 +36,42 @@ STARTUP_SCHEMA_LOCK_KEY = 728196  # 728193-728195: poll, jobdiva_bi_sync, AutoSy
 SCHEMA_WAIT_S = float(os.getenv("STARTUP_SCHEMA_WAIT_S", "150") or 150)
 _POLL_S = 1.0
 
-BOOT_ID = os.getenv("STARTUP_BOOT_ID") or f"{socket.gethostname()}:{os.getppid()}"
+
+
+def _process_start_ticks(pid: int) -> str:
+    """Start time of ``pid`` in clock ticks since boot (Linux), else ''."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        # Field 22; split after the ")" closing comm, which may hold spaces.
+        return stat.rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
+def _release_id() -> str:
+    rel = os.getenv("STARTUP_RELEASE_ID")
+    if rel:
+        return rel
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=2,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _boot_id() -> str:
+    if os.getenv("STARTUP_BOOT_ID"):
+        return os.environ["STARTUP_BOOT_ID"]
+    ppid = os.getppid()
+    return ":".join([socket.gethostname(), str(ppid), _process_start_ticks(ppid), _release_id()[:12]])
+
+
+BOOT_ID = _boot_id()
 
 _TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS app_startup_runs (
