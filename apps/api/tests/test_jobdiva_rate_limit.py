@@ -346,3 +346,67 @@ def test_details_batch_budget_covers_semaphore_wait(monkeypatch):
     out, elapsed = asyncio.run(run())
     assert out == {}
     assert elapsed < 1.0
+
+
+# ---- background context ------------------------------------------------------
+
+class _FakeClient:
+    def __init__(self, status=200):
+        self.calls = 0
+        self.status = status
+
+    async def get(self, url, **kw):
+        self.calls += 1
+        import httpx
+        return httpx.Response(self.status, request=httpx.Request("GET", url))
+
+
+def test_background_context_forces_background_priority(monkeypatch):
+    seen = []
+
+    async def fake_take(background):
+        seen.append(background)
+        return 0.0
+
+    monkeypatch.setattr(rl, "_take", fake_take)
+
+    async def run():
+        await rl.acquire(1.0, priority=rl.INTERACTIVE)
+        with rl.background_context():
+            await rl.acquire(1.0, priority=rl.INTERACTIVE)
+
+    asyncio.run(run())
+    assert seen == [False, True]
+
+
+def test_bg_get_interactive_bypasses_limiter(monkeypatch):
+    async def boom(*a, **k):
+        raise AssertionError("interactive bg_get must not wait for a slot")
+
+    monkeypatch.setattr(rl, "acquire", boom)
+    client = _FakeClient()
+    resp = asyncio.run(rl.bg_get(client, "https://x/y", label="t"))
+    assert resp.status_code == 200 and client.calls == 1
+
+
+def test_bg_get_background_raises_when_no_slot(monkeypatch):
+    async def no_slot(*a, **k):
+        return False
+
+    monkeypatch.setattr(rl, "acquire", no_slot)
+    client = _FakeClient()
+
+    async def run():
+        with rl.background_context():
+            await rl.bg_get(client, "https://x/y", label="t", max_wait_s=0.1)
+
+    with pytest.raises(rl.SlotTimeout):
+        asyncio.run(run())
+    assert client.calls == 0
+
+
+def test_bg_get_interactive_429_starts_shared_cooldown():
+    client = _FakeClient(status=429)
+    asyncio.run(rl.bg_get(client, "https://x/y", label="t"))
+    assert rl.stats()["http_429"] == 1
+    assert rl._local_cooldown_until > time.monotonic()

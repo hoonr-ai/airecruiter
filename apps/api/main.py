@@ -105,7 +105,8 @@ async def lifespan(app: FastAPI):
 
     # 2. Schedule "Always-On" JobDiva Sync (Zero-Setup / Production-Safe)
     from services.auto_assign_service import auto_assign_service
-    
+    from services import jobdiva_rate_limit
+
     async def auto_sync_all_jobs():
         """
         Global sync agent that runs inside the app process.
@@ -154,7 +155,10 @@ async def lifespan(app: FastAPI):
                     return
                 jid = job['job_id']
                 logger.info(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
-                await auto_assign_service.synchronize_job_applicants(jid)
+                # Background priority: every JobDiva call underneath yields
+                # to interactive requests and is paced by the shared limiter.
+                with jobdiva_rate_limit.background_context():
+                    await auto_assign_service.synchronize_job_applicants(jid)
                 await asyncio.sleep(2) # Prevent hammering the API
                 
             logger.info(f"✅ [AutoSync] Cycle complete for {len(jobs)} jobs.")

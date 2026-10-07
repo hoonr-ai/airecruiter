@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from exa_py import Exa
 from services.location import is_plausible_city_token, extract_us_location_from_text
+from core.vendor_limiter import EXA as _exa_limit
 
 logger = logging.getLogger(__name__)
 
@@ -549,6 +550,23 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
     }
 
 
+
+async def _exa_paced(loop, fn, *args):
+    """Run a blocking Exa SDK call in the executor behind the shared Exa limiter.
+
+    A 429 from the SDK (raised as an exception) starts the cooldown every
+    worker waits out before its next Exa call.
+    """
+    if not await _exa_limit.acquire():
+        raise RuntimeError("Exa rate-limited: no slot within budget")
+    try:
+        return await loop.run_in_executor(None, fn, *args)
+    except Exception as exc:
+        text = str(exc)
+        if "429" in text or "rate limit" in text.lower():
+            await _exa_limit.note_429()
+        raise
+
 class ExaService:
     def __init__(self):
         self.api_key = EXA_API_KEY
@@ -587,7 +605,7 @@ class ExaService:
             return self.exa.search_and_contents(q, **kwargs)
 
         responses = await asyncio.gather(
-            *[loop.run_in_executor(None, do_search, q) for q in queries],
+            *[_exa_paced(loop, do_search, q) for q in queries],
             return_exceptions=True,
         )
 
@@ -725,7 +743,7 @@ class ExaService:
 
         try:
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, do_contents),
+                _exa_paced(loop, do_contents),
                 timeout=25.0,
             )
         except asyncio.TimeoutError:
@@ -937,7 +955,7 @@ class ExaService:
                 effort, len(seeds), jd_title, jd_role,
             )
             created = await asyncio.wait_for(
-                loop.run_in_executor(None, do_create),
+                _exa_paced(loop, do_create),
                 timeout=30.0,
             )
             run_id = getattr(created, "id", None)

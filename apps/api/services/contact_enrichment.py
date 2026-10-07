@@ -74,7 +74,6 @@ EXA_AGENT_BETA = "agent-2026-05-07"
 _EXA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _EXA_POLL_INTERVAL_S = 4  # per Exa docs
 _EXA_LATE_POLL_S = 15      # background watch of a run we stopped waiting for
-_EXA_CREATE_429_BACKOFF_S = 3.0
 # Structured output we ask the agent to fill. Only the two billable contact
 # fields (email $0.02 / phone $0.07 per run) — richer schemas just cost more.
 # The `description` on each field matters: per Exa engineering, contact-field
@@ -944,7 +943,11 @@ async def _exa_contact_attempt(
         else:
             # Exa caps concurrent agent runs per account and answers a burst
             # with 429 — retry a couple of times rather than lose the lookup.
+            from core.vendor_limiter import EXA as _exa_limit
+
             for attempt in range(3):
+                if not await _exa_limit.acquire():
+                    return {"message": "Exa rate-limited (no slot)", "retry": "new"}
                 try:
                     r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
                 except httpx.TimeoutException:
@@ -959,9 +962,12 @@ async def _exa_contact_attempt(
                         candidate_id, found_run.get("id"),
                     )
                     break
-                if r.status_code != 429 or attempt == 2:
+                if r.status_code != 429:
                     break
-                await asyncio.sleep(_EXA_CREATE_429_BACKOFF_S * (attempt + 1))
+                # Shared cooldown: the next acquire() on any worker waits it out.
+                await _exa_limit.note_429(r.headers.get("retry-after"))
+                if attempt == 2:
+                    break
         if found_run is not None:
             run = found_run
             run_id = str(run.get("id") or "")

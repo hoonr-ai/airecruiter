@@ -1489,7 +1489,7 @@ class JobDivaService:
             logger.debug(f"Trying JobDiva applicants endpoint: {endpoint_url}")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(endpoint_url, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, endpoint_url, label="JobApplicantsDetail", headers=headers)
                 
                 logger.debug(f"Job applicants API response: {response.status_code}")
                 
@@ -3631,7 +3631,7 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="getCandidateById", params=params, headers=headers)
                 if response.status_code == 200:
                     return response.json()
                 else:
@@ -3922,10 +3922,12 @@ class JobDivaService:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 logger.info(f"🔍 Fetching job applicants for job_id: {safe_id}")
                 
-                applicants_response = await client.get(
-                    applicants_url, 
-                    params={"jobId": safe_id}, 
-                    headers=headers
+                applicants_response = await _bi_rate_limit.bg_get(
+                    client,
+                    applicants_url,
+                    label="JobApplicantsDetail",
+                    params={"jobId": safe_id},
+                    headers=headers,
                 )
                 
                 if applicants_response.status_code != 200:
@@ -4074,7 +4076,7 @@ class JobDivaService:
 
         for url, params in endpoint_attempts:
             try:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="CandidateResumesDetail", params=params, headers=headers)
                 if response.status_code != 200:
                     logger.debug(f"{url.rsplit('/', 1)[-1]} returned {response.status_code} for {candidate_id}")
                     continue
@@ -4137,10 +4139,12 @@ class JobDivaService:
             logger.debug(f"📖 Fetching resume text for resume ID: {resume_id}")
             
             resume_text_url = f"{self.api_url}/apiv2/bi/ResumesTextDetail"
-            resume_response = await client.get(
+            resume_response = await _bi_rate_limit.bg_get(
+                client,
                 resume_text_url,
+                label="ResumesTextDetail",
                 params={"resumeIds": resume_id},
-                headers=headers
+                headers=headers,
             )
             
             if resume_response.status_code == 200:
@@ -6141,7 +6145,7 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="JobsApplicantsDetail", params=params, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
                     return data if isinstance(data, list) else (data.get("data") or [])
@@ -6203,7 +6207,7 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="JobSubmittalsDetail", params=params, headers=headers)
                 if response.status_code == 200:
                     breaker.record_success()
                     data = response.json()

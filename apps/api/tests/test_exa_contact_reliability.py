@@ -177,7 +177,9 @@ def test_exa_create_429_is_retried(monkeypatch):
     calls = []
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_ENABLED", True)
     monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
-    monkeypatch.setattr(ce, "_EXA_CREATE_429_BACKOFF_S", 0)
+    from core.vendor_limiter import EXA
+    monkeypatch.setattr(EXA, "cooldown_cap_s", 0.0)
+    monkeypatch.setattr(EXA, "min_interval_s", 0.0)
     monkeypatch.setattr(ce.httpx, "AsyncClient", _client([
         _Resp(429, text="rate limited"),
         _Resp(200, {"id": "run-1", "status": "completed",
@@ -442,7 +444,9 @@ def _exa(monkeypatch, creates, polls=(), keep_polling=None):
     monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_RETRY", True)
     monkeypatch.setattr(ce, "_EXA_POLL_INTERVAL_S", 0)
-    monkeypatch.setattr(ce, "_EXA_CREATE_429_BACKOFF_S", 0)
+    from core.vendor_limiter import EXA
+    monkeypatch.setattr(EXA, "cooldown_cap_s", 0.0)
+    monkeypatch.setattr(EXA, "min_interval_s", 0.0)
     monkeypatch.setattr(ce.httpx, "AsyncClient", server)
     return server
 
