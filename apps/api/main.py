@@ -131,26 +131,30 @@ async def lifespan(app: FastAPI):
             return
 
         app.sync_in_progress = True
-        logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
+        logger.info("🤖 [AutoSync] Starting synchronization cycle...")
+
+        from services import auto_sync_queue
+
+        def _db(fn, *args):
+            conn = get_db_connection()
+            try:
+                return fn(conn, *args)
+            finally:
+                conn.close()
 
         try:
-            conn = get_db_connection()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("""
-                SELECT job_id, title 
-                FROM monitored_jobs 
-                WHERE is_archived IS NOT TRUE 
-                AND (processing_status IN ('monitoring_added', 'manual_created') OR processing_status LIKE 'step_%_complete')
-            """)
-            jobs = cur.fetchall()
-            cur.close()
-            conn.close()
-            
+            jobs = await asyncio.to_thread(_db, auto_sync_queue.pick_jobs)
             if not jobs:
                 logger.info("🤖 [AutoSync] No jobs to sync.")
                 return
 
-            for done, job in enumerate(jobs):
+            # Time-boxed slice: oldest-synced open jobs first, closed jobs at
+            # most daily. The next cycle continues where this one stopped.
+            started = time.monotonic()
+            done = 0
+            for job in jobs:
+                if time.monotonic() - started >= auto_sync_queue.CYCLE_BUDGET_S:
+                    break
                 # If the lock connection dropped, Postgres released the lock
                 # and another worker may already be running a cycle: stop.
                 if not await lock.still_held():
@@ -160,13 +164,22 @@ async def lifespan(app: FastAPI):
                     return
                 jid = job['job_id']
                 logger.debug(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
-                # Background priority: every JobDiva call underneath yields
-                # to interactive requests and is paced by the shared limiter.
-                with jobdiva_rate_limit.background_context():
-                    await auto_assign_service.synchronize_job_applicants(jid)
-                await asyncio.sleep(2) # Prevent hammering the API
-                
-            logger.info(f"✅ [AutoSync] Cycle complete for {len(jobs)} jobs.")
+                try:
+                    # Background priority: every JobDiva call underneath yields
+                    # to interactive requests and is paced by the shared limiter.
+                    with jobdiva_rate_limit.background_context():
+                        await auto_assign_service.synchronize_job_applicants(jid)
+                except Exception as e:
+                    logger.warning(f"[AutoSync] Sync failed for {jid}: {e}")
+                # Marked even on failure so one broken job can't pin the head
+                # of the queue; it comes round again after the others.
+                await asyncio.to_thread(_db, auto_sync_queue.mark_synced, [jid])
+                done += 1
+                await asyncio.sleep(0.5)  # breathing room for Postgres between jobs
+
+            logger.info(
+                f"✅ [AutoSync] Cycle synced {done}/{len(jobs)} due jobs in {time.monotonic() - started:.0f}s."
+            )
         except Exception as e:
             logger.error(f"❌ [AutoSync] Cycle failed: {e}")
         finally:
