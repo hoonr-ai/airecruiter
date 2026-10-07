@@ -67,6 +67,8 @@ def test_city_state_centroid_resolves_colloquial_aliases():
     abbreviations and a few common colloquial short names."""
     aliased = {
         ("New York City", "NY"): ("New York", "NY"),
+        ("NYC", "NY"): ("New York", "NY"),
+        ("LA", "CA"): ("Los Angeles", "CA"),
         ("St. Louis", "MO"): ("Saint Louis", "MO"),
         ("Ft. Worth", "TX"): ("Fort Worth", "TX"),
         ("Mt. Vernon", "NY"): ("Mount Vernon", "NY"),
@@ -75,6 +77,8 @@ def test_city_state_centroid_resolves_colloquial_aliases():
         ("Philly", "PA"): ("Philadelphia", "PA"),
         ("Vegas", "NV"): ("Las Vegas", "NV"),
         ("Nola", "LA"): ("New Orleans", "LA"),
+        ("DC", "DC"): ("Washington", "DC"),
+        ("Washington DC", "DC"): ("Washington", "DC"),
     }
     for (alias_city, alias_state), (canon_city, canon_state) in aliased.items():
         alias_point = zip_index.city_state_centroid(alias_city, alias_state)

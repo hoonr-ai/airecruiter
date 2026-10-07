@@ -147,11 +147,15 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
 # A city/state pair not listed here passes through unchanged.
 _CITY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("new york city", "NY"): ("new york", "NY"),
+    ("nyc", "NY"): ("new york", "NY"),
+    ("la", "CA"): ("los angeles", "CA"),
     ("san fran", "CA"): ("san francisco", "CA"),
     ("sf", "CA"): ("san francisco", "CA"),
     ("philly", "PA"): ("philadelphia", "PA"),
     ("vegas", "NV"): ("las vegas", "NV"),
     ("nola", "LA"): ("new orleans", "LA"),
+    ("dc", "DC"): ("washington", "DC"),
+    ("washington dc", "DC"): ("washington", "DC"),
 }
 
 # "St./Ft./Mt." prefixes GeoNames spells out in full ("Saint/Fort/Mount").
