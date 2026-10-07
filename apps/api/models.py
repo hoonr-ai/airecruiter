@@ -464,7 +464,7 @@ class ManualCandidateRequest(BaseModel):
 
 class CandidateFeedbackRequest(BaseModel):
     feedback_type: str # 'Submit', 'Reject', or 'Unreachable'
-    reason: Optional[str] = Field(None, max_length=500)
+    reason: Optional[str] = None
     submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
     manager_email: Optional[str] = None
     recruiter_notes: Optional[str] = None
