@@ -60,6 +60,7 @@ from models import (
 )
 from matcher import mock_match_candidates
 from services.extractor import llm_extractor
+from services import jobdiva_rate_limit
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.chat_service import chat_service
@@ -71,23 +72,28 @@ from services.job_rubric_db import JobRubricDB
 # Global scheduler
 scheduler = AsyncIOScheduler()
 
+# Job-status poll cadence. Was 5 min with ~2 JobDiva calls per monitored job;
+# statuses now come from batched BI JobsDetail, and 15 min is ample for the
+# PAIR Inactive email.
+JOB_STATUS_POLL_MINUTES = max(1, int(os.getenv("JOB_STATUS_POLL_MINUTES", "15") or 15))
+
+
 def schedule_next_poll():
-    """Schedule next poll 5 minutes from now, canceling any existing poll"""
+    """Schedule the next status poll JOB_STATUS_POLL_MINUTES from now, canceling any existing poll"""
     try:
         # Remove existing scheduled poll if any
         if scheduler.get_job("job_status_poll"):
             scheduler.remove_job("job_status_poll")
         
-        # Schedule new poll 5 minutes from now
         scheduler.add_job(
             poll_all_jobs,
             "date",
-            run_date=datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5),
+            run_date=datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=JOB_STATUS_POLL_MINUTES),
             id="job_status_poll",
             replace_existing=True
         )
         
-        next_run = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5)
+        next_run = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=JOB_STATUS_POLL_MINUTES)
         logger.info(f"🔄 Next auto-poll scheduled for: {next_run.strftime('%Y-%m-%d %H:%M:%S IST')}")
     except Exception as e:
         logger.error(f"Failed to schedule next poll: {e}")
@@ -105,7 +111,6 @@ async def lifespan(app: FastAPI):
 
     # 2. Schedule "Always-On" JobDiva Sync (Zero-Setup / Production-Safe)
     from services.auto_assign_service import auto_assign_service
-    from services import jobdiva_rate_limit
 
     async def auto_sync_all_jobs():
         """
@@ -622,16 +627,21 @@ async def _run_poll_cycle():
     logger.info("🔄 Starting job status polling...")
 
     jobs_data = load_monitored_jobs()
-    job_ids = list(jobs_data.get("jobs", {}).keys())
+    # Archived jobs are never shown or synced; polling them only spent quota.
+    job_ids = [
+        jid for jid, j in jobs_data.get("jobs", {}).items()
+        if not (j or {}).get("is_archived")
+    ]
 
     if not job_ids:
         logger.info("No jobs to monitor")
         return
 
-    logger.info(f"Polling {len(job_ids)} jobs: {job_ids}")
+    logger.info(f"Polling {len(job_ids)} jobs")
 
-    # Batch fetch statuses
-    statuses = await jobdiva_service.get_multiple_jobs_status(job_ids)
+    # Batched BI JobsDetail at background priority (yields to user requests).
+    with jobdiva_rate_limit.background_context():
+        statuses = await jobdiva_service.get_multiple_jobs_status(job_ids, jobs_data.get("jobs", {}))
     
     # Update local tracking in-place to avoid deleting jobs that failed to poll
     import time

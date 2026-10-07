@@ -4315,10 +4315,77 @@ class JobDivaService:
             "synced_at": readable_ist_now()
         }
 
-    async def get_multiple_jobs_status(self, job_ids: List[str]) -> List[Dict[str, Any]]:
-        """Batch fetch status for multiple jobs."""
-        results = []
-        for job_id in job_ids:
+    _STATUS_BATCH_SIZE = 50
+
+    async def get_multiple_jobs_status(
+        self,
+        job_ids: List[str],
+        local_jobs: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Status, title and customer for many jobs.
+
+        Numeric JobDiva ids go to the BI ``JobsDetail`` feed 50 at a time: one
+        paced request per batch instead of SearchJob + JobDetail per job (the
+        5-minute poll used to make ~2 × N calls per cycle, outside the shared
+        limiter). Jobs JobDiva does not return, or whose batch failed, come
+        back ``NOT_FOUND`` so the caller keeps their stored status. Anything
+        else (a reference id with no numeric id) falls back to ``get_job_status``.
+        """
+        local_jobs = local_jobs or {}
+        numeric = [str(j) for j in job_ids if str(j).strip().isdigit()]
+        others = [j for j in job_ids if str(j) not in set(numeric)]
+        results: List[Dict[str, Any]] = []
+
+        token = await self.authenticate() if numeric else None
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        url = f"{self.api_url}/apiv2/bi/JobsDetail"
+        for i in range(0, len(numeric), self._STATUS_BATCH_SIZE):
+            batch = numeric[i:i + self._STATUS_BATCH_SIZE]
+            rows_by_id: Dict[str, Dict[str, Any]] = {}
+            if token:
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await _bi_rate_limit.bi_get(
+                            client, url,
+                            max_wait_s=120.0,
+                            priority=_bi_rate_limit.BACKGROUND,
+                            label="JobsDetail(status)",
+                            params={"jobIds": [int(j) for j in batch]},
+                            headers=headers,
+                        )
+                    if response is not None and response.status_code == 200:
+                        payload = response.json()
+                        rows = payload.get("data") if isinstance(payload, dict) else payload
+                        if isinstance(rows, dict):
+                            rows = [rows]
+                        for row in rows or []:
+                            if isinstance(row, dict):
+                                rid = str(get_field(row, ["ID", "JOBID", "id"]) or "").strip()
+                                if rid:
+                                    rows_by_id[rid] = row
+                    elif response is not None:
+                        logger.warning(
+                            f"JobsDetail status batch failed: {response.status_code} - {response.text[:200]}"
+                        )
+                except Exception as e:
+                    logger.warning(f"JobsDetail status batch exception: {e}")
+
+            for job_id in batch:
+                row = rows_by_id.get(job_id)
+                if not row:
+                    results.append({"job_id": job_id, "status": "NOT_FOUND"})
+                    continue
+                local = local_jobs.get(job_id) or {}
+                company = str(row.get("COMPANYNAME") or "").strip()
+                results.append({
+                    "job_id": job_id,
+                    "status": str(row.get("JOBSTATUS") or "").strip() or "OPEN",
+                    "customer_name": company.title() if company else (local.get("customer_name") or "Unknown"),
+                    "title": str(get_field(row, ["TITLE", "JOBTITLE"]) or "").strip() or local.get("title") or "",
+                    "synced_at": readable_ist_now(),
+                })
+
+        for job_id in others:
             results.append(await self.get_job_status(job_id))
         return results
 

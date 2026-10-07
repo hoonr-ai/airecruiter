@@ -524,11 +524,20 @@ def _make_http_fetch(client) -> BiFetch:
             token = await jobdiva_service.authenticate(force_refresh=attempt == 2)
             if not token:
                 raise JobDivaBIError("JobDiva authentication failed")
-            response = await client.get(
+            from services import jobdiva_rate_limit as _rl
+
+            # Shared JobDiva pacing at background priority, like AutoSync.
+            response = await _rl.bi_get(
+                client,
                 f"{jobdiva_service.api_url}{path}",
+                max_wait_s=120.0,
+                priority=_rl.BACKGROUND,
+                label=f"bi_sync{path.rsplit('/', 1)[-1]}",
                 params=params,
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             )
+            if response is None:
+                raise JobDivaRateLimited(f"{path}: no JobDiva slot within 120s")
             if response.status_code == 401 and attempt == 1:
                 continue
             if response.status_code == 429:
