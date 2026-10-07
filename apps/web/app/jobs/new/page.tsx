@@ -275,9 +275,16 @@ function cleanLocationForIntro(location: string, fallback: string = "your area")
 }
 
 function getArticleForTitle(title: string): string {
-  const trimmed = title.trim();
-  if (!trimmed) return "a";
-  return /^[aeiou]/i.test(trimmed) ? "an" : "a";
+  if (!title || !title.trim()) return "a";
+  const firstWord = title.trim().split(/\s+/)[0].replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, "");
+  if (!firstWord) return "a";
+
+  if (["UX", "UI"].includes(firstWord.toUpperCase())) return "a";
+  if (firstWord.length <= 4 && firstWord === firstWord.toUpperCase()) {
+    return /^[AEFHILMNORSX]/i.test(firstWord[0]) ? "an" : "a";
+  }
+
+  return /^[aeiou]/i.test(firstWord[0]) ? "an" : "a";
 }
 
 function buildAutoBotIntroduction({
@@ -297,6 +304,20 @@ function buildAutoBotIntroduction({
   return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for ${article} ${introTitle} in ${locStr}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
 }
 
+function buildLegacyAutoBotIntroduction({
+  title,
+  location,
+  country,
+}: {
+  title: string;
+  location: string;
+  country: string;
+}): string {
+  const introTitle = cleanJobTitleForIntro(title);
+  const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
+  return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+}
+
 function matchesAutoBotIntroductionTemplate({
   intro,
   candidateTitles,
@@ -311,34 +332,36 @@ function matchesAutoBotIntroductionTemplate({
   location: string;
 }): boolean {
   const normalizedIntro = intro.trim().replace(/\s+/g, " ");
-  if (
-    normalizedIntro.includes("preliminary evaluation process") ||
-    normalizedIntro.includes("good fit for the role") ||
-    normalizedIntro.includes("8-12 minutes") ||
-    normalizedIntro.includes("3-5 mins") ||
-    normalizedIntro.includes("shortlisted for this role")
-  ) {
-    return true;
-  }
   const seen = new Set<string>();
   for (const rawTitle of candidateTitles) {
     const candidateTitle = (rawTitle || "").trim() || "role";
     if (seen.has(candidateTitle)) continue;
     seen.add(candidateTitle);
-    const templateRaw = buildAutoBotIntroduction({
-      title: candidateTitle,
-      isRemote,
-      country,
-      location,
-    }).trim().replace(/\s+/g, " ");
-    const templateCleaned = buildAutoBotIntroduction({
-      title: cleanJobTitleForIntro(candidateTitle),
-      isRemote,
-      country,
-      location,
-    }).trim().replace(/\s+/g, " ");
-    if (normalizedIntro === templateRaw || normalizedIntro === templateCleaned) return true;
+
+    const templateRaw = buildAutoBotIntroduction({ title: candidateTitle, isRemote, country, location }).trim().replace(/\s+/g, " ");
+    const templateCleaned = buildAutoBotIntroduction({ title: cleanJobTitleForIntro(candidateTitle), isRemote, country, location }).trim().replace(/\s+/g, " ");
+    const legacyRaw = buildLegacyAutoBotIntroduction({ title: candidateTitle, location, country }).trim().replace(/\s+/g, " ");
+    const legacyCleaned = buildLegacyAutoBotIntroduction({ title: cleanJobTitleForIntro(candidateTitle), location, country }).trim().replace(/\s+/g, " ");
+
+    if (
+      normalizedIntro === templateRaw ||
+      normalizedIntro === templateCleaned ||
+      normalizedIntro === legacyRaw ||
+      normalizedIntro === legacyCleaned
+    ) {
+      return true;
+    }
   }
+
+  const lower = normalizedIntro.toLowerCase();
+  if (
+    lower.includes("preliminary evaluation process") &&
+    lower.includes("good fit for the role") &&
+    lower.includes("8-12 minutes")
+  ) {
+    return true;
+  }
+
   return false;
 }
 

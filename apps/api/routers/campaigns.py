@@ -25,10 +25,17 @@ from typing import List, Dict, Any, Optional
 import logging
 import json
 import time
+import re
 import uuid
 
 from models import CampaignData, CampaignAddJobRequest, CampaignBulkAddRequest
-from routers._helpers import get_db_connection, get_dict_cursor_connection
+from routers._helpers import (
+    get_db_connection,
+    get_dict_cursor_connection,
+    get_article_for_title,
+    is_legacy_default_bot_intro,
+    normalize_bot_intro_tokens,
+)
 from routers.jobs import invalidate_monitored_jobs_cache
 from services.jobdiva import jobdiva_service
 from services.job_attribution import stamp_job_posted_by
@@ -958,9 +965,8 @@ async def _create_campaign_job(
     )
     job_location_str = _clean_location_for_intro(raw_loc_str)
 
-    article = "an" if (job_title_str and job_title_str[0].lower() in "aeiou") else "a"
-    is_legacy_default = any(phrase in raw_intro for phrase in ["preliminary evaluation process", "good fit for the role", "8-12 minutes"])
-    if not raw_intro.strip() or is_legacy_default:
+    article = get_article_for_title(job_title_str)
+    if not raw_intro.strip() or is_legacy_default_bot_intro(raw_intro):
         raw_intro = (
             f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
             f"We are helping our client recruit for {article} {job_title_str} in {job_location_str}, "
@@ -968,12 +974,7 @@ async def _create_campaign_job(
             f"for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?"
         )
     else:
-        import re
-        raw_intro = re.sub(r'\{\{\s*article\s*\}\}|\{\s*article\s*\}', article, raw_intro, flags=re.IGNORECASE)
-        raw_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_title_str, raw_intro, flags=re.IGNORECASE)
-        raw_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_location_str, raw_intro, flags=re.IGNORECASE)
-        raw_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_intro, flags=re.IGNORECASE)
-        raw_intro = re.sub(r'\{\{\s*(?:candidate_name|candidate name|name)\s*\}\}|\{\s*(?:candidate_name|candidate name|name)\s*\}', '{{candidate name}}', raw_intro, flags=re.IGNORECASE)
+        raw_intro = normalize_bot_intro_tokens(raw_intro, job_title_str, job_location_str)
         seed_title = campaign_seed_title
         if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
             raw_intro = raw_intro.replace(seed_title, job_title_str)

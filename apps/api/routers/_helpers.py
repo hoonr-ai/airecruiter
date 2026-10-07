@@ -386,3 +386,57 @@ def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: b
         status_code=403,
         detail="Access denied. You do not have permission to access or modify this job."
     )
+
+
+LEGACY_BOT_INTRO_PHRASES = (
+    "preliminary evaluation process",
+    "good fit for the role",
+    "8-12 minutes",
+)
+
+
+def get_article_for_title(title: str) -> str:
+    """Return 'a' or 'an' based on title phonetic heuristics."""
+    if not title or not title.strip():
+        return "a"
+    first_word = title.strip().split()[0].strip("-,:/|()[]{}")
+    if not first_word:
+        return "a"
+
+    # Acronyms starting with 'UX' or 'UI' sound like 'yoo' ('a UX Designer')
+    if first_word.upper() in {"UX", "UI"}:
+        return "a"
+
+    # Uppercase acronyms starting with vowel sound letters (e.g. HR, SRE, SQL, MBA, AWS, IT)
+    if first_word.isupper() and len(first_word) <= 4:
+        return "an" if first_word[0] in "AEFHILMNORSX" else "a"
+
+    # Standard vowel start
+    return "an" if first_word[0].lower() in "aeiou" else "a"
+
+
+def is_legacy_default_bot_intro(intro: str) -> bool:
+    """Check if intro equals unedited legacy system default intro requiring all 3 signature phrases."""
+    if not intro or not intro.strip():
+        return False
+    normalized = intro.lower().replace("\n", " ").strip()
+    return all(phrase in normalized for phrase in LEGACY_BOT_INTRO_PHRASES)
+
+
+def normalize_bot_intro_tokens(
+    intro: str,
+    job_title: str,
+    job_location: str,
+    company_name: str = "Pyramid Consulting",
+) -> str:
+    """Replace placeholder tokens in bot intro with normalized values."""
+    if not intro:
+        return ""
+    import re
+    article = get_article_for_title(job_title)
+    res = re.sub(r'\{\{\s*article\s*\}\}|\{\s*article\s*\}', article, intro, flags=re.IGNORECASE)
+    res = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_title, res, flags=re.IGNORECASE)
+    res = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_location, res, flags=re.IGNORECASE)
+    res = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', company_name, res, flags=re.IGNORECASE)
+    res = re.sub(r'\{\{\s*(?:candidate_name|candidate name|name)\s*\}\}|\{\s*(?:candidate_name|candidate name|name)\s*\}', '{{candidate name}}', res, flags=re.IGNORECASE)
+    return res

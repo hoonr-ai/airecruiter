@@ -83,7 +83,7 @@ export function CampaignForm({
   const [empTypes, setEmpTypes] = useState<string[]>(initial?.selected_employment_types ?? []);
   const [screeningLevel, setScreeningLevel] = useState<string>(initial?.screening_level ?? "L0.5");
   const [jobBoards, setJobBoards] = useState<string[]>(initial?.selected_job_boards ?? []);
-  const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for {{job_title}} in {{job_location}}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
+  const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for {{article}} {{job_title}} in {{job_location}}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
   const [botIntro, setBotIntro] = useState(initial?.bot_introduction?.trim() ? initial.bot_introduction : defaultBotIntro);
   const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
   const [hasQuestionWarning, setHasQuestionWarning] = useState(false);
