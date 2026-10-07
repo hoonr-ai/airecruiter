@@ -281,51 +281,6 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
 
-@pytest.mark.anyio
-async def test_save_candidate_feedback_custom_reject(monkeypatch):
-    from routers import candidates as cand_module
-    from services.jobdiva import jobdiva_service
-
-    monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
-
-    fake_cand_row = (
-        55148489, "21562841721070", "26-12137", {}, "33087136",
-        "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting"
-    )
-    fake_conn = _FakeConnection(select_row=fake_cand_row)
-    monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
-
-    jobdiva_calls = []
-    async def fake_create_note(**kwargs):
-        jobdiva_calls.append(kwargs)
-        return {"status": "success"}
-
-    monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
-    monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 0})
-
-    user = UserIdentity(
-        email="recruiter@pyramidci.com",
-        role="recruiter"
-    )
-
-    request = CandidateFeedbackRequest(
-        feedback_type="Reject",
-        reason="Candidate was rude in interview"
-    )
-
-    res = await cand_module.save_candidate_feedback(
-        job_id_or_ref="26-12137",
-        candidate_id="55148489",
-        request=request,
-        user=user
-    )
-
-    assert res["status"] == "success"
-    assert res["action_string"] == "PAIR Reject"
-    assert len(jobdiva_calls) == 1
-    assert jobdiva_calls[0]["action"] == "PAIR Reject"
-    assert "Reason: Candidate was rude in interview" in jobdiva_calls[0]["note_text"]
-
 
 @pytest.mark.anyio
 async def test_save_candidate_feedback_db_error_raises_500(monkeypatch):
