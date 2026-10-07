@@ -5,7 +5,9 @@ Public API:
     best_cosine(query_term, candidate_terms) -> float  -- sync, cache-only
 
 The cache is a global `OrderedDict` keyed by the lowercased + whitespace-
-collapsed term, with LRU eviction at `EMBEDDING_CACHE_MAX` entries.
+collapsed term, with LRU eviction at `EMBEDDING_CACHE_MAX` entries. Vectors
+are kept as `array('f')` (float32, ~6 KB for 1,536 dims) rather than a list
+of Python floats (~49 KB), which was the bulk of worker memory growth.
 Failures cache an empty list so we don't retry the same broken batch on
 every request — `best_cosine` treats empty as "no embedding" and falls
 back silently to the caller's keyword score.
@@ -24,7 +26,7 @@ import math
 import sys
 from array import array
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from openai import AsyncOpenAI
 
@@ -38,7 +40,7 @@ from core import llm_cache as _llm_cache
 
 logger = logging.getLogger(__name__)
 
-_CACHE: "OrderedDict[str, List[float]]" = OrderedDict()
+_CACHE: "OrderedDict[str, array]" = OrderedDict()
 _CACHE_LOCK = asyncio.Lock()
 _BATCH_SIZE = 256
 # Redis L2 entries expire so `volatile-lru` / `allkeys-lru` can evict them.
@@ -91,7 +93,7 @@ async def warm_terms(terms: List[str]) -> None:
         # safe. Net: a fresh worker boots warm against Redis
         # instead of re-embedding every term that crossed any worker
         # before its restart.
-        from_redis: Dict[str, List[float]] = {}
+        from_redis: Dict[str, array] = {}
         for term in still_needed:
             vec = await _embed_get_from_redis(term)
             if vec is not None:
@@ -110,7 +112,7 @@ async def warm_terms(terms: List[str]) -> None:
                     input=chunk,
                 )
                 for term, item in zip(chunk, resp.data):
-                    vec = list(item.embedding)
+                    vec = array("f", item.embedding)
                     _CACHE[term] = vec
                     # Write-through to Redis so the next worker / restart
                     # benefits without paying the OpenAI cost again.
@@ -124,7 +126,7 @@ async def warm_terms(terms: List[str]) -> None:
                 )
                 for term in chunk:
                     # Empty vector marks "tried, failed" so we don't retry.
-                    _CACHE.setdefault(term, [])
+                    _CACHE.setdefault(term, array("f"))
 
             while len(_CACHE) > EMBEDDING_CACHE_MAX:
                 _CACHE.popitem(last=False)
@@ -137,15 +139,15 @@ def _embed_redis_key(term: str) -> str:
     return _llm_cache.make_key("embed", _EMBED_REDIS_VERSION, OPENAI_EMBEDDING_MODEL, term)
 
 
-def _encode_vec(vec: List[float]) -> str:
+def _encode_vec(vec: Sequence[float]) -> str:
     # base64 little-endian float32: ~8 KB per 1,536-dim vector vs ~33 KB JSON.
-    arr = array("f", vec)
+    arr = array("f", vec)  # copy: byteswap below must not touch the cached vector
     if sys.byteorder != "little":
         arr.byteswap()
     return base64.b64encode(arr.tobytes()).decode("ascii")
 
 
-def _decode_vec(raw: str) -> Optional[List[float]]:
+def _decode_vec(raw: str) -> Optional[array]:
     try:
         arr = array("f")
         arr.frombytes(base64.b64decode(raw, validate=True))
@@ -153,17 +155,17 @@ def _decode_vec(raw: str) -> Optional[List[float]]:
         return None
     if sys.byteorder != "little":
         arr.byteswap()
-    return arr.tolist() or None
+    return arr if len(arr) else None
 
 
-async def _embed_get_from_redis(term: str) -> Optional[List[float]]:
+async def _embed_get_from_redis(term: str) -> Optional[array]:
     raw = await _llm_cache.get_str(_embed_redis_key(term))
     if not raw:
         return None
     return _decode_vec(raw)
 
 
-async def _embed_put_to_redis(term: str, vec: List[float]) -> None:
+async def _embed_put_to_redis(term: str, vec: Sequence[float]) -> None:
     if not vec:
         return
     try:
@@ -174,7 +176,7 @@ async def _embed_put_to_redis(term: str, vec: List[float]) -> None:
         logger.debug(f"embed redis write failed for {term!r}: {exc}")
 
 
-def _cosine(a: List[float], b: List[float]) -> float:
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = 0.0

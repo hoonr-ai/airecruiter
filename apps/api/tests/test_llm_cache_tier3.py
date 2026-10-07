@@ -148,6 +148,7 @@ def test_embedding_l2_writes_with_ttl_as_float32() -> None:
     assert key.startswith("llm:embed:v2:"), key
     assert store["__ttls__"][key] == skill_embeddings._EMBED_REDIS_TTL_S
     assert len(base64.b64decode(store[key])) == 1536 * 4
+    assert skill_embeddings._CACHE["golang"].typecode == "f", "L1 should hold float32 arrays"
     print("  ok: embedding L2 writes float32 with a TTL")
 
 

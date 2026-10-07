@@ -8,9 +8,10 @@ from pydantic import BaseModel
 from core.config import OPENAI_API_KEY
 from core.llm_client import get_openai_client, model_for
 from core import llm_cache
+from core.bounded_cache import BoundedDict
 
 
-_GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
+_GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = BoundedDict(10_000)
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _NOMINATIM_HEADERS = {
     "User-Agent": "airecruiter-location-filter/1.0",

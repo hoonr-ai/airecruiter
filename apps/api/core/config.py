@@ -545,7 +545,10 @@ EMBEDDING_MATCH_THRESHOLD = float(
 OPENAI_EMBEDDING_MODEL = get_env_with_default(
     "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
 )
-EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "50000"))
+# Per worker. Vectors are float32 arrays (~6 KB each), so 5,000 ≈ 30 MB. At
+# 50,000 Python-float lists (~49 KB each) this cache alone could reach ~2.4 GB
+# per worker.
+EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "5000"))
 
 # Per-family override for the embedding skill matcher. Keyword fuzzy
 # matching misses non-IT synonymy ("Stakeholder Management" ↔ "Executive
