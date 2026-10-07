@@ -307,7 +307,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     customer_name_block = (
         "REDACT CLIENT NAME (highest priority):\n"
-        f"The client name is '{req.customerName}'. You MUST completely redact any mention of '{req.customerName}' (or variants like '{req.customerName} Care+') from the entire job description. Replace it with 'our client' or 'a leading company'.\n"
+        f"The client name is '{req.customerName}'. You MUST completely redact any mention of '{req.customerName}' (as well as any related brand names, products, or division names associated with it) from the entire job description. Replace it with 'our client' or 'a leading company'.\n"
     ) if (req.customerName or "").strip() else ""
 
     prompt = (
