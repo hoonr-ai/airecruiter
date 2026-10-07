@@ -383,19 +383,20 @@ def test_hard_gate_soft_keeps_broad_region_as_unverified(svc):
     assert candidate.get("distance_miles") is None
 
 
-def test_hard_gate_soft_keeps_county_as_unverified(svc):
-    """"Santa Clara County, CA" isn't a city — the offline index has no
-    county-level entries. Before the broad-region regex covered "County", this
-    fell through to a live Nominatim call and its soft-keep status was
+def test_hard_gate_soft_keeps_county_and_metroplex_as_unverified(svc):
+    """"Santa Clara County, CA" and "Dallas-Fort Worth Metroplex" aren't cities.
+    Before the broad-region regex covered "County" and "Metroplex", these
+    fell through to a live Nominatim call and their soft-keep status was
     incidental (dependent on that call failing), not deterministic like
     "Bay Area"/"Metro Area" strings."""
-    candidate = {"location": "Santa Clara County, CA"}
-    assert svc._location_hard_gate(
-        candidate, _criteria(location="Los Angeles, CA", within_miles=50)
-    ) is None
-    assert candidate.get("location_match_reason") == "broad_region_unverified"
-    assert candidate.get("location_out_of_radius") is not True
-    assert candidate.get("distance_miles") is None
+    for location in ("Santa Clara County, CA", "Dallas-Fort Worth Metroplex"):
+        candidate = {"location": location}
+        assert svc._location_hard_gate(
+            candidate, _criteria(location="Los Angeles, CA", within_miles=50)
+        ) is None
+        assert candidate.get("location_match_reason") == "broad_region_unverified", location
+        assert candidate.get("location_out_of_radius") is not True, location
+        assert candidate.get("distance_miles") is None, location
 
 
 def test_hard_gate_no_veto_for_remote_job(svc):
