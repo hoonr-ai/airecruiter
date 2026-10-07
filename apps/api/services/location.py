@@ -65,8 +65,24 @@ _ARRANGEMENT_RESIDUE_WORDS = frozenset({
 # These strings describe a metro/region rather than a candidate's exact
 # locality. A geocoder may return a representative point for them, but that
 # point is not precise enough to hard-reject someone against a small radius.
+#
+# This is a deliberate recall-over-precision trade-off: a candidate in a
+# county/region adjacent to the one actually meant (e.g. "Santa Clara County,
+# CA" when the job wants a tighter radius than the county itself spans) may
+# still be retained as "unverified" rather than hard-dropped, because we have
+# no county/region centroid data to confirm they're truly out of range. The
+# alternative — geocoding a representative point and hard-rejecting against
+# it — risks silently dropping someone who IS in range; the chosen trade-off
+# is the one the offline-gating project treats as safer by default.
+#
+# Matched with .fullmatch() (see is_broad_region_location below), so the bare
+# literals here (chicagoland, silicon valley) only match when they make up
+# the ENTIRE label (plus an optional ", ST" suffix) — "North Chicagoland"
+# does NOT match, since there's no leading `.+` wildcard for those terms.
+# "tri-state area" is intentionally not a separate literal: it already
+# fullmatches via the generic `.+\s+area` alternative below.
 _BROAD_REGION_RE = re.compile(
-    r"(?:^greater\s+.+\s+area|.+\s+(?:bay\s+area|metro(?:politan)?(?:\s+area)?|metropolitan\s+area|area))"
+    r"(?:^greater\s+.+\s+area|chicagoland|silicon\s+valley|.+\s+(?:bay\s+area|metro(?:politan)?(?:\s+area)?|metropolitan\s+area|area|county|metroplex|region))"
     r"(?:,\s*[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?$",
     re.IGNORECASE,
 )

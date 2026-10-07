@@ -142,6 +142,60 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
     return _CITY_INDEX
 
 
+# Colloquial/abbreviated names that don't match GeoNames' canonical city name
+# used to build _city_index() above.
+#
+# Keying convention (both keys and values, enforced by the assert below —
+# every entry must be lowercase city / UPPERCASE 2-letter state, matching
+# _city_key()'s own normalization so a direct dict lookup always hits):
+#   (city_lower, "ST") -> (canonical_city_lower, "ST")
+# A city/state pair not listed here passes through unchanged (safe no-op).
+#
+# To extend: verify the alias actually resolves nothing today
+# (zip_index.city_state_centroid("Bklyn", "NY") is None) and that the
+# canonical form does (city_state_centroid("Brooklyn", "NY") is not None),
+# then add e.g. ("bklyn", "NY"): ("brooklyn", "NY"). Only add terms recruiters
+# plausibly type — this is a targeted table, not a fuzzy matcher (see the
+# "St./Ft./Mt." note below for why a blanket rule is unsafe).
+_CITY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
+    ("new york city", "NY"): ("new york", "NY"),
+    ("nyc", "NY"): ("new york", "NY"),
+    ("la", "CA"): ("los angeles", "CA"),
+    ("san fran", "CA"): ("san francisco", "CA"),
+    ("sf", "CA"): ("san francisco", "CA"),
+    ("philly", "PA"): ("philadelphia", "PA"),
+    ("vegas", "NV"): ("las vegas", "NV"),
+    ("nola", "LA"): ("new orleans", "LA"),
+    ("dc", "DC"): ("washington", "DC"),
+    ("washington dc", "DC"): ("washington", "DC"),
+}
+assert all(
+    k[0] == k[0].lower() and k[1] == k[1].upper() and len(k[1]) == 2
+    and v[0] == v[0].lower() and v[1] == v[1].upper() and len(v[1]) == 2
+    for k, v in _CITY_ALIASES.items()
+), "_CITY_ALIASES keys/values must be (lowercase city, UPPERCASE 2-letter state)"
+
+# "St./Ft./Mt." prefixes GeoNames spells out in full ("Saint/Fort/Mount").
+# Deliberately NOT a blanket "strip trailing City" rule — Jersey City, Kansas
+# City, Oklahoma City, Carson City, Atlantic City, Rapid City and Salt Lake
+# City are all genuinely named with "City" in the index.
+_ABBR_PREFIX_RE = re.compile(r"^(st|ft|mt)\.?\s+")
+_ABBR_EXPANSIONS = {"st": "saint", "ft": "fort", "mt": "mount"}
+
+
+def _normalize_city_alias(city: str, state: str) -> str:
+    """Expand a colloquial/abbreviated city name to the form GeoNames uses
+    (e.g. "new york city" -> "new york", "st. louis" -> "saint louis").
+    A no-op when no alias/abbreviation matches."""
+    alias = _CITY_ALIASES.get((city, state))
+    if alias:
+        return alias[0]
+    m = _ABBR_PREFIX_RE.match(city)
+    if m:
+        return _ABBR_EXPANSIONS[m.group(1)] + " " + city[m.end():]
+    return city
+
+
 def _city_key(city: str, state: str) -> Optional[Tuple[str, str]]:
     c = _clean(city).lower()
     s = _clean(state).upper()
@@ -155,6 +209,7 @@ def _city_key(city: str, state: str) -> Optional[Tuple[str, str]]:
             s = ""
         if not s:
             return None
+    c = _normalize_city_alias(c, s)
     return (c, s)
 
 
