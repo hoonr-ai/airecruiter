@@ -92,6 +92,37 @@ def test_apollo_out_of_credits_trips_a_cooldown(monkeypatch):
     assert ce.apollo_out_of_credits()
 
 
+def test_apollo_no_credits_cooldown_is_shared_across_workers(monkeypatch):
+    from services import jobdiva_rate_limit as rl
+
+    store = {}
+
+    class FakeRedis:
+        async def pttl(self, key):
+            return store.get(key, -2)
+
+        async def set(self, key, value, px=None):
+            store[key] = px
+
+    monkeypatch.setattr(rl, "_get_redis", lambda: FakeRedis())
+    monkeypatch.setattr(ce, "APOLLO_API_KEY", "k")
+    monkeypatch.setattr(ce, "_apollo_no_credits_until", 0.0)
+    calls = []
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _client(
+        [_Resp(422, text="You have insufficient credits! Upgrade your plan.")], calls,
+    ))
+
+    asyncio.run(ce.apollo_enrich_by_linkedin("c1", LINKEDIN))
+    assert store[ce.APOLLO_NO_CREDITS_REDIS_KEY] == int(ce.APOLLO_NO_CREDITS_COOLDOWN_S * 1000)
+
+    # Another worker: no local state, sees the shared key and never calls Apollo.
+    monkeypatch.setattr(ce, "_apollo_no_credits_until", 0.0)
+    res = asyncio.run(ce.apollo_enrich_by_linkedin("c2", LINKEDIN))
+    assert res == {"ok": False, "message": "Apollo out of credits"}
+    assert len(calls) == 1
+    assert ce.apollo_out_of_credits()
+
+
 def test_other_apollo_errors_do_not_trip_the_cooldown(monkeypatch):
     calls = []
     monkeypatch.setattr(ce, "APOLLO_API_KEY", "k")

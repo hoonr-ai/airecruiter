@@ -479,7 +479,13 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
 # only provider that matches a LinkedIn URL). After one such reply we log it
 # loudly and skip Apollo for a cool-down instead of paying the round-trip per
 # row; the chain goes straight to its next step.
-APOLLO_NO_CREDITS_COOLDOWN_S = 600.0
+#
+# The cool-down is shared across workers through Redis (`apollo:no_credits`,
+# with a TTL) so one worker's 422 stops all of them, and the ERROR is logged
+# once per window instead of once per worker every few minutes. The local
+# mirror keeps working when Redis is unavailable.
+APOLLO_NO_CREDITS_COOLDOWN_S = 3600.0
+APOLLO_NO_CREDITS_REDIS_KEY = "apollo:no_credits"
 _apollo_no_credits_until = 0.0
 
 
@@ -495,15 +501,57 @@ def apollo_out_of_credits() -> bool:
     return time.monotonic() < _apollo_no_credits_until
 
 
+async def _sync_shared_no_credits() -> None:
+    """Adopt a cool-down another worker opened (mirrored locally until it expires)."""
+    global _apollo_no_credits_until
+    if apollo_out_of_credits():
+        return
+    from services import jobdiva_rate_limit as _rl  # shared Redis client with retry/back-off
+
+    client = _rl._get_redis()
+    if client is None:
+        return
+    try:
+        ttl_ms = await client.pttl(APOLLO_NO_CREDITS_REDIS_KEY)
+    except Exception as exc:
+        _rl._mark_redis_down(exc)
+        return
+    if ttl_ms and ttl_ms > 0:
+        _apollo_no_credits_until = time.monotonic() + ttl_ms / 1000.0
+
+
+async def _trip_no_credits(status_code: int) -> None:
+    global _apollo_no_credits_until
+    _apollo_no_credits_until = time.monotonic() + APOLLO_NO_CREDITS_COOLDOWN_S
+    logger.error(
+        "Apollo is OUT OF CREDITS (%s, key source=%s): LinkedIn-URL contact "
+        "lookups fall through to paid Exa until it is topped up or "
+        "APOLLO_API_KEY is rotated; skipping Apollo for %ds on all workers",
+        status_code, APOLLO_KEY_SOURCE, int(APOLLO_NO_CREDITS_COOLDOWN_S),
+    )
+    from services import jobdiva_rate_limit as _rl
+
+    client = _rl._get_redis()
+    if client is None:
+        return
+    try:
+        await client.set(
+            APOLLO_NO_CREDITS_REDIS_KEY, str(status_code),
+            px=int(APOLLO_NO_CREDITS_COOLDOWN_S * 1000),
+        )
+    except Exception as exc:
+        _rl._mark_redis_down(exc)
+
+
 async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dict[str, Any]:
     """Call Apollo's people/enrich by LinkedIn URL. Pure async, no DB writes.
 
     Returns {"ok": bool, "fields"|"message": ...}.
     """
-    global _apollo_no_credits_until
     if not APOLLO_API_KEY or APOLLO_API_KEY == "PASTE_APOLLO_API_KEY_HERE":
         logger.warning("Apollo enrichment skipped for %s: API key not configured", candidate_id)
         return {"ok": False, "message": "Apollo API key not configured"}
+    await _sync_shared_no_credits()
     if apollo_out_of_credits():
         return {"ok": False, "message": "Apollo out of credits"}
 
@@ -522,13 +570,7 @@ async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dic
         return {"ok": False, "message": f"Apollo request failed: {str(e)}"}
 
     if _is_apollo_no_credits(ares.status_code, ares.text):
-        _apollo_no_credits_until = time.monotonic() + APOLLO_NO_CREDITS_COOLDOWN_S
-        logger.error(
-            "Apollo is OUT OF CREDITS (%s, key source=%s): LinkedIn-URL contact "
-            "lookups fall through to paid Exa until it is topped up or "
-            "APOLLO_API_KEY is rotated; skipping Apollo for %ds",
-            ares.status_code, APOLLO_KEY_SOURCE, int(APOLLO_NO_CREDITS_COOLDOWN_S),
-        )
+        await _trip_no_credits(ares.status_code)
         return {"ok": False, "message": "Apollo out of credits"}
 
     if ares.status_code >= 400:
