@@ -143,8 +143,20 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
 
 
 # Colloquial/abbreviated names that don't match GeoNames' canonical city name
-# used to build _city_index() above — keyed and valued as (city_lower, "ST").
-# A city/state pair not listed here passes through unchanged.
+# used to build _city_index() above.
+#
+# Keying convention (both keys and values, enforced by the assert below —
+# every entry must be lowercase city / UPPERCASE 2-letter state, matching
+# _city_key()'s own normalization so a direct dict lookup always hits):
+#   (city_lower, "ST") -> (canonical_city_lower, "ST")
+# A city/state pair not listed here passes through unchanged (safe no-op).
+#
+# To extend: verify the alias actually resolves nothing today
+# (zip_index.city_state_centroid("Bklyn", "NY") is None) and that the
+# canonical form does (city_state_centroid("Brooklyn", "NY") is not None),
+# then add e.g. ("bklyn", "NY"): ("brooklyn", "NY"). Only add terms recruiters
+# plausibly type — this is a targeted table, not a fuzzy matcher (see the
+# "St./Ft./Mt." note below for why a blanket rule is unsafe).
 _CITY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("new york city", "NY"): ("new york", "NY"),
     ("nyc", "NY"): ("new york", "NY"),
@@ -157,6 +169,11 @@ _CITY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("dc", "DC"): ("washington", "DC"),
     ("washington dc", "DC"): ("washington", "DC"),
 }
+assert all(
+    k[0] == k[0].lower() and k[1] == k[1].upper() and len(k[1]) == 2
+    and v[0] == v[0].lower() and v[1] == v[1].upper() and len(v[1]) == 2
+    for k, v in _CITY_ALIASES.items()
+), "_CITY_ALIASES keys/values must be (lowercase city, UPPERCASE 2-letter state)"
 
 # "St./Ft./Mt." prefixes GeoNames spells out in full ("Saint/Fort/Mount").
 # Deliberately NOT a blanket "strip trailing City" rule — Jersey City, Kansas

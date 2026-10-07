@@ -70,8 +70,10 @@ def test_city_state_centroid_resolves_colloquial_aliases():
         ("NYC", "NY"): ("New York", "NY"),
         ("LA", "CA"): ("Los Angeles", "CA"),
         ("St. Louis", "MO"): ("Saint Louis", "MO"),
+        ("St. Paul", "MN"): ("Saint Paul", "MN"),
         ("Ft. Worth", "TX"): ("Fort Worth", "TX"),
         ("Mt. Vernon", "NY"): ("Mount Vernon", "NY"),
+        ("Mt. Pleasant", "SC"): ("Mount Pleasant", "SC"),
         ("SF", "CA"): ("San Francisco", "CA"),
         ("San Fran", "CA"): ("San Francisco", "CA"),
         ("Philly", "PA"): ("Philadelphia", "PA"),
@@ -327,11 +329,16 @@ def test_new_york_city_alias_closes_multi_location_soft_keep_leak(svc, monkeypat
     )
 
     # Outside all 5 configured radii — must hard-drop, not soft-keep.
+    # Deliberately only towns with a comfortable (8+ mi) margin past every
+    # anchor's cap — Norwalk/Fairfield/Trumbull/Stratford sit within a few
+    # miles of the 41 mi NYC radius (Norwalk is ~0.3 mi over) and were
+    # dropped from this list per review feedback: a GeoNames centroid refresh
+    # could flip their verdict for reasons unrelated to the alias fix this
+    # test exists to cover, making the test flaky.
     for location in (
         "New Haven, CT", "Branford, CT", "Mystic, CT", "North Stonington, CT",
         "Putnam, CT", "Woodstock, CT", "Danielson, CT", "Moosup, CT",
-        "Norwich, CT", "Essex, CT", "Norwalk, CT", "Fairfield, CT",
-        "Trumbull, CT", "Stratford, CT",
+        "Norwich, CT", "Essex, CT",
     ):
         ok, reason, distance = svc._location_match_verdict({"location": location}, criteria)
         assert not ok and reason == "outside_radius_confirmed", (location, reason, distance)
@@ -401,6 +408,24 @@ def test_hard_gate_soft_keeps_county_and_metroplex_as_unverified(svc):
         assert candidate.get("location_match_reason") == "broad_region_unverified", location
         assert candidate.get("location_out_of_radius") is not True, location
         assert candidate.get("distance_miles") is None, location
+
+
+def test_broad_region_bare_literals_do_not_over_match_prefixed_strings():
+    """"chicagoland" and "silicon valley" are bare literals (no leading `.+`
+    wildcard) in _BROAD_REGION_RE, matched via .fullmatch(). A prefixed
+    variant like "North Chicagoland" must NOT match — there's nothing in the
+    pattern to consume the "North " prefix. If this ever starts failing, the
+    regex has grown a `.+` that makes these over-match (review flagged this
+    exact risk for PR #769)."""
+    from services.location import is_broad_region_location
+
+    assert is_broad_region_location("Chicagoland") is True
+    assert is_broad_region_location("Chicagoland, IL") is True
+    assert is_broad_region_location("Silicon Valley") is True
+    assert is_broad_region_location("Silicon Valley, CA") is True
+    assert is_broad_region_location("North Chicagoland") is False
+    assert is_broad_region_location("South Chicagoland, IL") is False
+    assert is_broad_region_location("North Silicon Valley") is False
 
 
 def test_hard_gate_no_veto_for_remote_job(svc):
