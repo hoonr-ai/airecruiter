@@ -26,8 +26,8 @@ class VettedService:
                 # v22: add pool sizing + pre_ping + connect_timeout.
                 self.engine = sqlalchemy.create_engine(
                     self.db_url,
-                    pool_size=5,
-                    max_overflow=10,
+                    pool_size=3,
+                    max_overflow=2,
                     pool_pre_ping=True,
                     pool_recycle=1800,
                     connect_args={"connect_timeout": 5},

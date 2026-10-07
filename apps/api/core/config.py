@@ -90,6 +90,20 @@ DATABASE_URL = get_env_or_fail("DATABASE_URL")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# Direct (non-pooled) Postgres URL for connections that hold a SESSION
+# advisory lock (scheduler locks, JobDiva BI sync). Required once DATABASE_URL
+# points at PgBouncer in transaction mode (Azure Flexible Server port 6432):
+# there a session lock would land on whichever server connection the
+# transaction happened to use and be released or leaked at random. Empty =
+# use DATABASE_URL.
+DATABASE_URL_DIRECT = (os.getenv("DATABASE_URL_DIRECT") or "").strip()
+if DATABASE_URL_DIRECT.startswith("postgres://"):
+    DATABASE_URL_DIRECT = DATABASE_URL_DIRECT.replace("postgres://", "postgresql://", 1)
+# "pgbouncer" when DATABASE_URL goes through PgBouncer: it rejects the
+# `options` startup parameter, so statement_timeout must then be set on the
+# role instead (ALTER ROLE ... SET statement_timeout = '30s').
+DB_POOLER = (os.getenv("DB_POOLER") or "").strip().lower()
+
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 if SUPABASE_DB_URL and SUPABASE_DB_URL.startswith("postgres://"):
     SUPABASE_DB_URL = SUPABASE_DB_URL.replace("postgres://", "postgresql://", 1)

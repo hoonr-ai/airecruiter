@@ -1013,7 +1013,9 @@ async def run_sync_cycle(
     and the cycle moves on; a 429 ends the cycle.
     """
     if conn_factory is None:
-        from core.db import get_db_connection as conn_factory  # noqa: N813
+        # Holds a session advisory lock for the whole cycle: needs a direct
+        # connection when DATABASE_URL goes through PgBouncer.
+        from core.db import get_session_db_connection as conn_factory  # noqa: N813
     summary: Dict[str, Any] = {}
     conn = await _db(conn_factory)
     got_lock = False

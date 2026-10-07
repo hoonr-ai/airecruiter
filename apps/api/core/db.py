@@ -9,8 +9,10 @@ import json
 import logging
 import threading
 import time
+import os
 from .config import (
-    INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME, DATABASE_URL
+    INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME, DATABASE_URL,
+    DATABASE_URL_DIRECT, DB_POOLER
 )
 
 logger = logging.getLogger(__name__)
@@ -28,8 +30,13 @@ DB_PASS = DB_PASSWORD
 # `workers * _POOL_MAX`. Keep _POOL_MAX small enough that 8 workers stay well
 # under Azure Postgres `max_connections` (typically 100–200). minconn=1 keeps
 # a warm socket per worker so the first request after idle isn't a cold start.
+#
+# Worst case per VM = workers × (_POOL_MAX + SQLAlchemy engines). At 20 that
+# was 8 × 35 = 280, over max_connections=200 on a single VM; 8 keeps the
+# psycopg2 share at 64. Observed peak was ~43 connections, so 8 per worker is
+# ample. Override with DB_POOL_MAX.
 _POOL_MIN = 1
-_POOL_MAX = 20
+_POOL_MAX = max(2, int(os.getenv("DB_POOL_MAX", "8") or 8))
 # ThreadedConnectionPool.getconn() raises PoolError immediately when full —
 # no queueing. _BORROW_WAIT_S bounds how long get_db_connection() will retry
 # on PoolError before giving up; absorbs micro-bursts when many requests
@@ -38,6 +45,15 @@ _BORROW_WAIT_S = 3.0
 _BORROW_RETRY_SLEEP_S = 0.05
 _pool: "ThreadedConnectionPool | None" = None
 _pool_lock = threading.Lock()
+
+
+def _connect_kwargs(via_pooler: bool) -> dict:
+    kwargs = {"connect_timeout": 5}
+    if not via_pooler:
+        # PgBouncer rejects the `options` startup parameter; behind it the
+        # 30s cap comes from ALTER ROLE ... SET statement_timeout instead.
+        kwargs["options"] = "-c statement_timeout=30000"
+    return kwargs
 
 
 def _get_pool() -> ThreadedConnectionPool:
@@ -56,8 +72,7 @@ def _get_pool() -> ThreadedConnectionPool:
                     minconn=_POOL_MIN,
                     maxconn=_POOL_MAX,
                     dsn=DATABASE_URL,
-                    connect_timeout=5,
-                    options="-c statement_timeout=30000",
+                    **_connect_kwargs(via_pooler=DB_POOLER == "pgbouncer"),
                 )
     return _pool
 
@@ -182,6 +197,19 @@ def get_db_connection():
     """
     pool = _get_pool()
     return _PooledConnection(pool, _borrow_with_wait(pool))
+
+
+def get_session_db_connection():
+    """Connection for work that holds a SESSION advisory lock.
+
+    With DATABASE_URL_DIRECT set (DATABASE_URL behind PgBouncer in
+    transaction mode) this opens a dedicated direct connection, so the lock
+    stays tied to one server session; ``.close()`` really closes it.
+    Otherwise it is an ordinary pooled connection, as before.
+    """
+    if not DATABASE_URL_DIRECT:
+        return get_db_connection()
+    return psycopg2.connect(DATABASE_URL_DIRECT, **_connect_kwargs(via_pooler=False))
 
 
 def get_dict_cursor_connection():
