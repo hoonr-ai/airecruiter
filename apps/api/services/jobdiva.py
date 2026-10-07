@@ -24,6 +24,7 @@ from core import (
 from services.location_type import resolve_location_type
 from services import jobdiva_rate_limit as _bi_rate_limit
 from services import jobdiva_detail_cache as _detail_cache
+from services import jobdiva_endpoint_breaker as _breakers
 
 logger = logging.getLogger(__name__)
 
@@ -679,6 +680,18 @@ def _is_pair_synthetic_email(email: str) -> bool:
     ``pair-<digits>@no-email.jobdiva.local``) or JobDiva's ``Auto_…`` one."""
     lowered = (email or "").strip().lower()
     return lowered.startswith("auto_") or "@no-email." in lowered
+
+
+def _escape_for_urldecoder(text: str) -> str:
+    """JobDiva runs Java ``URLDecoder.decode`` on ``textfile``; a bare ``%`` not
+    followed by two hex digits ("grew revenue 30% a year") makes it throw and
+    the whole CreateJobApplicationWithResume call 500s. Encoding ``%`` as
+    ``%25`` round-trips to the original text and leaves valid-looking
+    sequences like ``%41`` intact instead of letting JobDiva decode them.
+    ``URLDecoder`` also turns ``+`` into a space ("C++", "A+", "+1 555..."),
+    so ``+`` goes out as ``%2B``. ``%`` is encoded first so the ``%2B`` this
+    adds is not escaped again."""
+    return (text or "").replace("%", "%25").replace("+", "%2B")
 
 
 def _txt_filename(filename: str) -> str:
@@ -1479,7 +1492,7 @@ class JobDivaService:
             logger.debug(f"Trying JobDiva applicants endpoint: {endpoint_url}")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(endpoint_url, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, endpoint_url, label="JobApplicantsDetail", headers=headers)
                 
                 logger.debug(f"Job applicants API response: {response.status_code}")
                 
@@ -3621,7 +3634,7 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="getCandidateById", params=params, headers=headers)
                 if response.status_code == 200:
                     return response.json()
                 else:
@@ -3638,7 +3651,7 @@ class JobDivaService:
         # uses the root ref and doesn't 404 / trip the strict ref-match guard.
         # The caller keeps the versioned ref for any local DB identity it needs.
         job_id = strip_job_version_suffix(job_id)
-        logger.info(f"Fetching Job ID: {job_id}")
+        logger.debug(f"Fetching Job ID: {job_id}")
         token = await self.authenticate()
         if not token: return None
 
@@ -3655,7 +3668,7 @@ class JobDivaService:
             if local_job and local_job.get("jobdiva_id"):
                 search_id = local_job.get("jobdiva_id")
                 is_ref = True
-                logger.info(f"🔄 ID-Resolution: Using Reference {search_id} instead of numeric ID {job_id} for better reliability")
+                logger.debug(f"🔄 ID-Resolution: Using Reference {search_id} instead of numeric ID {job_id} for better reliability")
 
         if is_ref:
             payload = {"jobdivaref": search_id, "maxReturned": 1}
@@ -3720,7 +3733,7 @@ class JobDivaService:
                             for ckey in bi_keys:
                                 if d.get(ckey):
                                     j["customer_bi"] = d.get(ckey)
-                                    logger.info(f"Found customer '{j['customer_bi']}' in BI field '{ckey}'")
+                                    logger.debug(f"Found customer '{j['customer_bi']}' in BI field '{ckey}'")
                                     break
 
                             # Add robust BI Date and Status Extraction
@@ -3897,25 +3910,27 @@ class JobDivaService:
             # Resolve numeric ID if it's a reference number
             safe_id = job_id
             if "-" in job_id:
-                logger.info(f"🔄 Resolving numeric ID for reference {job_id}")
+                logger.debug(f"🔄 Resolving numeric ID for reference {job_id}")
                 job_info = await self.get_job_by_id(job_id)
                 if job_info:
                     # SearchJob returns job id in different fields sometimes
                     resolved_id = get_field(job_info, ["id", "jobId", "jobOrderID"])
                     if resolved_id:
                         safe_id = str(resolved_id)
-                        logger.info(f"✅ Resolved {job_id} to internal numeric ID: {safe_id}")
+                        logger.debug(f"✅ Resolved {job_id} to internal numeric ID: {safe_id}")
 
             # Step 1: Get Job Applicants using JobApplicantsDetail
             applicants_url = f"{self.api_url}/apiv2/bi/JobApplicantsDetail"
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                logger.info(f"🔍 Fetching job applicants for job_id: {safe_id}")
+                logger.debug(f"🔍 Fetching job applicants for job_id: {safe_id}")
                 
-                applicants_response = await client.get(
-                    applicants_url, 
-                    params={"jobId": safe_id}, 
-                    headers=headers
+                applicants_response = await _bi_rate_limit.bg_get(
+                    client,
+                    applicants_url,
+                    label="JobApplicantsDetail",
+                    params={"jobId": safe_id},
+                    headers=headers,
                 )
                 
                 if applicants_response.status_code != 200:
@@ -3925,7 +3940,7 @@ class JobDivaService:
                 applicants_data = applicants_response.json()
                 applicants = applicants_data.get("data", []) if isinstance(applicants_data, dict) else applicants_data
 
-                logger.info(f"📋 Found {len(applicants)} job applicants")
+                logger.debug(f"📋 Found {len(applicants)} job applicants")
 
                 # Batch-fetch CandidatesDetail for all applicants in one go.
                 # JobDiva's CandidatesDetail accepts up to 100 candidateIds per
@@ -4064,7 +4079,7 @@ class JobDivaService:
 
         for url, params in endpoint_attempts:
             try:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="CandidateResumesDetail", params=params, headers=headers)
                 if response.status_code != 200:
                     logger.debug(f"{url.rsplit('/', 1)[-1]} returned {response.status_code} for {candidate_id}")
                     continue
@@ -4127,10 +4142,12 @@ class JobDivaService:
             logger.debug(f"📖 Fetching resume text for resume ID: {resume_id}")
             
             resume_text_url = f"{self.api_url}/apiv2/bi/ResumesTextDetail"
-            resume_response = await client.get(
+            resume_response = await _bi_rate_limit.bg_get(
+                client,
                 resume_text_url,
+                label="ResumesTextDetail",
                 params={"resumeIds": resume_id},
-                headers=headers
+                headers=headers,
             )
             
             if resume_response.status_code == 200:
@@ -4301,10 +4318,77 @@ class JobDivaService:
             "synced_at": readable_ist_now()
         }
 
-    async def get_multiple_jobs_status(self, job_ids: List[str]) -> List[Dict[str, Any]]:
-        """Batch fetch status for multiple jobs."""
-        results = []
-        for job_id in job_ids:
+    _STATUS_BATCH_SIZE = 50
+
+    async def get_multiple_jobs_status(
+        self,
+        job_ids: List[str],
+        local_jobs: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Status, title and customer for many jobs.
+
+        Numeric JobDiva ids go to the BI ``JobsDetail`` feed 50 at a time: one
+        paced request per batch instead of SearchJob + JobDetail per job (the
+        5-minute poll used to make ~2 × N calls per cycle, outside the shared
+        limiter). Jobs JobDiva does not return, or whose batch failed, come
+        back ``NOT_FOUND`` so the caller keeps their stored status. Anything
+        else (a reference id with no numeric id) falls back to ``get_job_status``.
+        """
+        local_jobs = local_jobs or {}
+        numeric = [str(j) for j in job_ids if str(j).strip().isdigit()]
+        others = [j for j in job_ids if str(j) not in set(numeric)]
+        results: List[Dict[str, Any]] = []
+
+        token = await self.authenticate() if numeric else None
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        url = f"{self.api_url}/apiv2/bi/JobsDetail"
+        for i in range(0, len(numeric), self._STATUS_BATCH_SIZE):
+            batch = numeric[i:i + self._STATUS_BATCH_SIZE]
+            rows_by_id: Dict[str, Dict[str, Any]] = {}
+            if token:
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await _bi_rate_limit.bi_get(
+                            client, url,
+                            max_wait_s=120.0,
+                            priority=_bi_rate_limit.BACKGROUND,
+                            label="JobsDetail(status)",
+                            params={"jobIds": [int(j) for j in batch]},
+                            headers=headers,
+                        )
+                    if response is not None and response.status_code == 200:
+                        payload = response.json()
+                        rows = payload.get("data") if isinstance(payload, dict) else payload
+                        if isinstance(rows, dict):
+                            rows = [rows]
+                        for row in rows or []:
+                            if isinstance(row, dict):
+                                rid = str(get_field(row, ["ID", "JOBID", "id"]) or "").strip()
+                                if rid:
+                                    rows_by_id[rid] = row
+                    elif response is not None:
+                        logger.warning(
+                            f"JobsDetail status batch failed: {response.status_code} - {response.text[:200]}"
+                        )
+                except Exception as e:
+                    logger.warning(f"JobsDetail status batch exception: {e}")
+
+            for job_id in batch:
+                row = rows_by_id.get(job_id)
+                if not row:
+                    results.append({"job_id": job_id, "status": "NOT_FOUND"})
+                    continue
+                local = local_jobs.get(job_id) or {}
+                company = str(row.get("COMPANYNAME") or "").strip()
+                results.append({
+                    "job_id": job_id,
+                    "status": str(row.get("JOBSTATUS") or "").strip() or "OPEN",
+                    "customer_name": company.title() if company else (local.get("customer_name") or "Unknown"),
+                    "title": str(get_field(row, ["TITLE", "JOBTITLE"]) or "").strip() or local.get("title") or "",
+                    "synced_at": readable_ist_now(),
+                })
+
+        for job_id in others:
             results.append(await self.get_job_status(job_id))
         return results
 
@@ -5584,7 +5668,7 @@ class JobDivaService:
                 # of who filed the application.
                 json_payload = {
                     "filename": attempt_filename,
-                    "textfile": textfile,
+                    "textfile": _escape_for_urldecoder(textfile),
                     "filecontent": base64.b64encode(attempt_bytes).decode("ascii"),
                     "jobid": int(resolved_job_id or 0),
                     "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
@@ -6131,7 +6215,7 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="JobsApplicantsDetail", params=params, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
                     return data if isinstance(data, list) else (data.get("data") or [])
@@ -6164,6 +6248,12 @@ class JobDivaService:
         on a transient JobDiva outage.
         """
         error_result = None if none_on_error else []
+        # JobDiva removed this endpoint (404 for every job); skip it while
+        # the breaker is open instead of spending quota on known failures.
+        breaker = _breakers.get("JobSubmittalsDetail")
+        if await breaker.is_open():
+            return error_result
+
         token = await self.authenticate()
         if not token:
             return error_result
@@ -6187,12 +6277,16 @@ class JobDivaService:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await _bi_rate_limit.bg_get(client, url, label="JobSubmittalsDetail", params=params, headers=headers)
                 if response.status_code == 200:
+                    breaker.record_success()
                     data = response.json()
                     result = data if isinstance(data, list) else (data.get("data") or [])
                     logger.debug(f"📋 get_job_submittals: {len(result)} records for job {numeric_id}")
                     return result
+                elif response.status_code == 404:
+                    logger.warning(f"get_job_submittals: 404 for job {numeric_id}")
+                    await breaker.record_failure(404)
                 else:
                     logger.error(f"❌ get_job_submittals failed: {response.status_code} - {response.text[:300]}")
         except Exception as e:
@@ -6239,7 +6333,7 @@ class JobDivaService:
                     payload = data if isinstance(data, list) else (data.get("data") or [])
                     if payload and len(payload) > 0:
                         sample = payload[0] if isinstance(payload[0], dict) else {}
-                        logger.info(f"CandidatesQualificationsDetail sample keys: {list(sample.keys())[:10]}")
+                        logger.debug(f"CandidatesQualificationsDetail sample keys: {list(sample.keys())[:10]}")
                     for q_row in payload:
                         if not isinstance(q_row, dict): continue
                         # Try every possible candidate ID key JobDiva might use

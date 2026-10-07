@@ -24,11 +24,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
+from core.bounded_cache import BoundedDict
 from core.config import OPENAI_API_KEY, OPENAI_MODEL
 
 CANONICAL_GENDER_LABELS = {"male", "female", "default"}
 _AI_INFER_SEMAPHORE = asyncio.Semaphore(8)
-_AI_NAME_CACHE: Dict[str, "GenderPrediction"] = {}
+_AI_NAME_CACHE: Dict[str, "GenderPrediction"] = BoundedDict(10_000)
 logger = logging.getLogger(__name__)
 
 

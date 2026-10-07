@@ -332,7 +332,7 @@ def _resolve(title: str) -> dict | None:
         if leaf and (rec := _accept(_BY_LEAF.get(_norm(leaf)), title)):
             return rec
 
-    logger.info("role_taxonomy: no confident match for %r", title)
+    logger.debug("role_taxonomy: no confident match for %r", title)
     return None
 
 

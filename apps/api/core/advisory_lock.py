@@ -39,8 +39,8 @@ class AdvisoryLock:
     def _get_connection(self) -> Any:
         if self._connect is not None:
             return self._connect()
-        from core.db import get_db_connection
-        return get_db_connection()
+        from core.db import get_session_db_connection
+        return get_session_db_connection()
 
     def _try_acquire_sync(self) -> bool:
         conn = self._get_connection()

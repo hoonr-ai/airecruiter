@@ -21,11 +21,17 @@ Shared state, in Redis so every worker sees it:
   free slot while it is set, so user-facing requests go first.
 
 When ``REDIS_URL`` is empty the same logic runs in-process (per worker). When
-Redis errors, it is skipped for ``_REDIS_RETRY_S`` and then tried again.
+Redis errors, it is skipped for ``_REDIS_RETRY_S`` and then tried again; in
+that window each worker paces at ``MIN_INTERVAL_S × LOCAL_WORKERS`` so all
+workers together still stay within the shared budget (fail closed). Pacing
+every worker at the full rate is what multiplied JobDiva 429s by the worker
+count whenever Redis was down.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import email.utils
 import logging
 import os
@@ -55,8 +61,37 @@ COOLDOWN_MAX_S = _env_float("JOBDIVA_BI_COOLDOWN_MAX_S", 20.0)
 # Never honor a Retry-After longer than this (a bad header must not stall Step 5).
 COOLDOWN_CAP_S = _env_float("JOBDIVA_BI_COOLDOWN_CAP_S", 60.0)
 
+# Workers sharing the quota on this host (uvicorn --workers). Only used when
+# Redis is configured but unreachable, to split the budget between them.
+LOCAL_WORKERS = max(1, int(_env_float("JOBDIVA_BI_LOCAL_WORKERS", 8)))
+
 INTERACTIVE = "interactive"
 BACKGROUND = "background"
+
+# Set for the duration of a background job (AutoSync, backfills) so every
+# JobDiva call made underneath it is paced at background priority, including
+# ones whose callers pass INTERACTIVE or call JobDiva directly.
+_priority_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "jobdiva_priority", default=None
+)
+
+
+@contextlib.contextmanager
+def background_context():
+    token = _priority_ctx.set(BACKGROUND)
+    try:
+        yield
+    finally:
+        _priority_ctx.reset(token)
+
+
+def in_background() -> bool:
+    return _priority_ctx.get() == BACKGROUND
+
+
+class SlotTimeout(Exception):
+    """No JobDiva slot came up within the caller's wait budget."""
+
 
 _NEXT_KEY = "jobdiva:bi:next"
 _COOLDOWN_KEY = "jobdiva:cooldown"
@@ -165,20 +200,32 @@ def _get_local_lock() -> asyncio.Lock:
     return _local_lock[1]
 
 
+def _local_interval_s() -> float:
+    """Per-worker spacing for the in-process fallback.
+
+    No Redis configured (dev, single worker): the full budget. Redis
+    configured but down: this worker's share of it.
+    """
+    if getattr(_cfg, "REDIS_URL", ""):
+        return MIN_INTERVAL_S * LOCAL_WORKERS
+    return MIN_INTERVAL_S
+
+
 async def _take_local(background: bool) -> float:
     global _local_next, _local_fg_waiting_until
+    interval = _local_interval_s()
     async with _get_local_lock():
         now = time.monotonic()
         wait = max(_local_next - now, _local_cooldown_until - now, 0.0)
         if wait == 0 and background and now < _local_fg_waiting_until:
-            wait = MIN_INTERVAL_S
+            wait = interval
         if wait > 0:
             if not background:
                 _local_fg_waiting_until = max(
-                    _local_fg_waiting_until, now + wait + MIN_INTERVAL_S + 0.25
+                    _local_fg_waiting_until, now + wait + interval + 0.25
                 )
             return wait
-        _local_next = now + MIN_INTERVAL_S
+        _local_next = now + interval
         return 0.0
 
 
@@ -210,6 +257,8 @@ async def acquire(
     hydration pick the ids up later. Background callers yield to waiting
     interactive ones.
     """
+    if in_background():
+        priority = BACKGROUND
     background = priority == BACKGROUND
     t0 = time.monotonic()
     deadline = t0 + max(0.0, max_wait_s)
@@ -289,4 +338,32 @@ async def bi_get(
     response = await client.get(url, **kwargs)
     if response.status_code == 429:
         await note_429(response.headers.get("Retry-After"), label=label, priority=priority)
+    return response
+
+
+async def bg_get(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    label: str,
+    max_wait_s: float = 120.0,
+    **kwargs: Any,
+) -> httpx.Response:
+    """``client.get`` for JobDiva calls that are not always paced.
+
+    Inside ``background_context()`` the call waits for a background slot
+    (raising ``SlotTimeout`` if none comes up). Interactive callers go
+    straight through, unchanged. Either way a 429 starts the shared
+    cooldown so every other caller backs off.
+    """
+    if in_background():
+        response = await bi_get(
+            client, url, max_wait_s=max_wait_s, priority=BACKGROUND, label=label, **kwargs
+        )
+        if response is None:
+            raise SlotTimeout(f"no JobDiva slot for {label} within {max_wait_s:.0f}s")
+        return response
+    response = await client.get(url, **kwargs)
+    if response.status_code == 429:
+        await note_429(response.headers.get("Retry-After"), label=label, priority=INTERACTIVE)
     return response
