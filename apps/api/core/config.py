@@ -62,6 +62,12 @@ LLM_CACHE_ENABLED = get_env_bool("LLM_CACHE_ENABLED", True)
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")
 
+# ---- Screening Defaults ----
+# Single source of truth for the recommended screening level, so the jobs,
+# campaigns, and engagement routers (plus jobdiva ingestion) can't drift from
+# each other the next time the recommended default changes.
+DEFAULT_SCREENING_LEVEL = "L0.5"
+
 # JobDiva Configuration
 JOBDIVA_API_URL = get_env_with_default("JOBDIVA_API_URL", "https://api.jobdiva.com")
 JOBDIVA_CLIENT_ID = get_env_or_fail("JOBDIVA_CLIENT_ID")
