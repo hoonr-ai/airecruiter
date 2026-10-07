@@ -24,6 +24,7 @@ from core import (
 from services.location_type import resolve_location_type
 from services import jobdiva_rate_limit as _bi_rate_limit
 from services import jobdiva_detail_cache as _detail_cache
+from services import jobdiva_endpoint_breaker as _breakers
 
 logger = logging.getLogger(__name__)
 
@@ -6164,6 +6165,12 @@ class JobDivaService:
         on a transient JobDiva outage.
         """
         error_result = None if none_on_error else []
+        # JobDiva removed this endpoint (404 for every job); skip it while
+        # the breaker is open instead of spending quota on known failures.
+        breaker = _breakers.get("JobSubmittalsDetail")
+        if await breaker.is_open():
+            return error_result
+
         token = await self.authenticate()
         if not token:
             return error_result
@@ -6189,10 +6196,14 @@ class JobDivaService:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url, params=params, headers=headers)
                 if response.status_code == 200:
+                    breaker.record_success()
                     data = response.json()
                     result = data if isinstance(data, list) else (data.get("data") or [])
                     logger.debug(f"📋 get_job_submittals: {len(result)} records for job {numeric_id}")
                     return result
+                elif response.status_code == 404:
+                    logger.warning(f"get_job_submittals: 404 for job {numeric_id}")
+                    await breaker.record_failure(404)
                 else:
                     logger.error(f"❌ get_job_submittals failed: {response.status_code} - {response.text[:300]}")
         except Exception as e:
