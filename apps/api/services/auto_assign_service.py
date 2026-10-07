@@ -412,7 +412,7 @@ class AutoAssignService:
                             first = (d.get("CONTACTFIRSTNAME") or d.get("CONTACT_FIRST_NAME") or "").strip()
                             last = (d.get("CONTACTLASTNAME") or d.get("CONTACT_LAST_NAME") or "").strip()
                             contact_name = f"{first} {last}".strip().lower()
-                            logger.info(f"📋 Job {numeric_job_id} contact: '{contact_name}'")
+                            logger.debug(f"📋 Job {numeric_job_id} contact: '{contact_name}'")
                     else:
                         logger.warning(
                             f"[ExternalSubs] JobDetail returned {resp.status_code} for job "
@@ -440,7 +440,7 @@ class AutoAssignService:
             logger.debug(f"📋 No submittals found for job {numeric_job_id}")
             return 0
 
-        logger.info(f"📋 {len(submittals)} submittal(s) found for job {numeric_job_id}, contact='{contact_name}'")
+        logger.debug(f"📋 {len(submittals)} submittal(s) found for job {numeric_job_id}, contact='{contact_name}'")
 
         count = 0
         for sub in submittals:
@@ -501,7 +501,7 @@ class AutoAssignService:
 
                 diff_days = abs((sub_date - qual_date).days)
                 if diff_days <= 60:
-                    logger.info(
+                    logger.debug(
                         f"✅ External sub counted: candidate={candidate_id}, "
                         f"submittal={sub_date.date()}, qual={qual_date.date()}, diff={diff_days}d"
                     )
@@ -1094,7 +1094,7 @@ class AutoAssignService:
             # Drain whatever's left after the stream ends.
             _flush_batches()
 
-            logger.info(
+            logger.debug(
                 f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}"
                 + (f" ({pair_unlinked} PAIR-filed application(s) without a local row skipped)" if pair_unlinked else "")
             )
@@ -1305,7 +1305,7 @@ class AutoAssignService:
                     logger.warning(
                         f"[AutoAssignService] Submittal persistence failed for job {target_job_id}: {persist_err}"
                     )
-            logger.info(
+            logger.debug(
                 f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: "
                 f"pass_time={time_to_pass}min ext_subs={ext_subs} "
                 f"feedback={(feedback_metrics or {}).get('feedback_completed')} "

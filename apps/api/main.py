@@ -154,7 +154,7 @@ async def lifespan(app: FastAPI):
                     )
                     return
                 jid = job['job_id']
-                logger.info(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
+                logger.debug(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
                 # Background priority: every JobDiva call underneath yields
                 # to interactive requests and is paced by the shared limiter.
                 with jobdiva_rate_limit.background_context():

@@ -557,7 +557,13 @@ class UnifiedCandidateSearch:
 
 
     def _log_stage(self, stage: str, message: str) -> None:
-        logger.info("[CandidateSearch] %s | %s", stage, message)
+        # AutoSync runs a search per monitored job every cycle; its stage
+        # lines were ~10k INFO lines per few hours. Keep them for interactive
+        # searches (support greps them), DEBUG for background sync.
+        from services.jobdiva_rate_limit import in_background
+
+        level = logging.DEBUG if in_background() else logging.INFO
+        logger.log(level, "[CandidateSearch] %s | %s", stage, message)
 
     async def _apply_contact_enrichment(
         self,

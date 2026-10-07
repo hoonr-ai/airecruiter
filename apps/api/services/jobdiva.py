@@ -3648,7 +3648,7 @@ class JobDivaService:
         # uses the root ref and doesn't 404 / trip the strict ref-match guard.
         # The caller keeps the versioned ref for any local DB identity it needs.
         job_id = strip_job_version_suffix(job_id)
-        logger.info(f"Fetching Job ID: {job_id}")
+        logger.debug(f"Fetching Job ID: {job_id}")
         token = await self.authenticate()
         if not token: return None
 
@@ -3665,7 +3665,7 @@ class JobDivaService:
             if local_job and local_job.get("jobdiva_id"):
                 search_id = local_job.get("jobdiva_id")
                 is_ref = True
-                logger.info(f"🔄 ID-Resolution: Using Reference {search_id} instead of numeric ID {job_id} for better reliability")
+                logger.debug(f"🔄 ID-Resolution: Using Reference {search_id} instead of numeric ID {job_id} for better reliability")
 
         if is_ref:
             payload = {"jobdivaref": search_id, "maxReturned": 1}
@@ -3730,7 +3730,7 @@ class JobDivaService:
                             for ckey in bi_keys:
                                 if d.get(ckey):
                                     j["customer_bi"] = d.get(ckey)
-                                    logger.info(f"Found customer '{j['customer_bi']}' in BI field '{ckey}'")
+                                    logger.debug(f"Found customer '{j['customer_bi']}' in BI field '{ckey}'")
                                     break
 
                             # Add robust BI Date and Status Extraction
@@ -3907,20 +3907,20 @@ class JobDivaService:
             # Resolve numeric ID if it's a reference number
             safe_id = job_id
             if "-" in job_id:
-                logger.info(f"🔄 Resolving numeric ID for reference {job_id}")
+                logger.debug(f"🔄 Resolving numeric ID for reference {job_id}")
                 job_info = await self.get_job_by_id(job_id)
                 if job_info:
                     # SearchJob returns job id in different fields sometimes
                     resolved_id = get_field(job_info, ["id", "jobId", "jobOrderID"])
                     if resolved_id:
                         safe_id = str(resolved_id)
-                        logger.info(f"✅ Resolved {job_id} to internal numeric ID: {safe_id}")
+                        logger.debug(f"✅ Resolved {job_id} to internal numeric ID: {safe_id}")
 
             # Step 1: Get Job Applicants using JobApplicantsDetail
             applicants_url = f"{self.api_url}/apiv2/bi/JobApplicantsDetail"
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                logger.info(f"🔍 Fetching job applicants for job_id: {safe_id}")
+                logger.debug(f"🔍 Fetching job applicants for job_id: {safe_id}")
                 
                 applicants_response = await _bi_rate_limit.bg_get(
                     client,
@@ -3937,7 +3937,7 @@ class JobDivaService:
                 applicants_data = applicants_response.json()
                 applicants = applicants_data.get("data", []) if isinstance(applicants_data, dict) else applicants_data
 
-                logger.info(f"📋 Found {len(applicants)} job applicants")
+                logger.debug(f"📋 Found {len(applicants)} job applicants")
 
                 # Batch-fetch CandidatesDetail for all applicants in one go.
                 # JobDiva's CandidatesDetail accepts up to 100 candidateIds per
@@ -6263,7 +6263,7 @@ class JobDivaService:
                     payload = data if isinstance(data, list) else (data.get("data") or [])
                     if payload and len(payload) > 0:
                         sample = payload[0] if isinstance(payload[0], dict) else {}
-                        logger.info(f"CandidatesQualificationsDetail sample keys: {list(sample.keys())[:10]}")
+                        logger.debug(f"CandidatesQualificationsDetail sample keys: {list(sample.keys())[:10]}")
                     for q_row in payload:
                         if not isinstance(q_row, dict): continue
                         # Try every possible candidate ID key JobDiva might use
