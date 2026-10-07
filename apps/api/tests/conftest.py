@@ -35,9 +35,11 @@ def _block_real_redis(monkeypatch):
     monkeypatch.setattr(cfg, "REDIS_URL", "", raising=False)
     monkeypatch.setattr(jobdiva_rate_limit, "_redis_client", None)
     monkeypatch.setattr(vendor_limiter, "_redis_client", None)
-    for lim in (vendor_limiter.OPENAI, vendor_limiter.EXA):
+    for lim in (vendor_limiter.OPENAI, vendor_limiter.EXA, vendor_limiter.UNIPILE):
         monkeypatch.setattr(lim, "_local_next", 0.0)
         monkeypatch.setattr(lim, "_local_cooldown_until", 0.0)
+    # Scripted Unipile fakes make many calls per test; pacing them is just delay.
+    monkeypatch.setattr(vendor_limiter.UNIPILE, "min_interval_s", 0.0)
 
 
 @pytest.fixture(autouse=True)

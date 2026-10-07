@@ -40,6 +40,7 @@ def readable_ist_now() -> str:
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
 from core.advisory_lock import AdvisoryLock
+from core.startup_once import claim_once, run_schema_once
 from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -189,86 +190,84 @@ async def lifespan(app: FastAPI):
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
 
-    # 3. Initialize engagement audit table (moved out of module import in
-    # engagement.py so a slow/locked DB can no longer crash-loop the app).
-    # Wrapped in wait_for so even a hung DB does not block readiness.
-    if engagement is not None and hasattr(engagement, "init_engagement_tables"):
+    # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
+    # EXCLUSIVE, so running it in all 8 workers (and again on every worker
+    # recycle) queued them behind each other. One worker runs the steps under
+    # an advisory lock; the rest wait for it, then skip (core/startup_once).
+    async def _schema_step(name: str, coro_fn, timeout: float) -> bool:
         try:
-            await asyncio.wait_for(engagement.init_engagement_tables(), timeout=10)
+            await asyncio.wait_for(coro_fn(), timeout=timeout)
+            return True
         except asyncio.TimeoutError:
-            logger.error("engagement_audit_init_timeout (10s); continuing without init")
+            logger.error(f"{name}_timeout ({timeout:.0f}s); continuing")
         except Exception as e:  # noqa: BLE001
-            logger.error(f"engagement_audit_init_failed: {e}; continuing")
+            logger.error(f"{name}_failed: {e}; continuing")
+        return False
 
-    # 4. Provision monitored_jobs columns once at startup. Previously two
-    # handlers in routers/jobs.py ran `ALTER TABLE monitored_jobs ADD COLUMN
-    # IF NOT EXISTS ...` on every request — ACCESS EXCLUSIVE lock queued
-    # behind the auto-sync's shared lock, so `GET /jobs/monitored` could
-    # stall for 60-90+ seconds. Run it once here; skip it in the hot path.
-    if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):
-        try:
-            await asyncio.wait_for(jobs_router.init_monitored_jobs_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("monitored_jobs_schema_init_timeout (10s); continuing")
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
-
-    if job_criteria_router is not None and hasattr(job_criteria_router, "init_job_criteria_schema"):
-        try:
-            await asyncio.wait_for(job_criteria_router.init_job_criteria_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("job_criteria_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"job_criteria_schema_init_failed: {e}; continuing")
-
-    # Provision the campaigns table. Runs after monitored_jobs (whose
-    # campaign_id column links child jobs to a campaign). Idempotent.
-    if campaigns_router is not None and hasattr(campaigns_router, "init_campaigns_schema"):
-        try:
-            await asyncio.wait_for(campaigns_router.init_campaigns_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("campaigns_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"campaigns_schema_init_failed: {e}; continuing")
-
-    # Provision teams + team_members (admin-managed recruiter teams; drives
-    # the team_lead role and team-scoped analytics/jobs views). Idempotent.
-    if teams_router is not None and hasattr(teams_router, "init_teams_schema"):
-        try:
-            await asyncio.wait_for(teams_router.init_teams_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("teams_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"teams_schema_init_failed: {e}; continuing")
-
-    # Provision org_members (the Recruiter → Resource Manager → Delivery Manager
-    # → Delivery Director → AVP tree that decides whose jobs and admin analytics
-    # each person sees). Idempotent. If this times out, identity lookups fail
-    # CLOSED (no extra visibility), never open.
-    if org_hierarchy_router is not None and hasattr(org_hierarchy_router, "init_org_hierarchy_schema"):
-        try:
-            await asyncio.wait_for(org_hierarchy_router.init_org_hierarchy_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("org_hierarchy_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"org_hierarchy_schema_init_failed: {e}; continuing")
-
-    # Provision the JobDiva BI mirror (all Pyramid reqs, submittal / interview
-    # / start activity, the user directory) behind the PAIR Dashboard, and
-    # schedule its sync. Every worker schedules it; an advisory lock lets one
-    # run each cycle. Delayed like the auto-sync so boot stays uncontested.
     try:
         from services import jobdiva_bi_sync
     except Exception as e:  # noqa: BLE001 - never let the dashboard mirror block boot
         logger.error(f"jobdiva_bi_sync_import_failed: {e}; continuing")
         jobdiva_bi_sync = None
-    if jobdiva_bi_sync is not None:
-        try:
-            await asyncio.wait_for(jobdiva_bi_sync.init_jobdiva_bi_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("jobdiva_bi_schema_init_timeout (10s); continuing")
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"jobdiva_bi_schema_init_failed: {e}; continuing")
+
+    async def _init_schemas() -> bool:
+        steps = []
+        # Engagement audit table (moved out of module import in engagement.py
+        # so a slow/locked DB can no longer crash-loop the app).
+        if engagement is not None and hasattr(engagement, "init_engagement_tables"):
+            steps.append(("engagement_audit_init", engagement.init_engagement_tables, 10))
+        # monitored_jobs columns. Previously two handlers in routers/jobs.py ran
+        # ALTER TABLE on every request and stalled GET /jobs/monitored for 60-90s.
+        if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):
+            steps.append(("monitored_jobs_schema_init", jobs_router.init_monitored_jobs_schema, 10))
+        if job_criteria_router is not None and hasattr(job_criteria_router, "init_job_criteria_schema"):
+            steps.append(("job_criteria_schema_init", job_criteria_router.init_job_criteria_schema, 10))
+        # campaigns after monitored_jobs (whose campaign_id column links child jobs).
+        if campaigns_router is not None and hasattr(campaigns_router, "init_campaigns_schema"):
+            steps.append(("campaigns_schema_init", campaigns_router.init_campaigns_schema, 10))
+        # teams + team_members (team_lead role and team-scoped views).
+        if teams_router is not None and hasattr(teams_router, "init_teams_schema"):
+            steps.append(("teams_schema_init", teams_router.init_teams_schema, 10))
+        # org_members. If this times out, identity lookups fail CLOSED.
+        if org_hierarchy_router is not None and hasattr(org_hierarchy_router, "init_org_hierarchy_schema"):
+            steps.append(("org_hierarchy_schema_init", org_hierarchy_router.init_org_hierarchy_schema, 10))
+        # JobDiva BI mirror behind the PAIR Dashboard.
+        if jobdiva_bi_sync is not None:
+            steps.append(("jobdiva_bi_schema_init", jobdiva_bi_sync.init_jobdiva_bi_schema, 10))
+
+        # Imported inside each step so a broken module fails only its step.
+        async def _scs_init():
+            from services import sourced_candidates_storage as _scs
+            await _scs.init_sourced_candidates_schema()
+
+        async def _dnc_init():
+            from services import dnc_storage as _dnc
+            await _dnc.init_dnc_schema()
+
+        async def _rubric_init():
+            from services import job_rubric_db as _jrd
+            await _jrd.init_rubric_schema()
+
+        # sourced_candidates + candidate_enhanced_info. 15s: the initial CREATE
+        # INDEX on candidate_enhanced_info can take longer.
+        steps.append(("sourced_candidates_schema_init", _scs_init, 15))
+        # dnc_list + sourced_candidates.dnc_stopped_at; after sourced_candidates.
+        steps.append(("dnc_schema_init", _dnc_init, 10))
+        # job_skills / job_education `source` column (Recruiter vs PAIR chip).
+        steps.append(("rubric_schema_init", _rubric_init, 10))
+
+        ok = True
+        for name, fn, timeout in steps:
+            ok = await _schema_step(name, fn, timeout) and ok
+        return ok
+
+    try:
+        await run_schema_once("schemas", _init_schemas)
+    except Exception as e:  # noqa: BLE001 - schema init must never block boot
+        logger.error(f"startup_schema_init_failed: {e}; continuing")
+
+    # JobDiva BI mirror sync. Every worker schedules it; an advisory lock lets
+    # one run each cycle. Delayed like the auto-sync so boot stays uncontested.
     if jobdiva_bi_sync is not None and jobdiva_bi_sync.SYNC_ENABLED:
         try:
             scheduler.add_job(
@@ -322,7 +321,8 @@ async def lifespan(app: FastAPI):
     )
     # Prime cache once at startup so the first dashboard request after
     # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
-    # failure is logged inside the warmer and never blocks boot.
+    # failure is logged inside the warmer and never blocks boot. Stays
+    # per-worker: the cache is process-local and the warmer only reads Postgres.
     asyncio.create_task(warm_monitored_jobs_cache())
 
     # v30: one-time backfill of the denormalized counter columns. After
@@ -331,52 +331,24 @@ async def lifespan(app: FastAPI):
     # populates them from sourced_candidates aggregates so the dashboard
     # shows real numbers without waiting for the next 15-min sync cycle.
     # Fire-and-forget so a slow aggregate never blocks boot.
+    # Claimed by one worker per boot (core/startup_once).
+    async def _backfill_counters_once():
+        if await claim_once("backfill_monitored_jobs_counters"):
+            await jobs_router.backfill_monitored_jobs_counters()
+
     if jobs_router is not None and hasattr(jobs_router, "backfill_monitored_jobs_counters"):
-        asyncio.create_task(jobs_router.backfill_monitored_jobs_counters())
-
-    # 5. Provision sourced_candidates + candidate_enhanced_info schema.
-    # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
-    # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE
-    # INDEX per call. ALTER TABLE grabs ACCESS EXCLUSIVE and serialized every
-    # concurrent reader/writer. Budget 15s because candidate_enhanced_info is
-    # larger than monitored_jobs and the initial CREATE INDEX can take longer.
-    try:
-        from services import sourced_candidates_storage as _scs
-        await asyncio.wait_for(_scs.init_sourced_candidates_schema(), timeout=15)
-    except asyncio.TimeoutError:
-        logger.error("sourced_candidates_schema_init_timeout (15s); continuing")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"sourced_candidates_schema_init_failed: {e}; continuing")
-
-    # 6. Provision dnc_list table + sourced_candidates.dnc_stopped_at column.
-    # Runs after sourced_candidates so the ALTER TABLE finds an existing
-    # parent table. Idempotent — safe across redeploys.
-    try:
-        from services import dnc_storage as _dnc
-        await asyncio.wait_for(_dnc.init_dnc_schema(), timeout=10)
-    except asyncio.TimeoutError:
-        logger.error("dnc_schema_init_timeout (10s); continuing")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"dnc_schema_init_failed: {e}; continuing")
-
-    # 7. Provision `source` column on job_skills / job_education so the
-    # Step 3 rubric chip can show "Recruiter" vs "PAIR" provenance
-    # and have it survive save+reload. Idempotent ALTER TABLE ADD COLUMN
-    # IF NOT EXISTS — safe across redeploys.
-    try:
-        from services import job_rubric_db as _jrd
-        await asyncio.wait_for(_jrd.init_rubric_schema(), timeout=10)
-    except asyncio.TimeoutError:
-        logger.error("rubric_schema_init_timeout (10s); continuing")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"rubric_schema_init_failed: {e}; continuing")
+        asyncio.create_task(_backfill_counters_once())
 
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
     # manifesting as site-wide slowness right after every deploy. The 15-min
     # interval schedule above still catches everything; the delay just keeps
     # the cold-start window uncontested.
+    # One worker per boot: recycled workers (--limit-max-requests) would
+    # otherwise each kick off an extra cycle a minute after they start.
     async def _delayed_first_sync():
+        if not await claim_once("first_auto_sync"):
+            return
         await asyncio.sleep(60)
         await auto_sync_all_jobs()
 

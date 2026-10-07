@@ -219,3 +219,7 @@ class VendorLimiter:
 OPENAI = VendorLimiter("openai", min_interval_s=0.0, cooldown_min_s=2.0, cooldown_max_s=8.0, cooldown_cap_s=30.0)
 # Exa: ~5 requests/s across the account.
 EXA = VendorLimiter("exa", min_interval_s=0.2, cooldown_min_s=10.0, cooldown_max_s=15.0, cooldown_cap_s=60.0)
+# Unipile: global cap of ~4 requests/s across every LinkedIn account and worker.
+# LinkedIn 429s are per account and handled by the 15-min account bench in
+# services/unipile.py, so this limiter only paces; it never starts a cooldown.
+UNIPILE = VendorLimiter("unipile", min_interval_s=0.25)
