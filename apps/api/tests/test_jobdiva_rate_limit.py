@@ -86,6 +86,19 @@ def test_local_acquire_spaces_concurrent_callers():
     assert all(g >= 0.045 for g in _gaps(stamps)), _gaps(stamps)
 
 
+def test_redis_down_paces_each_worker_at_its_share(monkeypatch):
+    # Redis configured but unreachable: each worker gets 1/LOCAL_WORKERS of the budget.
+    monkeypatch.setattr(rl._cfg, "REDIS_URL", "redis://unreachable", raising=False)
+    monkeypatch.setattr(rl, "_redis_down_until", time.monotonic() + 60)
+    monkeypatch.setattr(rl, "LOCAL_WORKERS", 4)
+    stamps = asyncio.run(_timed_acquires(3))
+    assert all(g >= 0.19 for g in _gaps(stamps)), _gaps(stamps)
+
+
+def test_no_redis_configured_uses_full_budget():
+    assert rl._local_interval_s() == rl.MIN_INTERVAL_S
+
+
 def test_local_acquire_gives_up_past_budget_and_counts_it():
     async def run():
         await rl.note_429("1")

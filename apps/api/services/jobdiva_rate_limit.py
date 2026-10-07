@@ -21,7 +21,11 @@ Shared state, in Redis so every worker sees it:
   free slot while it is set, so user-facing requests go first.
 
 When ``REDIS_URL`` is empty the same logic runs in-process (per worker). When
-Redis errors, it is skipped for ``_REDIS_RETRY_S`` and then tried again.
+Redis errors, it is skipped for ``_REDIS_RETRY_S`` and then tried again; in
+that window each worker paces at ``MIN_INTERVAL_S × LOCAL_WORKERS`` so all
+workers together still stay within the shared budget (fail closed). Pacing
+every worker at the full rate is what multiplied JobDiva 429s by the worker
+count whenever Redis was down.
 """
 from __future__ import annotations
 
@@ -54,6 +58,10 @@ COOLDOWN_MIN_S = _env_float("JOBDIVA_BI_COOLDOWN_MIN_S", 10.0)
 COOLDOWN_MAX_S = _env_float("JOBDIVA_BI_COOLDOWN_MAX_S", 20.0)
 # Never honor a Retry-After longer than this (a bad header must not stall Step 5).
 COOLDOWN_CAP_S = _env_float("JOBDIVA_BI_COOLDOWN_CAP_S", 60.0)
+
+# Workers sharing the quota on this host (uvicorn --workers). Only used when
+# Redis is configured but unreachable, to split the budget between them.
+LOCAL_WORKERS = max(1, int(_env_float("JOBDIVA_BI_LOCAL_WORKERS", 8)))
 
 INTERACTIVE = "interactive"
 BACKGROUND = "background"
@@ -165,20 +173,32 @@ def _get_local_lock() -> asyncio.Lock:
     return _local_lock[1]
 
 
+def _local_interval_s() -> float:
+    """Per-worker spacing for the in-process fallback.
+
+    No Redis configured (dev, single worker): the full budget. Redis
+    configured but down: this worker's share of it.
+    """
+    if getattr(_cfg, "REDIS_URL", ""):
+        return MIN_INTERVAL_S * LOCAL_WORKERS
+    return MIN_INTERVAL_S
+
+
 async def _take_local(background: bool) -> float:
     global _local_next, _local_fg_waiting_until
+    interval = _local_interval_s()
     async with _get_local_lock():
         now = time.monotonic()
         wait = max(_local_next - now, _local_cooldown_until - now, 0.0)
         if wait == 0 and background and now < _local_fg_waiting_until:
-            wait = MIN_INTERVAL_S
+            wait = interval
         if wait > 0:
             if not background:
                 _local_fg_waiting_until = max(
-                    _local_fg_waiting_until, now + wait + MIN_INTERVAL_S + 0.25
+                    _local_fg_waiting_until, now + wait + interval + 0.25
                 )
             return wait
-        _local_next = now + MIN_INTERVAL_S
+        _local_next = now + interval
         return 0.0
 
 
