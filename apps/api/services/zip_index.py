@@ -121,10 +121,12 @@ def extract_zip(text: str) -> Optional[str]:
 
 # (city_lower, "ST") -> (lat, lng, zip nearest the averaged centroid)
 _CITY_INDEX: Optional[Dict[Tuple[str, str], Tuple[float, float, str]]] = None
+# city_lower -> the states that have that city name. Built with the city index.
+_CITY_STATES: Optional[Dict[str, frozenset]] = None
 
 
 def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
-    global _CITY_INDEX
+    global _CITY_INDEX, _CITY_STATES
     if _CITY_INDEX is None:
         with _lock:
             if _CITY_INDEX is None:
@@ -138,7 +140,11 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
                     lng = sum(r[2] for r in rows) / len(rows)
                     rep = min(rows, key=lambda r: (r[1] - lat) ** 2 + (r[2] - lng) ** 2)[0]
                     index[key] = (round(lat, 4), round(lng, 4), rep)
+                states: Dict[str, set] = {}
+                for name, state in index:
+                    states.setdefault(name, set()).add(state)
                 _CITY_INDEX = index
+                _CITY_STATES = {name: frozenset(found) for name, found in states.items()}
     return _CITY_INDEX
 
 
@@ -225,6 +231,43 @@ def city_state_centroid(city: str, state: str) -> Optional[Tuple[float, float]]:
     return (entry[0], entry[1])
 
 
+def city_state_representative_point(city: str, state: str) -> Optional[Tuple[float, float]]:
+    """A real ZIP inside the city: the ZIP nearest the averaged centroid.
+
+    The plain average can sit miles outside the city's core when a few ZIP
+    coordinates are outliers. Richardson, TX is the example — two southern
+    ZIP rows pull the average ~4.5 miles south of every central ZIP, which
+    pulled DeSoto and Cedar Hill inside a 25-mile radius of "Richardson".
+    Radius checks use this point whenever the recruiter or the candidate
+    gave a city and no ZIP.
+    """
+    key = _city_key(city, state)
+    if not key:
+        return None
+    entry = _city_index().get(key)
+    if not entry:
+        return None
+    point = zip_centroid(entry[2])
+    return point or (entry[0], entry[1])
+
+
+def unique_state_for_city(city: str) -> Optional[str]:
+    """The only state that has this city name, or None when several do.
+
+    "Tempe" is only Arizona, so a LinkedIn line that says just "Tempe" can
+    be measured. "Edison" exists in five states, so it must stay a label
+    instead of being pinned to the wrong one.
+    """
+    city_key = _clean(city).lower()
+    if not city_key:
+        return None
+    _city_index()
+    states = (_CITY_STATES or {}).get(city_key)
+    if states and len(states) == 1:
+        return next(iter(states))
+    return None
+
+
 def is_known_city(city: str, state: Optional[str] = None) -> bool:
     """Whether a city token appears in the offline ZIP/city index."""
     city_key = _clean(city).lower()
@@ -234,7 +277,7 @@ def is_known_city(city: str, state: Optional[str] = None) -> bool:
     if state:
         key = _city_key(city, state)
         return bool(key and key in index)
-    return any(name == city_key for name, _state in index)
+    return city_key in (_CITY_STATES or {})
 
 
 def city_state_default_zip(city: str, state: str) -> Optional[str]:
