@@ -161,6 +161,46 @@ def test_timeline_below_min_is_rejected_and_blank_dates_do_not_invent_years():
     assert kept["passes"] is True
 
 
+def test_numeric_and_year_only_work_history_counts_as_career_years():
+    """01/2020 and 2019-2021 inside Experience count. The same years under Education do not."""
+    scorer = _scorer()
+    criteria = SearchCriteria(job_id="26-100", min_experience_years=1, max_experience_years=6)
+    year_only = {
+        "resume_text": (
+            "EXPERIENCE\n"
+            "Acme | 2019 - 2021\n"
+            "EDUCATION\n"
+            "State University | 2010 - 2014\n"
+        ),
+    }
+    assert scorer._measured_total_years(year_only, now=_NOW) == 3.0
+
+    numeric_jobs = {
+        "enhanced_info": {
+            "company_experience": [
+                {"start_date": "01/2020", "end_date": "Present"},
+            ],
+        },
+        "resume_text": "EDUCATION\nState University | 01/2012 - 05/2016\n",
+    }
+    years = scorer._measured_total_years(numeric_jobs, now=_NOW)
+    assert years is not None and 6.8 <= years < 7.0
+    assert scorer._filter_assessment(numeric_jobs, criteria, enforce_years=True)["max_years_failure"] is True
+
+
+def test_bare_plus_claim_fails_a_ceiling_of_the_same_number():
+    """'6+' with no job dates is just over 6, so Max YOE 6 drops it."""
+    scorer = _scorer()
+    candidate = {"resume_text": "Engineer with 6+ years of experience.\n"}
+    assert scorer._measured_total_years(candidate, now=_NOW) == 6.1
+    assessment = scorer._filter_assessment(
+        candidate,
+        SearchCriteria(job_id="26-100", min_experience_years=1, max_experience_years=6),
+        enforce_years=True,
+    )
+    assert assessment["max_years_failure"] is True
+
+
 def test_jobdiva_scored_gate_drops_only_a_real_range_failure():
     criteria = SearchCriteria(job_id="26-100", min_experience_years=1, max_experience_years=6)
     assert UnifiedCandidateSearch._experience_range_failure(
