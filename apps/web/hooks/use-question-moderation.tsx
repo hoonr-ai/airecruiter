@@ -13,9 +13,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { API_BASE, authFetch } from "../lib/api";
 
-import { isRecruiterAddedQuestion, canEditQuestionType } from "../lib/question-moderation";
+import { isRecruiterAddedQuestion } from "../lib/question-moderation";
 
-export { isRecruiterAddedQuestion, canEditQuestionType };
+export { isRecruiterAddedQuestion };
 
 /**
  * Returns true when a question's type (scored/hard_filter/info_only) may be

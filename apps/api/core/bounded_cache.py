@@ -34,4 +34,7 @@ class BoundedDict(OrderedDict):
             self.move_to_end(key)
         super().__setitem__(key, value)
         while len(self) > self.maxsize:
-            self.popitem(last=False)
+            # popitem() reads through __getitem__, which would move the
+            # oldest key to the end and then fail to delete it.
+            oldest = next(iter(self))
+            super().__delitem__(oldest)

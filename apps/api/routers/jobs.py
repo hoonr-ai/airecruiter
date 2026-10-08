@@ -1063,7 +1063,11 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                         bot_introduction = %s,
                         screening_level = %s,
                         processing_status = CASE WHEN %s THEN processing_status ELSE %s END,
-                        current_step = CASE WHEN %s THEN current_step ELSE GREATEST(current_step, %s) END,
+                        -- GREATEST only on auto-saves, so a stray/out-of-order
+                        -- auto-save can't move current_step backwards. A manual
+                        -- save (explicit Next/back navigation) always sets the
+                        -- step directly, including deliberately backwards.
+                        current_step = CASE WHEN %s THEN GREATEST(current_step, %s) ELSE %s END,
                         customer_name = CASE 
                             WHEN %s IS NOT NULL AND %s NOT ILIKE 'Unknown%%' AND %s != '' THEN %s 
                             ELSE customer_name 
@@ -1086,8 +1090,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     draft_data.screening_level,                         # screening_level
                     draft_data.is_auto_saved,                           # auto_save skips status update
                     f"step_{draft_data.current_step}_complete",         # processing_status
-                    draft_data.is_auto_saved,                           # auto_save skips step advance
-                    draft_data.current_step,                            # current_step
+                    draft_data.is_auto_saved,                           # CASE: auto-save -> GREATEST path
+                    draft_data.current_step,                            # GREATEST bound (auto-save)
+                    draft_data.current_step,                            # direct set (manual save)
                     draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
                     draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
                     ref_code,                                           # 26-06182 (swapped)
