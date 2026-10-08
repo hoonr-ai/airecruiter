@@ -106,10 +106,49 @@ CASES = [
         "Resume highlights: 10 years Java experience. Strong AWS skills.",
         ("", ""),
     ),
-    # 9. Negative: non-US country should NOT be returned as a US state.
+    # 9. Non-US country is kept as a place so the country gate can drop it.
+    # Returning empty used to show "Location Unavailable" and soft-keep India.
     (
         "Located in Bangalore, India. Senior backend engineer with 9 years.",
-        ("", ""),
+        ("Bangalore, India", ""),
+    ),
+    # 9b. Hyphenated metro name is not truncated at the hyphen.
+    (
+        "Md Hasanul Azaz Aman. Dallas-Fort Worth Metroplex",
+        ("Dallas-Fort Worth Metroplex", ""),
+    ),
+    # 9c. "City, State, Country" keeps the US city and state.
+    (
+        "Location: Edison, New Jersey, United States",
+        ("Edison", "NJ"),
+    ),
+    # A job city earlier in the snippet must not hide the profile location.
+    (
+        "Senior engineer, Austin, TX. Location: Edison, New Jersey, United States",
+        ("Edison", "NJ"),
+    ),
+    # Bare profile city: show it. Edison is in several states, so no state
+    # is invented. Tempe and Secaucus exist in one state.
+    (
+        "Location: Edison",
+        ("Edison", ""),
+    ),
+    (
+        "Location: Tempe",
+        ("Tempe", "AZ"),
+    ),
+    (
+        "Location: Secaucus",
+        ("Secaucus", "NJ"),
+    ),
+    (
+        "Location: Hyderabad\nJagadeesh - Hyderabad, Telangana, India | LinkedIn",
+        ("Hyderabad, India", ""),
+    ),
+    # 9d. "City, Region, Country" keeps the country for the outside-country gate.
+    (
+        "Jagadeesh Rameswarapu - Hyderabad, Telangana, India | Professional Profile",
+        ("Hyderabad, India", ""),
     ),
     # 10. "Resides in CITY, ST" — newly supported verb.
     (

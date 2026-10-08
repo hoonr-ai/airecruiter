@@ -17,6 +17,7 @@ from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import (
     haversine_miles,
+    inferred_region_states,
     is_broad_region_location,
     normalize_location_string,
     sanitize_candidate_location,
@@ -243,6 +244,27 @@ logger = logging.getLogger(__name__)
 # to always exceed the UI's within_miles radius so the BEYOND 25MI badge
 # counts these rows instead of silently passing them as in-radius.
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
+
+
+def _richer_profile_location(current: str, recovered: str) -> str:
+    """Replace a blank or bare-city label with the profile's full location line.
+
+    "Edison" becomes "Edison, New Jersey, United States" once the profile
+    text is read. A location that already has a state is left alone.
+    """
+    current_text = str(current or "").strip()
+    recovered_text = str(recovered or "").strip()
+    if not recovered_text:
+        return ""
+    if not current_text:
+        return recovered_text
+    if (
+        "," in recovered_text
+        and "," not in current_text
+        and current_text.lower() in recovered_text.lower()
+    ):
+        return recovered_text
+    return ""
 
 
 def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
@@ -2266,6 +2288,54 @@ class UnifiedCandidateSearch:
                         cid = str(existing.get("candidate_id") or existing.get("id") or "")
                         if not cid:
                             continue
+                        # Pass A often stores a blank location because the
+                        # highlight text omitted the profile line. The agent
+                        # reads that line. Fill it before the patch, and drop
+                        # the row if the recovered place is outside every
+                        # radius or outside the country — a blank location
+                        # was soft-kept and is already on screen.
+                        recovered_location = sanitize_candidate_location(entry.get("location"))
+                        current_location = sanitize_candidate_location(existing.get("location"))
+                        # A later read of the profile can replace a bare city
+                        # ("Edison") with the line LinkedIn actually shows
+                        # ("Edison, New Jersey, United States").
+                        upgraded = _richer_profile_location(current_location, recovered_location)
+                        if upgraded:
+                            existing["location"] = upgraded
+                            recovered_location = upgraded
+                            outside_country = self._is_likely_outside_country(
+                                existing, self._target_country(criteria)
+                            )
+                            recovered_veto = None if outside_country else self._location_hard_gate(
+                                existing, criteria
+                            )
+                            if outside_country or recovered_veto:
+                                self._log_stage(
+                                    "LocationGate",
+                                    f"dropping candidate_id={cid} after Exa location recovery "
+                                    f"location={recovered_location!r} "
+                                    f"reason={existing.get('location_veto_reason') or 'non_us_candidate'}",
+                                )
+                                await queue.put({
+                                    "type": "candidate_detail",
+                                    "candidate_id": cid,
+                                    "stage": "dropped",
+                                    "patch": {
+                                        "_stage": "dropped",
+                                        "_drop_reason": (
+                                            "non_us_candidate" if outside_country else "location_mismatch"
+                                        ),
+                                    },
+                                })
+                                continue
+                            patch_fields["location"] = recovered_location
+                            # A confirmed in-radius place clears the
+                            # unverified badge the blank row was showing.
+                            patch_fields["location_match_reason"] = (
+                                existing.get("location_match_reason") or ""
+                            )
+                            if existing.get("distance_miles") is not None:
+                                patch_fields["distance_miles"] = existing["distance_miles"]
                         prior_sources = existing.get("sources") or [existing.get("source") or "LinkedIn-Exa"]
                         if not isinstance(prior_sources, list):
                             prior_sources = [str(prior_sources)]
@@ -4411,9 +4481,14 @@ class UnifiedCandidateSearch:
         if broad_locs and not direct_zip and not precise_locs:
             known_states = set()
             for loc in broad_locs:
-                state = self._parse_location(loc).get("state")
-                if state:
-                    known_states.add(state)
+                state = self._parse_location(loc).get("state") or ""
+                # Ignore a leftover token such as "united" from
+                # "New York, United States". Only a real state code counts,
+                # plus the LinkedIn region table (Chicago → IL, Detroit → MI).
+                if len(state) == 2 and state.upper() in self._US_STATE_CODES:
+                    known_states.add(state.lower())
+                for code in inferred_region_states(loc):
+                    known_states.add(code.lower())
             if required.get("state") and known_states and required["state"] not in known_states:
                 return False, "state_mismatch", None
             if required.get("state") and known_states and not required.get("city"):
@@ -4464,11 +4539,20 @@ class UnifiedCandidateSearch:
         if required.get("zip"):
             required_point = zip_index.zip_centroid(required["zip"])
         if required_point is None and required.get("city") and required.get("state"):
-            required_point = zip_index.city_state_centroid(required["city"], required["state"])
+            # Representative ZIP, not the average of every ZIP. The average
+            # for Richardson sits ~4.5 miles south of the city and was
+            # keeping DeSoto, Cedar Hill, and northeast Arlington.
+            required_point = zip_index.city_state_representative_point(
+                required["city"], required["state"]
+            )
 
         offline_state_mismatch_distance: Optional[float] = None
         best_offline_distance: Optional[float] = None
         unresolved_locs: List[str] = []
+        # "Edison" with no state exists in several states. Showing it is
+        # right; geocoding it would pin the wrong Edison and hard-drop
+        # someone who is inside a circle.
+        saw_ambiguous_city = False
 
         # When an exact city/state signal accompanies a broad region label,
         # evaluate the exact signal and avoid using the region centroid as a
@@ -4484,6 +4568,14 @@ class UnifiedCandidateSearch:
             cand_city = parsed.get("city", "")
             cand_state = parsed.get("state", "")
             cand_zip = parsed.get("zip", "")
+
+            if cand_city and not cand_state and not cand_zip:
+                only_state = zip_index.unique_state_for_city(cand_city)
+                if only_state:
+                    cand_state = only_state.lower()
+                else:
+                    saw_ambiguous_city = True
+                    continue
 
             # Exact zip match → same point, ~0 mi.
             if cand_zip and required.get("zip") and cand_zip == required["zip"]:
@@ -4503,7 +4595,7 @@ class UnifiedCandidateSearch:
             # flakiness whenever both sides resolve against the index.
             cand_point = zip_index.zip_centroid(cand_zip) if cand_zip else None
             if cand_point is None and cand_city and cand_state:
-                cand_point = zip_index.city_state_centroid(cand_city, cand_state)
+                cand_point = zip_index.city_state_representative_point(cand_city, cand_state)
             if cand_point is not None and required_point is not None:
                 d = haversine_miles(cand_point[0], cand_point[1], required_point[0], required_point[1])
                 if best_offline_distance is None or d < best_offline_distance:
@@ -4543,6 +4635,9 @@ class UnifiedCandidateSearch:
             closest_distance = offline_d
             if not unresolved_locs:
                 return False, "outside_radius_confirmed", offline_d
+
+        if best_offline_distance is None and saw_ambiguous_city and not unresolved_locs:
+            return False, "candidate_state_unknown", _UNKNOWN_DISTANCE_SENTINEL
 
         # Network path: Nominatim for the strings the offline index couldn't
         # place. Geocode the cleaned "City, ST" reconstruction as target —
@@ -4632,8 +4727,28 @@ class UnifiedCandidateSearch:
 
         city = parts[0] if parts else ""
         state = ""
+        # Words of parts[1] that are NOT the state name. "New Jersey" is two
+        # words; taking only "New" left Edison and Poughkeepsie unresolvable
+        # and soft-kept them as if the profile had no location.
+        state_part_leftover: List[str] = []
         if len(parts) > 1:
-            state = parts[1].split()[0]
+            state_tokens = parts[1].split()
+            resolved_state = ""
+            consumed = 0
+            for n in (3, 2, 1):
+                if len(state_tokens) < n:
+                    continue
+                code = resolve_state_code(" ".join(state_tokens[:n]))
+                if code:
+                    resolved_state = code
+                    consumed = n
+                    break
+            if resolved_state:
+                state = resolved_state
+                state_part_leftover = state_tokens[consumed:]
+            elif state_tokens:
+                state = state_tokens[0]
+                state_part_leftover = state_tokens[1:]
         elif len(parts) == 1:
             tokens = parts[0].split()
             # Bare state input ("CA", "California", "Calif") — recognise via
@@ -4670,8 +4785,7 @@ class UnifiedCandidateSearch:
         # is ONLY a country name ("Toronto, Canada") moves to country.
         country = ""
         after_state_tokens: List[str] = []
-        if len(parts) > 1:
-            after_state_tokens.extend(parts[1].split()[1:])
+        after_state_tokens.extend(state_part_leftover)
         for extra_part in parts[2:]:
             after_state_tokens.extend(extra_part.split())
         for tok in reversed([t.strip() for t in after_state_tokens if t.strip()]):
@@ -8399,7 +8513,7 @@ class UnifiedCandidateSearch:
             
             name = f"{cand.get('firstName', '')} {cand.get('lastName', '')}".lower().strip()
             city = cand.get("city", "").lower().strip()
-            
+
             if email:
                 key = f"email:{email}"
             elif phone_key:

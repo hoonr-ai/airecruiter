@@ -5,7 +5,12 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from exa_py import Exa
-from services.location import is_plausible_city_token, extract_us_location_from_text
+from services.location import (
+    is_broad_region_location,
+    is_plausible_city_token,
+    extract_us_location_from_text,
+    location_line_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +115,27 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
 
+    # The profile's own "Location:" line is the place the recruiter sees on
+    # LinkedIn. Prefer it over the first "City, ST" in a job description,
+    # and keep a bare city ("Edison") so Step 5 is not "Location Unavailable".
+    labeled = location_line_label(text)
+    if labeled and "," not in labeled:
+        # "Location: Hyderabad" next to "Hyderabad, Telangana, India" in the
+        # title should keep the country. A bare city does not replace a
+        # different city mentioned in a job line.
+        richer = extract_us_location_from_text(text, _from_line=True)
+        if richer and labeled.lower() in richer.lower() and "," in richer:
+            labeled = richer
+    if labeled:
+        if is_broad_region_location(labeled):
+            return labeled, ""
+        if "," in labeled:
+            city_part, state_part = labeled.split(",", 1)
+            state_token = state_part.strip()
+            if state_token.upper() in _US_STATE_CODES:
+                return city_part.strip(), state_token.upper()
+        return labeled, ""
+
     # Shared with extract_us_location_from_text (services/location.py) so
     # every provider rejects brand names / bare initials the same way.
     _is_plausible_city = is_plausible_city_token
@@ -135,6 +161,15 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
         if code and _is_plausible_city(cand.group(1), code):
             return cand.group(1).strip(), code
 
+    # 4a. "Dallas-Fort Worth Metroplex" — keep the full label. A word-boundary
+    # city pattern restarts at the hyphen and stores "Fort Worth Metroplex".
+    metroplex = re.search(
+        r"\b((?:[A-Z][A-Za-z]+(?:-[A-Z][A-Za-z]+)*)(?:\s+[A-Z][A-Za-z]+)*)\s+Metroplex\b",
+        head,
+    )
+    if metroplex:
+        return metroplex.group(0).strip(), ""
+
     # 4. "Greater <City> Area" / "<City> Bay Area" / "<City> Metro Area" (LinkedIn header)
     # When a state code IS available (e.g. "Atlanta, Georgia Area") we return
     # (city, code) as usual.  When the match is a pure regional label with no
@@ -155,17 +190,24 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
             return area_label, ""
 
     # 5. Delegate to the broader helper (used by Step-5 elsewhere) and split.
+    # A non-US "City, Country" and a broad region are returned whole so the
+    # card shows the profile text and the country / region gate can see it.
+    # Dropping those used to store a blank location ("Location Unavailable")
+    # and soft-keep someone the profile places in another state or country.
     full = extract_us_location_from_text(text)
-    if full and "," in full:
-        city_part, state_part = full.split(",", 1)
-        state_token = state_part.strip()
-        # extract_us_location_from_text returns either "City, ST" (US) or
-        # "City, Country" (non-US). Only accept the US form here.
-        if state_token.upper() in _US_STATE_CODES:
-            return city_part.strip(), state_token.upper()
-        code = _US_STATE_NAMES_TO_CODE.get(state_token.lower())
-        if code:
-            return city_part.strip(), code
+    if full:
+        if is_broad_region_location(full):
+            return full, ""
+        if "," in full:
+            city_part, state_part = full.split(",", 1)
+            state_token = state_part.strip()
+            if state_token.upper() in _US_STATE_CODES:
+                return city_part.strip(), state_token.upper()
+            code = _US_STATE_NAMES_TO_CODE.get(state_token.lower())
+            if code:
+                return city_part.strip(), code
+            return full, ""
+        return full, ""
 
     return "", ""
 
@@ -510,13 +552,20 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
     highlights_text = ""
     if getattr(result, "highlights", None):
         highlights_text = "\n".join(result.highlights)
+    page_text = getattr(result, "text", None) or ""
+    if isinstance(page_text, list):
+        page_text = "\n".join(str(part) for part in page_text)
+    page_text = str(page_text)[:4000]
 
     # Prefer the confidence-ordered header extraction (first 400 chars,
     # location-line patterns) over the loose full-text scan — the latter
     # returns the FIRST "City, ST" anywhere in ~6k chars, which is often a
     # past employer's HQ or a university town, and `location` outranks
     # city/state everywhere downstream.
-    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+    profile_blob = "\n".join(
+        part for part in (title, page_text, highlights_text) if part
+    )
+    extracted_city, extracted_state = _extract_city_from_highlights(profile_blob)
     if extracted_city or extracted_state:
         if extracted_state:
             # Precise city + state: store as "City, ST".
@@ -529,7 +578,7 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
             extracted_location = extracted_city
             city_for_field = ""
     else:
-        extracted_location = extract_us_location_from_text(f"{title}\n{highlights_text}")
+        extracted_location = extract_us_location_from_text(profile_blob)
         city_for_field = ""
 
     return {
@@ -580,6 +629,10 @@ class ExaService:
                 category="people",
                 type="auto",
                 num_results=limit,
+                # A short page excerpt carries the LinkedIn header
+                # ("Edison, New Jersey, United States") when highlights
+                # only say "Location: Edison".
+                text={"max_characters": 2500},
                 highlights={"max_characters": 4000},
             )
             if include_domains:

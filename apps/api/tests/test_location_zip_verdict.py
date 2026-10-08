@@ -211,13 +211,7 @@ def test_verdict_missing_location_soft_keep_sentinel(svc):
 
 
 @pytest.mark.parametrize("location", [
-    "San Francisco Bay Area",
-    "Greater Chicago Area",
-    "Los Angeles Metropolitan Area",
-    "Seattle Metro Area",
-    "Chicagoland",
     "Tri-State Area",
-    "Silicon Valley",
     "Midwest Region",
 ])
 def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, location):
@@ -233,6 +227,29 @@ def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, 
     assert not ok
     assert reason == "broad_region_unverified"
     assert distance == 9999.0
+
+
+@pytest.mark.parametrize("location", [
+    "San Francisco Bay Area",
+    "Greater Chicago Area",
+    "Los Angeles Metropolitan Area",
+    "Seattle Metro Area",
+    "Chicagoland",
+    "Silicon Valley",
+])
+def test_verdict_named_region_outside_search_state_is_mismatch(svc, monkeypatch, location):
+    """A LinkedIn metro whose states miss the search location is a confirmed
+    mismatch, not an unverified keep. Tempe, AZ does not cover IL/CA/WA."""
+    import services.unified_candidate_search as ucs
+
+    def unexpected_geocode(*args, **kwargs):
+        raise AssertionError("broad region labels must not be treated as point locations")
+
+    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    ok, reason, _distance = svc._location_match_verdict(
+        {"location": location}, _criteria()
+    )
+    assert not ok and reason == "state_mismatch", (location, reason)
 
 
 def test_broad_region_with_state_suffix_still_uses_state_but_not_radius(svc, monkeypatch):
@@ -387,11 +404,16 @@ def test_hard_gate_vetoes_offline_confirmed_outside(svc):
 
 
 def test_hard_gate_soft_keeps_broad_region_as_unverified(svc):
-    candidate = {"location": "San Francisco Bay Area"}
+    """Same-state region stays unverified. A different state's region drops."""
+    candidate = {"location": "Phoenix Metropolitan Area"}
     assert svc._location_hard_gate(candidate, _criteria()) is None
     assert candidate.get("location_match_reason") == "broad_region_unverified"
     assert candidate.get("location_out_of_radius") is not True
     assert candidate.get("distance_miles") is None
+
+    chicago = {"location": "Greater Chicago Area"}
+    assert svc._location_hard_gate(chicago, _criteria())
+    assert chicago.get("location_veto_reason") == "state_mismatch"
 
 
 def test_hard_gate_soft_keeps_county_and_metroplex_as_unverified(svc):
@@ -400,14 +422,27 @@ def test_hard_gate_soft_keeps_county_and_metroplex_as_unverified(svc):
     fell through to a live Nominatim call and their soft-keep status was
     incidental (dependent on that call failing), not deterministic like
     "Bay Area"/"Metro Area" strings."""
-    for location in ("Santa Clara County, CA", "Dallas-Fort Worth Metroplex"):
-        candidate = {"location": location}
-        assert svc._location_hard_gate(
-            candidate, _criteria(location="Los Angeles, CA", within_miles=50)
-        ) is None
-        assert candidate.get("location_match_reason") == "broad_region_unverified", location
-        assert candidate.get("location_out_of_radius") is not True, location
-        assert candidate.get("distance_miles") is None, location
+    county = {"location": "Santa Clara County, CA"}
+    assert svc._location_hard_gate(
+        county, _criteria(location="Los Angeles, CA", within_miles=50)
+    ) is None
+    assert county.get("location_match_reason") == "broad_region_unverified"
+    assert county.get("distance_miles") is None
+
+    # DFW is Texas. Against a Los Angeles search that is a state mismatch.
+    # Against a Dallas search the label is kept verbatim and unverified —
+    # it must not be rewritten to "Fort Worth Metroplex, US".
+    dfw_far = {"location": "Dallas-Fort Worth Metroplex"}
+    assert svc._location_hard_gate(
+        dfw_far, _criteria(location="Los Angeles, CA", within_miles=50)
+    )
+    assert dfw_far.get("location_veto_reason") == "state_mismatch"
+    dfw_near = {"location": "Dallas-Fort Worth Metroplex"}
+    assert svc._location_hard_gate(
+        dfw_near, _criteria(location="Richardson, TX", within_miles=25)
+    ) is None
+    assert dfw_near.get("location_match_reason") == "broad_region_unverified"
+    assert dfw_near.get("location") == "Dallas-Fort Worth Metroplex"
 
 
 def test_broad_region_bare_literals_do_not_over_match_prefixed_strings():
@@ -631,6 +666,83 @@ def test_parse_location_foreign_postal_not_us_anchor(svc):
     # 75001 is Addison, TX — but this string is Paris, France.
     parsed = svc._parse_location("Paris, 75001, France")
     assert parsed["zip"] == ""
+
+
+def _qa_criteria():
+    return _criteria(
+        location="Richardson, TX",
+        within_miles=25,
+        additional_locations=[
+            {"value": "Pennington, NJ", "within_miles": 50},
+            {"value": "New York, NY 10006", "within_miles": 60},
+            {"value": "Phoenix, AZ", "within_miles": 60},
+        ],
+    )
+
+
+def test_qa_radius_uses_representative_city_point_not_zip_average(svc):
+    """City-only names are measured from a real ZIP in each city.
+
+    Richardson's ZIP average sits south of the city and was keeping
+    DeSoto and Cedar Hill inside 25 miles. Melissa stays inside.
+    """
+    criteria = _qa_criteria()
+    kept = ["Melissa, TX", "Plano, TX", "Euless, TX", "Prosper, TX", "Frisco, TX"]
+    dropped = ["DeSoto, TX", "Desoto, TX", "Cedar Hill, TX", "Arlington, TX", "Fort Worth, TX", "Austin, TX"]
+    for location in kept:
+        ok, reason, _dist = svc._location_match_verdict({"location": location}, criteria)
+        assert ok, (location, reason, _dist)
+    for location in dropped:
+        veto = svc._location_hard_gate({"location": location}, criteria)
+        assert veto, location
+
+
+def test_qa_linkedin_strings_are_judged_not_left_blank(svc):
+    criteria = _qa_criteria()
+    edison = svc._location_match_verdict(
+        {"location": "Edison, New Jersey, United States"}, criteria
+    )
+    assert edison[0] is True, edison
+
+    poughkeepsie = svc._location_hard_gate(
+        {"location": "Poughkeepsie, New York, United States"}, criteria
+    )
+    assert poughkeepsie
+
+    # Within 50 miles of Pennington, so a different state is still a keep.
+    # Cross-state metros (Jersey City, Allentown) follow the radius, not a
+    # blanket state mismatch that would also drop Jersey City.
+    allentown = svc._location_match_verdict(
+        {"location": "Allentown, Pennsylvania, United States"}, criteria
+    )
+    assert allentown[0] is True, allentown
+
+    for label in ("New York, United States", "New Jersey, United States", "New Jersey, USA", "United States"):
+        ok, reason, _dist = svc._location_match_verdict({"location": label}, criteria)
+        assert not ok and reason == "broad_region_unverified", (label, reason)
+
+    chicago = svc._location_hard_gate({"location": "Greater Chicago Area"}, criteria)
+    detroit = svc._location_hard_gate({"location": "Detroit Metropolitan Area"}, criteria)
+    assert chicago and detroit
+
+    hyderabad = svc._is_likely_outside_country(
+        {"location": "Hyderabad, Telangana, India"}, "US"
+    )
+    assert hyderabad is True
+
+    # A city name with no state stays on the card and is not pinned to one
+    # of several possible states. A city that exists in only one state is
+    # measured.
+    edison_bare = svc._location_match_verdict({"location": "Edison"}, criteria)
+    assert edison_bare[1] == "candidate_state_unknown", edison_bare
+    assert svc._location_hard_gate({"location": "Edison"}, criteria) is None
+
+    tempe = svc._location_match_verdict({"location": "Tempe"}, criteria)
+    assert tempe[0] is True, tempe
+    secaucus = svc._location_match_verdict({"location": "Secaucus"}, criteria)
+    assert secaucus[0] is True, secaucus
+    irving = svc._location_match_verdict({"location": "Irving"}, criteria)
+    assert irving[1] == "candidate_state_unknown", irving
 
 
 # ----------------------------------------------------------------- Exa query

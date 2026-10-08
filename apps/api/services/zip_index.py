@@ -225,6 +225,42 @@ def city_state_centroid(city: str, state: str) -> Optional[Tuple[float, float]]:
     return (entry[0], entry[1])
 
 
+def city_state_representative_point(city: str, state: str) -> Optional[Tuple[float, float]]:
+    """A real ZIP inside the city: the ZIP nearest the averaged centroid.
+
+    The plain average can sit miles outside the city's core when a few ZIP
+    coordinates are outliers. Richardson, TX is the example — two southern
+    ZIP rows pull the average ~4.5 miles south of every central ZIP, which
+    pulled DeSoto and Cedar Hill inside a 25-mile radius of "Richardson".
+    Radius checks use this point whenever the recruiter or the candidate
+    gave a city and no ZIP.
+    """
+    key = _city_key(city, state)
+    if not key:
+        return None
+    entry = _city_index().get(key)
+    if not entry:
+        return None
+    point = zip_centroid(entry[2])
+    return point or (entry[0], entry[1])
+
+
+def unique_state_for_city(city: str) -> Optional[str]:
+    """The only state that has this city name, or None when several do.
+
+    "Tempe" is only Arizona, so a LinkedIn line that says just "Tempe" can
+    be measured. "Edison" exists in five states, so it must stay a label
+    instead of being pinned to the wrong one.
+    """
+    city_key = _clean(city).lower()
+    if not city_key:
+        return None
+    states = {state for name, state in _city_index() if name == city_key}
+    if len(states) == 1:
+        return next(iter(states))
+    return None
+
+
 def is_known_city(city: str, state: Optional[str] = None) -> bool:
     """Whether a city token appears in the offline ZIP/city index."""
     city_key = _clean(city).lower()
