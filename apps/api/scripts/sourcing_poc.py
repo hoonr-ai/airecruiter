@@ -413,7 +413,7 @@ async def run_variant_pipeline(
 
             # Stage 2: pre-LLM YOE heuristic.
             try:
-                if service._candidate_below_min_years_pre_llm(cand, criteria):
+                if service._candidate_outside_years_range_pre_llm(cand, criteria):
                     row["survived_to_stage"] = 1
                     row["drop_reason"] = "stage2_min_years_pre_llm"
                     stage_counts["drops"]["stage2_min_years_pre_llm"] += 1

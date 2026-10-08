@@ -59,7 +59,7 @@ def _run_linkedin_search(monkeypatch, profile):
     svc._search_linkedin = _search_linkedin
     svc.unipile_service = _FakeUnipile(profile)
     svc._candidate_title_match = lambda cand, criteria: True
-    svc._candidate_below_min_years_pre_llm = lambda cand, criteria: False
+    svc._candidate_outside_years_range_pre_llm = lambda cand, criteria: False
     svc._filter_assessment = lambda cand, criteria, enforce_years=False: {
         "passes": True, "matched": [], "missing": [], "excluded": [], "score": 0,
     }

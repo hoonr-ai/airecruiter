@@ -389,7 +389,7 @@ async def _run_pipeline_trace(
 
         # Stage 2: pre-LLM YOE heuristic
         try:
-            below = service._candidate_below_min_years_pre_llm(cand, criteria)
+            below = service._candidate_outside_years_range_pre_llm(cand, criteria)
         except Exception as e:
             below = False
             trace["stage2_error"] = str(e)
@@ -657,7 +657,7 @@ async def _run_jobagent_probe(
             trace["drop_reason"] = "filtered_by_summary_screen"
             return trace
         try:
-            if service._candidate_below_min_years_pre_llm(cand, criteria):
+            if service._candidate_outside_years_range_pre_llm(cand, criteria):
                 trace["drop_stage"] = "stage2_pre_llm_yoe"
                 trace["drop_reason"] = f"heuristic YOE < min_experience_years={criteria.min_experience_years}"
                 return trace
@@ -752,7 +752,6 @@ def _apply_lenient_overrides() -> Dict[str, Any]:
     from core import sourcing_config
     sourcing_config.INCLUDE_PROFILE_ONLY = True
     sourcing_config.STRIP_YEARS_FROM_BOOLEAN = True
-    sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK = True
     sourcing_config.REQUIRED_MATCH_RATIO = 0.3
     return _read_active_flags()
 
@@ -762,7 +761,6 @@ def _read_active_flags() -> Dict[str, Any]:
     flags = {
         "INCLUDE_PROFILE_ONLY": sourcing_config.INCLUDE_PROFILE_ONLY,
         "STRIP_YEARS_FROM_BOOLEAN": sourcing_config.STRIP_YEARS_FROM_BOOLEAN,
-        "SKIP_JOBDIVA_YOE_PRECHECK": sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK,
         "REQUIRED_MATCH_RATIO": sourcing_config.REQUIRED_MATCH_RATIO,
     }
     print("Active sourcing_config toggles:")

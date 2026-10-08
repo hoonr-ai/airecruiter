@@ -534,6 +534,21 @@ class UnifiedCandidateSearch:
         except (TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _experience_range_failure(criteria: "SearchCriteria", assessment: Any) -> bool:
+        """Whether Min YOE or Max YOE rejected this candidate."""
+        if not isinstance(assessment, dict):
+            return False
+        try:
+            min_set = int(getattr(criteria, "min_experience_years", 0) or 0) > 0
+        except (TypeError, ValueError):
+            min_set = False
+        max_set = UnifiedCandidateSearch._has_experience_years_range(criteria)
+        return bool(
+            (min_set and assessment.get("min_years_failure"))
+            or (max_set and assessment.get("max_years_failure"))
+        )
+
 
     def _log_stage(self, stage: str, message: str) -> None:
         logger.info("[CandidateSearch] %s | %s", stage, message)
@@ -1097,14 +1112,7 @@ class UnifiedCandidateSearch:
             # unlike the normal JobDiva relevance gate (which intentionally
             # remains advisory).  Do not let JOBDIVA_BYPASS_PASS_GATE leak an
             # enriched candidate outside that range back into Step 5.
-            min_set = int(getattr(criteria, "min_experience_years", 0) or 0) > 0
-            max_set = self._has_experience_years_range(criteria)
-            range_failure = False
-            if isinstance(assessment, dict):
-                range_failure = (
-                    (min_set and assessment.get("min_years_failure"))
-                    or (max_set and assessment.get("max_years_failure"))
-                )
+            range_failure = self._experience_range_failure(criteria, assessment)
             if range_failure:
                 self._log_stage(
                     "ExperienceGate",
@@ -1867,7 +1875,7 @@ class UnifiedCandidateSearch:
                         # PR-B: cheap pre-LLM YOE gate for external sources too.
                         # Drops candidates whose headline / abstract / resume
                         # snippet shows fewer years than the configured floor.
-                        if self._candidate_below_min_years_pre_llm(cand, criteria):
+                        if self._candidate_outside_years_range_pre_llm(cand, criteria):
                             return {"status": "failed_filter"}
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
@@ -6308,22 +6316,71 @@ class UnifiedCandidateSearch:
             return None
         return year * 12 + month
 
-    def _timeline_years(self, text: str) -> Optional[float]:
+    _EXPERIENCE_HEADING_RE = re.compile(
+        r"(?im)^[ \t]*(?:professional\s+|work\s+)?(?:experience|employment|work\s+history)\b.*$"
+    )
+    _EXPERIENCE_END_RE = re.compile(
+        r"(?im)^[ \t]*(?:education|academic|certifications?|licenses|skills|technical\s+skills|"
+        r"projects|publications|awards|references)\b.*$"
+    )
+    _NUMERIC_RANGE_RE = re.compile(
+        r"\b(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*"
+        r"(?:(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})|(present|current|now|ongoing))\b",
+        re.IGNORECASE,
+    )
+    _YEAR_RANGE_RE = re.compile(
+        r"\b((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*((?:19|20)\d{2}|present|current|now|ongoing)\b",
+        re.IGNORECASE,
+    )
+
+    def _experience_section(self, text: str) -> str:
+        """The work-history block only. Education and projects stay out."""
+        match = self._EXPERIENCE_HEADING_RE.search(str(text or ""))
+        if not match:
+            return ""
+        rest = text[match.end():]
+        end = self._EXPERIENCE_END_RE.search(rest)
+        return rest[:end.start()] if end else rest
+
+    def _add_span(self, spans: List[Tuple[int, int]], start: Optional[int], end: Optional[int]) -> None:
+        if start is None or end is None or end < start or end - start > 50 * 12:
+            return
+        spans.append((start, end + 1))
+
+    def _timeline_years(self, text: str, now: Any = None) -> Optional[float]:
         """Union of employment date ranges, in years. Skill lines are ignored."""
         from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc)
+        if now is None:
+            now = datetime.now(timezone.utc)
         now_index = now.year * 12 + now.month
         spans: List[Tuple[int, int]] = []
-        for match in self._EXPERIENCE_RANGE_RE.finditer(str(text or "")):
+        body = str(text or "")
+        for match in self._EXPERIENCE_RANGE_RE.finditer(body):
             start = self._month_index(match.group(1), int(match.group(2)))
             if match.group(5):
                 end = now_index
             else:
                 end = self._month_index(match.group(3), int(match.group(4)))
-            if start is None or end is None or end < start or end - start > 50 * 12:
+            self._add_span(spans, start, end)
+        for match in self._NUMERIC_RANGE_RE.finditer(body):
+            start = int(match.group(1)) + int(match.group(2)) * 12
+            if match.group(5):
+                end = now_index
+            else:
+                end = int(match.group(3)) + int(match.group(4)) * 12
+            self._add_span(spans, start, end)
+        for match in self._YEAR_RANGE_RE.finditer(body):
+            prefix = body[max(0, match.start() - 12):match.start()]
+            if re.search(r"(?i)jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec", prefix):
                 continue
-            spans.append((start, end + 1))
+            start_year = int(match.group(1))
+            start = start_year * 12 + 1
+            if re.fullmatch(r"(?i)present|current|now|ongoing", match.group(2) or ""):
+                end = now_index
+            else:
+                end = int(match.group(2)) * 12 + 12
+            self._add_span(spans, start, end)
         if not spans:
             return None
         spans.sort()
@@ -6356,18 +6413,16 @@ class UnifiedCandidateSearch:
             best = value if best is None else max(best, value)
         return best
 
-    def _measured_total_years(self, candidate: Dict[str, Any]) -> Optional[float]:
-        """Total career years from the résumé, for every source.
+    def _measured_total_years(self, candidate: Dict[str, Any], now: Any = None) -> Optional[float]:
+        """Total career years from work history, for every source.
 
-        Uses the employment timeline and a stated 'years of experience'.
-        Per-skill durations ('java: 6 years') are not the total.
+        Job dates win. A summary line such as "15+ years of experience" cannot
+        raise a shorter work history. "6+" is used only when the résumé has
+        no job dates, and it counts as just over 6. Education, projects, and
+        per-skill lines ("java: 9 years") are not the career.
         """
-        chunks: List[str] = []
-        for key in ("resume_text", "deep_text", "summary", "abstract", "headline"):
-            value = candidate.get(key)
-            if value:
-                chunks.append(str(value))
         enhanced = candidate.get("enhanced_info") or {}
+        job_lines: List[str] = []
         if isinstance(enhanced, dict):
             for item in enhanced.get("company_experience") or []:
                 if not isinstance(item, dict):
@@ -6375,18 +6430,26 @@ class UnifiedCandidateSearch:
                 start = str(item.get("start_date") or item.get("start") or "").strip()
                 end = str(item.get("end_date") or item.get("end") or "").strip()
                 if start or end:
-                    chunks.append(f"{start} - {end}")
-        blob = "\n".join(chunks)[:20000]
-        if not blob.strip():
-            return None
-        timeline = self._timeline_years(blob)
-        stated = self._explicit_total_years(blob)
-        values = [value for value in (timeline, stated) if value]
-        if not values:
-            return None
-        return max(values)
+                    job_lines.append(f"{start} - {end}")
+        experience_text = ""
+        if job_lines:
+            experience_text = "\n".join(job_lines)
+        else:
+            sections = [
+                self._experience_section(str(candidate.get(key) or ""))
+                for key in ("resume_text", "deep_text")
+            ]
+            experience_text = "\n".join(section for section in sections if section)
+        timeline = self._timeline_years(experience_text, now=now) if experience_text else None
+        if timeline:
+            return timeline
+        stated_parts = [
+            str(candidate.get(key) or "")
+            for key in ("headline", "summary", "abstract", "resume_text", "deep_text")
+        ]
+        return self._explicit_total_years("\n".join(stated_parts))
 
-    def _candidate_below_min_years_pre_llm(
+    def _candidate_outside_years_range_pre_llm(
         self,
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
@@ -6838,11 +6901,11 @@ class UnifiedCandidateSearch:
                     # resume text confidently shows fewer years than the
                     # configured floor, before paying for LLM enrichment.
                     # Soft-keep if no number is parseable.
-                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                    if self._candidate_outside_years_range_pre_llm(candidate, criteria):
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                            "skipping LLM for candidate_id=%s reason=outside_years_range_pre_llm threshold=%s" % (
                                 candidate_id,
                                 int(criteria.min_experience_years or 0),
                             ),
@@ -7222,11 +7285,11 @@ class UnifiedCandidateSearch:
                         return
 
                     # PR-B: cheap pre-LLM YOE gate.
-                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                    if self._candidate_outside_years_range_pre_llm(candidate, criteria):
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s (kept, scored)" % (
+                            "skipping LLM for candidate_id=%s reason=outside_years_range_pre_llm threshold=%s (kept, scored)" % (
                                 cid,
                                 int(criteria.min_experience_years or 0),
                             ),
