@@ -791,7 +791,7 @@ export default function GlobalCandidatesPage() {
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
           const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
           const feedback = knownFeedback(c.feedback);
-          const completedAt = c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at;
+          const completedAt = (c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at) as string | undefined;
 
           return [
             c.jobdiva_id || "",
@@ -1203,7 +1203,7 @@ export default function GlobalCandidatesPage() {
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] border-l border-slate-200">
                         {(() => {
-                          const completedAt = c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at;
+                          const completedAt = (c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at) as string | undefined;
                           return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
                         })()}
                       </TableCell>

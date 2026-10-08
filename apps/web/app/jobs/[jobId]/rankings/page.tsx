@@ -855,7 +855,7 @@ export default function CandidateRankingsPage() {
         if (field === "name") val = c.name || "";
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
-        else if (field === "engage_completed_at") val = c.engage_completed_at || c.data?.engage_completed_at ? formatEasternDateTime(c.engage_completed_at || c.data?.engage_completed_at) : "N/A";
+        else if (field === "engage_completed_at") val = c.engage_completed_at || c.data?.engage_completed_at ? formatEasternDateTime((c.engage_completed_at || c.data?.engage_completed_at) as string | undefined) : "N/A";
         else if (field === "screening_score") val = String(c.match_score || 0);
         else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
@@ -2790,7 +2790,7 @@ export default function CandidateRankingsPage() {
                                   {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
                                     <div className="flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100">
                                       <div className="text-[11px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
-                                        <Mail className="w-3 h-3" /> {formatEasternDateTime(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                        <Mail className="w-3 h-3" /> {formatEasternDateTime((candidate.engage_created_at || candidate.data?.engage_created_at) as string | undefined)}
                                       </div>
                                       {(() => {
                                         const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
@@ -2832,7 +2832,7 @@ export default function CandidateRankingsPage() {
                         </TableCell>
 
                         <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] align-middle py-3 px-2 border-l border-slate-200">
-                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatEasternDateTime(candidate.engage_completed_at || candidate.data?.engage_completed_at) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
+                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatEasternDateTime((candidate.engage_completed_at || candidate.data?.engage_completed_at) as string | undefined) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
                         </TableCell>
 
                         <TableCell
