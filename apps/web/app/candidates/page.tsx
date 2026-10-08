@@ -763,7 +763,7 @@ export default function GlobalCandidatesPage() {
           withEasternLabel("Launched Date"),
           "Screening Level",
           "Resume Screening Score",
-          "Pass Status",
+          "Engage Status",
           "Engage Score",
           "Total Fit Score",
           "Candidate Feedback",
@@ -994,7 +994,7 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("LAUNCHED DATE")}</TableHead>
                 <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SCREENING LEVEL</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
-                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">PASS STATUS</TableHead>
+                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("CANDIDATE FEEDBACK")}</TableHead>
