@@ -713,7 +713,7 @@ function RecruiterJobs({
 // ---------------------------------------------------------------------------
 
 export default function RecruiterAnalyticsPage() {
-  const { isAdmin, isTeamLead, teamName, isLoading: isRoleLoading, email, role } = useUserRole();
+  const { isAdmin, isTeamLead, teamName, orgRoleLabel, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
 
   const [data, setData] = useState<RecruiterAnalyticsData | null>(null);
@@ -956,7 +956,7 @@ export default function RecruiterAnalyticsPage() {
             )}
             {!isAdmin && (
               <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200 uppercase tracking-wide">
-                Team Lead
+                {orgRoleLabel ?? "Team Lead"}
               </span>
             )}
           </div>

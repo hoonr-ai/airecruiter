@@ -91,12 +91,12 @@ CASES = [
         "Director of Engineering — Dallas, Texas. Built three platforms.",
         ("Dallas", "TX"),
     ),
-    # 6. LinkedIn "Greater <City> Area" header pattern.
+    # 6. LinkedIn "Greater <City> Area" header pattern — full label is preserved.
     (
         "Greater Boston Area · Senior Data Scientist · 6+ years machine learning.",
-        ("Boston", ""),
+        ("Greater Boston Area", ""),
     ),
-    # 7. "<City>, <State> Area" LinkedIn pattern.
+    # 7. "<City>, <State> Area" LinkedIn pattern — state IS resolvable → (city, code).
     (
         "Atlanta, Georgia Area | Vice President, Product",
         ("Atlanta", "GA"),
@@ -106,15 +106,95 @@ CASES = [
         "Resume highlights: 10 years Java experience. Strong AWS skills.",
         ("", ""),
     ),
-    # 9. Negative: non-US country should NOT be returned as a US state.
+    # 9. Non-US country is kept as a place so the country gate can drop it.
+    # Returning empty used to show "Location Unavailable" and soft-keep India.
     (
         "Located in Bangalore, India. Senior backend engineer with 9 years.",
+        ("Bangalore, India", ""),
+    ),
+    # 9b. Hyphenated metro name is not truncated at the hyphen.
+    (
+        "Md Hasanul Azaz Aman. Dallas-Fort Worth Metroplex",
+        ("Dallas-Fort Worth Metroplex", ""),
+    ),
+    # 9c. "City, State, Country" keeps the US city and state.
+    (
+        "Location: Edison, New Jersey, United States",
+        ("Edison", "NJ"),
+    ),
+    # A job city earlier in the snippet must not hide the profile location.
+    (
+        "Senior engineer, Austin, TX. Location: Edison, New Jersey, United States",
+        ("Edison", "NJ"),
+    ),
+    # Bare profile city: show it. Edison is in several states, so no state
+    # is invented. Tempe and Secaucus exist in one state.
+    (
+        "Location: Edison",
+        ("Edison", ""),
+    ),
+    (
+        "Location: Tempe",
+        ("Tempe", "AZ"),
+    ),
+    (
+        "Location: Secaucus",
+        ("Secaucus", "NJ"),
+    ),
+    (
+        "Location: Open to work",
         ("", ""),
+    ),
+    (
+        "Location: Worldwide",
+        ("", ""),
+    ),
+    (
+        "Location: Remote",
+        ("", ""),
+    ),
+    (
+        "Location: Hyderabad\nJagadeesh - Hyderabad, Telangana, India | LinkedIn",
+        ("Hyderabad, India", ""),
+    ),
+    # 9d. "City, Region, Country" keeps the country for the outside-country gate.
+    (
+        "Jagadeesh Rameswarapu - Hyderabad, Telangana, India | Professional Profile",
+        ("Hyderabad, India", ""),
     ),
     # 10. "Resides in CITY, ST" — newly supported verb.
     (
         "Resides in Miami, FL. Bilingual sales leader.",
         ("Miami", "FL"),
+    ),
+    # 11. Ignore a headline technology brand + state-code-looking suffix and
+    # continue to the actual LinkedIn location header.
+    # Full "Greater Chicago Area" label preserved for display.
+    (
+        "John Lash - Salesforce, MS Dynamics. Greater Chicago Area",
+        ("Greater Chicago Area", ""),
+    ),
+    # 12. Ignore a two-letter resume fragment that resembles a city, then
+    # recover the broad LinkedIn metro location. Full label preserved.
+    (
+        "Yuhong Ouyang - PS, PR. Los Angeles Metropolitan Area",
+        ("Los Angeles Metropolitan Area", ""),
+    ),
+    # 13. Devlin Rocha / Laura Wood scenario: Bay Area label is preserved so the
+    # candidate card shows "San Francisco Bay Area" instead of being blank.
+    (
+        "Devlin Rocha - Software Engineer. San Francisco Bay Area",
+        ("San Francisco Bay Area", ""),
+    ),
+    # 14. Multi-word city names: Greater prefix + Bay suffix both preserved.
+    (
+        "Senior Product Manager · Greater San Francisco Bay Area",
+        ("Greater San Francisco Bay Area", ""),
+    ),
+    # 15. Laura Wood scenario: exact LinkedIn header string.
+    (
+        "Laura Wood - San Jose State University - San Francisco Bay Area",
+        ("San Francisco Bay Area", ""),
     ),
 ]
 

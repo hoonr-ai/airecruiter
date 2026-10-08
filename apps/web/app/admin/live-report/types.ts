@@ -65,6 +65,12 @@ export interface CandidateRow {
   sms_failed?: number;
   email_sent?: number;
   email_failed?: number;
+  is_dnc?: boolean;
+  dnc_stopped_at?: string | null;
+  dnc_trigger?: string | null;
+  dnc_reasons?: Record<string, any>;
+  dnc_blocked_channels?: string[];
+  dnc_message?: string | null;
 }
 
 export type TerminalReason =
@@ -123,6 +129,7 @@ export type Anomaly =
   | HandoffExpiredAnomaly;
 
 export interface Snapshot {
+  status?: string;
   bulk_id: string;
   created_at: string | null;
   state: LaunchState;

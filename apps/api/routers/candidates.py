@@ -365,6 +365,52 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         except (TypeError, ValueError):
             within_miles = 25
 
+        additional_locations = []
+        if locations and len(locations) > 1:
+            for loc in locations[1:]:
+                v = loc.get("value", "")
+                if v:
+                    loc_rad = 25
+                    try:
+                        r = "".join(ch for ch in str(loc.get("radius") or "") if ch.isdigit())
+                        if r:
+                            loc_rad = max(1, min(100, int(r)))
+                    except ValueError:
+                        logger.debug(
+                            "_build_resume_matching_criteria: could not parse radius %r for location %r; "
+                            "using default 25mi",
+                            loc.get("radius"),
+                            v,
+                        )
+                    additional_locations.append({"value": v, "within_miles": loc_rad})
+
+        # Clamp primary radius to 1-100.
+        within_miles = max(1, min(100, within_miles))
+
+        max_experience_years = None
+        raw_max_years = sourcing_filters.get("maxExperienceYears")
+        try:
+            if raw_max_years is not None and int(raw_max_years) > 0:
+                max_experience_years = int(raw_max_years)
+        except (TypeError, ValueError):
+            max_experience_years = None
+
+        # Saved drafts predate range validation and can contain a stale or
+        # hand-edited inverted pair. Preserve the established minimum and drop
+        # the invalid cap so re-score/rebuild remains available.
+        if (
+            min_experience_years is not None
+            and max_experience_years is not None
+            and min_experience_years > max_experience_years
+        ):
+            logger.warning(
+                "Ignoring stale maxExperienceYears=%s below minExperienceYears=%s for job %s",
+                max_experience_years,
+                min_experience_years,
+                job_ref,
+            )
+            max_experience_years = None
+
         return SearchCriteria(
             job_id=str(resolved_job_ref),
             title_criteria=title_criteria,
@@ -373,9 +419,11 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             companies=sourcing_filters.get("companies") or [],
             resume_match_filters=resume_match_filters,
             location=primary_location,
+            additional_locations=additional_locations,
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             min_experience_years=min_experience_years,
+            max_experience_years=max_experience_years,
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
@@ -745,10 +793,36 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
 
         # Canonicalize location: top-level `location` is authoritative.
         location = ""
+        additional_locations: list = []
         if request.location:
             location = request.location
         elif request.locations:
             location = request.locations[0].value
+
+        # Multi-location: carry all request.locations entries whose normalized
+        # value differs from the resolved primary location. This avoids the
+        # locations[1:] slice causing a silent drop when request.location differs
+        # from locations[0].value, or a duplicate when they match.
+        import re as _re
+
+        def _norm(s: str) -> str:
+            return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+        primary_key = _norm(location)
+        if request.locations:
+            for loc in request.locations:
+                loc_value = str(loc.value or "").strip()
+                if not loc_value or _norm(loc_value) == primary_key:
+                    continue
+                loc_radius = 25
+                if loc.radius:
+                    digits = "".join(ch for ch in str(loc.radius) if ch.isdigit())
+                    if digits:
+                        loc_radius = min(100, max(1, int(digits)))
+                additional_locations.append({
+                    "value": loc_value,
+                    "within_miles": loc_radius,
+                })
 
         # Work arrangement: request wins; else read monitored_jobs so Remote
         # jobs skip the commute-radius constraint even when the caller
@@ -836,6 +910,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
             location=location,
+            additional_locations=additional_locations,
             location_type=location_type or "Unspecified",
             within_miles=within_miles,
             companies=companies,
@@ -850,6 +925,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                 else bool(request.include_relocation_candidates)
             ),
             min_experience_years=request.min_experience_years,
+            max_experience_years=request.max_experience_years,
             jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
             jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
             # Placeholder customer values carry no client signal — skip them.
@@ -1029,6 +1105,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    additional_locations=additional_locations,
                     location_type=location_type or "Unspecified",
                     within_miles=within_miles,
                     companies=request.companies or [],
@@ -1039,6 +1116,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     recent_days=request.recent_days,
                     require_resume=require_resume,
                     min_experience_years=request.min_experience_years,
+                    max_experience_years=request.max_experience_years,
                     jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
                     jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
                 )
@@ -3697,7 +3775,35 @@ def _launched_status_filter(status: Optional[str]) -> Tuple[str, List[Any]]:
     return " AND la.status = %s", [status]
 
 
+# Single source of truth for "when did this candidate complete their
+# interview" on the SQL side — first_completed_at (the live-merged value the
+# list endpoint also prefers when building cand["engage_completed_at"], see
+# that assignment below) beats the stored engage_completed_at. The frontend's
+# getCandidateCompletedAt (apps/web/lib/candidate-completed-at.ts) mirrors
+# this exact order so a candidate is never filtered on one timestamp while a
+# different one displays.
+_COMPLETED_AT_JSON_EXPR = (
+    "NULLIF(COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at'), '')"
+)
+# sc.data is a free-form JSON blob written by several upstream paths with no
+# shared validation, so a malformed string there must not fail the whole
+# listing with a 500 — CASE WHEN ... ELSE NULL is evaluated in declared
+# order per the SQL standard (unlike a bare AND, whose operand order the
+# planner may rearrange), so this is a safe "try-cast, else NULL" idiom: a
+# row that fails the pattern check is excluded from the date-range match
+# (as if it had no completed-at), never raises.
+_COMPLETED_AT_TS_PATTERN = r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})"
+
+
+def _safe_completed_at_timestamptz_expr() -> str:
+    return (
+        f"(CASE WHEN {_COMPLETED_AT_JSON_EXPR} ~ '{_COMPLETED_AT_TS_PATTERN}' "
+        f"THEN CAST({_COMPLETED_AT_JSON_EXPR} AS timestamptz) ELSE NULL END)"
+    )
+
+
 def _launched_filter_conditions(
+    *,
     search: Optional[str],
     status: Optional[str],
     feedback: Optional[str],
@@ -3705,6 +3811,8 @@ def _launched_filter_conditions(
     min_score: Optional[int],
     start_date: Optional[str],
     end_date: Optional[str],
+    completed_start_date: Optional[str] = None,
+    completed_end_date: Optional[str] = None,
 ) -> Tuple[str, List[Any], str, str]:
     """(search_condition, params, feedback_exists_condition, feedback_order_by).
 
@@ -3758,7 +3866,7 @@ def _launched_filter_conditions(
     # the Postgres 'AT TIME ZONE' cast flipping based on whether the column is
     # naive or timestamptz.
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    if start_date or end_date:
+    if start_date or end_date or completed_start_date or completed_end_date:
         from zoneinfo import ZoneInfo
         ny_tz = ZoneInfo("America/New_York")
     if start_date:
@@ -3772,6 +3880,19 @@ def _launched_filter_conditions(
             raise HTTPException(status_code=400, detail="Invalid end_date format, expected YYYY-MM-DD")
         dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
         search_condition += " AND la.created_at <= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
+
+    if completed_start_date:
+        if not date_pattern.match(completed_start_date):
+            raise HTTPException(status_code=400, detail="Invalid completed_start_date format, expected YYYY-MM-DD")
+        dt = datetime.strptime(completed_start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
+        search_condition += f" AND {_safe_completed_at_timestamptz_expr()} >= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
+    if completed_end_date:
+        if not date_pattern.match(completed_end_date):
+            raise HTTPException(status_code=400, detail="Invalid completed_end_date format, expected YYYY-MM-DD")
+        dt = datetime.strptime(completed_end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
+        search_condition += f" AND {_safe_completed_at_timestamptz_expr()} <= %s"
         params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
 
     return search_condition, params, feedback_exists_condition, feedback_order_by
@@ -4051,6 +4172,8 @@ async def get_launched_candidates(
     min_score: Optional[int] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    completed_start_date: Optional[str] = Query(None),
+    completed_end_date: Optional[str] = Query(None),
 ):
     """
     Fetches all launched candidates across all jobs, one row per (job,
@@ -4068,7 +4191,8 @@ async def get_launched_candidates(
         from psycopg2.extras import RealDictCursor
 
         search_condition, params, feedback_exists_condition, feedback_order_by = _launched_filter_conditions(
-            search, status, feedback, source, min_score, start_date, end_date,
+            search=search, status=status, feedback=feedback, source=source, min_score=min_score, start_date=start_date, end_date=end_date,
+            completed_start_date=completed_start_date, completed_end_date=completed_end_date,
         )
         rows_sql, count_sql = _launched_candidates_sql(
             search_condition, feedback_exists_condition, feedback_order_by,
@@ -5209,8 +5333,9 @@ async def save_candidate_feedback(
             "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
             "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
         }
-        action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
-    
+        if request.reason and request.reason not in rejection_mapping:
+            raise HTTPException(status_code=422, detail="Invalid rejection reason provided")
+        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID

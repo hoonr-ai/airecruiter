@@ -57,3 +57,54 @@ def test_seed_job_rubric_category_assignment(monkeypatch):
     # We should have the non-excluded dict question updated to 'role-specific'
     assert len(role_specific) == 1
     assert role_specific[0]["question_text"] == "Q1"
+
+
+def test_get_article_for_title():
+    """Verify phonetic article selection for job titles."""
+    from routers._helpers import get_article_for_title
+
+    # Vowel sounds (an)
+    assert get_article_for_title("Accountant") == "an"
+    assert get_article_for_title("HR Manager") == "an"
+    assert get_article_for_title("SRE Lead") == "an"
+    assert get_article_for_title("AWS Engineer") == "an"
+    assert get_article_for_title("MBA Graduate") == "an"
+    assert get_article_for_title("IT Specialist") == "an"
+    assert get_article_for_title("Executive Director") == "an"
+
+    # Consonant sounds (a) including 'yoo' sounds like UX, UI
+    assert get_article_for_title("Java Developer") == "a"
+    assert get_article_for_title("UX Designer") == "a"
+    assert get_article_for_title("UI Developer") == "a"
+    assert get_article_for_title("Software Engineer") == "a"
+
+
+def test_is_legacy_default_bot_intro():
+    """Verify legacy bot intro detection requires all signature phrases."""
+    from routers._helpers import is_legacy_default_bot_intro
+
+    legacy_intro = (
+        "Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
+        "We are helping our client recruit for a Java Developer in New York, NY, and you seem to be a good fit for the role. "
+        "Please note that conversation may be recorded for verification and quality purposes. "
+        "Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+    )
+    assert is_legacy_default_bot_intro(legacy_intro) is True
+
+    # Recruiter typed custom intro containing only 1 phrase — should NOT be flagged as legacy default
+    custom_intro = "Hi, this interview takes about 8-12 minutes. Thanks for applying!"
+    assert is_legacy_default_bot_intro(custom_intro) is False
+
+
+def test_normalize_bot_intro_tokens():
+    """Verify placeholder token substitution in bot intros."""
+    from routers._helpers import normalize_bot_intro_tokens
+
+    template = "Hi {name}, we are recruiting for {article} {title} in {location}."
+    result = normalize_bot_intro_tokens(template, job_title="HR Manager", job_location="Chicago, IL")
+    assert result == "Hi {{candidate name}}, we are recruiting for an HR Manager in Chicago, IL."
+
+    template_consonant = "Hi {{candidate name}}, we are recruiting for {{article}} {{job_title}} in {{job_location}}."
+    result_consonant = normalize_bot_intro_tokens(template_consonant, job_title="Java Engineer", job_location="Austin, TX")
+    assert result_consonant == "Hi {{candidate name}}, we are recruiting for a Java Engineer in Austin, TX."
+

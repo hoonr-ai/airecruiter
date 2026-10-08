@@ -46,7 +46,7 @@ def _build_feedback_exists_condition(feedback: str) -> str:
 def _shipped_statements(feedback: str = ""):
     """(rows_sql, count_sql) exactly as get_launched_candidates builds them."""
     search, _params, exists_cond, order_by = _launched_filter_conditions(
-        None, None, feedback or None, None, None, None, None
+        search=None, status=None, feedback=feedback or None, source=None, min_score=None, start_date=None, end_date=None, completed_start_date=None, completed_end_date=None
     )
     return _launched_candidates_sql(search, exists_cond, order_by)
 

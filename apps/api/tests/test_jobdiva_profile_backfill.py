@@ -172,10 +172,24 @@ def test_profiles_pair_recorded_as_preexisting_are_skipped():
 
 def test_placeholder_name_is_skipped():
     fake = _FakeJobDiva()
-    report = _run(_row(name="LinkedIn Candidate"), fake)
+    # No vanity URL to read a name from (see the next test).
+    report = _run(_row(name="LinkedIn Candidate", profile_url=""), fake)
 
     assert report["status"] == "skipped_no_usable_name"
     assert fake.uploads == [] and fake.updates == []
+
+
+def test_linkedin_member_profile_is_renamed_from_the_vanity_url():
+    # A full profile PAIR created under LinkedIn's stand-in name (2026-09-29).
+    named_member = {**BLANK_PROFILE, "FIRSTNAME": "Linkedin", "LASTNAME": "Member", "EMAIL": "ada@lovelace.dev",
+                    "CELLPHONE": "2015550100", "CITY": "Jersey City", "STATE": "NJ"}
+    fake = _FakeJobDiva(profile=named_member, resumes=[{"resume_id": "1", "date_created": "", "text": "x" * 2000}])
+    report = _run(_row(name="Linkedin Member", profile_url="https://www.linkedin.com/in/jane-doe-8a7b6c5"), fake)
+
+    assert report["status"] == "repaired"
+    assert fake.uploads == []  # the résumé was already there
+    (update,) = fake.updates
+    assert (update["firstName"], update["lastName"]) == ("Jane", "Doe")
 
 
 def test_unreadable_jobdiva_is_a_failure_not_a_write():

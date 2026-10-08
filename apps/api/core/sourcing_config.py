@@ -43,17 +43,6 @@ STRIP_YEARS_FROM_BOOLEAN = True
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# #5 — Skip pre-LLM YOE heuristic for JobDiva sources
-# ─────────────────────────────────────────────────────────────────────────
-# When True, the regex-based YOE pre-check at Stage 2 is skipped for
-# candidates whose `source` starts with "JobDiva". JobDiva's `experience_years`
-# field is often a constant default (4) populated from the job title alone,
-# which causes real candidates to be dropped before their resume is parsed.
-# Real YOE check still runs at Stage 5 against the LLM-extracted value.
-SKIP_JOBDIVA_YOE_PRECHECK = True
-
-
-# ─────────────────────────────────────────────────────────────────────────
 # #3 — Stage-5 post-LLM filter ratio
 # ─────────────────────────────────────────────────────────────────────────
 # Threshold for `_filter_assessment(enforce_years=True)` — candidate passes
@@ -265,26 +254,6 @@ except ValueError:
 # routers/candidates._enrich_candidate_contact_impl.
 CONTACT_LOOKUP_PROVIDERS = _csv_env("CONTACT_LOOKUP_PROVIDERS", "apollo,exa")
 
-# Hard-drop rows whose location is CONFIRMED outside the job's location
-# (state/province mismatch, or a real measured distance beyond the radius)
-# for every source except JobDiva-JobAgent / JobDiva-Applicants. Unknown or
-# unparseable candidate locations are NOT confirmed mismatches — those stay
-# soft-kept per the existing policy. JobAgent rows keep the soft
-# out-of-radius badge instead of dropping (JobDiva's own matcher is
-# trusted; the recruiter narrows via the UI chips).
-EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP = True
-
-# Scoring-time location veto for JobDiva-JobAgent rows. JobAgent results
-# follow the criteria/boolean the recruiter authored inside JobDiva — which
-# may deliberately reach beyond the job's radius (relocators, nearby metros)
-# — so a confirmed out-of-radius / state-mismatch must NOT zero their
-# match_score the way it does for machine-queried sources. False (default):
-# JobAgent rows keep their rubric score plus the out-of-radius badge and
-# distance, and the recruiter filters via the UI chips. True restores the
-# old hard-zero. Every other source keeps the location hard gate either way.
-JOBAGENT_LOCATION_HARD_VETO = False
-
-
 # ─────────────────────────────────────────────────────────────────────────
 # Résumé is final for residence (2026-09-11, product)
 # ─────────────────────────────────────────────────────────────────────────
@@ -431,16 +400,6 @@ CANDIDATES_DETAIL_MAX_TOTAL_S = float(
     _os.getenv("CANDIDATES_DETAIL_MAX_TOTAL_S", "90").strip() or "90"
 )
 
-# Policy: a JobDiva candidate is never hidden from Step 5 just for being
-# outside the search radius / in a different state. When True, the JobDiva
-# talent-pool LocationGate (`_filter_by_state`) KEEPS out-of-radius candidates
-# (flagged `location_out_of_radius`, with `distance_miles`) so they surface
-# at a lower location-rubric score and the recruiter can narrow via the
-# location chip / MIN MATCH — instead of dropping them before they render.
-# Only positive non-US evidence is still hard-dropped. Set False to restore
-# the old hard radius filter.
-JOBDIVA_LOCATION_SOFT_KEEP = True
-
 import os as _os_geo
 
 def _env_bool_geo(var: str, default: bool) -> bool:
@@ -449,15 +408,21 @@ def _env_bool_geo(var: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
+
+# Final Step-5 radius policy. Enabled by default so a confirmed out-of-radius
+# candidate is excluded from every provider. This provides an operational
+# rollback switch if a geodata regression causes unexpected recall loss.
+LOCATION_RADIUS_HARD_GATE_ENABLED = _env_bool_geo(
+    "LOCATION_RADIUS_HARD_GATE_ENABLED", True
+)
+
 # Send zipCode + withinMiles on JobDiva TalentSearch. SETTLED by the live
 # probe 2026-07-19 (scripts/jobdiva_payload_variants_probe.py): with the
 # correct v2 top-level body shape the structured radius IS honored — 98.8%
 # of returned candidates in-radius vs 8.1% unfiltered. Guardrails: the
-# radius is sent with 2x headroom (so the UI's BEYOND-radius soft-keep
-# bucket still gets the near-miss band; only far-away noise is cut
-# server-side), and the zip is skipped entirely for multi-location-chip
-# searches (one anchor can't represent an OR of locations) and for Remote
-# jobs.
+# radius is sent at the configured value. Final client-side checks validate
+# every returned candidate against each location chip. The zip is skipped for
+# multi-location searches (one anchor cannot represent an OR) and Remote jobs.
 JOBDIVA_ZIP_RADIUS_ENABLED = _env_bool_geo("JOBDIVA_ZIP_RADIUS_ENABLED", True)
 
 # DEAD FLAG (kept for env compat): the boolean geo dialect rewrite is moot

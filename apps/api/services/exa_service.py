@@ -5,7 +5,14 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from exa_py import Exa
-from services.location import extract_us_location_from_text
+from services.location import (
+    is_broad_region_location,
+    is_plausible_city_token,
+    extract_us_location_from_text,
+    location_line_label,
+    _RE_METROPLEX,
+)
+from core.vendor_limiter import EXA as _exa_limit
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +69,7 @@ _CITY_STATE_RE = re.compile(rf"\b({_CITY_PAT}),\s*([A-Z]{{2}})\b")
 # Matched without anchoring to a verb so it catches the common header pattern
 # where the city sits alone with no "Located in" preamble.
 _AREA_RE = re.compile(
-    rf"\b(?:Greater\s+)?({_CITY_PAT})(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:Metropolitan\s+)?Area\b"
+    rf"\b(?:Greater\s+)?({_CITY_PAT}?)(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:(?:Bay|Metro(?:politan)?)\s+)?Area\b"
 )
 # Full state names → 2-letter codes, used when the highlight uses e.g.
 # "Dallas, Texas" instead of "Dallas, TX".
@@ -101,7 +108,7 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
       1. "Located/Based/Lives/Currently/Resides in CITY, ST"
       2. "City, ST" with a real US state code in the first ~400 chars
       3. "City, FullStateName" (e.g. "Dallas, Texas") — normalises to ST
-      4. "Greater <City> Area" / "<City>, <State> Area" — LinkedIn header
+      4. LinkedIn metro, metropolitan, and Bay Area headers
       5. Fallback to `extract_us_location_from_text` and split its result
 
     Returns ("", "") on miss — callers MUST treat empty as "unknown" rather
@@ -110,47 +117,96 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
 
+    # The profile's own "Location:" line is the place the recruiter sees on
+    # LinkedIn. Prefer it over the first "City, ST" in a job description,
+    # and keep a bare city ("Edison") so Step 5 is not "Location Unavailable".
+    labeled = location_line_label(text)
+    if labeled and "," not in labeled:
+        # "Location: Hyderabad" next to "Hyderabad, Telangana, India" in the
+        # title should keep the country. A bare city does not replace a
+        # different city mentioned in a job line.
+        richer = extract_us_location_from_text(text, _from_line=True)
+        if richer and labeled.lower() in richer.lower() and "," in richer:
+            labeled = richer
+    if labeled:
+        if is_broad_region_location(labeled):
+            return labeled, ""
+        if "," in labeled:
+            city_part, state_part = labeled.split(",", 1)
+            state_token = state_part.strip()
+            if state_token.upper() in _US_STATE_CODES:
+                return city_part.strip(), state_token.upper()
+        return labeled, ""
+
+    # Shared with extract_us_location_from_text (services/location.py) so
+    # every provider rejects brand names / bare initials the same way.
+    _is_plausible_city = is_plausible_city_token
+
     # 1. Strict "Located/Based/Lives/etc. in CITY, ST"
     m = _LOCATED_IN_RE.search(text)
     if m:
         st = m.group(2).strip().upper()
-        if st in _US_STATE_CODES:
+        if st in _US_STATE_CODES and _is_plausible_city(m.group(1), st):
             return m.group(1).strip(), st
 
     # 2. "City, ST" with a valid US state code — widened from 200 → 400 chars
     head = text[:400]
     for cand in _CITY_STATE_RE.finditer(head):
         st = cand.group(2).strip().upper()
-        if st in _US_STATE_CODES:
+        if st in _US_STATE_CODES and _is_plausible_city(cand.group(1), st):
             return cand.group(1).strip(), st
 
     # 3. "City, FullStateName" — normalise to (City, ST)
     for cand in _CITY_STATE_NAME_RE.finditer(head):
         state_name = cand.group(2).strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_name)
-        if code:
+        if code and _is_plausible_city(cand.group(1), code):
             return cand.group(1).strip(), code
 
-    # 4. "Greater <City> Area" / "<City>, <State> Area" (LinkedIn header)
+    # 4a. "Dallas-Fort Worth Metroplex" — keep the full label. A word-boundary
+    # city pattern restarts at the hyphen and stores "Fort Worth Metroplex".
+    metroplex = _RE_METROPLEX.search(head)
+    if metroplex:
+        return metroplex.group(0).strip(), ""
+
+    # 4. "Greater <City> Area" / "<City> Bay Area" / "<City> Metro Area" (LinkedIn header)
+    # When a state code IS available (e.g. "Atlanta, Georgia Area") we return
+    # (city, code) as usual.  When the match is a pure regional label with no
+    # resolvable state (e.g. "San Francisco Bay Area", "Greater Chicago Area")
+    # we return (full_area_label, "") so the caller can display the original
+    # string rather than silently stripping "Bay Area" and showing only "San
+    # Francisco".
     for cand in _AREA_RE.finditer(head):
         city = cand.group(1).strip()
         state_token = (cand.group(2) or "").strip().lower()
         code = _US_STATE_NAMES_TO_CODE.get(state_token) if state_token else ""
-        if city:
-            return city, code or ""
+        if city and _is_plausible_city(city, code or None):
+            if code:
+                # Precise match: city + resolved state code.
+                return city, code
+            # Broad-region match: preserve the full area label for display.
+            area_label = cand.group(0).strip()
+            return area_label, ""
 
     # 5. Delegate to the broader helper (used by Step-5 elsewhere) and split.
+    # A non-US "City, Country" and a broad region are returned whole so the
+    # card shows the profile text and the country / region gate can see it.
+    # Dropping those used to store a blank location ("Location Unavailable")
+    # and soft-keep someone the profile places in another state or country.
     full = extract_us_location_from_text(text)
-    if full and "," in full:
-        city_part, state_part = full.split(",", 1)
-        state_token = state_part.strip()
-        # extract_us_location_from_text returns either "City, ST" (US) or
-        # "City, Country" (non-US). Only accept the US form here.
-        if state_token.upper() in _US_STATE_CODES:
-            return city_part.strip(), state_token.upper()
-        code = _US_STATE_NAMES_TO_CODE.get(state_token.lower())
-        if code:
-            return city_part.strip(), code
+    if full:
+        if is_broad_region_location(full):
+            return full, ""
+        if "," in full:
+            city_part, state_part = full.split(",", 1)
+            state_token = state_part.strip()
+            if state_token.upper() in _US_STATE_CODES:
+                return city_part.strip(), state_token.upper()
+            code = _US_STATE_NAMES_TO_CODE.get(state_token.lower())
+            if code:
+                return city_part.strip(), code
+            return full, ""
+        return full, ""
 
     return "", ""
 
@@ -427,9 +483,10 @@ def build_deep_research_output_schema(include_contact_fields: Optional[bool] = N
             "type": "string",
             "description": (
                 "Candidate's CURRENT residence from the LinkedIn profile's own "
-                "location line, e.g. 'Tempe, Arizona, United States' or 'Greater "
-                "Phoenix Area'. Not a company HQ, not a past position's city. "
-                "Empty string if the profile shows no location."
+                "location line, e.g. 'Tempe, Arizona', 'New York, NY', or 'San Francisco Bay Area'. "
+                "IMPORTANT: You MUST NOT extract skills, certifications, software (e.g. 'Salesforce'), "
+                "company names, or acronyms (e.g. 'PS, PR'). If the text is not a clear geographic location, "
+                "return an empty string. Empty string only if the profile shows no geographic location."
             ),
         },
         "last_activity": {"type": ["string", "null"]},
@@ -494,23 +551,40 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
     highlights_text = ""
     if getattr(result, "highlights", None):
         highlights_text = "\n".join(result.highlights)
+    page_text = getattr(result, "text", None) or ""
+    if isinstance(page_text, list):
+        page_text = "\n".join(str(part) for part in page_text)
+    page_text = str(page_text)[:4000]
 
     # Prefer the confidence-ordered header extraction (first 400 chars,
     # location-line patterns) over the loose full-text scan — the latter
     # returns the FIRST "City, ST" anywhere in ~6k chars, which is often a
     # past employer's HQ or a university town, and `location` outranks
     # city/state everywhere downstream.
-    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+    profile_blob = "\n".join(
+        part for part in (title, page_text, highlights_text) if part
+    )
+    extracted_city, extracted_state = _extract_city_from_highlights(profile_blob)
     if extracted_city or extracted_state:
-        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
+        if extracted_state:
+            # Precise city + state: store as "City, ST".
+            extracted_location = f"{extracted_city}, {extracted_state}"
+            city_for_field = extracted_city
+        else:
+            # Broad region (e.g. "San Francisco Bay Area"): the area label IS
+            # the location — display it as-is so recruiters see the original
+            # LinkedIn string rather than a bare city with no context.
+            extracted_location = extracted_city
+            city_for_field = ""
     else:
-        extracted_location = extract_us_location_from_text(f"{title}\n{highlights_text}")
+        extracted_location = extract_us_location_from_text(profile_blob)
+        city_for_field = ""
 
     return {
         "firstName": first_name,
         "lastName": last_name,
         "email": "",
-        "city": extracted_city,
+        "city": city_for_field,
         "state": extracted_state,
         "location": extracted_location,
         "title": title,
@@ -522,6 +596,38 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
         "recruiter_candidate_id": None,
     }
 
+
+
+# The SDK raises ValueError("Request failed with status code 429: ...");
+# newer versions may also carry status_code / response.status_code.
+_EXA_429_RE = re.compile(r"status code 429\b|too many requests|rate limit", re.IGNORECASE)
+
+
+def _is_exa_429(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return status == 429
+    return bool(_EXA_429_RE.search(str(exc)))
+
+
+async def _exa_paced(loop, fn, *args, max_wait_s: float = 15.0):
+    """Run a blocking Exa SDK call in the executor behind the shared Exa limiter.
+
+    A 429 from the SDK (raised as an exception) starts the cooldown every
+    worker waits out before its next Exa call. ``max_wait_s`` stays below the
+    callers' ``wait_for`` timeouts (25-30 s), so a long cooldown gives up with
+    a clear error instead of being cancelled mid-wait.
+    """
+    if not await _exa_limit.acquire(max_wait_s=max_wait_s):
+        raise RuntimeError("Exa rate-limited: no slot within budget")
+    try:
+        return await loop.run_in_executor(None, fn, *args)
+    except Exception as exc:
+        if _is_exa_429(exc):
+            await _exa_limit.note_429()
+        raise
 
 class ExaService:
     def __init__(self):
@@ -554,6 +660,9 @@ class ExaService:
                 category="people",
                 type="auto",
                 num_results=limit,
+                # The LinkedIn place is in the page header. 1000 characters
+                # reaches that line without pulling the whole profile.
+                text={"max_characters": 1000},
                 highlights={"max_characters": 4000},
             )
             if include_domains:
@@ -561,7 +670,7 @@ class ExaService:
             return self.exa.search_and_contents(q, **kwargs)
 
         responses = await asyncio.gather(
-            *[loop.run_in_executor(None, do_search, q) for q in queries],
+            *[_exa_paced(loop, do_search, q) for q in queries],
             return_exceptions=True,
         )
 
@@ -699,7 +808,7 @@ class ExaService:
 
         try:
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, do_contents),
+                _exa_paced(loop, do_contents),
                 timeout=25.0,
             )
         except asyncio.TimeoutError:
@@ -834,10 +943,9 @@ class ExaService:
             )
         location_clause = (
             f"  {6 if include_contacts else 5}. location: the candidate's CURRENT residence exactly as the "
-            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona, "
-            "United States' or 'Greater Phoenix Area'). Never substitute a "
-            "company HQ or a past position's city; leave empty only if the "
-            "profile shows no location at all.\n"
+            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona', 'New York, NY', or 'San Francisco Bay Area'). "
+            "CRITICAL: Never substitute a company HQ, a past position's city, a person's name, skills, software, "
+            "or acronyms (like 'Salesforce', 'PS, PR'); leave empty only if the profile shows no clear geographic location.\n"
         )
         exclude_clause = ""
         exclude_clean = str(exclude_company or "").strip()
@@ -912,7 +1020,7 @@ class ExaService:
                 effort, len(seeds), jd_title, jd_role,
             )
             created = await asyncio.wait_for(
-                loop.run_in_executor(None, do_create),
+                _exa_paced(loop, do_create),
                 timeout=30.0,
             )
             run_id = getattr(created, "id", None)

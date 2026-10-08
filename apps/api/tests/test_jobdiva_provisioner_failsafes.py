@@ -428,11 +428,43 @@ def test_name_only_row_is_refused_instead_of_creating_a_blank_profile(harness, c
 def test_placeholder_name_is_refused(harness, caplog):
     caplog.set_level(logging.ERROR)
     fake = _FakeJobDiva(result=(True, 777))
-    results = harness([_linkedin_row(name="LinkedIn Candidate", data={})], fake)
+    # Nothing to rescue a name from: no LinkedIn profile, no vanity URL.
+    results = harness([_linkedin_row(name="LinkedIn Candidate", data={}, profile_url="")], fake)
 
     assert fake.calls == []
     assert results["blank_profile_refused"] == 1
     assert "no_usable_name" in caplog.text
+
+
+def test_hidden_linkedin_member_is_refused_when_no_name_can_be_found(harness, caplog):
+    # LinkedIn's stand-in for an out-of-network person; the re-read says the
+    # same. A JobDiva profile titled "Linkedin Member" was created on 2026-09-29.
+    caplog.set_level(logging.ERROR)
+    fake = _FakeJobDiva(result=(True, 777))
+    hidden = {**_LINKEDIN_PROFILE, "name": "LinkedIn Member"}
+    results = harness(
+        [_linkedin_row(name="Linkedin Member", profile_url="", data={"linkedin_profile": hidden})],
+        fake, reread={"name": "LinkedIn Member"},
+    )
+
+    assert fake.calls == []
+    assert results["blank_profile_refused"] == 1
+    assert "no_usable_name" in caplog.text
+    assert harness.reread_calls == ["unipile_AEMAA1"]  # a placeholder name triggers the re-read
+
+
+def test_hidden_linkedin_member_is_named_from_the_vanity_url(harness):
+    fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
+    hidden = {**_LINKEDIN_PROFILE, "name": "LinkedIn Member"}
+    harness(
+        [_linkedin_row(name="Linkedin Member", profile_url="https://www.linkedin.com/in/jane-doe-8a7b6c5",
+                       data={"linkedin_profile": hidden})],
+        fake, reread={"name": "LinkedIn Member"},
+    )
+
+    (call,) = fake.calls
+    assert (call["first_name"], call["last_name"]) == ("Jane", "Doe")
+    assert "Linkedin Member" not in call["resume_text"] and "LinkedIn Member" not in call["resume_text"]
 
 
 def test_placeholder_name_is_rescued_by_the_linkedin_profile_name(harness):

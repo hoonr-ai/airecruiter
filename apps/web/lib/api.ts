@@ -4,6 +4,7 @@
 
 import { trackEvent } from "@/lib/analytics";
 import { msalInstance } from "@/lib/msal-config";
+import type { Snapshot } from "@/app/admin/live-report/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL!;
 
@@ -92,6 +93,8 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
 export {
   ApiError,
   isNotFoundError,
+  LIVE_REPORT_NOT_FOUND_MESSAGE,
+  LIVE_REPORT_FORBIDDEN_MESSAGE,
   LIVE_REPORT_PROD_ONLY_MESSAGE,
   isWithinRedirectCooldown,
   recordRedirectTimestamp,
@@ -250,6 +253,78 @@ export type CrossSubmissionsResponse = {
   count: number;
   candidates: CrossSubmission[];
 };
+
+// ---- Org hierarchy (admin) -------------------------------------------------
+
+export type OrgHierarchyMember = {
+  id: number;
+  name: string;
+  email: string | null;
+  role: string;
+  role_label: string;
+  reports_to_id: number | null;
+  vertical: string;
+  title: string;
+  direct_reports: number;
+  total_reports: number;
+};
+
+export type OrgHierarchyLevel = { role: string; label: string; rank: number };
+
+export type OrgHierarchyOverview = {
+  members: OrgHierarchyMember[];
+  levels: OrgHierarchyLevel[];
+  counts: {
+    total: number;
+    with_email: number;
+    without_email: number;
+    by_role: Record<string, number>;
+  };
+  last_import: { imported_by: string; imported_at: string } | null;
+};
+
+export type OrgImportNeedsEmail = {
+  name: string;
+  role: string;
+  role_label: string;
+  vertical: string;
+  direct_reports: number;
+  total_reports: number;
+  named_only: boolean;
+};
+
+export type OrgImportPreview = {
+  dry_run: boolean;
+  applied: boolean;
+  blocking: boolean;
+  summary: {
+    rows: number;
+    people: number;
+    with_email: number;
+    without_email: number;
+    by_role: Record<string, number>;
+    needs_email: OrgImportNeedsEmail[];
+    top_level: {
+      name: string;
+      email: string | null;
+      role: string;
+      role_label: string;
+      vertical: string;
+      total_reports: number;
+    }[];
+    titles_treated_as_recruiter: { title: string; count: number }[];
+  };
+  issues: { severity: "error" | "warning" | "info"; row: number | null; message: string }[];
+  diff: {
+    current_people_with_email: number;
+    emails_added: number;
+    emails_removed: number;
+    removed_sample: string[];
+  } | null;
+  coverage: { people_with_email: number; assigned_to_a_job: number } | null;
+};
+
+type ApiEnvelope<T> = { status: string; data?: T; message?: string };
 
 export type DashboardQuery = {
   startDate?: string | null;
@@ -471,11 +546,30 @@ export const api = {
     remove: (teamId: string) =>
       req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
   },
+  // Admin: the Recruiter → Resource Manager → Delivery Manager → Delivery Director → AVP
+  // tree that decides whose jobs and admin analytics each person sees.
+  orgHierarchy: {
+    get: () => req<ApiEnvelope<OrgHierarchyOverview>>(`/api/v1/org-hierarchy`),
+    // dry_run defaults to a preview server-side; pass false to replace the tree.
+    import: (body: { csv: string; dry_run: boolean; head_role: string }) =>
+      req<ApiEnvelope<OrgImportPreview>>(`/api/v1/org-hierarchy/import`, { method: "POST", body }),
+    // The current tree in the importer's own format.
+    export: () => req<ApiEnvelope<{ filename: string; csv: string }>>(`/api/v1/org-hierarchy/export`),
+  },
   liveReport: {
-    getLaunches: () => req<any>(`/api/analytics/live-report/launches`),
+    getLaunches: (params?: { search?: string; jobdiva_id?: string; limit?: number; signal?: AbortSignal }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.jobdiva_id) qs.set("jobdiva_id", params.jobdiva_id);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      const queryStr = qs.toString();
+      return req<any>(`/api/analytics/live-report/launches${queryStr ? `?${queryStr}` : ""}`, { signal: params?.signal });
+    },
     getHealth: () => req<any>(`/api/analytics/live-report/health`),
-    getSnapshot: (bulkId: string, reveal = false) =>
-      req<any>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`),
+    getSnapshot: (bulkId: string, reveal = false, signal?: AbortSignal) =>
+      req<Snapshot>(`/api/analytics/live-report/${encodeURIComponent(bulkId)}${reveal ? "?reveal=true" : ""}`, { signal }),
+    getJobSnapshot: (jobdivaId: string, reveal = false, signal?: AbortSignal) =>
+      req<Snapshot>(`/api/analytics/live-report/job/${encodeURIComponent(jobdivaId)}${reveal ? "?reveal=true" : ""}`, { signal }),
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },

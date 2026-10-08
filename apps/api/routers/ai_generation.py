@@ -15,6 +15,7 @@ from datetime import datetime
 
 from services.jobdiva import jobdiva_service, strip_job_version_suffix
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
+from services.location import extract_us_locations_from_text
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
 from services.screening_question_generator import generate_screening_questions
@@ -28,6 +29,38 @@ from core.llm_client import get_openai_client, log_usage, model_for
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+
+def _propagate_note_locations_to_rubric(rubric_obj: Any, recruiter_notes: str) -> None:
+    """Include validated recruiter-note locations in Step 3 Other Requirements.
+
+    Location extraction also feeds Steps 4 and 5, but the rubric extractor may
+    use the generated JD as its grounding text and omit recruiter notes. Add
+    validated note locations deterministically so the Step 3 summary cannot
+    silently lose them.
+    """
+    locations = extract_us_locations_from_text(recruiter_notes, limit=10)
+    if not locations:
+        return
+
+    requirements = list(getattr(rubric_obj, "other_requirements", None) or [])
+
+    def normalize(value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"^location\s*:\s*", "", text)
+        return re.sub(r"[\s.,;]+$", "", text).strip()
+
+    existing = {
+        normalize(item.get("value") if isinstance(item, dict) else item)
+        for item in requirements
+    }
+    for location in locations:
+        key = normalize(location)
+        if key in existing:
+            continue
+        requirements.append({"value": f"Location: {location}.", "required": "Required"})
+        existing.add(key)
+    rubric_obj.other_requirements = requirements
+
 # Singleton OpenAI client — module-level reference for legacy code paths.
 # New code should call get_openai_client() directly.
 client = get_openai_client()
@@ -39,6 +72,7 @@ class JobDescriptionRequest(BaseModel):
     workAuthorization: str = ""
     jobDescription: str = ""
     payRate: str = ""
+    customerName: Optional[str] = Field(default=None, max_length=120)
     # Rubric-derived context. All optional so older clients keep working.
     yearsOfExperience: Optional[int] = None
     education: List[Dict[str, Any]] = Field(default_factory=list)
@@ -159,7 +193,7 @@ def _lookup_job_ref_sync(job_id: str):
                     if row and row[0]:
                         ref_code = row[0]
     except Exception as e:
-        print(f"DEBUG: Failed to fetch ref code: {e}")
+        logger.warning("Failed to fetch JobDiva reference code: %s", e)
     return numeric_job_id, ref_code
 
 
@@ -177,9 +211,10 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     last_request_time = time.time()
 
-    print(
-        f"DEBUG PAYLOAD: Job Notes Length = {len(req.jobNotes)}, JD Length = {len(req.jobDescription)}, "
-        f"YoE = {req.yearsOfExperience}, education={len(req.education)}, certs={len(req.certifications)}"
+    logger.debug(
+        "JD generation payload notes_len=%s jd_len=%s yoe=%s education=%s certs=%s",
+        len(req.jobNotes), len(req.jobDescription), req.yearsOfExperience,
+        len(req.education), len(req.certifications),
     )
 
     # ---- Structured context blocks (empty strings when no data, so the prompt
@@ -270,6 +305,14 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     else:
         remote_directive_block = ""
 
+    raw_name = (req.customerName or "").strip()
+    clean_customer_name = re.sub(r'[\'\"\n\r\t]', ' ', raw_name).strip() if raw_name else ""
+
+    customer_name_block = (
+        "REDACT CLIENT NAME (highest priority):\n"
+        f"The client name is '{clean_customer_name}'. You MUST completely redact any mention of '{clean_customer_name}' (as well as any related brand names, products, or division names associated with it) from the entire job description. Replace it with 'our client' or 'a company'.\n"
+    ) if clean_customer_name else ""
+
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
         "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
@@ -280,6 +323,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         f"Input Data:\n"
         f"{recruiter_notes_block}\n\n"
         f"{remote_directive_block}{chr(10) if remote_directive_block else ''}"
+        f"{customer_name_block}{chr(10) if customer_name_block else ''}"
         f"{canonical_title_block}\n\n"
         f"Work Authorization: {req.workAuthorization or '(not specified)'}\n\n"
         f"{pay_rate_block}\n\n"
@@ -326,28 +370,36 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     description = None
     try:
-        print(f"DEBUG: Attempting JD generation with OpenAI: {OPENAI_MODEL}")
+        locations = extract_us_locations_from_text(req.jobNotes, limit=10)
+    except Exception:
+        logger.exception("Could not extract validated locations from recruiter notes")
+        locations = []
+    try:
+        logger.debug("Attempting JD generation with OpenAI model=%s", OPENAI_MODEL)
         completion = await client.chat.completions.create(
             model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an expert recruitment copywriter."},
                 {"role": "user", "content": prompt}
             ],
-            # Lower temperature keeps recruiter-notes facts (exact years, tools,
-            # certifications) from being paraphrased away.
             temperature=0.3,
             timeout=45,
             prompt_cache_key="jd-gen-v1",
         )
         description = completion.choices[0].message.content
-        print("DEBUG: OpenAI JD generation successful.")
+        if description and clean_customer_name:
+            pattern = re.compile(re.escape(clean_customer_name), re.IGNORECASE)
+            if pattern.search(description):
+                logger.warning("LLM leaked customer name '%s' in description, applying deterministic redaction", clean_customer_name)
+                description = pattern.sub("our client", description)
+        logger.debug("OpenAI JD generation successful")
     except Exception as e:
-        print(f"DEBUG: OpenAI JD generation failed: {e}")
+        logger.exception("OpenAI JD generation failed: %s", e)
         # No fallback to Gemini as requested
 
     if not description:
         # ULTIMATE FALLBACK: Expert Template
-        print("DEBUG: Using Expert Template Fallback due to API issues.")
+        logger.warning("Using expert template fallback after JD generation failure")
         description = (
             f"{req.jobTitle.upper()}\n\n"
             "**The Role**\n"
@@ -382,7 +434,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
             {"ai_description": description},
         )
 
-    return {"description": description}
+    return {"description": description, "locations": locations}
 
 @router.post("/jobs/generate-title")
 async def generate_job_title(req: JobDescriptionRequest):
@@ -405,14 +457,14 @@ async def generate_job_title(req: JobDescriptionRequest):
     )
     
     if not OPENAI_API_KEY:
-        print("DEBUG TITLE: No OpenAI API Key found.")
+        logger.warning("Title enhancement skipped: OpenAI API key is not configured")
         return {"title": f"ERROR: No API Key"}
 
     try:
         # Tier-3 #11: title polish is a sub-60-char text transform —
         # nano is plenty. Override via LLM_MODEL_TITLE_POLISH.
         _title_model = model_for("title_polish", "gpt-4.1-nano")
-        print(f"DEBUG TITLE: Attempting title enhancement with OpenAI: {_title_model}")
+        logger.debug("Attempting title enhancement with OpenAI model=%s", _title_model)
         completion = await client.chat.completions.create(
             model=_title_model,
             messages=[
@@ -430,13 +482,13 @@ async def generate_job_title(req: JobDescriptionRequest):
         new_title = re.sub(r'^[\"\']|[\"\']$', '', new_title).strip()
         new_title = new_title.replace("**", "")
         
-        print(f"DEBUG TITLE: Original: '{req.jobTitle}' -> New: '{new_title}'")
+        logger.debug("Title enhancement completed: %r -> %r", req.jobTitle, new_title)
         
         if new_title:
             return {"title": new_title}
             
     except Exception as e:
-        print(f"DEBUG TITLE: OpenAI title enhancement failed: {e}")
+        logger.exception("OpenAI title enhancement failed: %s", e)
         # No fallback to Gemini as requested
 
     return {"title": f"ERROR: AI enhancement failed"}
@@ -483,6 +535,12 @@ async def generate_rubric(req: RubricGenerationRequest):
             job_location=f"{req.jobCity}, {req.jobState}".strip(", "),
             location_type=req.locationType
         )
+
+        # Recruiter-note locations are also surfaced as explicit Step 3
+        # requirements, even when the rubric model grounded itself on the JD
+        # and omitted the notes. The same values feed the Step 4/5 location
+        # chips through the JD-generation response.
+        _propagate_note_locations_to_rubric(rubric_obj, req.jobNotes)
         
         # If JobDiva has a structured degree, and AI found nothing, use it
         if not rubric_obj.education and req.requiredDegree:

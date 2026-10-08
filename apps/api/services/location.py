@@ -1,16 +1,20 @@
 import json
+import logging
 import math
 import re
 from typing import Optional, Tuple, Dict
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from pydantic import BaseModel
 from core.config import OPENAI_API_KEY
 from core.llm_client import get_openai_client, model_for
 from core import llm_cache
+from core.bounded_cache import BoundedDict
 
 
-_GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
+_GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = BoundedDict(10_000)
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _NOMINATIM_HEADERS = {
     "User-Agent": "airecruiter-location-filter/1.0",
@@ -62,6 +66,174 @@ _ARRANGEMENT_RESIDUE_WORDS = frozenset({
     "week", "weeks", "willing", "with", "work", "working", "x",
 })
 
+# These strings describe a metro/region rather than a candidate's exact
+# locality. A geocoder may return a representative point for them, but that
+# point is not precise enough to hard-reject someone against a small radius.
+#
+# This is a deliberate recall-over-precision trade-off: a candidate in a
+# county/region adjacent to the one actually meant (e.g. "Santa Clara County,
+# CA" when the job wants a tighter radius than the county itself spans) may
+# still be retained as "unverified" rather than hard-dropped, because we have
+# no county/region centroid data to confirm they're truly out of range. The
+# alternative — geocoding a representative point and hard-rejecting against
+# it — risks silently dropping someone who IS in range; the chosen trade-off
+# is the one the offline-gating project treats as safer by default.
+#
+# Matched with .fullmatch() (see is_broad_region_location below), so the bare
+# literals here (chicagoland, silicon valley) only match when they make up
+# the ENTIRE label (plus an optional ", ST" suffix) — "North Chicagoland"
+# does NOT match, since there's no leading `.+` wildcard for those terms.
+# "tri-state area" is intentionally not a separate literal: it already
+# fullmatches via the generic `.+\s+area` alternative below.
+_BROAD_REGION_RE = re.compile(
+    r"(?:^greater\s+.+\s+area|chicagoland|silicon\s+valley|.+\s+(?:bay\s+area|metro(?:politan)?(?:\s+area)?|metropolitan\s+area|area|county|metroplex|region))"
+    r"(?:,\s*[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?$",
+    re.IGNORECASE,
+)
+
+
+# "New York, United States" / "New Jersey, USA" name a state (or the whole
+# country), not a point. Geocoding them returns a state centroid that can
+# fall inside a nearby radius and hide the unverified badge.
+_COUNTRY_ONLY_RE = re.compile(
+    r"^(?:united states(?: of america)?|u\.?s\.?a?\.?)$",
+    re.IGNORECASE,
+)
+_STATE_COUNTRY_RE = re.compile(
+    r"^(?P<region>.+?),\s*(?:united states(?: of america)?|u\.?s\.?a?\.?)$",
+    re.IGNORECASE,
+)
+
+# LinkedIn's own metro labels, mapped to every state the metro touches.
+# A city-name lookup is not enough: "Detroit" is also a town in Texas, but
+# "Detroit Metropolitan Area" is metro Detroit. A label whose states miss
+# the search is not a hard-drop until its core city is also outside the
+# radius — Philadelphia is inside 50 miles of Pennington, NJ.
+_REGION_STATE_LABELS = {
+    "greater chicago area": frozenset({"IL", "IN", "WI"}),
+    "chicagoland": frozenset({"IL", "IN", "WI"}),
+    "detroit metropolitan area": frozenset({"MI"}),
+    "greater detroit area": frozenset({"MI"}),
+    "san francisco bay area": frozenset({"CA"}),
+    "greater san francisco bay area": frozenset({"CA"}),
+    "silicon valley": frozenset({"CA"}),
+    "greater boston area": frozenset({"MA", "NH", "RI"}),
+    "greater seattle area": frozenset({"WA"}),
+    "seattle metro area": frozenset({"WA"}),
+    # normalize_location_string() deletes the word "metro", so the gate
+    # sees "Seattle Area" rather than "Seattle Metro Area".
+    "seattle area": frozenset({"WA"}),
+    "greater los angeles area": frozenset({"CA"}),
+    "los angeles metropolitan area": frozenset({"CA"}),
+    "greater philadelphia area": frozenset({"PA", "NJ", "DE"}),
+    "greater atlanta area": frozenset({"GA"}),
+    "greater phoenix area": frozenset({"AZ"}),
+    "phoenix metropolitan area": frozenset({"AZ"}),
+    "dallas-fort worth metroplex": frozenset({"TX"}),
+    "dallas fort worth metroplex": frozenset({"TX"}),
+    "fort worth metroplex": frozenset({"TX"}),
+    "new york city metropolitan area": frozenset({"NY", "NJ", "CT", "PA"}),
+    "greater new york area": frozenset({"NY", "NJ", "CT", "PA"}),
+    "dallas area": frozenset({"TX"}),
+}
+
+# One city used only to decide whether a broad label can reach a circle.
+# The label itself stays unverified; this point is not shown as the address.
+_REGION_CORE_CITY = {
+    "greater chicago area": ("Chicago", "IL"),
+    "chicagoland": ("Chicago", "IL"),
+    "detroit metropolitan area": ("Detroit", "MI"),
+    "greater detroit area": ("Detroit", "MI"),
+    "san francisco bay area": ("San Francisco", "CA"),
+    "greater san francisco bay area": ("San Francisco", "CA"),
+    "silicon valley": ("San Jose", "CA"),
+    "greater boston area": ("Boston", "MA"),
+    "greater seattle area": ("Seattle", "WA"),
+    "seattle metro area": ("Seattle", "WA"),
+    "seattle area": ("Seattle", "WA"),
+    "greater los angeles area": ("Los Angeles", "CA"),
+    "los angeles metropolitan area": ("Los Angeles", "CA"),
+    "greater philadelphia area": ("Philadelphia", "PA"),
+    "greater atlanta area": ("Atlanta", "GA"),
+    "greater phoenix area": ("Phoenix", "AZ"),
+    "phoenix metropolitan area": ("Phoenix", "AZ"),
+    "dallas-fort worth metroplex": ("Dallas", "TX"),
+    "dallas fort worth metroplex": ("Dallas", "TX"),
+    "fort worth metroplex": ("Dallas", "TX"),
+    "new york city metropolitan area": ("New York", "NY"),
+    "greater new york area": ("New York", "NY"),
+    "dallas area": ("Dallas", "TX"),
+}
+
+
+def _region_label_key(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = re.sub(
+        r",\s*(?:united states(?: of america)?|u\.?s\.?a?\.?)$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.casefold()
+
+
+def region_core_city(value) -> Optional[Tuple[str, str]]:
+    """Core city for a named metro, or None when the label has no core.
+
+    Used to avoid hard-dropping a metro whose center sits inside a search
+    circle in another state. "Greater Philadelphia Area" against Pennington
+    is the case: the label says Pennsylvania, and Philadelphia is inside
+    50 miles.
+    """
+    core = _REGION_CORE_CITY.get(_region_label_key(value))
+    if not core:
+        return None
+    return core
+
+
+def inferred_region_states(value) -> frozenset:
+    """States a broad label actually refers to, or empty when we can't tell.
+
+    Empty means "don't hard-drop on state" — the caller soft-keeps the row
+    as unverified. A non-empty set that misses every search location is a
+    confirmed state mismatch (Greater Chicago Area on a Texas search).
+    """
+    key = _region_label_key(value)
+    if not key:
+        return frozenset()
+    labeled = _REGION_STATE_LABELS.get(key)
+    if labeled:
+        return labeled
+    # "New York, United States" / "New Jersey, USA" — the region half is a
+    # state name. Import lazily: us_state_index does not import this module.
+    try:
+        from services.us_state_index import resolve_state_code
+    except ImportError:
+        logger.exception("us_state_index import failed while reading region states")
+        return frozenset()
+    code = resolve_state_code(key)
+    if code:
+        return frozenset({code.upper()})
+    return frozenset()
+
+
+def is_broad_region_location(value) -> bool:
+    """Whether a location label denotes a broad metro/region, not a city."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return False
+    if _BROAD_REGION_RE.fullmatch(text) or _COUNTRY_ONLY_RE.fullmatch(text):
+        return True
+    state_country = _STATE_COUNTRY_RE.fullmatch(text)
+    if not state_country:
+        return False
+    try:
+        from services.us_state_index import resolve_state_code
+    except ImportError:
+        logger.exception("us_state_index import failed while reading a state label")
+        return False
+    return bool(resolve_state_code(state_country.group("region")))
+
 
 def sanitize_candidate_location(value) -> str:
     """Strip work-arrangement noise from a candidate-location string.
@@ -74,8 +246,14 @@ def sanitize_candidate_location(value) -> str:
     pass through untouched.
     """
     text = re.sub(r"\s+", " ", str(value or "").strip())
+    if text.casefold() in {"unknown", "n/a", "na", "none", "not specified"}:
+        return ""
     if not text or not _ARRANGEMENT_HINT_RE.search(text):
-        return text
+        # Display/storage paths also receive parser-produced city/state
+        # strings. Apply the shared false-city guard here so a bad upstream
+        # parse such as "Salesforce, MS" or "PS, PR" cannot survive simply
+        # because it was already formatted as a location.
+        return _sanitize_city_state_display(text)
 
     cleaned = _ARRANGEMENT_PHRASE_RE.sub(" ", text)
     cleaned = _ARRANGEMENT_WORD_RE.sub(" ", cleaned)
@@ -93,7 +271,16 @@ def sanitize_candidate_location(value) -> str:
         return ""
     if all(t.lower() in _ARRANGEMENT_RESIDUE_WORDS for t in alpha_tokens):
         return ""
-    return cleaned
+        
+    return _sanitize_city_state_display(cleaned)
+
+
+def _sanitize_city_state_display(value: str) -> str:
+    """Blank city/state-shaped strings whose city token is known to be noise."""
+    match = re.fullmatch(r"(.+?),\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?", value)
+    if match and not is_plausible_city_token(match.group(1), match.group(2)):
+        return ""
+    return value
 
 
 def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -233,6 +420,31 @@ _CITY_RE = r"([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){0,3})"
 _RE_GREATER_AREA = re.compile(
     rf"\bGreater\s+{_CITY_RE}\s+Area\b"
 )
+# LinkedIn variants not matched by _RE_GREATER_AREA:
+#   "San Francisco Bay Area"  → city = "San Francisco"
+#   "New York Metro Area"     → city = "New York"
+#   "Los Angeles Metropolitan Area" → city = "Los Angeles"
+_RE_BAY_AREA = re.compile(
+    rf"\b{_CITY_RE}\s+Bay\s+Area\b"
+)
+_RE_METRO_AREA = re.compile(
+    rf"\b{_CITY_RE}\s+Metro(?:politan)?\s+Area\b",
+    re.IGNORECASE,
+)
+# "Dallas-Fort Worth Metroplex". The hyphen is inside the name — a word
+# boundary before "Fort" would keep only "Fort Worth Metroplex" and drop
+# "Dallas-". The repeated hyphenated token is what keeps the full name.
+_RE_METROPLEX = re.compile(
+    r"\b((?:[A-Z][A-Za-z]+(?:-[A-Z][A-Za-z]+)*)(?:\s+[A-Z][A-Za-z]+)*)\s+Metroplex\b"
+)
+_RE_CITY_REGION_COUNTRY = re.compile(
+    rf"\b{_CITY_RE},\s+([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){{0,2}}),\s+"
+    rf"([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){{0,2}})\b"
+)
+_RE_LOCATION_LINE = re.compile(
+    r"\bLocation:\s*([^·|•\n]{2,80})",
+    re.IGNORECASE,
+)
 _RE_CITY_STATE_CODE = re.compile(
     rf"\b{_CITY_RE},\s+([A-Z]{{2}})\b"
 )
@@ -247,8 +459,179 @@ _RE_BASED_LOCATED = re.compile(
     re.IGNORECASE,
 )
 
+# Tech brand names, tools, and common proper-noun words that the City regex
+# can mistakenly capture from headline / resume text
+# (e.g. "Salesforce, MS" from a headline listing "Salesforce, MS Dynamics").
+# The index is authoritative for known cities; these heuristics also protect
+# locations absent from or aliased differently in the offline index.
+_NON_PLACE_TOKENS: frozenset = frozenset({
+    # CRM / cloud platforms
+    "salesforce", "servicenow", "workday", "oracle", "sap", "dynamics",
+    "hubspot", "marketo", "zendesk", "freshdesk", "netsuite",
+    # BI / analytics tools
+    "tableau", "powerbi", "looker", "qlik", "microstrategy", "cognos",
+    "superset", "metabase", "splunk", "grafana",
+    # Cloud / infra
+    "kubernetes", "terraform", "ansible", "jenkins", "datadog", "newrelic",
+    # Languages / frameworks (capitalised in resume text)
+    "typescript", "javascript", "python", "golang", "kotlin", "scala",
+    "angular", "react", "vue", "django", "flask", "fastapi", "spring",
+    # Databases
+    "mongodb", "postgresql", "cassandra", "elasticsearch", "redis",
+    "snowflake", "databricks", "bigquery", "redshift",
+    # Certificates / frameworks
+    "scrum", "agile", "itil", "cobit", "togaf",
+    # Misc proper nouns that look like city names but are never places
+    "linkedin", "github", "gitlab", "jira", "confluence", "slack",
+    # Bio-lab / life-sciences software and testing tools. These appear in
+    # resume skill/software sections and get mis-parsed as city names when
+    # followed by a comma-separated state abbreviation (e.g. "Parasoft, CA",
+    # "SoftMaxPro, MS"). None of these are US place names.
+    "parasoft", "softmaxpro", "graphpad", "graphpadprism",
+    "imagej", "imagepro", "facsdiva", "flowjo", "cellquest", "kaluza",
+    "modfit", "winnonlin", "nonmem", "simcyp", "gastroplus",
+    "certara", "pksolver", "bioanalytical",
+    # Additional cloud / devops tools
+    "appdynamics", "dynatrace", "nagios", "zabbix", "pagerduty",
+})
 
-def extract_us_location_from_text(text: str) -> str:
+
+# Compiled once at import time for the CamelCase brand guard below.
+_CAMEL_CASE_RE = re.compile(r"[a-z][A-Z]")
+
+_CANADIAN_PROVINCE_CODES = frozenset({
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON",
+    "PE", "QC", "SK", "YT",
+})
+
+
+def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
+    """Reject brand/tool names and bare two-letter initials as a city token.
+    Use the offline city index as positive evidence, then heuristics for misses.
+    A missing index entry alone is not enough to reject a real city.
+    """
+    token = value.strip()
+    if not token:
+        return False
+        
+    state_upper = str(state or "").upper()
+    
+    # Stable explicit allowlist for abbreviations / non-US cities
+    if token == "LA" and state_upper == "CA":
+        return True
+    if token == "DC" and state_upper == "DC":
+        return True
+
+    # Primary gate: offline zip/city index
+    try:
+        from services.zip_index import is_known_city, _load
+        if not _load():
+            # Treat empty/unavailable index like an exception (fall through to heuristics)
+            raise RuntimeError("Zip index is unavailable")
+            
+        # Normalise common abbreviations before lookup
+        lookup_token = token
+        token_lower = token.lower()
+        if token_lower.startswith("st. "):
+            lookup_token = "Saint " + token[4:]
+        elif token_lower.startswith("ft. "):
+            lookup_token = "Fort " + token[4:]
+            
+        if is_known_city(lookup_token, state):
+            return True
+            
+        if state_upper in _CANADIAN_PROVINCE_CODES:
+            # The ZIP index is US-only; apply the false-positive guards before
+            # accepting a city paired with a Canadian province.
+            if token_lower in _NON_PLACE_TOKENS or _CAMEL_CASE_RE.search(token):
+                return False
+            return True
+
+        # Broad regions are not represented in the ZIP index.
+        if state and (token_lower.endswith(" area") or token_lower.endswith(" metroplex")):
+            return True
+    except Exception:
+        pass
+
+    # Fallback heuristics (state-less path or index unavailable)
+    if token.lower() in _NON_PLACE_TOKENS:
+        return False
+        
+    # Prevent CamelCase brands ("SoftMaxPro"), but allow valid prefixes ("McKinney", "DeKalb")
+    test_token = re.sub(r"\b(Mc|Mac|De|La|Di|Le)([A-Z])", r"\1 \2", token, flags=re.IGNORECASE)
+    if _CAMEL_CASE_RE.search(test_token):
+        return False
+        
+    if re.fullmatch(r"[A-Z]{2}", token):
+        return False
+        
+    return True
+
+
+# A LinkedIn "Location:" line sometimes carries a work arrangement. Those
+# are not cities and must not be stored as the profile place.
+_PROFILE_LABEL_DENY = frozenset({
+    "remote",
+    "hybrid",
+    "onsite",
+    "on site",
+    "on-site",
+    "wfh",
+    "open to work",
+    "worldwide",
+})
+
+
+def profile_location_label(raw: str) -> str:
+    """Turn one LinkedIn ``Location:`` value into the string we display.
+
+    A full line ("Edison, New Jersey, United States") becomes "Edison, NJ".
+    A city that exists in only one state ("Tempe", "Secaucus") gains that
+    state so the radius check can run. A city that exists in several states
+    ("Edison") is kept as written so the card is not "Location Unavailable"
+    and we do not invent a state.
+    """
+    text = re.sub(r"\s+", " ", str(raw or "")).strip(" .")
+    text = re.split(r"\s+[·•|]\s+", text, maxsplit=1)[0].strip(" .")
+    if not text:
+        return ""
+    if text.casefold() in _PROFILE_LABEL_DENY:
+        return ""
+    cleaned = sanitize_candidate_location(text)
+    if not cleaned:
+        return ""
+    if is_broad_region_location(cleaned):
+        return re.sub(r"\s+", " ", cleaned).strip(" ,")
+    structured = extract_us_location_from_text(cleaned, _from_line=True)
+    if structured:
+        return structured
+    from services.zip_index import is_known_city, unique_state_for_city
+
+    token = cleaned.split(",")[0].strip()
+    if "," not in cleaned and is_known_city(token):
+        state = unique_state_for_city(token)
+        if state:
+            return f"{token}, {state}"
+        return token
+    # "Location: Hyderabad" has no US city and no country token. Still show
+    # it. The country gate runs when the same profile also says India.
+    # Work-arrangement lines ("Open to work", "Worldwide") are not cities.
+    if cleaned.casefold() in _PROFILE_LABEL_DENY:
+        return ""
+    if re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{0,60}", cleaned) and len(cleaned.split()) <= 4:
+        return cleaned
+    return ""
+
+
+def location_line_label(text: str) -> str:
+    """The place named by a ``Location:`` line anywhere in profile text."""
+    line = _RE_LOCATION_LINE.search(str(text or "")[:8000])
+    if not line:
+        return ""
+    return profile_location_label(line.group(1))
+
+
+def extract_us_location_from_text(text: str, _from_line: bool = False) -> str:
     """Best-effort: pull a location string out of free text.
 
     Returns a normalised location like ``"Plano, TX"`` or
@@ -261,25 +644,47 @@ def extract_us_location_from_text(text: str) -> str:
         return ""
     body = str(text)[:6000]
 
-    # 1. LinkedIn classic: "Greater <City> Area"
-    match = _RE_GREATER_AREA.search(body)
-    if match:
-        return normalize_location_string(match.group(1))
+    # 1a–1d. LinkedIn region headers. Keep the source text intact
+    # ("Dallas-Fort Worth Metroplex", "Greater Chicago Area"). Returning
+    # only the embedded city made the radius gate treat a region as a point
+    # and rewrote the label the recruiter sees.
+    for pattern in (_RE_METROPLEX, _RE_GREATER_AREA, _RE_BAY_AREA, _RE_METRO_AREA):
+        match = pattern.search(body)
+        if match:
+            return normalize_location_string(match.group(0))
 
     # 2. "City, ST" with a real US state code
     for match in _RE_CITY_STATE_CODE.finditer(body):
         state = match.group(2).upper()
-        if state in _US_STATE_CODES:
-            return normalize_location_string(f"{match.group(1)}, {state}")
+        if state not in _US_STATE_CODES:
+            continue
+        city_token = match.group(1).strip()
+        if not is_plausible_city_token(city_token, state):
+            continue
+        return normalize_location_string(f"{city_token}, {state}")
 
     # 3. "City, FullStateName" → normalise to "City, ST"
     for match in _RE_CITY_STATE_NAME.finditer(body):
         candidate_state = match.group(2).strip().lower()
         state_code = _US_STATE_NAMES.get(candidate_state)
-        if state_code:
-            return normalize_location_string(f"{match.group(1)}, {state_code}")
+        if not state_code:
+            continue
+        city_token = match.group(1).strip()
+        if not is_plausible_city_token(city_token, state_code):
+            continue
+        return normalize_location_string(f"{city_token}, {state_code}")
 
-    # 4. "City, Country" with a known non-US country
+    # 4. "City, Region, Country" ("Hyderabad, Telangana, India"). The
+    # middle token is an admin region, not the country — matching only
+    # "City, Country" stored nothing and the row was soft-kept.
+    for match in _RE_CITY_REGION_COUNTRY.finditer(body):
+        candidate_country = match.group(3).strip().lower()
+        if candidate_country in _NON_US_COUNTRY_TOKENS:
+            return normalize_location_string(
+                f"{match.group(1).strip()}, {match.group(3).strip()}"
+            )
+
+    # 5. "City, Country" with a known non-US country
     for match in _RE_CITY_COUNTRY.finditer(body):
         candidate_country = match.group(2).strip().lower()
         if candidate_country in _NON_US_COUNTRY_TOKENS:
@@ -288,7 +693,15 @@ def extract_us_location_from_text(text: str) -> str:
                 f"{match.group(1)}, {match.group(2).strip()}"
             )
 
-    # 5. "based in X" / "located in X" / "currently in X"
+    # 6. LinkedIn snippet line: "Location: Edison, New Jersey, United States"
+    # or "Location: Edison". The line is the profile's own place, so it
+    # wins over a city mentioned earlier in a job description.
+    if not _from_line:
+        labeled = location_line_label(body)
+        if labeled:
+            return labeled
+
+    # 7. "based in X" / "located in X" / "currently in X"
     match = _RE_BASED_LOCATED.search(body)
     if match:
         cleaned = normalize_location_string(match.group(1))
@@ -301,6 +714,47 @@ def extract_us_location_from_text(text: str) -> str:
     return ""
 
 
+def extract_us_locations_from_text(text: str, limit: int = 10) -> list[str]:
+    """Extract distinct, ZIP-index-validated US city/state locations.
+
+    Used for recruiter-note location chips so generating a JD doesn't require
+    a second LLM request. Unknown city/state pairs are ignored; the UI only
+    receives normalized, deduplicated locations.
+    """
+    from services import zip_index
+
+    body = str(text or "")[:20000]
+    cap = max(0, min(10, int(limit or 10)))
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(city: str, state: str) -> None:
+        city = re.sub(r"\s+", " ", city).strip(" ,.;:-")
+        state = state.upper().strip()
+        if not city or state not in _US_STATE_CODES:
+            return
+        if not is_plausible_city_token(city, state):
+            return
+        value = sanitize_candidate_location(f"{city}, {state}")
+        key = value.casefold()
+        if value and key not in seen and len(found) < cap:
+            seen.add(key)
+            found.append(value)
+
+    for match in _RE_CITY_STATE_CODE.finditer(body):
+        add(match.group(1), match.group(2))
+    for match in _RE_CITY_STATE_NAME.finditer(body):
+        state = _US_STATE_NAMES.get(match.group(2).strip().lower())
+        if state:
+            add(match.group(1), state)
+
+    for match in re.finditer(r"\b(\d{5})(?:-\d{4})?\b", body):
+        entry = zip_index.lookup_zip(match.group(1))
+        if entry:
+            add(entry["city"], entry["state"])
+    return found
+
+
 class LocationVerdict(BaseModel):
     is_within_range: bool
     distance_estimate: str # e.g. "15 miles", "Different Country"
@@ -311,7 +765,9 @@ class LocationService:
         self.api_key = OPENAI_API_KEY
         self.client = get_openai_client()
         
-    async def check_proximity(self, candidate_loc: str, job_loc: str, work_mode: str) -> LocationVerdict:
+    async def check_proximity(
+        self, candidate_loc: str, job_loc: str, work_mode: str, within_miles: int = 50
+    ) -> LocationVerdict:
         """
         Semantically checks if candidate is within commuting distance.
         """
@@ -327,7 +783,7 @@ class LocationService:
         # in-process dict that died on every worker restart.
         cand_key = (candidate_loc or "").strip().lower()
         job_key = (job_loc or "").strip().lower()
-        cache_key = llm_cache.make_key("location", 1, cand_key, job_key)
+        cache_key = llm_cache.make_key("location", 2, cand_key, job_key, str(within_miles))
         cached = await llm_cache.get_json(cache_key)
         if cached is not None:
             try:
@@ -336,7 +792,7 @@ class LocationService:
                 pass  # fall through to LLM on schema drift
 
         prompt = f"""
-        Determine if the Candidate Location is within commuting distance (approx 50 miles / 80 km) of the Job Location.
+        Determine if the Candidate Location is within commuting distance (approx {within_miles} miles) of the Job Location.
 
         Candidate Location: {candidate_loc}
         Job Location: {job_loc}

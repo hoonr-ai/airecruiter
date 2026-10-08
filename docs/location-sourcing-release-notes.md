@@ -1,0 +1,20 @@
+# Multi-location sourcing release notes
+
+- Search supports up to 10 configured locations. Provider query fan-out is
+  capped at that limit; six locations, including Jacksonville, are supported.
+- Validated US locations extracted from recruiter notes are added to Step 3
+  Other Requirements, carried into Step 4 as OR alternatives, and persisted
+  with the Step 5 sourcing locations.
+- Confirmed out-of-radius candidates are excluded from Step 5 for JobDiva
+  Agent, JobDiva Talent, LinkedIn, and Exa. Remote jobs do not apply a
+  geographic radius. For local jobs, candidates with blank, broad, or
+  unresolvable locations are retained with a "Location unverified" indicator;
+  they are not treated as confirmed radius matches. Known out-of-radius
+  candidates are still excluded.
+- JobDiva's server-side `withinMiles` now uses the configured radius without
+  the former 2x headroom. Candidate-to-location checks use straight-line
+  ZIP/city centroid distances, followed by best-effort geocoding when the
+  offline index cannot resolve a place; these are not driving distances.
+- Exa DeepSearch accepts one radius for its OR-joined query, so it searches
+  with the broadest configured radius. The final Step 5 gate applies each
+  location's configured radius independently.

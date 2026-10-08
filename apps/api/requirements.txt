@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn>=0.30  # supervisor restarts workers recycled by --limit-max-requests
 pydantic>=2.5,<3
 httpx
 openai

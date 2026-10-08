@@ -1,14 +1,22 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useLayoutEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
+import {
+  isGeneratedCommuteQuestion,
+  mergeArrangementQuestionLocations,
+  mergeSourceLocations,
+  normalizeLocationKey,
+} from "@/lib/location-propagation";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
 import { shouldSkipForInFlightManualSave, isSupersededAbort } from "@/lib/save-coordination";
 import {
   DEFAULT_SEARCH_SOURCES,
+  DISABLED_SEARCH_SOURCE_IDS,
+  getEnabledSearchSourceIds,
   SEARCH_SOURCES_VERSION,
   restoreSavedSearchSources,
   type SearchSources,
@@ -267,6 +275,19 @@ function cleanLocationForIntro(location: string, fallback: string = "your area")
   return cleaned || fallback;
 }
 
+function getArticleForTitle(title: string): string {
+  if (!title || !title.trim()) return "a";
+  const firstWord = title.trim().split(/\s+/)[0].replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, "");
+  if (!firstWord) return "a";
+
+  if (["UX", "UI"].includes(firstWord.toUpperCase())) return "a";
+  if (firstWord.length <= 4 && firstWord === firstWord.toUpperCase()) {
+    return /^[AEFHILMNORSX]/i.test(firstWord[0]) ? "an" : "a";
+  }
+
+  return /^[aeiou]/i.test(firstWord[0]) ? "an" : "a";
+}
+
 function buildAutoBotIntroduction({
   title,
   isRemote,
@@ -277,6 +298,21 @@ function buildAutoBotIntroduction({
   isRemote: boolean;
   country: string;
   location: string;
+}): string {
+  const introTitle = cleanJobTitleForIntro(title);
+  const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
+  const article = getArticleForTitle(introTitle);
+  return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for ${article} ${introTitle} in ${locStr}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
+}
+
+function buildLegacyAutoBotIntroduction({
+  title,
+  location,
+  country,
+}: {
+  title: string;
+  location: string;
+  country: string;
 }): string {
   const introTitle = cleanJobTitleForIntro(title);
   const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
@@ -302,20 +338,31 @@ function matchesAutoBotIntroductionTemplate({
     const candidateTitle = (rawTitle || "").trim() || "role";
     if (seen.has(candidateTitle)) continue;
     seen.add(candidateTitle);
-    const templateRaw = buildAutoBotIntroduction({
-      title: candidateTitle,
-      isRemote,
-      country,
-      location,
-    }).trim().replace(/\s+/g, " ");
-    const templateCleaned = buildAutoBotIntroduction({
-      title: cleanJobTitleForIntro(candidateTitle),
-      isRemote,
-      country,
-      location,
-    }).trim().replace(/\s+/g, " ");
-    if (normalizedIntro === templateRaw || normalizedIntro === templateCleaned) return true;
+
+    const templateRaw = buildAutoBotIntroduction({ title: candidateTitle, isRemote, country, location }).trim().replace(/\s+/g, " ");
+    const templateCleaned = buildAutoBotIntroduction({ title: cleanJobTitleForIntro(candidateTitle), isRemote, country, location }).trim().replace(/\s+/g, " ");
+    const legacyRaw = buildLegacyAutoBotIntroduction({ title: candidateTitle, location, country }).trim().replace(/\s+/g, " ");
+    const legacyCleaned = buildLegacyAutoBotIntroduction({ title: cleanJobTitleForIntro(candidateTitle), location, country }).trim().replace(/\s+/g, " ");
+
+    if (
+      normalizedIntro === templateRaw ||
+      normalizedIntro === templateCleaned ||
+      normalizedIntro === legacyRaw ||
+      normalizedIntro === legacyCleaned
+    ) {
+      return true;
+    }
   }
+
+  const lower = normalizedIntro.toLowerCase();
+  if (
+    lower.includes("preliminary evaluation process") &&
+    lower.includes("good fit for the role") &&
+    lower.includes("8-12 minutes")
+  ) {
+    return true;
+  }
+
   return false;
 }
 
@@ -346,7 +393,7 @@ function isRecruiterSource(source: string | null | undefined): boolean {
 // events by the unified search backend.
 type SourceStatusInfo = {
   source: string;
-  status: "ok" | "empty" | "failed";
+  status: "ok" | "empty" | "failed" | "disabled";
   count: number;
   reason?: string;
   criteria_unconfigured?: boolean;
@@ -727,10 +774,8 @@ const looksLikeLinkedInProfile = (url?: string | null): boolean => {
  *  We only fall back when the value is genuinely absent — an explicit
  *  recruiter choice of L1.5 (Standard Screen) is preserved as-is.
  */
-const resolveScreeningLevel = (value: string | null | undefined): ScreeningLevel => {
-  const v = value || "L0.5";
-  return (v === "L0.5" || v === "L1" || v === "L1.5" || v === "L2") ? v as ScreeningLevel : "L0.5";
-};
+const resolveScreeningLevel = (value: string | null | undefined): ScreeningLevel =>
+  (value || "L0.5") as ScreeningLevel;
 
 export default function NewJobPage() {
   return (
@@ -995,6 +1040,8 @@ function NewJobPageContent() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
+  const rubricDataRef = useRef(rubricData);
+  useLayoutEffect(() => { rubricDataRef.current = rubricData; }, [rubricData]);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
   // Covers the entire Step-2 → Step-3 advance (draft save + rubric fetch) so
   // the Next button stays in a loading state continuously. `isGeneratingRubric`
@@ -1018,10 +1065,14 @@ function NewJobPageContent() {
     // ratio. Clamped to [0.1, 5] at the input layer.
     weight?: number;
   }>>([]);
+  const resumeMatchFiltersRef = useRef(resumeMatchFilters);
+  useLayoutEffect(() => { resumeMatchFiltersRef.current = resumeMatchFilters; }, [resumeMatchFilters]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
+  const screenQuestionsRef = useRef(screenQuestions);
+  useLayoutEffect(() => { screenQuestionsRef.current = screenQuestions; }, [screenQuestions]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
   // AI policy check (NSFW / rude / discriminatory / nonsensical) for
   // recruiter-added questions — shows a warning under the row, never blocks.
@@ -1033,11 +1084,10 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. The two JobDiva talent pools, LinkedIn and Exa are
-  // pre-ticked (LinkedIn sourcing round-robins across all attached Unipile
-  // accounts, so default-on no longer risks burning a single account; Exa
-  // had been opt-in since the April QA punch list, which in practice meant
-  // it never ran — re-enabled 2026-09). Dice stays opt-in and hidden.
+  // switchboard now. The two JobDiva talent pools and Exa are pre-ticked;
+  // LinkedIn-Unipile stays off while its provider is paused. Exa was re-enabled
+  // in 2026-09 after the April QA default-off behavior suppressed its searches.
+  // Dice stays opt-in and hidden.
   // Defaults + saved-draft migration live in lib/search-sources.ts.
   //
   // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
@@ -1096,6 +1146,9 @@ function NewJobPageContent() {
     value: string;
     radius: string;
   }>>([]);
+  const sourceLocationsRef = useRef(sourceLocations);
+  useLayoutEffect(() => { sourceLocationsRef.current = sourceLocations; }, [sourceLocations]);
+  const excludedSourceLocationKeysRef = useRef<Set<string>>(new Set());
   const [hasSeededSourceLocation, setHasSeededSourceLocation] = useState(false);
   const [sourceCompanies, setSourceCompanies] = useState<string[]>([]);
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
@@ -1103,6 +1156,8 @@ function NewJobPageContent() {
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
+  const sourceLocationMilesRef = useRef(sourceLocationMiles);
+  useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   // PR-B: top-level minimum years of experience floor for sourcing.
@@ -1110,6 +1165,11 @@ function NewJobPageContent() {
   // backend applies pre-LLM (cheap regex over headline / resume snippet)
   // and post-LLM (parsed years_of_experience).
   const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
+  const [maxExperienceYears, setMaxExperienceYears] = useState<number | null>(null);
+  const hasInvalidExperienceRange =
+    minExperienceYears !== null &&
+    maxExperienceYears !== null &&
+    minExperienceYears > maxExperienceYears;
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
@@ -1805,10 +1865,8 @@ function NewJobPageContent() {
   const [isHydratingJobSetup, setIsHydratingJobSetup] = useState(false);
   // Gate autosave on a dedicated "hydration complete" signal instead of
   // Boolean(jobData): loadJobDraft sets jobData partway through a sequence
-  // of setState calls (rubric, recruiter notes, sourcing filters, etc.), so
-  // Boolean(jobData) alone could flip true mid-hydration and let a spurious
-  // auto-save fire on page load/refresh before every field had its
-  // persisted value.
+  // of setState calls, so Boolean(jobData) alone could flip true mid-hydration
+  // and let a spurious auto-save fire before every field had its persisted value.
   const isWizardHydrated = Boolean(jobData) && !isHydratingJobSetup;
   const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
   const stepStartMsRef = useRef<number>(Date.now());
@@ -1954,6 +2012,7 @@ function NewJobPageContent() {
 
   useEffect(() => {
     setHasSeededSourceLocation(false);
+    excludedSourceLocationKeysRef.current = new Set();
   }, [numericJobId, jobdivaId]);
 
   // Pull the (candidate_id, source) keys for everyone already launched (i.e.
@@ -2302,7 +2361,15 @@ function NewJobPageContent() {
         setQuestionIdCounter(finalScreenQuestions.length + 1);
       }
       if (finalBotIntroduction && !draft.bot_introduction) {
-        setBotIntroduction(finalBotIntroduction);
+        if (!botIntroductionEditedRef.current) {
+          const titleToUse = draft.enhanced_title || draft.title || embeddedDetails?.enhanced_title || embeddedDetails?.title || "role";
+          const isRemote = isRemoteJob(embeddedDetails || draft);
+          const country = deriveCountry((embeddedDetails || draft)?.state);
+          const location = `${(embeddedDetails || draft)?.city || ""}, ${(embeddedDetails || draft)?.state || ""}`.trim().replace(/^, |, $/g, "");
+          setBotIntroduction(buildAutoBotIntroduction({ title: titleToUse, isRemote, country, location }));
+        } else {
+          setBotIntroduction(finalBotIntroduction);
+        }
       }
 
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
@@ -2418,12 +2485,20 @@ function NewJobPageContent() {
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
         if (sf.locations) setSourceLocations(sf.locations);
+        excludedSourceLocationKeysRef.current = new Set(
+          Array.isArray(sf.excludedSourceLocationKeys)
+            ? sf.excludedSourceLocationKeys.map((value: unknown) => normalizeLocationKey(String(value || "")))
+            : []
+        );
         if (sf.companies) setSourceCompanies(sf.companies);
         if (sf.keywords) setSourceKeywords(sf.keywords);
         if (typeof sf.recentDaysFilter === "number") setRecentDaysFilter(sf.recentDaysFilter);
         if (typeof sf.includeNoResume === "boolean") setIncludeNoResume(sf.includeNoResume);
         if (sf.minExperienceYears === null || typeof sf.minExperienceYears === "number") {
           setMinExperienceYears(sf.minExperienceYears);
+        }
+        if (sf.maxExperienceYears === null || typeof sf.maxExperienceYears === "number") {
+          setMaxExperienceYears(sf.maxExperienceYears);
         }
         if (typeof sf.sourceLocationMiles === "number") setSourceLocationMiles(sf.sourceLocationMiles);
         console.log('✅ Restored sourcing filters from database');
@@ -2842,6 +2917,7 @@ function NewJobPageContent() {
           workArrangement: jobData?.location_type || "",
           country: deriveCountry(jobData?.state),
           city: jobData?.city || "",
+          customerName: jobData?.customer_name || "",
         })
       });
 
@@ -2864,6 +2940,116 @@ function NewJobPageContent() {
 
       const data = await response.json();
       setJobPosting(data.description);
+      if (data.locations && Array.isArray(data.locations) && data.locations.length > 0) {
+        // Read refs after the async generation request so recruiter edits
+        // made while it was running are included in both state and the draft
+        // payload instead of being overwritten by stale render closures.
+        const latestLocations = sourceLocationsRef.current;
+        const latestFilters = resumeMatchFiltersRef.current;
+        const latestQuestions = screenQuestionsRef.current;
+        const nextRubricData = { ...(rubricDataRef.current || {}) };
+        const nextOtherRequirements = [
+          ...(Array.isArray(nextRubricData.other_requirements)
+            ? nextRubricData.other_requirements
+            : []),
+        ];
+        const normalizeRequirementLocation = (value: unknown) =>
+          String(value || "")
+            .trim()
+            .replace(/^location\s*:\s*/i, "")
+            .replace(/[\s.,;]+$/, "")
+            .trim()
+            .toLowerCase();
+        const existingRequirementLocations = new Set(
+          nextOtherRequirements.map((item: any) =>
+            normalizeRequirementLocation(typeof item === "string" ? item : item?.value)
+          )
+        );
+        for (const loc of data.locations) {
+          const key = normalizeRequirementLocation(loc);
+          if (!key || existingRequirementLocations.has(key)) continue;
+          nextOtherRequirements.push({
+            value: `Location: ${loc}.`,
+            required: "Required",
+          });
+          existingRequirementLocations.add(key);
+        }
+        nextRubricData.other_requirements = nextOtherRequirements;
+        rubricDataRef.current = nextRubricData;
+        setRubricData(nextRubricData);
+        const newLocs = mergeSourceLocations({
+          jobCity: jobData?.city,
+          jobState: jobData?.state,
+          jobZip: jobData?.zip_code,
+          existing: latestLocations,
+          noteLocations: data.locations,
+          defaultRadius: `within ${sourceLocationMilesRef.current} mi`,
+          excludedLocationKeys: Array.from(excludedSourceLocationKeysRef.current),
+          remote: isRemoteJob(jobData),
+        });
+        setSourceLocations(newLocs);
+
+        const newFilters = [...latestFilters];
+        const existingLocs = new Set(latestFilters
+          .filter(f => f.category === "Location")
+          .map(f => normalizeLocationKey(f.value)));
+        let nextFilterId = Math.max(Date.now(), ...newFilters.map(filter => filter.id + 1));
+        // The JobDiva primary location is the sourcing origin, not an
+        // additional resume-match requirement. Only explicit note locations
+        // become location resume filters; all source locations stay in Step 5.
+        for (const loc of data.locations) {
+          const key = normalizeLocationKey(loc);
+          if (key && !excludedSourceLocationKeysRef.current.has(key) && !existingLocs.has(key)) {
+            newFilters.push({
+              id: nextFilterId++,
+              category: "Location",
+              value: loc,
+              active: true,
+              weight: 5,
+              ai: true,
+              fromRubric: true
+            });
+            existingLocs.add(key);
+          }
+        }
+        setResumeMatchFilters(newFilters);
+
+        const newQuestions = [...latestQuestions];
+        const arrangementQuestionIndex = newQuestions.findIndex(q =>
+          q.generated_source === "work-arrangement-location"
+          || /work arrangement based in .*\. are you open to working in this setup\?/i.test(q.question_text)
+        );
+        if (arrangementQuestionIndex >= 0) {
+          newQuestions[arrangementQuestionIndex] = mergeArrangementQuestionLocations(
+            newQuestions[arrangementQuestionIndex],
+            newLocs.map(location => location.value),
+          );
+          // Remove every generated duplicate from previous builds. Matching
+          // requires explicit provenance or the exact legacy auto-generated
+          // shape, so ordinary recruiter-authored screening questions survive.
+          for (let index = newQuestions.length - 1; index >= 0; index--) {
+            if (index !== arrangementQuestionIndex && isGeneratedCommuteQuestion(newQuestions[index])) {
+              newQuestions.splice(index, 1);
+            }
+          }
+        }
+        setScreenQuestions(newQuestions);
+
+        // Explicitly trigger a silent auto-save to persist these newly generated
+        // states since we are on Step 2 and the hooks for Step 3/4/5 won't detect
+        // this change. Pass the computed arrays as overrides so the save reflects
+        // this update even though the setState calls above haven't flushed yet.
+        saveJobDraft({
+          currentStep,
+          saveType: "auto",
+          skipToast: true,
+          keepalive: false,
+          sourceLocationsOverride: newLocs,
+          resumeMatchFiltersOverride: newFilters,
+          screenQuestionsOverride: newQuestions,
+          rubricDataOverride: nextRubricData,
+        }).catch(() => {});
+      }
       const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
       if (syncedTitle) {
         lastSyncedTitleForJDRef.current = syncedTitle;
@@ -3057,7 +3243,15 @@ function NewJobPageContent() {
     currentStep: number,
     saveType?: string,
     skipToast?: boolean,
-    keepalive?: boolean
+    keepalive?: boolean,
+    // Explicit overrides so a caller mid-update (e.g. the JD-generation
+    // locations merge below) can save the just-computed values instead of
+    // the stale closure that would otherwise race the setState batch.
+    sourceLocationsOverride?: typeof sourceLocations,
+    sourceLocationMilesOverride?: number,
+    resumeMatchFiltersOverride?: typeof resumeMatchFilters,
+    screenQuestionsOverride?: typeof screenQuestions,
+    rubricDataOverride?: any,
   }): Promise<{ ok: boolean, message?: string }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
@@ -3074,10 +3268,8 @@ function NewJobPageContent() {
     const isAutoSave = stepData.saveType === "auto";
 
     // "Latest wins" — but only among auto-saves. An auto-save must never
-    // cancel a save the user explicitly triggered (Next / Save & Exit):
-    // doing so surfaced a misleading "Save timed out" and blocked the step
-    // transition. A manual save may always supersede whatever's in flight
-    // (including another manual save, e.g. a rapid double-click).
+    // cancel a save the user explicitly triggered (Next / Save & Exit).
+    // A manual save may always supersede whatever is in flight.
     if (saveAbortControllerRef.current) {
       if (shouldSkipForInFlightManualSave({ inFlightIsAuto: saveIsAutoRef.current, incomingIsAuto: isAutoSave })) {
         return { ok: true };
@@ -3112,11 +3304,11 @@ function NewJobPageContent() {
           screening_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
           rubric: {
-            ...getNormalizedRubricPayload(),
-            screen_questions: screenQuestions
+            ...getNormalizedRubricPayload(stepData.rubricDataOverride ?? rubricData),
+            screen_questions: stepData.screenQuestionsOverride ?? screenQuestions
           }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
           bot_introduction: botIntroduction,
-          resume_match_filters: resumeMatchFilters.map(f => ({
+          resume_match_filters: (stepData.resumeMatchFiltersOverride ?? resumeMatchFilters).map(f => ({
             id: f.id,
             category: f.category,
             value: f.value,
@@ -3129,13 +3321,15 @@ function NewJobPageContent() {
             sources_version: SEARCH_SOURCES_VERSION,
             titles: sourceTitles,
             skills: sourceSkills,
-            locations: sourceLocations,
+            locations: stepData.sourceLocationsOverride ?? sourceLocations,
+            excludedSourceLocationKeys: Array.from(excludedSourceLocationKeysRef.current),
             companies: sourceCompanies,
             keywords: sourceKeywords,
             recentDaysFilter,
             includeNoResume,
             minExperienceYears,
-            sourceLocationMiles,
+            maxExperienceYears,
+            sourceLocationMiles: stepData.sourceLocationMilesOverride ?? sourceLocationMiles,
           },
           step1_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 1 : undefined,
           step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
@@ -3143,15 +3337,11 @@ function NewJobPageContent() {
           is_auto_saved: stepData.saveType === "auto"
       });
 
-      // `keepalive: true` requests are capped (~64KB in Chromium) so the
-      // browser can guarantee delivery after the page starts unloading;
-      // past that they're silently dropped. A large rubric/JD payload can
-      // exceed it, so fall back to a normal fetch rather than guarantee a
-      // silent loss — best-effort during pagehide still beats nothing.
+      // keepalive requests are capped (~64KB in Chromium). A large rubric
+      // payload past that is silently dropped, so fall back to a normal fetch.
       const KEEPALIVE_BYTE_LIMIT = 60000;
       const useKeepalive = Boolean(stepData.keepalive) && new TextEncoder().encode(requestBody).length < KEEPALIVE_BYTE_LIMIT;
 
-      // Use the new endpoint that saves directly to monitored_jobs
       const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3175,9 +3365,6 @@ function NewJobPageContent() {
     } catch (error) {
       const isAbort = error instanceof Error && error.name === "AbortError";
       if (isSupersededAbort(isAbort, saveController.signal.reason)) {
-        // A newer save (auto or manual) superseded this request — stay
-        // quiet and let that save own the toast/result; this is neither a
-        // failure nor a timeout.
         return { ok: true };
       }
       console.error("Error saving job to monitored jobs:", error);
@@ -3212,6 +3399,7 @@ function NewJobPageContent() {
     recentDaysFilter,
     includeNoResume,
     minExperienceYears,
+    maxExperienceYears,
     sourceLocationMiles,
   ]);
 
@@ -3994,14 +4182,14 @@ function NewJobPageContent() {
     matchType: normalizeMatchType(skillItem.matchType),
   });
 
-  const getNormalizedRubricPayload = () => {
-    if (!rubricData) return rubricData;
+  const getNormalizedRubricPayload = (rubric: any = rubricData) => {
+    if (!rubric) return rubric;
 
     return {
-      ...rubricData,
-      titles: (rubricData.titles || []).map((title: any) => getNormalizedTitleItem(title)),
-      skills: (rubricData.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
-      soft_skills: (rubricData.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      ...rubric,
+      titles: (rubric.titles || []).map((title: any) => getNormalizedTitleItem(title)),
+      skills: (rubric.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      soft_skills: (rubric.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
     };
   };
 
@@ -4925,7 +5113,11 @@ function NewJobPageContent() {
             : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
         : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
-      question => question.category !== "default" && question.category !== "role-specific"
+      question => question.category !== "default"
+        && question.category !== "role-specific"
+        // Suppress only marked or exact legacy generated duplicates when the
+        // default onsite/hybrid arrangement question will cover the locations.
+        && (isRemote || !isGeneratedCommuteQuestion(question))
     );
     const isIt = isLikelyItRole(
       enhancedTitle || jobTitle || "",
@@ -4935,14 +5127,21 @@ function NewJobPageContent() {
     // 1. Bot Introduction
     const introTitle = cleanJobTitleForIntro(enhancedTitle || jobTitle || "role");
     const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
-    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    const article = getArticleForTitle(introTitle);
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for ${article} ${introTitle} in ${locStr}, and you have been shortlisted for this role. Please note that this conversation may be recorded for verification and quality purposes. Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?`;
     setBotIntroduction(prev => (prev && prev.trim().length > 0 && botIntroductionEditedRef.current ? prev : intro));
 
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
     // question is a preference check, not a hard filter; recruiters can flip
     // it to a hard filter manually if disqualification should be automatic.
     const availabilityDate = jobData.start_date || 'ASAP';
-    const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
+    const defaultQs: Array<{
+      text: string;
+      criteria: string;
+      is_hard_filter?: boolean;
+      generated_source?: ScreenQuestion["generated_source"];
+      location_values?: string[];
+    }> = [
       { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" }
     ];
 
@@ -4953,9 +5152,19 @@ function NewJobPageContent() {
     defaultQs.push({ text: "What is your current location?", criteria: "" });
 
     if (!isRemote) {
+      // Reflect every configured sourcing location (not just the single
+      // JobDiva address) so a Regenerate on Step 4 doesn't drop the "or"
+      // locations a recruiter added or that were extracted from notes.
+      const arrangementLocations = sourceLocations.length > 0
+        ? sourceLocations.map(l => l.value).filter((value, index, values) =>
+            values.findIndex(candidate => normalizeLocationKey(candidate) === normalizeLocationKey(value)) === index
+          )
+        : [addressStr || location || "the job location"];
       defaultQs.push({
-        text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
+        text: `This role follows ${arrangementLabel} work arrangement based in ${arrangementLocations.join(" or ")}. Are you open to working in this setup?`,
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
+        generated_source: "work-arrangement-location",
+        location_values: arrangementLocations,
       });
     }
     
@@ -4979,6 +5188,8 @@ function NewJobPageContent() {
         order_index: index,
         is_hard_filter: !!q.is_hard_filter,
         is_locked: isLockedDefaultQuestion(q.text),
+        generated_source: q.generated_source,
+        location_values: q.location_values,
       });
     });
 
@@ -5287,7 +5498,11 @@ function NewJobPageContent() {
     // 3. Locations
     if (!hasSeededSourceLocation) {
       setHasSeededSourceLocation(true);
-      if (jobData && sourceLocations.length === 0 && !isRemoteJob(jobData)) {
+      if (
+        jobData
+        && sourceLocations.length === 0
+        && !isRemoteJob(jobData)
+      ) {
         // Format: "City, State Zip" (e.g. "Tempe, AZ 85281"). Including the
         // zip narrows sourcing-provider matches that mishandle short state
         // codes alone. Falls back to "City, State" when the zip is missing.
@@ -5296,7 +5511,7 @@ function NewJobPageContent() {
         const zip = (jobData.zip_code || "").trim();
         const cityState = [city, state].filter(Boolean).join(", ");
         const loc = [cityState, zip].filter(Boolean).join(" ");
-        if (loc) {
+        if (loc && !excludedSourceLocationKeysRef.current.has(normalizeLocationKey(cityState))) {
           setSourceLocations([{
             id: 1,
             value: loc,
@@ -5607,14 +5822,22 @@ function NewJobPageContent() {
   const addSourceLocation = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
-    setSourceLocations(prev => [
-      ...prev,
+    excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
+    const nextLocations = [
+      ...sourceLocations,
       {
         id: Date.now(),
         value: cleanValue,
         radius: `within ${sourceLocationMiles} mi`
       }
-    ]);
+    ];
+    setSourceLocations(nextLocations);
+    void saveJobDraft({
+      currentStep,
+      saveType: "auto",
+      skipToast: true,
+      sourceLocationsOverride: nextLocations,
+    }).catch(() => {});
     setSourceLocationInput("");
     setGeneratedBoolean("");
     trackEvent("job_wizard_step5_source_location_added", {
@@ -6192,7 +6415,7 @@ function NewJobPageContent() {
   }
 
   const buildStep5FilterContext = () => ({
-    search_sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+    search_sources: getEnabledSearchSourceIds(searchSources),
     recent_days: recentDaysFilter,
     include_no_resume: includeNoResume,
     active_resume_filters_count: resumeMatchFilters.filter(f => f.active).length,
@@ -6265,8 +6488,7 @@ function NewJobPageContent() {
         active: f.active,
         weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
       }));
-    const selectedSourcesArray = Object.keys(searchSources)
-      .filter(k => (searchSources as any)[k])
+    const selectedSourcesArray = getEnabledSearchSourceIds(searchSources)
       .map(k => {
         // `jobdiva_applicants` was removed as a toggle (5.1). Applicants
         // still land via the auto-sync path; they're just not gated by a
@@ -6275,7 +6497,6 @@ function NewJobPageContent() {
         // we always send the explicit pool names so only what's ticked runs.
         if (k === 'jobdiva_agent') return 'JobDiva-JobAgent';
         if (k === 'jobdiva_talent') return 'JobDiva-TalentSearch';
-        if (k === 'linkedin') return 'LinkedIn';
         if (k === 'dice') return 'Dice';
         if (k === 'exa') return 'Exa';
         return k;
@@ -6289,6 +6510,7 @@ function NewJobPageContent() {
       resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
+      locations: sourceLocations.map(l => ({ value: l.value, radius: l.radius })),
       // Work arrangement — Remote jobs skip the commute-radius constraint
       // server-side (backend also falls back to monitored_jobs.location_type
       // when omitted; sending it saves that lookup and handles unsaved jobs).
@@ -6305,6 +6527,10 @@ function NewJobPageContent() {
       min_experience_years:
         typeof minExperienceYears === "number" && minExperienceYears > 0
           ? minExperienceYears
+          : undefined,
+      max_experience_years:
+        typeof maxExperienceYears === "number" && maxExperienceYears > 0
+          ? maxExperienceYears
           : undefined,
       // Hiring client / account name. Powers the "Same client / industry"
       // scoring dimension and the currently-employed-by-client veto. The
@@ -6684,6 +6910,10 @@ function NewJobPageContent() {
   // relaxation, no tranche follow-ups — one fast pass so the recruiter can
   // judge source quality before approving the full (expensive) run.
   const handleRunSampleSearch = async (): Promise<any[]> => {
+    if (hasInvalidExperienceRange) {
+      setSearchStatus("Set Max YOE to the same value as or above Min YOE before searching.");
+      return [];
+    }
     const searchStartMs = Date.now();
     let sampleResults: any[] = [];
 
@@ -6696,7 +6926,7 @@ function NewJobPageContent() {
     trackEvent("job_wizard_step5_sample_search_started", {
       step: 5,
       sample_per_source: SAMPLE_PER_SOURCE,
-      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+      sources: getEnabledSearchSourceIds(searchSources),
       recent_days: recentDaysFilter,
       include_no_resume: includeNoResume,
     });
@@ -6739,6 +6969,10 @@ function NewJobPageContent() {
   };
 
   const handleRunSearch = async (): Promise<any[]> => {
+    if (hasInvalidExperienceRange) {
+      setSearchStatus("Set Max YOE to the same value as or above Min YOE before searching.");
+      return [];
+    }
     const searchStartMs = Date.now();
     let accumulated: any[] = [];
     let runBreakdown: Array<Record<string, unknown>> = [];
@@ -6753,7 +6987,7 @@ function NewJobPageContent() {
     trackEvent("job_wizard_step5_candidate_search_started", {
       step: 5,
       query: truncateForTelemetry(resolvedGeneratedBoolean, 260),
-      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+      sources: getEnabledSearchSourceIds(searchSources),
       recent_days: recentDaysFilter,
       include_no_resume: includeNoResume,
     });
@@ -9082,7 +9316,7 @@ function NewJobPageContent() {
                       // default; untick one to skip that search entirely.
                       { id: 'jobdiva_agent', label: 'JobDiva Agent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false, hint: "JobDiva's AI matcher, using the search criteria set on this req inside JobDiva" },
                       { id: 'jobdiva_talent', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#8b5cf6]" />, disabled: false, hint: "JobDiva Talent Search, using the Boolean string generated below" },
-                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false, hint: "" },
+                      { id: 'linkedin', label: 'LinkedIn (temporarily disabled)', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: DISABLED_SEARCH_SOURCE_IDS.has('linkedin'), hint: "LinkedIn sourcing through Unipile is temporarily paused" },
                       // Dice source hidden from the sourcing switchboard. Backend
                       // wiring (`Dice` source string, `_search_dice`) is left intact
                       // so re-enabling is a one-line revert; the results chip below
@@ -9163,6 +9397,36 @@ function NewJobPageContent() {
                       title="Drops candidates whose resume confidently shows fewer years of experience. Leave blank for no floor."
                     />
                   </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Max YOE:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={40}
+                      step={1}
+                      value={maxExperienceYears ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setMaxExperienceYears(null);
+                          return;
+                        }
+                        const parsed = parseInt(raw, 10);
+                        const clamped = Number.isFinite(parsed)
+                          ? Math.max(0, Math.min(40, parsed))
+                          : null;
+                        setMaxExperienceYears(clamped);
+                      }}
+                      placeholder="any"
+                      className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
+                      title="Drops candidates whose resume confidently shows more years of experience. Leave blank for no cap."
+                    />
+                  </div>
+                  {hasInvalidExperienceRange && (
+                    <p className="basis-full -mt-3 text-[11px] font-medium text-rose-600">
+                      Max YOE must be the same as or greater than Min YOE.
+                    </p>
+                  )}
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
                       checked={includeNoResume}
@@ -9610,7 +9874,15 @@ function NewJobPageContent() {
                           <button
                             className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                             onClick={() => {
-                              setSourceLocations(prev => prev.filter(l => l.id !== loc.id));
+                              const nextLocations = sourceLocations.filter(l => l.id !== loc.id);
+                              excludedSourceLocationKeysRef.current.add(normalizeLocationKey(loc.value));
+                              setSourceLocations(nextLocations);
+                              void saveJobDraft({
+                                currentStep,
+                                saveType: "auto",
+                                skipToast: true,
+                                sourceLocationsOverride: nextLocations,
+                              }).catch(() => {});
                               trackEvent("job_wizard_step5_source_location_removed", {
                                 step: 5,
                                 value: truncateForTelemetry(loc.value, 100),
@@ -9655,8 +9927,8 @@ function NewJobPageContent() {
                           }
                         }}
                         onBlur={() => {
+                          const clamped = Math.min(100, Math.max(1, Math.round(sourceLocationMiles || 25)));
                           setSourceLocationMiles((prev) => {
-                            const clamped = Math.min(100, Math.max(1, Math.round(prev || 25)));
                             if (clamped !== prev) {
                               trackEvent("job_wizard_step5_location_radius_changed", {
                                 step: 5,
@@ -9665,6 +9937,12 @@ function NewJobPageContent() {
                             }
                             return clamped;
                           });
+                          void saveJobDraft({
+                            currentStep,
+                            saveType: "auto",
+                            skipToast: true,
+                            sourceLocationMilesOverride: clamped,
+                          }).catch(() => {});
                           setGeneratedBoolean("");
                         }}
                         className="h-7 w-14 px-1 text-center text-[13px] font-bold border-0 focus:ring-0 focus-visible:ring-0 shadow-none p-0"

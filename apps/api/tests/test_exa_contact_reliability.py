@@ -92,6 +92,37 @@ def test_apollo_out_of_credits_trips_a_cooldown(monkeypatch):
     assert ce.apollo_out_of_credits()
 
 
+def test_apollo_no_credits_cooldown_is_shared_across_workers(monkeypatch):
+    from services import jobdiva_rate_limit as rl
+
+    store = {}
+
+    class FakeRedis:
+        async def pttl(self, key):
+            return store.get(key, -2)
+
+        async def set(self, key, value, px=None):
+            store[key] = px
+
+    monkeypatch.setattr(rl, "_get_redis", lambda: FakeRedis())
+    monkeypatch.setattr(ce, "APOLLO_API_KEY", "k")
+    monkeypatch.setattr(ce, "_apollo_no_credits_until", 0.0)
+    calls = []
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _client(
+        [_Resp(422, text="You have insufficient credits! Upgrade your plan.")], calls,
+    ))
+
+    asyncio.run(ce.apollo_enrich_by_linkedin("c1", LINKEDIN))
+    assert store[ce.APOLLO_NO_CREDITS_REDIS_KEY] == int(ce.APOLLO_NO_CREDITS_COOLDOWN_S * 1000)
+
+    # Another worker: no local state, sees the shared key and never calls Apollo.
+    monkeypatch.setattr(ce, "_apollo_no_credits_until", 0.0)
+    res = asyncio.run(ce.apollo_enrich_by_linkedin("c2", LINKEDIN))
+    assert res == {"ok": False, "message": "Apollo out of credits"}
+    assert len(calls) == 1
+    assert ce.apollo_out_of_credits()
+
+
 def test_other_apollo_errors_do_not_trip_the_cooldown(monkeypatch):
     calls = []
     monkeypatch.setattr(ce, "APOLLO_API_KEY", "k")
@@ -146,7 +177,9 @@ def test_exa_create_429_is_retried(monkeypatch):
     calls = []
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_ENABLED", True)
     monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
-    monkeypatch.setattr(ce, "_EXA_CREATE_429_BACKOFF_S", 0)
+    from core.vendor_limiter import EXA
+    monkeypatch.setattr(EXA, "cooldown_cap_s", 0.0)
+    monkeypatch.setattr(EXA, "min_interval_s", 0.0)
     monkeypatch.setattr(ce.httpx, "AsyncClient", _client([
         _Resp(429, text="rate limited"),
         _Resp(200, {"id": "run-1", "status": "completed",
@@ -206,7 +239,7 @@ def test_exa_rows_are_shown_before_their_contact_lookup(monkeypatch):
     svc._search_exa = _pass_a
     svc.apply_scoring_policy = _policy
     svc._candidate_title_match = lambda cand, criteria: True
-    svc._candidate_below_min_years_pre_llm = lambda cand, criteria: False
+    svc._candidate_outside_years_range_pre_llm = lambda cand, criteria: False
     svc._filter_assessment = lambda cand, criteria, enforce_years=False: {
         "passes": True, "matched": [], "missing": [], "excluded": [], "score": 0,
     }
@@ -286,7 +319,7 @@ def _run_pass_a(monkeypatch, rows, scores):
     svc._search_exa = _pass_a
     svc.apply_scoring_policy = _policy
     svc._candidate_title_match = lambda cand, criteria: True
-    svc._candidate_below_min_years_pre_llm = lambda cand, criteria: False
+    svc._candidate_outside_years_range_pre_llm = lambda cand, criteria: False
     svc._filter_assessment = lambda cand, criteria, enforce_years=False: {
         "passes": True, "matched": [], "missing": [], "excluded": [], "score": 0,
     }
@@ -411,7 +444,9 @@ def _exa(monkeypatch, creates, polls=(), keep_polling=None):
     monkeypatch.setattr(ce, "EXA_API_KEY", "test-key")
     monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_RETRY", True)
     monkeypatch.setattr(ce, "_EXA_POLL_INTERVAL_S", 0)
-    monkeypatch.setattr(ce, "_EXA_CREATE_429_BACKOFF_S", 0)
+    from core.vendor_limiter import EXA
+    monkeypatch.setattr(EXA, "cooldown_cap_s", 0.0)
+    monkeypatch.setattr(EXA, "min_interval_s", 0.0)
     monkeypatch.setattr(ce.httpx, "AsyncClient", server)
     return server
 

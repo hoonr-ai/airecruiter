@@ -2,14 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge, Network } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
 
 export function Sidebar() {
     const pathname = usePathname();
-    const { isAdmin, isTeamLead, teamName, isLoading } = useUserRole();
+    const { isAdmin, isTeamLead, teamName, orgRoleLabel, isLoading } = useUserRole();
 
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
@@ -26,10 +26,12 @@ export function Sidebar() {
                   { label: "Recruiter Analytics", href: "/admin/recruiter-analytics", icon: UserCheck, disabled: false },
                   { label: "Launch Report", href: "/admin/launch-report", icon: FileClock, disabled: false },
                   { label: "Teams", href: "/admin/teams", icon: UsersRound, disabled: false },
+                  { label: "Org Hierarchy", href: "/admin/hierarchy", icon: Network, disabled: false },
                   { label: "No Contact List", href: "/admin/no-contact", icon: ShieldOff, disabled: false },
               ]
             : []),
-        // Team leads get these pages auto-scoped to their team by the backend.
+        // Team leads and org-hierarchy managers (Resource Manager and above) get
+        // these pages auto-scoped by the backend to their team / everyone beneath them.
         ...(!isAdmin && isTeamLead
             ? [
                   { label: "Dashboard", href: "/admin/dashboard", icon: Gauge, disabled: false },
@@ -99,7 +101,8 @@ export function Sidebar() {
                 </ul>
             </nav>
 
-            {/* Role identity chip — team leads see "Team Lead" instead of
+            {/* Role identity chip — managers see their level in the org hierarchy
+                ("Delivery Director"), team leads outside it see "Team Lead", instead of
                 recruiter/admin, per the team management spec. */}
             {!isLoading && isTeamLead && (
                 <div className="mt-4 px-4">
@@ -107,7 +110,7 @@ export function Sidebar() {
                         className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ring-inset bg-indigo-50 text-indigo-700 ring-indigo-200"
                         title={teamName ? `Team: ${teamName}` : undefined}
                     >
-                        Team Lead
+                        {orgRoleLabel ?? "Team Lead"}
                         {teamName ? <span className="font-medium text-indigo-500">· {teamName}</span> : null}
                     </span>
                 </div>

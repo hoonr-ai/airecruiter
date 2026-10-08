@@ -12,7 +12,7 @@ import psycopg2
 import psycopg2.extras
 from sqlalchemy import text
 
-from core import OPENAI_API_KEY, DATABASE_URL, JOBDIVA_JOB_NOTES_UDF_ID, DEFAULT_SCREENING_LEVEL
+from core import OPENAI_API_KEY, DATABASE_URL, JOBDIVA_JOB_NOTES_UDF_ID
 from services.ai_service import ai_service
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
@@ -28,8 +28,14 @@ from models import (
     SkillsExtractionRequest, SkillsExtractionResponse, JobSkillsSummaryResponse,
     ExternalJobCreateRequest,
 )
-from routers._helpers import get_db_connection, get_dict_cursor_connection
-from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
+from routers._helpers import (
+    get_db_connection,
+    get_dict_cursor_connection,
+    _get_job_draft_sync,
+    _verify_job_access_by_id,
+    optional_monitored_jobs_columns,
+)
+from core.auth import get_current_user, get_user_scope_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
 from services.launched_candidates import fetch_launched_candidates, interview_id_of
 
@@ -442,7 +448,8 @@ async def parse_job_description(request: ParsedJobRequest):
             hard_skills=data.hard_skills,
             soft_skills=data.soft_skills,
             experience_level=data.experience_level,
-            location_type=data.location_type
+            location_type=data.location_type,
+            locations=getattr(data, 'locations', [])
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -698,7 +705,7 @@ async def save_job_to_monitoring_enhanced(job_id: str, job_details: dict) -> boo
             
             # Application state
             "processing_status": "pending",
-            "screening_level": job_details.get("screening_level") or DEFAULT_SCREENING_LEVEL
+            "screening_level": job_details.get("screening_level") or "L0.5"
         }
         
         # Save using centralized service logic
@@ -947,59 +954,6 @@ def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes
         logger.info(f"✅ [Background] Rubric persisted for Job {jobdiva_id}")
     except Exception as e:
         logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
-
-def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False, check_duplicate_launch: bool = False) -> None:
-    if user.is_admin:
-        return
-    try:
-        job_dict = _get_job_draft_sync(job_id)
-        if job_dict.get("status") == "success" and job_dict.get("data"):
-            try:
-                verify_job_access(job_dict["data"], user)
-                return
-            except HTTPException as e:
-                if e.status_code == 403 and check_duplicate_launch:
-                    job_data = job_dict["data"]
-                    raw_emails = job_data.get("recruiter_emails", [])
-                    if isinstance(raw_emails, str):
-                        try:
-                            emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
-                        except Exception:
-                            emails = [raw_emails] if raw_emails else []
-                    elif isinstance(raw_emails, list):
-                        emails = raw_emails
-                    else:
-                        emails = []
-                    clean_assigned_emails = [str(email).strip().lower() for email in emails if email]
-                    if clean_assigned_emails:
-                        assigned_email = clean_assigned_emails[0]
-                        # Intentional: every authenticated caller here is an
-                        # internal recruiter at the same single-tenant org, so
-                        # revealing which teammate already launched the job
-                        # (to coordinate with them) is the point, not a leak
-                        # across org/tenant boundaries. Pinned by
-                        # test_auth_access.test_verify_job_access_by_id_duplicate_launch.
-                        raise HTTPException(
-                            status_code=403,
-                            detail={"code": "JOB_ALREADY_LAUNCHED", "recruiter_email": assigned_email, "message": f"Job has already been launched by {assigned_email}."}
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=403,
-                            detail={"code": "JOB_LOCKED", "message": "This job cannot be launched."}
-                        )
-                raise
-        elif allow_not_found and job_dict.get("status") == "error" and "No data found" in str(job_dict.get("message", "")):
-            return
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        logger.error(f"Error verifying job access for job_id={job_id}: {e}")
-
-    raise HTTPException(
-        status_code=403,
-        detail="Access denied. You do not have permission to access or modify this job."
-    )
 
 def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> None:
     if user.is_admin or not user.email:
@@ -1288,92 +1242,6 @@ async def create_external_job(req: ExternalJobCreateRequest, user: UserIdentity 
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create external job: {str(e)}")
-
-def _get_job_draft_sync(job_id: str) -> dict:
-    import json
-
-    def parse_json(val):
-        if not val: return []
-        if isinstance(val, (list, dict)): return val
-        try: return json.loads(val)
-        except: return []
-
-    def _fetch_one_monitored_job(cursor, requested_job_id: str):
-        # Avoid `OR` predicates on job_id/jobdiva_id so planner can use single-column
-        # indexes more reliably under load.
-        cursor.execute(
-            """
-            SELECT * FROM monitored_jobs
-            WHERE job_id = %s
-            UNION ALL
-            SELECT * FROM monitored_jobs
-            WHERE jobdiva_id = %s AND job_id <> %s
-            LIMIT 1
-            """,
-            (requested_job_id, requested_job_id, requested_job_id),
-        )
-        return cursor.fetchone()
-
-    conn = get_dict_cursor_connection()
-    cursor = conn.cursor()
-    try:
-        normalized_job_id = job_id.lstrip('0') if job_id and '-' not in job_id else job_id
-        job_row = _fetch_one_monitored_job(cursor, job_id)
-        if not job_row and normalized_job_id != job_id:
-            job_row = _fetch_one_monitored_job(cursor, normalized_job_id)
-    finally:
-        cursor.close()
-        conn.close()
-
-    if not job_row:
-        return {"status": "error", "message": f"No data found for job {job_id}"}
-
-    return {
-        "status": "success",
-        "data": {
-            "id": job_id,
-            "job_id": job_id,
-            "jobdiva_id": job_row.get("jobdiva_id") or job_id,
-            "title": job_row.get("title") or "",
-            "enhanced_title": job_row.get("enhanced_title") or job_row.get("title") or "",
-            "customer_name": job_row.get("customer_name") or "",
-            "location_type": job_row.get("location_type") or "Onsite",
-            "city": job_row.get("city") or "",
-            "state": job_row.get("state") or "",
-            "zip_code": job_row.get("zip_code") or "",
-            "ai_description": job_row.get("ai_description") or "",
-            "jobdiva_description": job_row.get("jobdiva_description") or "",
-            "recruiter_notes": job_row.get("recruiter_notes") or "",
-            "work_authorization": job_row.get("work_authorization") or "",
-            "selected_job_boards": parse_json(job_row.get("selected_job_boards")),
-            "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
-            "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
-            "current_step": job_row.get("current_step") or 1,
-            "screening_level": job_row.get("screening_level") or DEFAULT_SCREENING_LEVEL,
-            "bot_introduction": job_row.get("bot_introduction") or "",
-            "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
-            "sourcing_filters": job_row.get("sourcing_filters") or {},
-            "job_details": {
-                "id": job_row.get("job_id") or job_id,
-                "jobdiva_id": job_row.get("jobdiva_id") or job_id,
-                "title": job_row.get("title") or "",
-                "customer_name": job_row.get("customer_name") or "",
-                "status": job_row.get("status") or "OPEN",
-                "city": job_row.get("city") or "",
-                "state": job_row.get("state") or "",
-                "zip_code": job_row.get("zip_code") or "",
-                "location_type": job_row.get("location_type") or "Onsite",
-                "description": job_row.get("jobdiva_description") or "",
-                "jobdiva_description": job_row.get("jobdiva_description") or "",
-                "ai_description": job_row.get("ai_description") or "",
-                "recruiter_notes": job_row.get("recruiter_notes") or "",
-                "employment_type": job_row.get("employment_type") or "",
-                "pay_rate": job_row.get("pay_rate") or "",
-                "work_authorization": job_row.get("work_authorization") or ""
-            }
-        }
-    }
-
 
 @router.get("/jobs/{job_id}/draft")
 async def get_job_draft(job_id: str, user_session: str = "default", user: UserIdentity = Depends(get_current_user)):
@@ -2272,7 +2140,7 @@ async def create_new_job(job_data: Dict[str, Any]):
             "recruiter_emails": json.dumps(job_data.get("recruiter_emails", [])),
             "selected_employment_types": json.dumps(job_data.get("selected_employment_types", [])),
             "selected_job_boards": json.dumps(job_data.get("selected_job_boards", [])),
-            "screening_level": job_data.get("screening_level", DEFAULT_SCREENING_LEVEL),
+            "screening_level": job_data.get("screening_level", "L0.5"),
             "pair_enabled": job_data.get("pair_enabled", True),
             "pair_enhanced": job_data.get("pair_enhanced", False),
             "processing_status": "manual_created",
@@ -2358,17 +2226,18 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # `auto_assign_service.refresh_job_performance_metrics` during
             # every auto-sync cycle. Dashboard reads are now a single
             # indexed SELECT — no JOIN, no aggregate, no JSONB extraction.
+            optional = optional_monitored_jobs_columns(cursor, "mj.")
             select_sql = (
-                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.recruiter_emails, mj.status, "
-                "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
-                "mj.processing_status, mj.is_archived, mj.archive_reason, mj.screening_level, "
-                "mj.resumes_shortlisted, "
-                "mj.pair_external_subs, mj.pair_submits, mj.feedback_completed, "
-                "mj.candidates_sourced, mj.candidates_launched, "
-                "mj.complete_submissions, mj.pass_submissions, "
-                "mj.jobdiva_total_subs, "
-                "mj.jobdiva_criteria_unconfigured, "
-                "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.recruiter_emails, mj.status, \n"
+                "       mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, \n"
+                "       mj.processing_status, mj.is_archived, mj.archive_reason, mj.screening_level, \n"
+                "       mj.resumes_shortlisted, \n"
+                "       mj.pair_external_subs, mj.pair_submits, mj.feedback_completed, \n"
+                "       mj.candidates_sourced, mj.candidates_launched, \n"
+                "       mj.complete_submissions, mj.pass_submissions, \n"
+                "       mj.jobdiva_total_subs, \n"
+                "       mj.jobdiva_criteria_unconfigured, \n"
+                f"       mj.pair_launched_at, {optional['pair_launched_by']} AS pair_launched_by, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at \n"
                 "FROM monitored_jobs mj"
             )
 
@@ -2469,7 +2338,10 @@ def _filter_jobs_for_user(
         else:
             emails = []
         clean_emails = [str(e).strip().lower() for e in emails if e]
-        if not allowed_emails.isdisjoint(clean_emails):
+        launcher_email = str(job.get("pair_launched_by") or "").strip().lower()
+        if not allowed_emails.isdisjoint(clean_emails) or (launcher_email and launcher_email in allowed_emails):
+            # Do not return launcher email to the frontend for all users to see
+            job.pop("pair_launched_by", None)
             filtered_jobs[jid] = job
 
     res = dict(payload)

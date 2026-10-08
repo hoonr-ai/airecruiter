@@ -70,10 +70,13 @@ SECTION_TITLES = frozenset({
 _CAREER_SECTIONS = frozenset({"experience", "summary", "resume", "profile_text"})
 
 # Names the sourcing pipeline falls back to when it has none
-# (services/unipile.py `_resolve_candidate_name`, the Step-5 save payload).
+# (services/unipile.py `_resolve_candidate_name`, the Step-5 save payload), plus
+# "LinkedIn Member" -- what LinkedIn shows instead of an out-of-network person's
+# name. A JobDiva profile was created under it on 2026-09-29.
 _PLACEHOLDER_NAMES = frozenset({
     "", "unknown", "unknown unknown", "unknown candidate", "unnamed candidate",
     "linkedin candidate", "professional candidate", "candidate", "n/a", "na",
+    "linkedin member",
 })
 _HONORIFICS = frozenset({"dr", "dr.", "mr", "mr.", "mrs", "mrs.", "ms", "ms.", "miss", "prof", "prof."})
 
@@ -515,6 +518,35 @@ def is_placeholder_name(name: Any) -> bool:
     return False
 
 
+def is_stand_in_name(name: Any) -> bool:
+    """True only for the exact stand-ins ("Unknown", "LinkedIn Member", ...).
+
+    Unlike ``is_placeholder_name`` it skips the headline / id heuristics, so it
+    is safe for judging a name already on a JobDiva profile, which a recruiter
+    may have typed ("Maria At Santos" is a person).
+    """
+    return _line(name, 200).casefold() in _PLACEHOLDER_NAMES
+
+
+def name_from_linkedin_url(url: Any) -> str:
+    """The person's name spelled by a public LinkedIn vanity URL, or "".
+
+    ``linkedin.com/in/jane-doe-8a7b6c5`` -> ``"Jane Doe"``. LinkedIn hides an
+    out-of-network person's name ("LinkedIn Member") but the vanity slug usually
+    still carries it. Only a slug that is plainly a name is trusted: 2-4 words
+    of letters once LinkedIn's disambiguating suffixes (any word with a digit)
+    are dropped, the first and last at least two letters. "perryh" or
+    "jdoe123" give "" -- no name beats a guessed one on a JobDiva profile.
+    """
+    slug = linkedin_public_identifier(url)
+    words = [w for w in re.split(r"[-_.]+", slug) if w and not any(ch.isdigit() for ch in w)]
+    if not 2 <= len(words) <= 4 or not all(w.isalpha() for w in words):
+        return ""
+    if len(words[0]) < 2 or len(words[-1]) < 2:
+        return ""
+    return " ".join(w[:1].upper() + w[1:].lower() for w in words)
+
+
 def split_person_name(name: Any) -> Tuple[str, str]:
     """``"Dr. Jane van der Berg, PMP"`` -> ``("Jane", "van der Berg")``.
 
@@ -803,9 +835,19 @@ def build_profile_resume(
     enhanced = _as_dict(data.get("enhanced_info")) or _as_dict(row.get("enhanced_info"))
     from services.location import sanitize_candidate_location
 
+    urls = _as_dict(data.get("urls")) or _as_dict(enhanced.get("urls"))
+    linkedin = public_linkedin_url(
+        row.get("profile_url"), profile.get("public_profile_url"), urls.get("linkedin"), urls.get("linkedin_url"),
+    )
     name = _line(row.get("name"), 160)
     if is_placeholder_name(name):
-        name = _line(profile.get("name"), 160) or _line(enhanced.get("candidate_name"), 160) or name
+        # First real name among the LinkedIn profile, the LLM extraction and the
+        # vanity URL; a placeholder stays a placeholder (the provisioner refuses it).
+        for alternative in (profile.get("name"), enhanced.get("candidate_name"), name_from_linkedin_url(linkedin)):
+            alternative = _line(alternative, 160)
+            if alternative and not is_placeholder_name(alternative):
+                name = alternative
+                break
     headline = (
         _line(profile.get("headline"), 300)
         or _line(row.get("headline"), 300)
@@ -816,10 +858,6 @@ def build_profile_resume(
         location = sanitize_candidate_location(_line(candidate_location, 200))
         if location:
             break
-    urls = _as_dict(data.get("urls")) or _as_dict(enhanced.get("urls"))
-    linkedin = public_linkedin_url(
-        row.get("profile_url"), profile.get("public_profile_url"), urls.get("linkedin"), urls.get("linkedin_url"),
-    )
     links = [u for u in [*_as_list(profile.get("websites")), urls.get("github"), urls.get("portfolio")] if _line(u, 400)]
 
     header = [name] if name else []

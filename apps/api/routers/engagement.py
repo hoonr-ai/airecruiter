@@ -13,6 +13,7 @@ Auto-creates the engage_interview_audit table on startup.
 import asyncio
 import hashlib
 import html
+import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
@@ -23,7 +24,13 @@ import os
 import httpx
 import re
 from datetime import datetime, timezone, timedelta
-from routers._helpers import get_db_connection, _verify_job_access_by_id
+from routers._helpers import (
+    get_db_connection,
+    _verify_job_access_by_id,
+    get_article_for_title,
+    is_legacy_default_bot_intro,
+    normalize_bot_intro_tokens,
+)
 from services.pair_auth import get_pair_auth_headers
 
 from core.email import (
@@ -248,6 +255,59 @@ def _merge_employer_signals(
     return merged
 
 
+def _exa_resume_texts(candidate: Dict[str, Any]) -> Tuple[List[str], List[str], bool]:
+    """Extract Exa highlights as unstructured text for the launch gate.
+
+    Exa candidates often lack structured company data (vague headline), but
+    their `resume_text` (LinkedIn highlights) almost always has it. This helper
+    splits highlights into experience fragments and routes only fragments with
+    an explicit current marker or an open-ended date range to the
+    current-employer ladder. Other fragments go to the last-employer ladder.
+    This keeps a former client role from being mistaken for a current one when
+    Exa returns multiple roles in the same highlight line.
+    """
+    cand_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    source = str(
+        candidate.get("source") or cand_data.get("source") or candidate.get("source_type") or ""
+    ).strip().lower()
+
+    if source not in ("linkedin-exa", "exa"):
+        return [], [], False
+
+    text = str(candidate.get("resume_text") or cand_data.get("resume_text") or "").strip()
+    if not text:
+        return [], [], True
+
+    current: List[str] = []
+    last: List[str] = []
+    current_marker = re.compile(
+        r"\b(?:19|20)\d{2}\s*(?:[-–—]|to)\s*(?:present|current|now)\b"
+        r"|[\(\[]\s*(?:present|current|now)\s*[\)\]]"
+        r"|\bcurrent\s+(?:role|position|employer|employment)\b"
+        r"|\bcurrently\s+(?:at|with|employed|working)\b",
+        re.IGNORECASE,
+    )
+    open_ended_date = re.compile(
+        r"\b(?:19|20)\d{2}\s*(?:[-–—]|to)\s*"
+        r"(?:present|current|now)?\s*[\])}.,;:]*\s*$",
+        re.IGNORECASE,
+    )
+    for line in text.splitlines():
+        # Exa may place two roles on one line. Split at semicolons so a
+        # current role's date does not make a former role on that same line
+        # look current too.
+        for fragment in re.split(r";\s*", line):
+            fragment = fragment.strip()
+            if not fragment:
+                continue
+            if current_marker.search(fragment) or open_ended_date.search(fragment):
+                current.append(fragment)
+            else:
+                last.append(fragment)
+
+    return current, last, True
+
+
 def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
     """Check if a candidate should be excluded from PAIR outreach.
 
@@ -384,6 +444,17 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         profile_current_texts, profile_last_texts = candidate_profile_texts(candidate)
     except Exception:  # noqa: BLE001 — profile parsing must not block launches
         pass
+
+    # For Exa candidates, structured company data is often absent (vague headline),
+    # but their current employer is almost always present in the raw `resume_text`.
+    exa_current, exa_last, is_exa_source = _exa_resume_texts(candidate)
+    profile_current_texts.extend(exa_current)
+    profile_last_texts.extend(exa_last)
+
+    # Reuse the source classification from the parser rather than normalizing
+    # nested source fields a second time.
+    conflict_suffix = "Exa profile text" if is_exa_source else "JobDiva profile"
+
     if profile_current_texts or profile_last_texts:
         try:
             from services.no_contact import matches_no_contact_company
@@ -401,7 +472,7 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
             if not current_companies:
                 for text in profile_current_texts:
                     if client_appears_in_text(text, client_name):
-                        return True, "Employed by Hiring Client (JobDiva profile)"
+                        return True, f"Employed by Hiring Client ({conflict_suffix})"
                 # Last-resort ladder rung: consulted only when NO structured
                 # signal of any kind exists — a structured last employer that
                 # already cleared employed_by_client must not be second-guessed
@@ -411,7 +482,7 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
                         if client_appears_in_text(text, client_name):
                             return True, (
                                 "Employed by Hiring Client "
-                                "(last known employer, JobDiva profile)"
+                                f"(last known employer, {conflict_suffix})"
                             )
 
     # Visibility for the failure mode that put a Bank of America employee into
@@ -1152,17 +1223,16 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             job_t = _clean_job_title_for_intro(raw_title_str)
             raw_loc_str = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
             job_l = _clean_location_for_intro(raw_loc_str)
-            if not raw_company_intro.strip():
+            article = get_article_for_title(job_t)
+            if not raw_company_intro.strip() or is_legacy_default_bot_intro(raw_company_intro):
                 raw_company_intro = (
                     f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
-                    f"We are helping our client recruit for a {job_t} in {job_l}, and you seem to be a good fit for the role. "
-                    f"Please note that conversation may be recorded for verification and quality purposes. "
-                    f"Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+                    f"We are helping our client recruit for {article} {job_t} in {job_l}, and you have been shortlisted for this role. "
+                    f"Please note that this conversation may be recorded for verification and quality purposes. "
+                    f"Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?"
                 )
             else:
-                raw_company_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_t, raw_company_intro, flags=re.IGNORECASE)
-                raw_company_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_l, raw_company_intro, flags=re.IGNORECASE)
-                raw_company_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = normalize_bot_intro_tokens(raw_company_intro, job_t, job_l)
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {
@@ -1476,6 +1546,54 @@ async def _wait_for_pairbot_creation(
             if pump_error:
                 raise pump_error[0]
     raise TimeoutError(f"Pairbot stream ended without creation_completed bulk_id={bulk_id}")
+
+
+async def _confirm_failed_candidates_with_pairbot(
+    bulk_id: str, job_id: str, candidate_ids: List[str]
+) -> List[str]:
+    """After `_wait_for_pairbot_creation` errors out (timeout, dropped SSE
+    stream, or any other wait failure), check PairBot's own record before
+    concluding a candidate's interview was never created.
+
+    PairBot already accepted the bulk with a 202; our stream dying or our
+    600s wait expiring does NOT mean creation failed — PairBot may still be
+    working, or may have finished right after we stopped listening. There is
+    no background reconciler any more to catch this later, so this is the
+    only check before stamping `failed`.
+
+    Returns only the candidate_ids PairBot itself confirms have no interview,
+    and only once PairBot reports it is done processing the bulk. Everything
+    else — including a failed check itself — comes back empty, so a real
+    success already in progress is never overwritten to `failed`.
+    """
+    if not job_id or not candidate_ids:
+        return []
+    try:
+        headers = get_pair_auth_headers()
+        url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/by-job/{job_id}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.error(
+                "pairbot_status_check_after_wait_error bulk_id=%s status=%s",
+                bulk_id, resp.status_code,
+            )
+            return []
+        payload = resp.json().get("data") or {}
+        if payload.get("bulk_in_progress"):
+            # Still creating — nothing is a confirmed failure yet.
+            return []
+        found_ids = {
+            str(iv.get("source_candidate_id"))
+            for iv in (payload.get("interviews") or [])
+            if iv.get("source_candidate_id")
+        }
+        return [cid for cid in candidate_ids if str(cid) not in found_ids]
+    except Exception as exc:
+        logger.error(
+            "pairbot_status_check_after_wait_error_failed bulk_id=%s err=%s", bulk_id, exc
+        )
+        return []
 
 
 # JobDiva's parser requires an email, so the provisioner mints one for
@@ -2471,7 +2589,14 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
         else:
             # Send to external PAIR API
             external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews"
-            logger.info(f"📤 Sending bulk interview to {external_url}")
+            # Client-generate bulk_id so requests are idempotent and lookups
+            # succeed even if the connection drops after PairBot accepts but
+            # before the 202 response arrives — without this, a client-side
+            # retry has no id to look up and would create a second bulk.
+            client_bulk_id = str(uuid.uuid4())
+            if isinstance(payload_obj, dict):
+                payload_obj["bulk_id"] = client_bulk_id
+            logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
             response = await _post_to_pairbot(external_url, payload_obj)
 
@@ -2489,9 +2614,9 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             is_success = 200 <= response.status_code < 300
             logger.info(f"📥 PAIR API response status: {response.status_code}")
             if is_success and response.status_code == 202:
-                bulk_id = str(response_data.get("bulk_id") or "").strip()
+                bulk_id = str(response_data.get("bulk_id") or client_bulk_id).strip()
                 if not bulk_id:
-                    raise RuntimeError("Pairbot returned 202 without bulk_id")
+                    bulk_id = client_bulk_id
                 job_id_alt = str(payload_obj.get("jd", {}).get("jobdiva_id") or "")
                 # Mark processing so rank-list shows work in progress if the
                 # stream is slow; overwritten to sent/failed after creation.
@@ -2516,19 +2641,49 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 try:
                     creation_event = await _wait_for_pairbot_creation(bulk_id)
                 except Exception as wait_err:
-                    # Do not leave candidates stuck at engage_status=processing.
-                    try:
-                        _stamp_engage_status_batch(
-                            list(request.real_candidate_ids),
-                            "failed",
-                            job_id_value=str(job_id_from_payload or ""),
-                            job_id_alt=job_id_alt,
-                        )
-                    except Exception as _fail_stamp_err:
-                        logger.warning(
-                            "engage_failed_stamp_after_wait_error bulk_id=%s err=%s",
+                    # A dead stream or a wait timeout is NOT proof creation
+                    # failed — PairBot already accepted the bulk and may
+                    # still be working. Check PairBot's own record before
+                    # stamping anyone `failed`; a retry on a false failure
+                    # would create a duplicate bulk for candidates PairBot
+                    # already has interviews for.
+                    logger.error(
+                        "engage_wait_for_creation_error bulk_id=%s candidates=%d err=%s "
+                        "— confirming with PairBot before stamping failed",
+                        bulk_id,
+                        len(request.real_candidate_ids),
+                        wait_err,
+                    )
+                    confirmed_failed = await _confirm_failed_candidates_with_pairbot(
+                        bulk_id, job_id_alt, list(request.real_candidate_ids)
+                    )
+                    if confirmed_failed:
+                        try:
+                            _stamp_engage_status_batch(
+                                confirmed_failed,
+                                "failed",
+                                job_id_value=str(job_id_from_payload or ""),
+                                job_id_alt=job_id_alt,
+                            )
+                        except Exception as _fail_stamp_err:
+                            logger.error(
+                                "engage_failed_stamp_after_wait_error bulk_id=%s err=%s",
+                                bulk_id,
+                                _fail_stamp_err,
+                            )
+                    else:
+                        # PairBot confirms it's still working, or the check
+                        # itself couldn't tell — leave as 'processing'. There
+                        # is no automatic reconciler any more, so this needs
+                        # manual follow-up (dashboard/logs on bulk_id) if it
+                        # never resolves.
+                        logger.error(
+                            "engage_wait_for_creation_error_unconfirmed bulk_id=%s "
+                            "candidates=%d left as 'processing' — PairBot did not "
+                            "confirm these failed; needs manual follow-up if it "
+                            "never resolves",
                             bulk_id,
-                            _fail_stamp_err,
+                            len(request.real_candidate_ids),
                         )
                     raise wait_err
                 response_data = {

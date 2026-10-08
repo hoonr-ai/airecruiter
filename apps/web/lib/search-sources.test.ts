@@ -3,20 +3,28 @@ import { test } from "node:test";
 
 import {
   DEFAULT_SEARCH_SOURCES,
+  getEnabledSearchSourceIds,
   SEARCH_SOURCES_VERSION,
   restoreSavedSearchSources,
 } from "./search-sources.ts";
 
 // --- defaults ---------------------------------------------------------------
 
-test("defaults: both JobDiva pools, LinkedIn and Exa on; Dice off", () => {
+test("defaults: JobDiva Agent and Exa on; JobDiva Talent, LinkedIn and Dice off", () => {
   assert.deepEqual(DEFAULT_SEARCH_SOURCES, {
     jobdiva_agent: true,
-    jobdiva_talent: true,
-    linkedin: true,
+    jobdiva_talent: false,
+    linkedin: false,
     dice: false,
     exa: true,
   });
+});
+
+test("Unipile is excluded from submitted sources even if state says enabled", () => {
+  assert.deepEqual(
+    getEnabledSearchSourceIds({ ...DEFAULT_SEARCH_SOURCES, linkedin: true }),
+    ["jobdiva_agent", "exa"],
+  );
 });
 
 test("restore with nothing saved returns the defaults", () => {
@@ -24,6 +32,15 @@ test("restore with nothing saved returns the defaults", () => {
   assert.deepEqual(restoreSavedSearchSources(undefined, undefined), DEFAULT_SEARCH_SOURCES);
   assert.deepEqual(restoreSavedSearchSources("junk", undefined), DEFAULT_SEARCH_SOURCES);
   assert.deepEqual(restoreSavedSearchSources([true], undefined), DEFAULT_SEARCH_SOURCES);
+});
+
+test("a previously saved LinkedIn preference cannot re-enable Unipile", () => {
+  const out = restoreSavedSearchSources(
+    { linkedin: true, exa: true },
+    SEARCH_SOURCES_VERSION,
+  );
+  assert.equal(out.linkedin, false);
+  assert.equal(out.exa, true);
 });
 
 // --- Exa re-enable migration ----------------------------------------------------
@@ -74,6 +91,26 @@ test("a non-numeric version is treated as legacy", () => {
   assert.equal(out.exa, true);
 });
 
+// --- JobDiva Talent v3 migration ----------------------------------------------------
+
+test("legacy draft (version < 3) with missing/true jobdiva_talent gets the new default (off)", () => {
+  const out1 = restoreSavedSearchSources({ jobdiva_talent: true }, 2);
+  assert.equal(out1.jobdiva_talent, false);
+
+  const out2 = restoreSavedSearchSources({}, 2);
+  assert.equal(out2.jobdiva_talent, false);
+});
+
+test("legacy draft (version < 3) with jobdiva_talent: false keeps it off", () => {
+  const out = restoreSavedSearchSources({ jobdiva_talent: false }, 2);
+  assert.equal(out.jobdiva_talent, false);
+});
+
+test("v3 draft with jobdiva_talent: true is a deliberate opt-in and is honoured", () => {
+  const out = restoreSavedSearchSources({ jobdiva_talent: true }, SEARCH_SOURCES_VERSION);
+  assert.equal(out.jobdiva_talent, true);
+});
+
 // --- legacy JobDiva flag + retired keys -------------------------------------
 
 test("legacy single jobdiva flag drives both pools", () => {
@@ -83,7 +120,7 @@ test("legacy single jobdiva flag drives both pools", () => {
 });
 
 test("explicit per-pool flags win over the legacy jobdiva flag", () => {
-  const out = restoreSavedSearchSources({ jobdiva: false, jobdiva_talent: true }, undefined);
+  const out = restoreSavedSearchSources({ jobdiva: false, jobdiva_talent: true }, SEARCH_SOURCES_VERSION);
   assert.equal(out.jobdiva_agent, false);
   assert.equal(out.jobdiva_talent, true);
 });
@@ -101,7 +138,7 @@ test("non-boolean values are ignored", () => {
     { linkedin: "no", dice: 1, exa: null },
     SEARCH_SOURCES_VERSION,
   );
-  assert.equal(out.linkedin, true);
+  assert.equal(out.linkedin, false);
   assert.equal(out.dice, false);
   assert.equal(out.exa, true);
 });

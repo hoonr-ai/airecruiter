@@ -121,11 +121,22 @@ def verify_azure_token(token: str) -> Optional[str]:
 @dataclass
 class UserIdentity:
     email: str
-    role: str  # 'admin' | 'team_lead' | 'recruiter'
+    # 'admin' | 'team_lead' | 'recruiter'. 'team_lead' is the one non-admin role
+    # with a view wider than the caller's own jobs: it covers a lead of a
+    # Teams-page team AND anyone who manages people in the org hierarchy
+    # (Resource Manager and above), so every page gated on it admits both.
+    role: str
     # Populated when the user belongs to a team (lead or member). Admins keep
     # role='admin' even when they lead a team — the full admin view wins.
     team_id: Optional[str] = None
     team_name: Optional[str] = None
+    # 'lead' | 'member' when team_id is set. Needed because role='team_lead' no
+    # longer implies leading THIS team: a hierarchy manager can be a plain member.
+    team_member_role: Optional[str] = None
+    # Org hierarchy node (services/org_hierarchy.py); None when not in the tree.
+    org_member_id: Optional[int] = None
+    org_role: Optional[str] = None
+    org_manages_people: bool = False
 
     @property
     def is_admin(self) -> bool:
@@ -134,6 +145,24 @@ class UserIdentity:
     @property
     def is_team_lead(self) -> bool:
         return self.role == "team_lead"
+
+    @property
+    def leads_team(self) -> bool:
+        """Leads a Teams-page team (not merely belongs to one).
+
+        When the member role is unknown (an identity built by hand), the old rule
+        applies: a team_lead with a team leads it.
+        """
+        if not self.team_id:
+            return False
+        if self.team_member_role is not None:
+            return self.team_member_role == "lead"
+        return self.role == "team_lead"
+
+    @property
+    def manages_org(self) -> bool:
+        """Has at least one person beneath them in the org hierarchy."""
+        return self.org_member_id is not None and self.org_manages_people
 
 
 def get_user_role(email: str) -> str:
@@ -170,15 +199,19 @@ def get_user_role(email: str) -> str:
 
 
 def resolve_user_identity(email: str) -> UserIdentity:
-    """Full identity resolution: base role + team membership.
+    """Full identity resolution: base role + team membership + org hierarchy.
 
-    A non-admin who is a 'lead' on a team resolves to role='team_lead'.
-    Team id/name are attached for any team member so scoped endpoints can
-    reuse them without re-querying.
+    A non-admin who is a 'lead' on a team, or who has people beneath them in
+    the org hierarchy, resolves to role='team_lead'. Team id/name are attached
+    for any team member so scoped endpoints can reuse them without re-querying.
+
+    Both lookups are best-effort and fail CLOSED: if one errors, the user simply
+    gets no extra visibility from it (never more).
     """
     role = get_user_role(email)
     team_id = None
     team_name = None
+    team_member_role = None
     try:
         # Late import: services.teams_db pulls core.db; importing it lazily
         # keeps core.auth import-safe during early app boot and tests.
@@ -188,11 +221,38 @@ def resolve_user_identity(email: str) -> UserIdentity:
         if membership:
             team_id = membership.get("team_id")
             team_name = membership.get("team_name")
-            if role != "admin" and membership.get("member_role") == "lead":
+            team_member_role = membership.get("member_role")
+            if role != "admin" and team_member_role == "lead":
                 role = "team_lead"
     except Exception as e:
         logger.debug("team membership check failed for %s: %s", email, e)
-    return UserIdentity(email=email, role=role, team_id=team_id, team_name=team_name)
+
+    org_member_id = None
+    org_role = None
+    org_manages_people = False
+    try:
+        from services import org_hierarchy
+
+        org = org_hierarchy.get_membership(email)
+        if org:
+            org_member_id = org["id"]
+            org_role = org["role"]
+            org_manages_people = bool(org["has_reports"])
+            if role != "admin" and org_manages_people:
+                role = "team_lead"
+    except Exception as e:
+        logger.debug("org hierarchy check failed for %s: %s", email, e)
+
+    return UserIdentity(
+        email=email,
+        role=role,
+        team_id=team_id,
+        team_name=team_name,
+        team_member_role=team_member_role,
+        org_member_id=org_member_id,
+        org_role=org_role,
+        org_manages_people=org_manages_people,
+    )
 
 
 def get_current_user(
@@ -259,17 +319,68 @@ def get_user_scope_emails(user: UserIdentity) -> set:
     """Emails whose job assignments this user may see.
 
     Recruiters: themselves. Team leads: themselves + everyone on their team.
-    (Admins bypass scope checks entirely — callers check is_admin first.)
+    Org-hierarchy managers: themselves + everyone beneath them at any depth.
+    Someone who is both gets the union, so adding the hierarchy never removes
+    access. (Admins bypass scope checks entirely — callers check is_admin first.)
+
+    This is the ONE definition of "who can this user see": the jobs list,
+    verify_job_access and the admin reports all derive from it (the reports
+    through report_scope_parts, which names the same two sources), so a
+    manager's jobs and analytics can never describe different people.
     """
     allowed = {user.email}
-    if user.is_team_lead and user.team_id:
+    if user.leads_team:
         try:
             from services import teams_db
 
             allowed.update(teams_db.get_team_member_emails(user.team_id))
         except Exception as e:
             logger.debug("team scope emails lookup failed for %s: %s", user.email, e)
+    if user.manages_org:
+        try:
+            from services import org_hierarchy
+
+            allowed.update(org_hierarchy.scope_emails(user.org_member_id))
+        except Exception as e:
+            logger.debug("org scope emails lookup failed for %s: %s", user.email, e)
     return allowed
+
+
+def report_scope_parts(user: UserIdentity) -> List[str]:
+    """The scope parts behind get_user_scope_emails, as report scope keys.
+
+    `org:<id>` = the user's organisation in the hierarchy; a bare id = the
+    Teams-page team they lead. Order is stable so equal scopes share a cache key.
+    """
+    parts: List[str] = []
+    if user.manages_org:
+        parts.append(f"org:{user.org_member_id}")
+    if user.leads_team:
+        parts.append(str(user.team_id))
+    return parts
+
+
+def resolve_report_scope(user: UserIdentity, requested: Optional[str], what: str) -> Optional[str]:
+    """Scope key for an admin report: who the numbers are about.
+
+    - Admins: whatever they ask for (a Teams-page team id, an `org:<id>` key, or
+      nothing = everyone).
+    - Team leads / org managers: always their own scope; a requested scope is
+      ignored, never honoured.
+    - Everyone else: 403.
+
+    `what` completes the 403 message ("... to view <what>."). The result is the
+    `scope_team_id` the reports pass to routers._helpers._load_team_scope.
+    """
+    if user.is_admin:
+        return (requested or "").strip() or None
+    parts = report_scope_parts(user)
+    if user.is_team_lead and parts:
+        return "+".join(parts)
+    raise HTTPException(
+        status_code=403,
+        detail=f"Access denied. Admin or team lead access required to view {what}.",
+    )
 
 
 def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
@@ -309,6 +420,12 @@ auth_router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 @auth_router.get("/me")
 def get_my_identity(user: UserIdentity = Depends(get_current_user)):
+    org_role = user.org_role if user.org_member_id is not None else None
+    org_role_label = None
+    if org_role:
+        from services import org_hierarchy
+
+        org_role_label = org_hierarchy.role_label(org_role)
     return {
         "email": user.email,
         "role": user.role,
@@ -316,4 +433,9 @@ def get_my_identity(user: UserIdentity = Depends(get_current_user)):
         "is_team_lead": user.is_team_lead,
         "team_id": user.team_id,
         "team_name": user.team_name,
+        # Org hierarchy: the person's level (for labels) and whether anyone
+        # reports to them. Visibility itself is enforced server-side.
+        "org_role": org_role,
+        "org_role_label": org_role_label,
+        "manages_people": user.manages_org,
     }

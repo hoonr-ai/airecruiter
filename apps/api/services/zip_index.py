@@ -121,10 +121,12 @@ def extract_zip(text: str) -> Optional[str]:
 
 # (city_lower, "ST") -> (lat, lng, zip nearest the averaged centroid)
 _CITY_INDEX: Optional[Dict[Tuple[str, str], Tuple[float, float, str]]] = None
+# city_lower -> the states that have that city name. Built with the city index.
+_CITY_STATES: Optional[Dict[str, frozenset]] = None
 
 
 def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
-    global _CITY_INDEX
+    global _CITY_INDEX, _CITY_STATES
     if _CITY_INDEX is None:
         with _lock:
             if _CITY_INDEX is None:
@@ -138,8 +140,66 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
                     lng = sum(r[2] for r in rows) / len(rows)
                     rep = min(rows, key=lambda r: (r[1] - lat) ** 2 + (r[2] - lng) ** 2)[0]
                     index[key] = (round(lat, 4), round(lng, 4), rep)
+                states: Dict[str, set] = {}
+                for name, state in index:
+                    states.setdefault(name, set()).add(state)
                 _CITY_INDEX = index
+                _CITY_STATES = {name: frozenset(found) for name, found in states.items()}
     return _CITY_INDEX
+
+
+# Colloquial/abbreviated names that don't match GeoNames' canonical city name
+# used to build _city_index() above.
+#
+# Keying convention (both keys and values, enforced by the assert below —
+# every entry must be lowercase city / UPPERCASE 2-letter state, matching
+# _city_key()'s own normalization so a direct dict lookup always hits):
+#   (city_lower, "ST") -> (canonical_city_lower, "ST")
+# A city/state pair not listed here passes through unchanged (safe no-op).
+#
+# To extend: verify the alias actually resolves nothing today
+# (zip_index.city_state_centroid("Bklyn", "NY") is None) and that the
+# canonical form does (city_state_centroid("Brooklyn", "NY") is not None),
+# then add e.g. ("bklyn", "NY"): ("brooklyn", "NY"). Only add terms recruiters
+# plausibly type — this is a targeted table, not a fuzzy matcher (see the
+# "St./Ft./Mt." note below for why a blanket rule is unsafe).
+_CITY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
+    ("new york city", "NY"): ("new york", "NY"),
+    ("nyc", "NY"): ("new york", "NY"),
+    ("la", "CA"): ("los angeles", "CA"),
+    ("san fran", "CA"): ("san francisco", "CA"),
+    ("sf", "CA"): ("san francisco", "CA"),
+    ("philly", "PA"): ("philadelphia", "PA"),
+    ("vegas", "NV"): ("las vegas", "NV"),
+    ("nola", "LA"): ("new orleans", "LA"),
+    ("dc", "DC"): ("washington", "DC"),
+    ("washington dc", "DC"): ("washington", "DC"),
+}
+assert all(
+    k[0] == k[0].lower() and k[1] == k[1].upper() and len(k[1]) == 2
+    and v[0] == v[0].lower() and v[1] == v[1].upper() and len(v[1]) == 2
+    for k, v in _CITY_ALIASES.items()
+), "_CITY_ALIASES keys/values must be (lowercase city, UPPERCASE 2-letter state)"
+
+# "St./Ft./Mt." prefixes GeoNames spells out in full ("Saint/Fort/Mount").
+# Deliberately NOT a blanket "strip trailing City" rule — Jersey City, Kansas
+# City, Oklahoma City, Carson City, Atlantic City, Rapid City and Salt Lake
+# City are all genuinely named with "City" in the index.
+_ABBR_PREFIX_RE = re.compile(r"^(st|ft|mt)\.?\s+")
+_ABBR_EXPANSIONS = {"st": "saint", "ft": "fort", "mt": "mount"}
+
+
+def _normalize_city_alias(city: str, state: str) -> str:
+    """Expand a colloquial/abbreviated city name to the form GeoNames uses
+    (e.g. "new york city" -> "new york", "st. louis" -> "saint louis").
+    A no-op when no alias/abbreviation matches."""
+    alias = _CITY_ALIASES.get((city, state))
+    if alias:
+        return alias[0]
+    m = _ABBR_PREFIX_RE.match(city)
+    if m:
+        return _ABBR_EXPANSIONS[m.group(1)] + " " + city[m.end():]
+    return city
 
 
 def _city_key(city: str, state: str) -> Optional[Tuple[str, str]]:
@@ -155,6 +215,7 @@ def _city_key(city: str, state: str) -> Optional[Tuple[str, str]]:
             s = ""
         if not s:
             return None
+    c = _normalize_city_alias(c, s)
     return (c, s)
 
 
@@ -168,6 +229,55 @@ def city_state_centroid(city: str, state: str) -> Optional[Tuple[float, float]]:
     if not entry:
         return None
     return (entry[0], entry[1])
+
+
+def city_state_representative_point(city: str, state: str) -> Optional[Tuple[float, float]]:
+    """A real ZIP inside the city: the ZIP nearest the averaged centroid.
+
+    The plain average can sit miles outside the city's core when a few ZIP
+    coordinates are outliers. Richardson, TX is the example — two southern
+    ZIP rows pull the average ~4.5 miles south of every central ZIP, which
+    pulled DeSoto and Cedar Hill inside a 25-mile radius of "Richardson".
+    Radius checks use this point whenever the recruiter or the candidate
+    gave a city and no ZIP.
+    """
+    key = _city_key(city, state)
+    if not key:
+        return None
+    entry = _city_index().get(key)
+    if not entry:
+        return None
+    point = zip_centroid(entry[2])
+    return point or (entry[0], entry[1])
+
+
+def unique_state_for_city(city: str) -> Optional[str]:
+    """The only state that has this city name, or None when several do.
+
+    "Tempe" is only Arizona, so a LinkedIn line that says just "Tempe" can
+    be measured. "Edison" exists in five states, so it must stay a label
+    instead of being pinned to the wrong one.
+    """
+    city_key = _clean(city).lower()
+    if not city_key:
+        return None
+    _city_index()
+    states = (_CITY_STATES or {}).get(city_key)
+    if states and len(states) == 1:
+        return next(iter(states))
+    return None
+
+
+def is_known_city(city: str, state: Optional[str] = None) -> bool:
+    """Whether a city token appears in the offline ZIP/city index."""
+    city_key = _clean(city).lower()
+    if not city_key:
+        return False
+    index = _city_index()
+    if state:
+        key = _city_key(city, state)
+        return bool(key and key in index)
+    return city_key in (_CITY_STATES or {})
 
 
 def city_state_default_zip(city: str, state: str) -> Optional[str]:

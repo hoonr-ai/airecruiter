@@ -40,6 +40,7 @@ def readable_ist_now() -> str:
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
 from core.advisory_lock import AdvisoryLock
+from core.startup_once import claim_once, run_schema_once
 from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ from models import (
 )
 from matcher import mock_match_candidates
 from services.extractor import llm_extractor
+from services import jobdiva_rate_limit
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.chat_service import chat_service
@@ -71,23 +73,28 @@ from services.job_rubric_db import JobRubricDB
 # Global scheduler
 scheduler = AsyncIOScheduler()
 
+# Job-status poll cadence. Was 5 min with ~2 JobDiva calls per monitored job;
+# statuses now come from batched BI JobsDetail, and 15 min is ample for the
+# PAIR Inactive email.
+JOB_STATUS_POLL_MINUTES = max(1, int(os.getenv("JOB_STATUS_POLL_MINUTES", "15") or 15))
+
+
 def schedule_next_poll():
-    """Schedule next poll 5 minutes from now, canceling any existing poll"""
+    """Schedule the next status poll JOB_STATUS_POLL_MINUTES from now, canceling any existing poll"""
     try:
         # Remove existing scheduled poll if any
         if scheduler.get_job("job_status_poll"):
             scheduler.remove_job("job_status_poll")
         
-        # Schedule new poll 5 minutes from now
         scheduler.add_job(
             poll_all_jobs,
             "date",
-            run_date=datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5),
+            run_date=datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=JOB_STATUS_POLL_MINUTES),
             id="job_status_poll",
             replace_existing=True
         )
         
-        next_run = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5)
+        next_run = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=JOB_STATUS_POLL_MINUTES)
         logger.info(f"🔄 Next auto-poll scheduled for: {next_run.strftime('%Y-%m-%d %H:%M:%S IST')}")
     except Exception as e:
         logger.error(f"Failed to schedule next poll: {e}")
@@ -105,7 +112,7 @@ async def lifespan(app: FastAPI):
 
     # 2. Schedule "Always-On" JobDiva Sync (Zero-Setup / Production-Safe)
     from services.auto_assign_service import auto_assign_service
-    
+
     async def auto_sync_all_jobs():
         """
         Global sync agent that runs inside the app process.
@@ -125,26 +132,30 @@ async def lifespan(app: FastAPI):
             return
 
         app.sync_in_progress = True
-        logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
+        logger.info("🤖 [AutoSync] Starting synchronization cycle...")
+
+        from services import auto_sync_queue
+
+        def _db(fn, *args):
+            conn = get_db_connection()
+            try:
+                return fn(conn, *args)
+            finally:
+                conn.close()
 
         try:
-            conn = get_db_connection()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("""
-                SELECT job_id, title 
-                FROM monitored_jobs 
-                WHERE is_archived IS NOT TRUE 
-                AND (processing_status IN ('monitoring_added', 'manual_created') OR processing_status LIKE 'step_%_complete')
-            """)
-            jobs = cur.fetchall()
-            cur.close()
-            conn.close()
-            
+            jobs = await asyncio.to_thread(_db, auto_sync_queue.pick_jobs)
             if not jobs:
                 logger.info("🤖 [AutoSync] No jobs to sync.")
                 return
 
-            for done, job in enumerate(jobs):
+            # Time-boxed slice: oldest-synced open jobs first, closed jobs at
+            # most daily. The next cycle continues where this one stopped.
+            started = time.monotonic()
+            done = 0
+            for job in jobs:
+                if time.monotonic() - started >= auto_sync_queue.CYCLE_BUDGET_S:
+                    break
                 # If the lock connection dropped, Postgres released the lock
                 # and another worker may already be running a cycle: stop.
                 if not await lock.still_held():
@@ -153,11 +164,23 @@ async def lifespan(app: FastAPI):
                     )
                     return
                 jid = job['job_id']
-                logger.info(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
-                await auto_assign_service.synchronize_job_applicants(jid)
-                await asyncio.sleep(2) # Prevent hammering the API
-                
-            logger.info(f"✅ [AutoSync] Cycle complete for {len(jobs)} jobs.")
+                logger.debug(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
+                try:
+                    # Background priority: every JobDiva call underneath yields
+                    # to interactive requests and is paced by the shared limiter.
+                    with jobdiva_rate_limit.background_context():
+                        await auto_assign_service.synchronize_job_applicants(jid)
+                except Exception as e:
+                    logger.warning(f"[AutoSync] Sync failed for {jid}: {e}")
+                # Marked even on failure so one broken job can't pin the head
+                # of the queue; it comes round again after the others.
+                await asyncio.to_thread(_db, auto_sync_queue.mark_synced, [jid])
+                done += 1
+                await asyncio.sleep(0.5)  # breathing room for Postgres between jobs
+
+            logger.info(
+                f"✅ [AutoSync] Cycle synced {done}/{len(jobs)} due jobs in {time.monotonic() - started:.0f}s."
+            )
         except Exception as e:
             logger.error(f"❌ [AutoSync] Cycle failed: {e}")
         finally:
@@ -167,74 +190,84 @@ async def lifespan(app: FastAPI):
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
 
-    # 3. Initialize engagement audit table (moved out of module import in
-    # engagement.py so a slow/locked DB can no longer crash-loop the app).
-    # Wrapped in wait_for so even a hung DB does not block readiness.
-    if engagement is not None and hasattr(engagement, "init_engagement_tables"):
+    # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
+    # EXCLUSIVE, so running it in all 8 workers (and again on every worker
+    # recycle) queued them behind each other. One worker runs the steps under
+    # an advisory lock; the rest wait for it, then skip (core/startup_once).
+    async def _schema_step(name: str, coro_fn, timeout: float) -> bool:
         try:
-            await asyncio.wait_for(engagement.init_engagement_tables(), timeout=10)
+            await asyncio.wait_for(coro_fn(), timeout=timeout)
+            return True
         except asyncio.TimeoutError:
-            logger.error("engagement_audit_init_timeout (10s); continuing without init")
+            logger.error(f"{name}_timeout ({timeout:.0f}s); continuing")
         except Exception as e:  # noqa: BLE001
-            logger.error(f"engagement_audit_init_failed: {e}; continuing")
+            logger.error(f"{name}_failed: {e}; continuing")
+        return False
 
-    # 4. Provision monitored_jobs columns once at startup. Previously two
-    # handlers in routers/jobs.py ran `ALTER TABLE monitored_jobs ADD COLUMN
-    # IF NOT EXISTS ...` on every request — ACCESS EXCLUSIVE lock queued
-    # behind the auto-sync's shared lock, so `GET /jobs/monitored` could
-    # stall for 60-90+ seconds. Run it once here; skip it in the hot path.
-    if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):
-        try:
-            await asyncio.wait_for(jobs_router.init_monitored_jobs_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("monitored_jobs_schema_init_timeout (10s); continuing")
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
-
-    if job_criteria_router is not None and hasattr(job_criteria_router, "init_job_criteria_schema"):
-        try:
-            await asyncio.wait_for(job_criteria_router.init_job_criteria_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("job_criteria_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"job_criteria_schema_init_failed: {e}; continuing")
-
-    # Provision the campaigns table. Runs after monitored_jobs (whose
-    # campaign_id column links child jobs to a campaign). Idempotent.
-    if campaigns_router is not None and hasattr(campaigns_router, "init_campaigns_schema"):
-        try:
-            await asyncio.wait_for(campaigns_router.init_campaigns_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("campaigns_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"campaigns_schema_init_failed: {e}; continuing")
-
-    # Provision teams + team_members (admin-managed recruiter teams; drives
-    # the team_lead role and team-scoped analytics/jobs views). Idempotent.
-    if teams_router is not None and hasattr(teams_router, "init_teams_schema"):
-        try:
-            await asyncio.wait_for(teams_router.init_teams_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("teams_schema_init_timeout (10s); continuing")
-        except Exception as e:
-            logger.error(f"teams_schema_init_failed: {e}; continuing")
-
-    # Provision the JobDiva BI mirror (all Pyramid reqs, submittal / interview
-    # / start activity, the user directory) behind the PAIR Dashboard, and
-    # schedule its sync. Every worker schedules it; an advisory lock lets one
-    # run each cycle. Delayed like the auto-sync so boot stays uncontested.
     try:
         from services import jobdiva_bi_sync
     except Exception as e:  # noqa: BLE001 - never let the dashboard mirror block boot
         logger.error(f"jobdiva_bi_sync_import_failed: {e}; continuing")
         jobdiva_bi_sync = None
-    if jobdiva_bi_sync is not None:
-        try:
-            await asyncio.wait_for(jobdiva_bi_sync.init_jobdiva_bi_schema(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("jobdiva_bi_schema_init_timeout (10s); continuing")
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"jobdiva_bi_schema_init_failed: {e}; continuing")
+
+    async def _init_schemas() -> bool:
+        steps = []
+        # Engagement audit table (moved out of module import in engagement.py
+        # so a slow/locked DB can no longer crash-loop the app).
+        if engagement is not None and hasattr(engagement, "init_engagement_tables"):
+            steps.append(("engagement_audit_init", engagement.init_engagement_tables, 10))
+        # monitored_jobs columns. Previously two handlers in routers/jobs.py ran
+        # ALTER TABLE on every request and stalled GET /jobs/monitored for 60-90s.
+        if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):
+            steps.append(("monitored_jobs_schema_init", jobs_router.init_monitored_jobs_schema, 10))
+        if job_criteria_router is not None and hasattr(job_criteria_router, "init_job_criteria_schema"):
+            steps.append(("job_criteria_schema_init", job_criteria_router.init_job_criteria_schema, 10))
+        # campaigns after monitored_jobs (whose campaign_id column links child jobs).
+        if campaigns_router is not None and hasattr(campaigns_router, "init_campaigns_schema"):
+            steps.append(("campaigns_schema_init", campaigns_router.init_campaigns_schema, 10))
+        # teams + team_members (team_lead role and team-scoped views).
+        if teams_router is not None and hasattr(teams_router, "init_teams_schema"):
+            steps.append(("teams_schema_init", teams_router.init_teams_schema, 10))
+        # org_members. If this times out, identity lookups fail CLOSED.
+        if org_hierarchy_router is not None and hasattr(org_hierarchy_router, "init_org_hierarchy_schema"):
+            steps.append(("org_hierarchy_schema_init", org_hierarchy_router.init_org_hierarchy_schema, 10))
+        # JobDiva BI mirror behind the PAIR Dashboard.
+        if jobdiva_bi_sync is not None:
+            steps.append(("jobdiva_bi_schema_init", jobdiva_bi_sync.init_jobdiva_bi_schema, 10))
+
+        # Imported inside each step so a broken module fails only its step.
+        async def _scs_init():
+            from services import sourced_candidates_storage as _scs
+            await _scs.init_sourced_candidates_schema()
+
+        async def _dnc_init():
+            from services import dnc_storage as _dnc
+            await _dnc.init_dnc_schema()
+
+        async def _rubric_init():
+            from services import job_rubric_db as _jrd
+            await _jrd.init_rubric_schema()
+
+        # sourced_candidates + candidate_enhanced_info. 15s: the initial CREATE
+        # INDEX on candidate_enhanced_info can take longer.
+        steps.append(("sourced_candidates_schema_init", _scs_init, 15))
+        # dnc_list + sourced_candidates.dnc_stopped_at; after sourced_candidates.
+        steps.append(("dnc_schema_init", _dnc_init, 10))
+        # job_skills / job_education `source` column (Recruiter vs PAIR chip).
+        steps.append(("rubric_schema_init", _rubric_init, 10))
+
+        ok = True
+        for name, fn, timeout in steps:
+            ok = await _schema_step(name, fn, timeout) and ok
+        return ok
+
+    try:
+        await run_schema_once("schemas", _init_schemas)
+    except Exception as e:  # noqa: BLE001 - schema init must never block boot
+        logger.error(f"startup_schema_init_failed: {e}; continuing")
+
+    # JobDiva BI mirror sync. Every worker schedules it; an advisory lock lets
+    # one run each cycle. Delayed like the auto-sync so boot stays uncontested.
     if jobdiva_bi_sync is not None and jobdiva_bi_sync.SYNC_ENABLED:
         try:
             scheduler.add_job(
@@ -288,7 +321,8 @@ async def lifespan(app: FastAPI):
     )
     # Prime cache once at startup so the first dashboard request after
     # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
-    # failure is logged inside the warmer and never blocks boot.
+    # failure is logged inside the warmer and never blocks boot. Stays
+    # per-worker: the cache is process-local and the warmer only reads Postgres.
     asyncio.create_task(warm_monitored_jobs_cache())
 
     # v30: one-time backfill of the denormalized counter columns. After
@@ -297,52 +331,24 @@ async def lifespan(app: FastAPI):
     # populates them from sourced_candidates aggregates so the dashboard
     # shows real numbers without waiting for the next 15-min sync cycle.
     # Fire-and-forget so a slow aggregate never blocks boot.
+    # Claimed by one worker per boot (core/startup_once).
+    async def _backfill_counters_once():
+        if await claim_once("backfill_monitored_jobs_counters"):
+            await jobs_router.backfill_monitored_jobs_counters()
+
     if jobs_router is not None and hasattr(jobs_router, "backfill_monitored_jobs_counters"):
-        asyncio.create_task(jobs_router.backfill_monitored_jobs_counters())
-
-    # 5. Provision sourced_candidates + candidate_enhanced_info schema.
-    # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
-    # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE
-    # INDEX per call. ALTER TABLE grabs ACCESS EXCLUSIVE and serialized every
-    # concurrent reader/writer. Budget 15s because candidate_enhanced_info is
-    # larger than monitored_jobs and the initial CREATE INDEX can take longer.
-    try:
-        from services import sourced_candidates_storage as _scs
-        await asyncio.wait_for(_scs.init_sourced_candidates_schema(), timeout=15)
-    except asyncio.TimeoutError:
-        logger.error("sourced_candidates_schema_init_timeout (15s); continuing")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"sourced_candidates_schema_init_failed: {e}; continuing")
-
-    # 6. Provision dnc_list table + sourced_candidates.dnc_stopped_at column.
-    # Runs after sourced_candidates so the ALTER TABLE finds an existing
-    # parent table. Idempotent — safe across redeploys.
-    try:
-        from services import dnc_storage as _dnc
-        await asyncio.wait_for(_dnc.init_dnc_schema(), timeout=10)
-    except asyncio.TimeoutError:
-        logger.error("dnc_schema_init_timeout (10s); continuing")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"dnc_schema_init_failed: {e}; continuing")
-
-    # 7. Provision `source` column on job_skills / job_education so the
-    # Step 3 rubric chip can show "Recruiter" vs "PAIR" provenance
-    # and have it survive save+reload. Idempotent ALTER TABLE ADD COLUMN
-    # IF NOT EXISTS — safe across redeploys.
-    try:
-        from services import job_rubric_db as _jrd
-        await asyncio.wait_for(_jrd.init_rubric_schema(), timeout=10)
-    except asyncio.TimeoutError:
-        logger.error("rubric_schema_init_timeout (10s); continuing")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"rubric_schema_init_failed: {e}; continuing")
+        asyncio.create_task(_backfill_counters_once())
 
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
     # manifesting as site-wide slowness right after every deploy. The 15-min
     # interval schedule above still catches everything; the delay just keeps
     # the cold-start window uncontested.
+    # One worker per boot: recycled workers (--limit-max-requests) would
+    # otherwise each kick off an extra cycle a minute after they start.
     async def _delayed_first_sync():
+        if not await claim_once("first_auto_sync"):
+            return
         await asyncio.sleep(60)
         await auto_sync_all_jobs()
 
@@ -394,10 +400,12 @@ recruiter_analytics_router = _safe_import("recruiter_analytics")
 job_step_time_router = _safe_import("job_step_time")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
+org_hierarchy_router = _safe_import("org_hierarchy")
 cross_submissions_router = _safe_import("cross_submissions")
 live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
 apollo_webhook_router = _safe_import("apollo_webhook")
+dnc_webhook_router = _safe_import("dnc_webhook")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -451,6 +459,7 @@ _mount(launch_report_router, "launch_report")
 _mount(recruiter_analytics_router, "recruiter_analytics")
 _mount(job_step_time_router, "job_step_time")
 _mount(teams_router, "teams")
+_mount(org_hierarchy_router, "org_hierarchy")
 _mount(cross_submissions_router, "cross_submissions")
 _mount(live_report_router, "live_report")
 _mount(pair_dashboard_router, "pair_dashboard")
@@ -462,6 +471,7 @@ _mount(campaigns_router, "campaigns", prefix="/api")
 # guarded, not login-guarded: Apollo is the caller. nginx has an exact location
 # for it with its own rate zone (Apollo delivers in bursts after a big launch).
 _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
+_mount(dnc_webhook_router, "dnc_webhook")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 from core.auth import auth_router
@@ -478,10 +488,60 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    print(f"DEBUG: Incoming {request.method} {request.url.path}")
+    # Was two print() lines per request straight to stdout/syslog (no level,
+    # not filterable); DEBUG keeps them available without the volume.
+    logger.debug(f"Incoming {request.method} {request.url.path}")
     response = await call_next(request)
-    print(f"DEBUG: Response {response.status_code} for {request.url.path}")
+    logger.debug(f"Response {response.status_code} for {request.url.path}")
     return response
+
+
+@app.get("/api/health", include_in_schema=False)
+async def api_health():
+    """Unauthenticated liveness + dependency check for uptime monitoring.
+
+    503 only when Postgres is unreachable (nothing works without it). Redis
+    trouble is reported as "degraded" with 200: the app keeps serving with
+    per-worker fallbacks, and a separate Redis alert covers it.
+    """
+    from fastapi.responses import JSONResponse
+
+    def _db_ok() -> bool:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            return True
+        finally:
+            conn.close()
+
+    checks: Dict[str, str] = {}
+    try:
+        checks["db"] = "ok" if await asyncio.wait_for(asyncio.to_thread(_db_ok), timeout=5) else "error"
+    except Exception as exc:
+        # Public endpoint: details go to the log, not the response.
+        logger.warning(f"api_health: db check failed: {type(exc).__name__}: {exc}")
+        checks["db"] = "error"
+
+    redis_client = jobdiva_rate_limit._get_redis()
+    if redis_client is None:
+        checks["redis"] = "unavailable"
+    else:
+        try:
+            await asyncio.wait_for(redis_client.ping(), timeout=2)
+            checks["redis"] = "ok"
+        except Exception as exc:
+            logger.warning(f"api_health: redis check failed: {type(exc).__name__}: {exc}")
+            checks["redis"] = "error"
+
+    if checks["db"] != "ok":
+        status, code = "down", 503
+    elif checks["redis"] != "ok":
+        status, code = "degraded", 200
+    else:
+        status, code = "ok", 200
+    return JSONResponse({"status": status, "checks": checks}, status_code=code)
 
 @app.middleware("http")
 async def amplitude_request_tracking(request: Request, call_next):
@@ -602,16 +662,21 @@ async def _run_poll_cycle():
     logger.info("🔄 Starting job status polling...")
 
     jobs_data = load_monitored_jobs()
-    job_ids = list(jobs_data.get("jobs", {}).keys())
+    # Archived jobs are never shown or synced; polling them only spent quota.
+    job_ids = [
+        jid for jid, j in jobs_data.get("jobs", {}).items()
+        if not (j or {}).get("is_archived")
+    ]
 
     if not job_ids:
         logger.info("No jobs to monitor")
         return
 
-    logger.info(f"Polling {len(job_ids)} jobs: {job_ids}")
+    logger.info(f"Polling {len(job_ids)} jobs")
 
-    # Batch fetch statuses
-    statuses = await jobdiva_service.get_multiple_jobs_status(job_ids)
+    # Batched BI JobsDetail at background priority (yields to user requests).
+    with jobdiva_rate_limit.background_context():
+        statuses = await jobdiva_service.get_multiple_jobs_status(job_ids, jobs_data.get("jobs", {}))
     
     # Update local tracking in-place to avoid deleting jobs that failed to poll
     import time

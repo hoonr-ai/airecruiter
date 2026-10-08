@@ -62,12 +62,6 @@ LLM_CACHE_ENABLED = get_env_bool("LLM_CACHE_ENABLED", True)
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")
 
-# ---- Screening Defaults ----
-# Single source of truth for the recommended screening level, so the jobs,
-# campaigns, and engagement routers (plus jobdiva ingestion) can't drift from
-# each other the next time the recommended default changes.
-DEFAULT_SCREENING_LEVEL = "L0.5"
-
 # JobDiva Configuration
 JOBDIVA_API_URL = get_env_with_default("JOBDIVA_API_URL", "https://api.jobdiva.com")
 JOBDIVA_CLIENT_ID = get_env_or_fail("JOBDIVA_CLIENT_ID")
@@ -96,6 +90,20 @@ DATABASE_URL = get_env_or_fail("DATABASE_URL")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# Direct (non-pooled) Postgres URL for connections that hold a SESSION
+# advisory lock (scheduler locks, JobDiva BI sync). Required once DATABASE_URL
+# points at PgBouncer in transaction mode (Azure Flexible Server port 6432):
+# there a session lock would land on whichever server connection the
+# transaction happened to use and be released or leaked at random. Empty =
+# use DATABASE_URL.
+DATABASE_URL_DIRECT = (os.getenv("DATABASE_URL_DIRECT") or "").strip()
+if DATABASE_URL_DIRECT.startswith("postgres://"):
+    DATABASE_URL_DIRECT = DATABASE_URL_DIRECT.replace("postgres://", "postgresql://", 1)
+# "pgbouncer" when DATABASE_URL goes through PgBouncer: it rejects the
+# `options` startup parameter, so statement_timeout must then be set on the
+# role instead (ALTER ROLE ... SET statement_timeout = '30s').
+DB_POOLER = (os.getenv("DB_POOLER") or "").strip().lower()
+
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 if SUPABASE_DB_URL and SUPABASE_DB_URL.startswith("postgres://"):
     SUPABASE_DB_URL = SUPABASE_DB_URL.replace("postgres://", "postgresql://", 1)
@@ -117,6 +125,12 @@ JOBDIVA_PAIR_QUALIFICATION_NAME = get_env_with_default("JOBDIVA_PAIR_QUALIFICATI
 JOBDIVA_PAIR_QUALIFICATION_ID = int(get_env_with_default("JOBDIVA_PAIR_QUALIFICATION_ID", "0"))
 JOBDIVA_PASS_ACTION_NAME = get_env_with_default("JOBDIVA_PASS_ACTION_NAME", "PAIR Pass Candidate Report")
 JOBDIVA_PASS_QUALIFICATION_VALUE = get_env_with_default("JOBDIVA_PASS_QUALIFICATION_VALUE", "Pass")
+
+# Single source of truth for the recommended screening level, so the jobs,
+# campaigns, and engagement routers (plus JobDiva ingestion) can't drift.
+# A job falls back to this when its monitored_jobs row has none set.
+# The env var may override it; the default stays L0.5, the level already live on main.
+DEFAULT_SCREENING_LEVEL = get_env_with_default("DEFAULT_SCREENING_LEVEL", "L0.5")
 
 # ---- JobDiva provenance: mark the applications PAIR records ----
 # JobDiva's applicant list (bi/JobApplicantsDetail) cannot tell an application
@@ -533,7 +547,16 @@ EMBEDDING_MATCH_THRESHOLD = float(
 OPENAI_EMBEDDING_MODEL = get_env_with_default(
     "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
 )
-EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "50000"))
+# Per worker. Vectors are float32 arrays (~6 KB each), so 5,000 ≈ 30 MB. At
+# 50,000 Python-float lists (~49 KB each) this cache alone could reach ~2.4 GB
+# per worker.
+EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "5000"))
+
+# Side SQLAlchemy engines (routers/candidate_processing.py, services/vetted.py),
+# per worker, on top of core/db.py's psycopg2 pool. 3 + 2 keeps 8 workers well
+# under max_connections; raise via env if QueuePool timeouts show up under load.
+SQLA_POOL_SIZE = int(get_env_with_default("SQLA_POOL_SIZE", "3"))
+SQLA_MAX_OVERFLOW = int(get_env_with_default("SQLA_MAX_OVERFLOW", "2"))
 
 # Per-family override for the embedding skill matcher. Keyword fuzzy
 # matching misses non-IT synonymy ("Stakeholder Management" ↔ "Executive

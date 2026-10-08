@@ -28,7 +28,7 @@ class LLMExtractor:
             response = await self.client.beta.chat.completions.parse(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Extract structured job information. Ensure summary is professional and concise."},
+                    {"role": "system", "content": "Extract structured job information. Ensure summary is professional and concise. Explicitly extract all mentioned locations (city and state, e.g. 'New York, NY', 'Austin, TX') into the 'locations' field."},
                     {"role": "user", "content": text}
                 ],
                 response_format=ExtractedData,

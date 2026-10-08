@@ -10,6 +10,8 @@ type CandidateLocationInput = {
   work_location?: string | null;
   work_city?: string | null;
   work_state?: string | null;
+  location_match_reason?: string | null;
+  location_out_of_radius?: boolean;
 };
 
 export function getCandidateLocations(c: CandidateLocationInput): {
@@ -32,4 +34,15 @@ export function getCandidateLocations(c: CandidateLocationInput): {
     null;
 
   return { home: home || null, work: work || null };
+}
+
+export function hasUnverifiedCandidateLocation(c: CandidateLocationInput): boolean {
+  if (c.location_out_of_radius) return false;
+  return [
+    "candidate_location_missing",
+    "candidate_state_unknown",
+    "broad_region_unverified",
+    "geocode_unavailable",
+    "location_unverified",
+  ].includes(String(c.location_match_reason || ""));
 }

@@ -13,7 +13,11 @@ object.__new__, pure methods exercised directly.
 """
 import pytest  # noqa: E402
 
-from services.location import sanitize_candidate_location  # noqa: E402
+from services.location import (  # noqa: E402
+    extract_us_locations_from_text,
+    is_plausible_city_token,
+    sanitize_candidate_location,
+)
 from services.sourced_candidates_storage import _clean_location_value  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     UnifiedCandidateSearch,
@@ -72,10 +76,14 @@ def test_pure_arrangement_strings_blank_out(value):
     ("Remote, New York, NY", "New York, NY"),
     ("Hybrid – Chicago, IL", "Chicago, IL"),
     ("REMOTE, GA", "GA"),          # CRM rows with "REMOTE" typed as the city
-    ("Remote, USA", "USA"),        # country evidence survives for the country gate
 ])
 def test_mixed_strings_keep_the_place(value, expected):
     assert sanitize_candidate_location(value) == expected
+
+
+@pytest.mark.parametrize("country", ["USA", "India", "Canada", "UK"])
+def test_country_location_is_preserved_for_country_gate(country):
+    assert sanitize_candidate_location(country) == country
 
 
 # ------------------------------------------------------------- passthrough
@@ -92,10 +100,115 @@ def test_real_places_pass_through_unchanged(value):
     assert sanitize_candidate_location(value) == value
 
 
+@pytest.mark.parametrize("value", [
+    "Salesforce, MS",
+    "PS, PR",
+    "Remote, Salesforce, MS",
+    # Bio-lab software names mis-parsed as cities (QA-reported)
+    "Parasoft, CA",
+    "SoftMaxPro, MS",
+    # CamelCase brand names that are never US places
+    "ServiceNow, CA",
+    "PowerBI, TX",
+    "FlowJo, CA",
+    "FACSDiva, NY",
+    "GraphPad, CA",
+])
+def test_false_city_state_values_are_blank_in_shared_display_sanitizer(value):
+    """Brand/tool names must not be retained as candidate city strings."""
+    assert sanitize_candidate_location(value) == ""
+
+
+@pytest.mark.parametrize("value", [
+    "Chicago, IL",
+    "Reading, PA",
+    "New York, NY 10018",
+])
+def test_real_city_state_values_survive_shared_display_sanitizer(value):
+    assert sanitize_candidate_location(value) == value
+
+
+@pytest.mark.parametrize("value", [
+    "Spring, TX", "Oracle, AZ", "Cassandra, PA", "DC, DC", "LA, CA",
+    # Mc* cities are real places — must not be blocked by the CamelCase guard
+    "McKinney, TX", "McAllen, TX",
+])
+def test_real_cities_that_collide_with_denylist_or_initials_survive(value):
+    assert sanitize_candidate_location(value) == value
+
+
+def test_empty_zip_index_uses_fallback_heuristics(monkeypatch):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {})
+    assert is_plausible_city_token("New Town", "TX")
+    assert not is_plausible_city_token("Parasoft", "CA")
+
+
+def test_loaded_index_miss_uses_fallback_instead_of_rejecting_city(monkeypatch):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {"90210": ["Beverly Hills", "CA", 0, 0]})
+    monkeypatch.setattr(zip_index, "is_known_city", lambda *_args: False)
+    assert is_plausible_city_token("New Town", "TX")
+    assert not is_plausible_city_token("Parasoft", "CA")
+
+
+@pytest.mark.parametrize("token,state,expected", [
+    ("Parasoft", "ON", False),
+    ("Dynatrace", "NS", False),
+    ("Ajax", "ON", True),
+])
+def test_canadian_city_tokens_apply_false_positive_guards(monkeypatch, token, state, expected):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {"90210": ["Beverly Hills", "CA", 0, 0]})
+    monkeypatch.setattr(zip_index, "is_known_city", lambda *_args: False)
+    assert is_plausible_city_token(token, state) is expected
+
+
+@pytest.mark.parametrize("token", ["St. Louis", "Ft. Worth"])
+def test_common_city_abbreviations_are_normalized_for_index_lookup(monkeypatch, token):
+    import services.zip_index as zip_index
+
+    looked_up = []
+    monkeypatch.setattr(zip_index, "_load", lambda: {"90210": ["Beverly Hills", "CA", 0, 0]})
+
+    def known_city(city, _state):
+        looked_up.append(city)
+        return city in {"Saint Louis", "Fort Worth"}
+
+    monkeypatch.setattr(zip_index, "is_known_city", known_city)
+    assert is_plausible_city_token(token, "MO" if token.startswith("St.") else "TX")
+    assert looked_up == ["Saint Louis" if token.startswith("St.") else "Fort Worth"]
+
+
+@pytest.mark.parametrize("token", ["McKinney", "McAllen", "DeKalb", "LaGrange"])
+def test_real_city_prefixes_survive_when_zip_index_is_unavailable(monkeypatch, token):
+    import services.zip_index as zip_index
+
+    monkeypatch.setattr(zip_index, "_load", lambda: {})
+    assert is_plausible_city_token(token, "TX")
+
+
+def test_state_less_phoenix_is_not_in_false_place_denylist():
+    assert is_plausible_city_token("Phoenix")
+
+
 def test_empty_and_none_inputs():
     assert sanitize_candidate_location("") == ""
     assert sanitize_candidate_location(None) == ""
     assert sanitize_candidate_location("   ") == ""
+
+
+def test_recruiter_note_location_extraction_validates_deduplicates_and_caps():
+    notes = (
+        "Locations: Mountain View, CA 94043; New York, New York; "
+        "Phoenix, AZ; Salesforce, MS; PS, PR"
+    )
+    locations = extract_us_locations_from_text(notes, limit=2)
+    assert locations == ["Mountain View, CA", "Phoenix, AZ"]
+    assert len(extract_us_locations_from_text(notes, limit=10)) <= 10
 
 
 def test_clean_location_value_rejects_arrangements_and_placeholders():
@@ -163,7 +276,7 @@ def test_verdict_arrangement_only_candidate_is_location_unknown(svc, monkeypatch
         {"location": "Remote", "enhanced_info": {"current_location": "Remote"}},
         _criteria(),
     )
-    assert ok and reason == "candidate_location_missing_keep"
+    assert not ok and reason == "candidate_location_missing"
     assert dist is not None  # sentinel distance, not "in radius"
 
 

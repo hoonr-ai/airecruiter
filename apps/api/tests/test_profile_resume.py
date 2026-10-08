@@ -22,8 +22,10 @@ from services.profile_resume import (
     clean_profile_text,
     deep_search_profile,
     is_placeholder_name,
+    is_stand_in_name,
     jobdiva_address_fields,
     linkedin_public_identifier,
+    name_from_linkedin_url,
     normalize_linkedin_profile,
     resume_to_docx,
     split_person_name,
@@ -315,10 +317,47 @@ def test_person_name_split():
 def test_placeholder_names():
     for name in ("", "Unknown", "Unknown Candidate", "Unnamed Candidate", "LinkedIn Candidate",
                  "LinkedIn Professional ab12cd34", "Data Engineer | Spark", "Data Engineer at Acme",
-                 "ada@example.com", "12345"):
+                 "ada@example.com", "12345", "LinkedIn Member", "Linkedin Member", " linkedin  MEMBER "):
         assert is_placeholder_name(name), name
     for name in ("Ada Lovelace", "Li Na", "José Álvarez", "O'Brien Kate", "Ahmad Ali At-Tamimi"):
         assert not is_placeholder_name(name), name
+
+
+def test_stand_in_names_are_only_the_exact_stand_ins():
+    for name in ("", "Unknown", "Linkedin Member", "LINKEDIN MEMBER", "Unknown Candidate"):
+        assert is_stand_in_name(name), name
+    # The headline / id heuristics of is_placeholder_name do not apply: these
+    # may be names a recruiter typed into JobDiva.
+    for name in ("Maria At Santos", "Ada Lovelace", "Data Engineer | Spark", "Ada"):
+        assert not is_stand_in_name(name), name
+
+
+def test_name_from_linkedin_url():
+    assert name_from_linkedin_url("https://www.linkedin.com/in/jane-doe-8a7b6c5") == "Jane Doe"
+    assert name_from_linkedin_url("linkedin.com/in/jos%C3%A9-%C3%A1lvarez/") == "José Álvarez"
+    assert name_from_linkedin_url("https://www.linkedin.com/in/mary-ann-smith-42?trk=x") == "Mary Ann Smith"
+    # Not plainly a name: a single word, digits only, an initial at either end.
+    for url in ("https://www.linkedin.com/in/janed", "https://www.linkedin.com/in/jdoe123",
+                "https://www.linkedin.com/in/123-456", "https://www.linkedin.com/in/j-doe",
+                "https://www.linkedin.com/in/a-b-c-d-e", "https://www.linkedin.com/talent/profile/AEMAA",
+                "", None):
+        assert name_from_linkedin_url(url) == "", url
+
+
+def test_hidden_linkedin_member_is_named_from_the_vanity_url():
+    hidden = {**normalize_linkedin_profile(UNIPILE_PROFILE), "name": "LinkedIn Member"}
+    resume = build_profile_resume(
+        _unipile_row(name="Linkedin Member", profile_url="https://www.linkedin.com/in/jane-doe-8a7b6c5"),
+        {"linkedin_profile": hidden},
+    )
+    assert resume.name == "Jane Doe"
+    assert resume.text.startswith("Jane Doe")
+
+
+def test_hidden_linkedin_member_without_a_vanity_url_stays_a_placeholder():
+    hidden = {**normalize_linkedin_profile(UNIPILE_PROFILE), "name": "LinkedIn Member", "public_profile_url": ""}
+    resume = build_profile_resume(_unipile_row(name="Linkedin Member", profile_url=""), {"linkedin_profile": hidden})
+    assert is_placeholder_name(resume.name)  # the provisioner refuses it
 
 
 def test_public_identifier_and_profile_text_helpers():

@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { REJECTION_REASONS } from "@/lib/rejection";
 import {
   ArrowLeft,
   Search,
@@ -26,6 +27,7 @@ import {
   Check,
   X,
   Activity,
+  Radio,
   Ban,
   AlertTriangle,
   PhoneOff,
@@ -42,6 +44,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { JobLiveReportPanel } from "@/components/jobs/JobLiveReportPanel";
 import {
   Select,
   SelectContent,
@@ -64,28 +67,8 @@ import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
-
-// Utility function to format dates
-const formatDate = (dateStr: string) => {
-  if (!dateStr) return "—";
-  try {
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-      month: '2-digit',
-      day: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-      timeZoneName: 'short'
-    }).replace(",", "");
-  } catch {
-    return dateStr;
-  }
-};
+import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
+import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -635,7 +618,7 @@ export default function CandidateRankingsPage() {
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
   type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
-  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
+  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status" | "engage_completed_at";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
   interface ColumnFilter {
@@ -645,6 +628,7 @@ export default function CandidateRankingsPage() {
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
+  const [viewMode, setViewMode] = useState<"table" | "live-report">("table");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [feedbackFilter, setFeedbackFilter] = useState<string>("");
   const [minScore, handleMinScoreChange, setMinScore] = useClampedScoreInput("");
@@ -869,6 +853,10 @@ export default function CandidateRankingsPage() {
         if (field === "name") val = c.name || "";
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
+        else if (field === "engage_completed_at") {
+          const completedAt = getCandidateCompletedAt(c);
+          val = completedAt ? formatEasternDateTime(completedAt) : "N/A";
+        }
         else if (field === "screening_score") val = String(c.match_score || 0);
         else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
@@ -945,6 +933,26 @@ export default function CandidateRankingsPage() {
           case "engage_status":
             primary = normalizeInterviewStatus(a).label.localeCompare(normalizeInterviewStatus(b).label);
             break;
+          case "engage_completed_at": {
+            // Compare parsed instants, not raw strings — localeCompare only
+            // sorted correctly when every value happened to be ISO-8601 with
+            // the same offset format. Missing values always sort last in
+            // both directions: `dir` flips the real-date comparison below as
+            // usual, but a missing-vs-present result is pre-multiplied by
+            // `dir` here so the later `dir * primary` cancels it back to a
+            // constant sign.
+            const rawA = getCandidateCompletedAt(a);
+            const rawB = getCandidateCompletedAt(b);
+            const timeA = rawA ? Date.parse(rawA) : NaN;
+            const timeB = rawB ? Date.parse(rawB) : NaN;
+            const missingA = Number.isNaN(timeA);
+            const missingB = Number.isNaN(timeB);
+            if (missingA && missingB) primary = 0;
+            else if (missingA) primary = dir;
+            else if (missingB) primary = -dir;
+            else primary = timeA - timeB;
+            break;
+          }
           default:
             primary = 0;
         }
@@ -2250,6 +2258,22 @@ export default function CandidateRankingsPage() {
                 <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
               </div>
 
+              <button
+                type="button"
+                onClick={() => setViewMode(prev => prev === "live-report" ? "table" : "live-report")}
+                className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all select-none shadow-sm cursor-pointer ${
+                  viewMode === "live-report"
+                    ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+                    : "bg-white border-slate-200 hover:bg-slate-50 text-slate-600 hover:text-emerald-700 hover:border-emerald-300"
+                }`}
+                title={viewMode === "live-report" ? "Switch back to Candidate Rankings view" : "Switch to Live Report telemetry view"}
+              >
+                <Radio className={`w-3.5 h-3.5 ${viewMode === "live-report" ? "text-indigo-600 animate-pulse" : "text-emerald-600 animate-pulse"}`} />
+                <span className="text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap">
+                  {viewMode === "live-report" ? "Rankings" : "Live Report"}
+                </span>
+              </button>
+
               {hasActiveFilters && (
                 <button
                   onClick={clearFilters}
@@ -2270,76 +2294,88 @@ export default function CandidateRankingsPage() {
             </div>
           </div>
 
-          {/* Row 2: Status, Source, Feedback, Min Resume Score */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
-              >
-                <option value="all">All</option>
-                <option value="pass">Pass</option>
-                <option value="fail">Fail</option>
-                <option value="in_progress">In Progress</option>
-                <option value="pending">Pending</option>
-                <option value="n/a">N/A</option>
-                <option value="duplicate_candidate">Duplicate Candidate</option>
-                <option value="invalid_contact">Invalid Contact</option>
-              </select>
-            </div>
+          {/* Row 2: Status, Source, Feedback, Min Resume Score (only in table mode) */}
+          {viewMode === "table" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 w-full">
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Status</label>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                  className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+                >
+                  <option value="all">All</option>
+                  <option value="pass">Pass</option>
+                  <option value="fail">Fail</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="pending">Pending</option>
+                  <option value="n/a">N/A</option>
+                  <option value="duplicate_candidate">Duplicate Candidate</option>
+                  <option value="invalid_contact">Invalid Contact</option>
+                </select>
+              </div>
 
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
-              <select
-                value={sourceFilter}
-                onChange={(e) => setSourceFilter(e.target.value)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
-              >
-                <option value="all">All</option>
-                {availableSources.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Source</label>
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value)}
+                  className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+                >
+                  <option value="all">All</option>
+                  {availableSources.map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
 
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
-              <select
-                value={feedbackFilter}
-                onChange={(e) => setFeedbackFilter(e.target.value)}
-                className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
-              >
-                <option value="">All</option>
-                <option value="no feedback">No Feedback</option>
-                <option value="submit">Submitted</option>
-                <option value="reject">Rejected</option>
-                <option value="unreachable">Unreachable</option>
-              </select>
-            </div>
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Feedback</label>
+                <select
+                  value={feedbackFilter}
+                  onChange={(e) => setFeedbackFilter(e.target.value)}
+                  className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 flex-1 text-right"
+                >
+                  <option value="">All</option>
+                  <option value="no feedback">No Feedback</option>
+                  <option value="submit">Submitted</option>
+                  <option value="reject">Rejected</option>
+                  <option value="unreachable">Unreachable</option>
+                </select>
+              </div>
 
-            <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
-              <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                value={minScore}
-                onChange={(e) => {
-                  handleMinScoreChange(e.target.value);
-                }}
-                className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
-              />
+              <div className="flex items-center justify-between gap-2 bg-white rounded-lg px-3 h-10 border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-sm w-full">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap shrink-0">Min Resume Score</label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={minScore}
+                  onChange={(e) => {
+                    handleMinScoreChange(e.target.value);
+                  }}
+                  className="h-7 w-full max-w-[80px] ml-auto text-[12px] font-bold bg-slate-50/50 border-slate-200 rounded px-2 text-center focus-visible:ring-indigo-500/20 focus-visible:border-indigo-500"
+                />
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* HTML Exact Replica Table */}
-        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
+        {/* View Mode Switching: Live Report vs. Candidate Rankings Table */}
+        {viewMode === "live-report" ? (
+          <div className="w-full">
+            <JobLiveReportPanel
+              jobId={jobId as string}
+              jobdivaId={job?.jobdiva_id}
+              initialTitle={job?.title}
+            />
+          </div>
+        ) : (
+          /* HTML Exact Replica Table */
+          <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
           <div
             ref={tableScrollRef}
             className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
@@ -2478,6 +2514,38 @@ export default function CandidateRankingsPage() {
                   <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
+                        onClick={() => toggleSort("engage_completed_at")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>{withEasternLabel("COMPLETED AT")}</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "engage_completed_at"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "engage_completed_at" ? null : "engage_completed_at"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["engage_completed_at"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Completed At"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "engage_completed_at" && (
+                        <ColumnFilterPopup
+                          field="engage_completed_at" label={withEasternLabel("COMPLETED AT")}
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, engage_completed_at: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.engage_completed_at; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["engage_completed_at"]}
+                        />
+                      )}
+                    </div>
+                  </TableHead>
+
+                  <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
                         onClick={() => toggleSort("engage_score")}
                         className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
                       >
@@ -2557,6 +2625,7 @@ export default function CandidateRankingsPage() {
                       <TableCell className="border-b border-slate-200 w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
@@ -2738,7 +2807,7 @@ export default function CandidateRankingsPage() {
                                   {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
                                     <div className="flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100">
                                       <div className="text-[11px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
-                                        <Mail className="w-3 h-3" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                        <Mail className="w-3 h-3" /> {formatEasternDateTime((candidate.engage_created_at || candidate.data?.engage_created_at) as string | undefined)}
                                       </div>
                                       {(() => {
                                         const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
@@ -2749,7 +2818,7 @@ export default function CandidateRankingsPage() {
                                             className={`text-[11px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
                                             title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
                                           >
-                                            <Phone className="w-3 h-3" /> {formatDate(phoneTime.toISOString())}
+                                            <Phone className="w-3 h-3" /> {formatEasternDateTime(phoneTime.toISOString())}
                                           </div>
                                         );
                                       })()}
@@ -2779,7 +2848,12 @@ export default function CandidateRankingsPage() {
                           })()}
                         </TableCell>
 
-
+                        <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] align-middle py-3 px-2 border-l border-slate-200">
+                          {(() => {
+                            const completedAt = getCandidateCompletedAt(candidate);
+                            return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
+                          })()}
+                        </TableCell>
 
                         <TableCell
                           className="border-b border-slate-200 text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
@@ -2953,6 +3027,7 @@ export default function CandidateRankingsPage() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* Modals */}
@@ -3080,35 +3155,18 @@ export default function CandidateRankingsPage() {
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <label htmlFor={`reject-reason-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <select
+                      id={`reject-reason-${actionCandidateId || "rankings"}`}
+                      aria-label="Rejection Reason"
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
                       onChange={e => setRejectReason(e.target.value)}
                     >
                       <option value="" disabled>Select a reason...</option>
-                      <option value="Skills do not meet requirements">Skills do not meet requirements</option>
-                      <option value="Communication skills">Communication skills</option>
-                      <option value="Domain experience mismatch">Domain experience mismatch</option>
-                      <option value="More qualified candidates identified">More qualified candidates identified</option>
-                      <option value="Overqualified for the role">Overqualified for the role</option>
-                      <option value="Compensation expectations exceed budget">Compensation expectations exceed budget</option>
-                      <option value="Not aligned with employment type (W2 / C2C / 1099)">Not aligned with employment type (W2 / C2C / 1099)</option>
-                      <option value="Work authorization / visa constraints">Work authorization / visa constraints</option>
-                      <option value="Not comfortable with background check / drug test">Not comfortable with background check / drug test</option>
-                      <option value="Not local and not open to relocation">Not local and not open to relocation</option>
-                      <option value="Open to remote only">Open to remote only</option>
-                      <option value="Not available within required timeline">Not available within required timeline</option>
-                      <option value="Accepted another offer">Accepted another offer</option>
-                      <option value="Candidate withdrew interest">Candidate withdrew interest</option>
-                      <option value="Career gap concern">Career gap concern</option>
-                      <option value="Job Hopping (short-term engagements throughout or in the last 5-7 years)">Job Hopping (short-term engagements throughout or in the last 5-7 years)</option>
-                      <option value="Fake candidate — Multiple profiles/resumes; misrepresentation of past experience">Fake candidate — Multiple profiles/resumes; misrepresentation of past experience</option>
-                      <option value="Already submitted to same client / hiring manager by another vendor">Already submitted to same client / hiring manager by another vendor</option>
-                      <option value="Previously rejected by client">Previously rejected by client</option>
-                      <option value="Not eligible for rehire">Not eligible for rehire</option>
-                      <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
-                      <option value="Candidate does not want to work with the same client">Candidate does not want to work with the same client</option>
+                      {REJECTION_REASONS.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
                     </select>
                   </div>
                 </div>

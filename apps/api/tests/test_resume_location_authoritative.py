@@ -138,7 +138,7 @@ def test_scoring_passes_when_resume_is_local_even_if_profile_is_not(svc):
     assert res["score"] == 100
 
 
-# ---------------------------------------------------------------- JobAgent exemption
+# ---------------------------------------------------------------- JobAgent location enforcement
 def test_jobagent_exemption_off_when_resume_contradicts_profile(svc):
     crit = _criteria(location="CA", within_miles=25,
                      skill_criteria=[{"value": "Python", "match_type": "must"}])
@@ -149,11 +149,14 @@ def test_jobagent_exemption_off_when_resume_contradicts_profile(svc):
     assert res["score_details"]["hard_filters"]["location"] == "fail"
 
 
-def test_jobagent_exemption_still_applies_without_conflict(svc):
+def test_jobagent_is_not_exempt_from_location_hard_veto(svc):
+    """Step 5 enforces the configured radius for every source, including
+    JobDiva-JobAgent — a confirmed out-of-state candidate is hard-vetoed
+    the same as any other source, with no per-source carve-out."""
     crit = _criteria(location="CA", within_miles=25,
                      skill_criteria=[{"value": "Python", "match_type": "must"}])
     cand = _cand(profile="Austin, TX", resume=None, source="JobDiva-JobAgent")
     svc._apply_resume_location(cand)
     res = svc._score_candidate(cand, crit)
-    assert res["score_details"]["hard_veto"]["triggered"] is False
-    assert res["score"] == 100
+    assert res["score_details"]["hard_veto"]["triggered"] is True
+    assert res["score"] == 0

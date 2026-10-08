@@ -6,9 +6,9 @@ import math
 import os
 import re
 import time
-from typing import List, Dict, Any, Optional, Sequence, Tuple
+from typing import List, Dict, Any, Callable, Optional, Sequence, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from services.jobdiva import JobDivaService
 from utils.email_utils import is_placeholder_email
@@ -17,6 +17,9 @@ from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import (
     haversine_miles,
+    inferred_region_states,
+    is_broad_region_location,
+    region_core_city,
     normalize_location_string,
     sanitize_candidate_location,
     within_radius,
@@ -244,6 +247,54 @@ logger = logging.getLogger(__name__)
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
 
 
+def _broad_core_inside_radius(broad_locs, required: Dict[str, str], criteria: "SearchCriteria") -> bool:
+    """Whether a metro's core city falls inside this one search circle.
+
+    Offline ZIP points only. The broad label is not sent to a geocoder.
+    """
+    from services import zip_index
+
+    miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+    required_point = None
+    if required.get("zip"):
+        required_point = zip_index.zip_centroid(required["zip"])
+    if required_point is None and required.get("city") and required.get("state"):
+        required_point = zip_index.city_state_representative_point(
+            required["city"], required["state"]
+        )
+    if required_point is None:
+        return False
+    for loc in broad_locs:
+        core = region_core_city(loc)
+        if not core:
+            continue
+        point = zip_index.city_state_representative_point(core[0], core[1])
+        if point is None:
+            continue
+        distance = haversine_miles(
+            point[0], point[1], required_point[0], required_point[1]
+        )
+        if distance <= miles:
+            return True
+    return False
+
+
+def _richer_profile_location(current: str, recovered: str) -> str:
+    """Return the profile location when it is new, including a wrong city.
+
+    Pass A can store a blank line, a bare city, or a city taken from a job
+    description. The later profile read replaces any of those. An identical
+    string is left alone.
+    """
+    current_text = str(current or "").strip()
+    recovered_text = str(recovered or "").strip()
+    if not recovered_text:
+        return ""
+    if recovered_text.casefold() == current_text.casefold():
+        return ""
+    return recovered_text
+
+
 def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
     """Whether a rubric chip is an EXCLUDE, tolerant of spelling/casing.
 
@@ -297,6 +348,21 @@ _off_search_family: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
+class LocationEntry(BaseModel):
+    """Typed entry for an additional sourcing location."""
+    value: str
+    within_miles: int = 25
+
+
+# Maximum number of additional locations accepted per request to cap
+# provider fan-out and protect latency and quota.
+_MAX_LOCATIONS: int = 10
+# Unipile is paused for new sourcing searches. Keep its implementation and
+# profile-enrichment path available for focused tests and a future re-enable.
+LINKEDIN_UNIPILE_SEARCH_ENABLED = False
+DISABLED_EXTERNAL_SOURCES = frozenset({"LinkedIn"})
+
+
 class SearchCriteria(BaseModel):
     job_id: str
     title_criteria: List[Dict[str, Any]] = []
@@ -305,6 +371,11 @@ class SearchCriteria(BaseModel):
     resume_match_filters: List[Dict[str, Any]] = []
     location: str = ""
     within_miles: int = 25
+    # Multi-location sourcing: additional locations beyond the primary.
+    # Each entry has "value" (location string) and optionally "within_miles".
+    # The location filter passes if the candidate is near ANY location.
+    # Capped at _MAX_LOCATIONS entries to prevent unbounded provider fan-out.
+    additional_locations: List[LocationEntry] = []
     # Job work arrangement ("Remote" | "Hybrid" | "Onsite" | "Unspecified").
     # Remote jobs skip the commute-radius constraint entirely (any US
     # location passes; non-US is still dropped).
@@ -328,6 +399,16 @@ class SearchCriteria(BaseModel):
     require_resume: bool = True
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
+    max_experience_years: Optional[int] = Field(None, ge=1, le=40)
+
+    @model_validator(mode="after")
+    def experience_years_form_a_valid_range(self):
+        """Keep saved/re-score criteria from creating an impossible YOE range."""
+        minimum = self.min_experience_years
+        maximum = self.max_experience_years
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("min_experience_years cannot exceed max_experience_years")
+        return self
     # JobDiva tranche controls. Initial search uses offset=0/batch=150; the
     # "Search more" action uses offset=150/batch=150 to append the next page.
     jobdiva_offset: int = 0
@@ -516,9 +597,38 @@ class UnifiedCandidateSearch:
             return None
         return detect_role_family(title_hint, "", criteria.skill_criteria or [])
 
+    @staticmethod
+    def _has_experience_years_range(criteria: "SearchCriteria") -> bool:
+        """Whether an upper YOE cap makes the range a strict hard filter."""
+        try:
+            return int(criteria.max_experience_years or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _experience_range_failure(criteria: "SearchCriteria", assessment: Any) -> bool:
+        """Whether Min YOE or Max YOE rejected this candidate."""
+        if not isinstance(assessment, dict):
+            return False
+        try:
+            min_set = int(getattr(criteria, "min_experience_years", 0) or 0) > 0
+        except (TypeError, ValueError):
+            min_set = False
+        max_set = UnifiedCandidateSearch._has_experience_years_range(criteria)
+        return bool(
+            (min_set and assessment.get("min_years_failure"))
+            or (max_set and assessment.get("max_years_failure"))
+        )
+
 
     def _log_stage(self, stage: str, message: str) -> None:
-        logger.info("[CandidateSearch] %s | %s", stage, message)
+        # AutoSync runs a search per monitored job every cycle; its stage
+        # lines were ~10k INFO lines per few hours. Keep them for interactive
+        # searches (support greps them), DEBUG for background sync.
+        from services.jobdiva_rate_limit import in_background
+
+        level = logging.DEBUG if in_background() else logging.INFO
+        logger.log(level, "[CandidateSearch] %s | %s", stage, message)
 
     async def _apply_contact_enrichment(
         self,
@@ -686,6 +796,7 @@ class UnifiedCandidateSearch:
 
         def finalize_candidate(cand):
             """Apply match scoring to a candidate — see apply_scoring_policy."""
+            self._hydrate_candidate_location_from_zip(cand)
             return self.apply_scoring_policy(cand, criteria)
 
         # Which JobDiva producers this request selects — see
@@ -757,11 +868,9 @@ class UnifiedCandidateSearch:
             }
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
-            # Policy 2026-05-13: only hard-drop on definitive non-US evidence.
-            # State-mismatch, outside-radius, and relocation-excluded-by-filter
-            # are softened to "show + score + let recruiter filter in UI" since
-            # the source-side metadata is often stale or the candidate is
-            # actively relocating.
+            # Keep the early source assessment permissive so candidates can
+            # finish enrichment. The final location gate below enforces every
+            # configured radius consistently before a row reaches Step 5.
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
             if not assessment.get("passes") and location_reason in {
                 "non_us_candidate",
@@ -793,6 +902,21 @@ class UnifiedCandidateSearch:
             cand = finalize_candidate(cand)
             cid = str(cand.get("candidate_id") or cand.get("id"))
 
+            # Step 5 has a strict radius contract across every source. Check
+            # again after finalization because résumé extraction may replace
+            # a stale profile location or recover a previously blank one.
+            self._hydrate_candidate_location_from_zip(cand)
+            final_location_veto = self._location_hard_gate(cand, criteria)
+            if final_location_veto:
+                summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
+                self._log_stage(
+                    "LocationGate",
+                    f"dropping candidate_id={cid} source={cand.get('source')} "
+                    f"reason={cand.get('location_veto_reason') or final_location_veto} "
+                    f"distance={cand.get('distance_miles')}",
+                )
+                return False
+
             # Relevance gate for machine-queried sources (Exa / Unipile /
             # DeepSearch / Dice / Vetted). JobDiva-JobAgent (recruiter-authored
             # criteria) and JobDiva-Applicants (real applicants) are exempt.
@@ -804,18 +928,6 @@ class UnifiedCandidateSearch:
             _exempt = set(getattr(_sc_gate, "EXTERNAL_MIN_SCORE_EXEMPT_SOURCES",
                                   ("JobDiva-JobAgent", "JobDiva-Applicants")))
             if _src not in _exempt:
-                if (
-                    bool(getattr(_sc_gate, "EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP", True))
-                    and cand.get("location_veto_reason")
-                ):
-                    summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
-                    self._log_stage(
-                        "LocationGate",
-                        f"dropping candidate_id={cid} source={_src} "
-                        f"reason={cand.get('location_veto_reason')} "
-                        f"distance={cand.get('distance_miles')}",
-                    )
-                    return False
                 _min_score = getattr(_sc_gate, "EXTERNAL_SOURCE_MIN_SCORE", None)
                 if (
                     _min_score is not None
@@ -920,6 +1032,21 @@ class UnifiedCandidateSearch:
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             if cid and cid in seen_ids:
                 return False
+
+            self._hydrate_candidate_location_from_zip(cand)
+            final_location_veto = self._location_hard_gate(cand, criteria)
+            if final_location_veto:
+                self._log_stage(
+                    "LocationGate",
+                    f"deferring JobDiva candidate_id={cid} source={source_label} "
+                    f"reason={cand.get('location_veto_reason') or final_location_veto} "
+                    f"distance={cand.get('distance_miles')}",
+                )
+                # The CRM location may be absent or stale; résumé enrichment
+                # can supply the authoritative current residence. Keep it out
+                # of Step 5 until the post-enrichment gate has a final verdict.
+                cand["_defer_initial_emit"] = True
+
             if cid:
                 seen_ids.add(cid)
 
@@ -948,8 +1075,9 @@ class UnifiedCandidateSearch:
                 if v not in (None, "", [], {}):
                     agent_payload[key] = v
 
-            summary["total_candidates"] += 1
-            await queue.put({"type": "candidate", "data": agent_payload})
+            if not cand.get("_defer_initial_emit", False):
+                summary["total_candidates"] += 1
+                await queue.put({"type": "candidate", "data": agent_payload})
             return True
 
         async def emit_source_status(
@@ -1074,19 +1202,62 @@ class UnifiedCandidateSearch:
             drops — no drop patch is sent for a row the client never saw.
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
+            deferred_initial = bool(cand.pop("_defer_initial_emit", False))
+            emit_full_row = as_full_row or deferred_initial
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
+            # A selected experience range is an explicit recruiter constraint,
+            # unlike the normal JobDiva relevance gate (which intentionally
+            # remains advisory).  Do not let JOBDIVA_BYPASS_PASS_GATE leak an
+            # enriched candidate outside that range back into Step 5.
+            range_failure = self._experience_range_failure(criteria, assessment)
+            if range_failure:
+                self._log_stage(
+                    "ExperienceGate",
+                    f"dropping candidate_id={cid} outside configured experience range",
+                )
+                if not emit_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "experience_years_out_of_range"},
+                    })
+                return False
             if not assessment.get("passes") and location_reason in {"non_us_candidate"}:
                 distance = cand.get("distance_miles")
                 self._log_stage(
                     "LocationGate",
                     f"dropping candidate_id={cid} reason={location_reason} distance={distance}",
                 )
-                if not as_full_row:
+                if not emit_full_row:
                     await queue.put({
                         "type": "candidate_detail",
                         "candidate_id": cid,
                         "stage": "dropped",
                         "patch": {"_stage": "dropped", "_drop_reason": "non_us_candidate"},
+                    })
+                return False
+
+            # Résumé enrichment (_apply_resume_location) can overwrite
+            # cand["location"] with a value the first-paint gate in
+            # emit_jobdiva_agent_result never saw — re-check here so a
+            # résumé-recovered location outside every configured radius
+            # still gets dropped instead of reaching Step 5.
+            self._hydrate_candidate_location_from_zip(cand)
+            scored_location_veto = self._location_hard_gate(cand, criteria)
+            if scored_location_veto:
+                summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
+                self._log_stage(
+                    "LocationGate",
+                    f"dropping candidate_id={cid} reason={cand.get('location_veto_reason') or scored_location_veto} "
+                    f"distance={cand.get('distance_miles')}",
+                )
+                if not emit_full_row:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "location_mismatch"},
                     })
                 return False
 
@@ -1123,7 +1294,7 @@ class UnifiedCandidateSearch:
                 # never-dropped JobAgent copy re-emit if it arrives later.
                 if cid:
                     seen_ids.discard(cid)
-                if not as_full_row:
+                if not emit_full_row:
                     await queue.put({
                         "type": "candidate_detail",
                         "candidate_id": cid,
@@ -1180,7 +1351,7 @@ class UnifiedCandidateSearch:
                             "candidate_id": owner_id,
                             "patch": dict(changed),
                         })
-                    if not as_full_row:
+                    if not emit_full_row:
                         await queue.put({
                             "type": "candidate_detail",
                             "candidate_id": cid,
@@ -1195,7 +1366,7 @@ class UnifiedCandidateSearch:
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
 
-            if as_full_row:
+            if emit_full_row:
                 # Sample mode: no skeleton row exists client-side — emit the
                 # fully-enriched, scored candidate as a complete row. The
                 # total_candidates counter normally increments at the
@@ -1321,7 +1492,7 @@ class UnifiedCandidateSearch:
                     "Applicants",
                     f"Found {len(applicants)} applicants; starting resume screen...",
                 )
-                if criteria.bypass_screening:
+                if criteria.bypass_screening and not self._has_experience_years_range(criteria):
                     self._log_stage("Applicants", f"Bypassing LLM enrichment for {len(applicants)} applicants (instant sync mode).")
                     for cand in applicants:
                         assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
@@ -1531,19 +1702,25 @@ class UnifiedCandidateSearch:
                             _jc = str(_c.get("candidate_id") or _c.get("id") or "")
                             if _jc:
                                 jobagent_matched_ids.add(_jc)
+                        if self._has_experience_years_range(criteria):
+                            self._log_stage(
+                                "ExperienceGate",
+                                "JobAgent range filter enabled; extracting résumés before emitting candidates",
+                            )
                         await _process_talent_pool(
                             jobagent_res,
                             stage_name="JobDiva",
                             source_label="JobDiva-JobAgent",
                             cap_label="JobAgent rank",
                             # Recruiter-authored criteria in JobDiva + its own
-                            # ranking → trust the results: high-level score only
-                            # (no per-candidate LLM skills-match), never dropped.
-                            # assess_all_sources (auto-launch flow) overrides
-                            # this: agent rows need a real, comparable score.
-                            high_level_scoring=bool(
-                                getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
-                            ) and not criteria.assess_all_sources,
+                            # ranking normally use a high-level score. A selected
+                            # YOE range is an explicit cap, however, and requires
+                            # résumé extraction before a row can be emitted.
+                            high_level_scoring=(
+                                bool(getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True))
+                                and not criteria.assess_all_sources
+                                and not self._has_experience_years_range(criteria)
+                            ),
                         )
 
                     # Two-phase fetch: JobAgentSearch latency scales with
@@ -1818,9 +1995,8 @@ class UnifiedCandidateSearch:
                         # PR-B: cheap pre-LLM YOE gate for external sources too.
                         # Drops candidates whose headline / abstract / resume
                         # snippet shows fewer years than the configured floor.
-                        if self._candidate_below_min_years_pre_llm(cand, criteria):
+                        if self._candidate_outside_years_range_pre_llm(cand, criteria):
                             return {"status": "failed_filter"}
-
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
                             return {"status": "failed_filter"}
@@ -1860,11 +2036,32 @@ class UnifiedCandidateSearch:
                             cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
                             cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
+                        cand["experience_years"] = (
+                            cand["enhanced_info"].get("years_of_experience")
+                            or cand.get("experience_years")
+                        )
                         # Résumé is final for residence (see
                         # _apply_resume_location): an explicitly stated
                         # résumé location replaces the profile's; the profile
                         # value only stands when the résumé is silent.
                         self._apply_resume_location(cand)
+                        # The heuristic gate above is only an early cost saver.
+                        # Once enrichment has extracted total YOE, enforce the
+                        # requested range against that authoritative value.
+                        range_assessment = self._filter_assessment(
+                            cand, criteria, enforce_years=True
+                        )
+                        if (
+                            range_assessment.get("min_years_failure")
+                            or range_assessment.get("max_years_failure")
+                        ):
+                            self._log_stage(
+                                "ExperienceGate",
+                                "dropping candidate_id=%s outside configured experience range" % (
+                                    cand.get("candidate_id") or cand.get("id"),
+                                ),
+                            )
+                            return {"status": "failed_experience_range"}
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 
@@ -2074,11 +2271,20 @@ class UnifiedCandidateSearch:
                             jd_title=agent_titles[0] if agent_titles else "",
                             jd_role=" or ".join(agent_titles[:2]),
                             skills=criteria.skill_only_values(),
-                            # Remote-aware: US-wide for remote jobs, else the
-                            # US-scoped job location.
-                            location=self._search_location_for_source(criteria),
+                            # Remote-aware: US-wide for remote jobs; else all
+                            # configured locations "or"-joined (Pass B is one
+                            # call per request, so additional locations ride
+                            # in the same prompt rather than a fan-out).
+                            location=self._search_location_for_deep_research(criteria),
                             seed_urls=seed_urls,
-                            within_miles=getattr(criteria, "within_miles", 25),
+                            # Exa accepts one radius for this OR query, so
+                            # request the broadest configured search envelope.
+                            # emit_candidate enforces each chip's exact radius
+                            # before a candidate reaches Step 5.
+                            within_miles=max(
+                                [getattr(criteria, "within_miles", 25) or 25]
+                                + [entry.within_miles for entry in (criteria.additional_locations or [])]
+                            ),
                             exclude_company=str(getattr(criteria, "client_name", "") or ""),
                         )
                     except Exception as e:
@@ -2128,6 +2334,55 @@ class UnifiedCandidateSearch:
                         cid = str(existing.get("candidate_id") or existing.get("id") or "")
                         if not cid:
                             continue
+                        # Pass A can store a blank line or the wrong city.
+                        # The agent reads the profile line. Write that place
+                        # onto the row. If it is outside every circle or
+                        # outside the country, remove the card: Step 5 already
+                        # drops a row when this event arrives with
+                        # stage "dropped". A place inside a circle, or a vague
+                        # label, stays and the badge updates.
+                        recovered_location = sanitize_candidate_location(entry.get("location"))
+                        current_location = sanitize_candidate_location(existing.get("location"))
+                        # A later read of the profile can replace a bare city
+                        # ("Edison") with the line LinkedIn actually shows
+                        # ("Edison, New Jersey, United States").
+                        upgraded = _richer_profile_location(current_location, recovered_location)
+                        if upgraded:
+                            existing["location"] = upgraded
+                            recovered_location = upgraded
+                            outside_country = self._is_likely_outside_country(
+                                existing, self._target_country(criteria)
+                            )
+                            recovered_veto = None if outside_country else self._location_hard_gate(
+                                existing, criteria
+                            )
+                            if outside_country or recovered_veto:
+                                self._log_stage(
+                                    "LocationGate",
+                                    f"dropping candidate_id={cid} after Exa location recovery "
+                                    f"location={recovered_location!r} "
+                                    f"reason={existing.get('location_veto_reason') or 'non_us_candidate'}",
+                                )
+                                await queue.put({
+                                    "type": "candidate_detail",
+                                    "candidate_id": cid,
+                                    "stage": "dropped",
+                                    "patch": {
+                                        "_stage": "dropped",
+                                        "_drop_reason": (
+                                            "non_us_candidate" if outside_country else "location_mismatch"
+                                        ),
+                                    },
+                                })
+                                continue
+                            patch_fields["location"] = recovered_location
+                            # A confirmed in-radius place clears the
+                            # unverified badge the blank row was showing.
+                            patch_fields["location_match_reason"] = (
+                                existing.get("location_match_reason") or ""
+                            )
+                            if existing.get("distance_miles") is not None:
+                                patch_fields["distance_miles"] = existing["distance_miles"]
                         prior_sources = existing.get("sources") or [existing.get("source") or "LinkedIn-Exa"]
                         if not isinstance(prior_sources, list):
                             prior_sources = [str(prior_sources)]
@@ -2284,7 +2539,7 @@ class UnifiedCandidateSearch:
 
         # Build producer tasks for all selected sources — run in parallel.
         # JobDiva Applicants and JobDiva Talent are now independent producers,
-        # each with its own SENTINEL, so they stream concurrently alongside Exa/Unipile/Dice.
+        # each with its own SENTINEL, so they stream concurrently alongside Exa/Dice.
         producers = []
         if applicants_selected:
             producers.append(asyncio.create_task(produce_jobdiva_applicants()))
@@ -2296,9 +2551,34 @@ class UnifiedCandidateSearch:
             ("Dice", self._search_dice),
             ("Exa", self._search_exa),
         ]
+        disabled_source_events = []
         for ext_name, ext_method in external_order:
+            # LinkedIn sourcing is currently paused because this path uses
+            # Unipile. Ignore stale clients and saved criteria that still
+            # submit LinkedIn; LinkedIn-Exa remains a separate active source.
+            if (
+                ext_name in criteria.sources
+                and ext_name in DISABLED_EXTERNAL_SOURCES
+                and not LINKEDIN_UNIPILE_SEARCH_ENABLED
+            ):
+                label = {"LinkedIn": "LinkedIn-Unipile"}.get(ext_name, ext_name)
+                disabled_source_events.append({
+                    "type": "source_status",
+                    "data": {
+                        "source": label,
+                        "status": "disabled",
+                        "count": 0,
+                        "reason": f"{label} sourcing is temporarily disabled.",
+                    },
+                })
+                continue
             if ext_name in criteria.sources:
                 producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
+
+        # Surface disabled sources even when no provider producers remain
+        # (for example, a stale client submitting only LinkedIn).
+        for event in disabled_source_events:
+            await queue.put(event)
 
         # Exa Research API Pass B — depends on Pass A (`produce_external("Exa")`),
         # so only schedule when both the agent is enabled AND Exa is selected.
@@ -2327,7 +2607,7 @@ class UnifiedCandidateSearch:
         hydration_targets: List[Dict[str, Any]] = []
         hydration_task: Optional[asyncio.Task] = None
         try:
-            while active > 0:
+            while active > 0 or not queue.empty():
                 event = await queue.get()
                 if event is SENTINEL:
                     active -= 1
@@ -2793,6 +3073,84 @@ class UnifiedCandidateSearch:
                 titles=title_pull_variants,
             )
 
+            # Multi-location: also search each additional location and merge.
+            # Cap to _MAX_LOCATIONS entries to prevent unbounded fan-out.
+            additional_locs = criteria.additional_locations[:_MAX_LOCATIONS]
+
+            async def _search_one_loc(
+                loc_entry: LocationEntry,
+            ) -> tuple[List[Dict[str, Any]], bool]:
+                """Run a single-location TalentSearch; returns (candidates, ok)."""
+                loc_value = str(loc_entry.value or "").strip()
+                loc_miles = max(1, min(100, int(loc_entry.within_miles)))
+                alt_criteria = criteria.model_copy(update={
+                    "location": loc_value,
+                    "within_miles": loc_miles,
+                    "additional_locations": [],
+                })
+                # Build a per-location boolean WITHOUT the multi-location OR
+                # clause so the text filter doesn't conflict with the geo radius.
+                loc_boolean = (
+                    criteria.boolean_string
+                    or self._build_boolean_string(alt_criteria, dialect="jobdiva")
+                )
+                alt_countries, alt_states, alt_geo_zip = self._resolve_jobdiva_geo(alt_criteria)
+                if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+                    alt_geo_zip = ""
+                    alt_states = []
+                try:
+                    cands = await self.jobdiva_service.search_candidates(
+                        skills=list(criteria.skill_criteria or []),
+                        location=loc_value,
+                        page=1,
+                        limit=max_total,
+                        job_id=None,
+                        boolean_string=loc_boolean,
+                        recent_days=criteria.recent_days,
+                        require_resume=getattr(criteria, "require_resume", True),
+                        countries=alt_countries,
+                        states=alt_states,
+                        page_number=0,
+                        zip_code=alt_geo_zip,
+                        within_miles=loc_miles,
+                        titles=title_pull_variants,
+                    )
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Multi-location TalentSearch for '{loc_value}' returned "
+                        f"{len(cands)} candidate(s)",
+                    )
+                    return cands, True
+                except Exception as loc_err:
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Multi-location search failed for '{loc_value}': {loc_err}",
+                    )
+                    return [], False
+
+            if additional_locs:
+                # Bounded concurrency: at most 3 parallel location calls.
+                _loc_sem = asyncio.Semaphore(3)
+
+                async def _guarded(loc: LocationEntry):
+                    async with _loc_sem:
+                        return await _search_one_loc(loc)
+
+                loc_results = await asyncio.gather(
+                    *[_guarded(loc) for loc in additional_locs]
+                )
+                partial_failures = 0
+                for loc_cands, ok in loc_results:
+                    all_candidates.extend(loc_cands)
+                    if not ok:
+                        partial_failures += 1
+                if partial_failures:
+                    self._log_stage(
+                        "TalentSearch",
+                        f"{partial_failures}/{len(additional_locs)} additional-location "
+                        "searches failed (partial results returned)",
+                    )
+
             self._log_stage(
                 "TalentSearch",
                 f"TalentSearch returned {len(all_candidates)} candidate(s) "
@@ -3048,29 +3406,29 @@ class UnifiedCandidateSearch:
 
         US-only is applied unconditionally; only candidates with positive
         evidence of a non-US location are dropped. The radius/state check
-        runs only when ``criteria.location`` is set, and soft-keeps any
-        candidate whose location can't be resolved.
+        runs only when a configured location is set. Missing locations are
+        deferred while enrichment can still supply one; confirmed radius
+        failures are rejected.
 
-        POLICY (JOBDIVA_LOCATION_SOFT_KEEP, default True): out-of-radius /
-        state-mismatch JobDiva candidates are NOT dropped here — they are kept
-        and flagged (`location_out_of_radius`, with `distance_miles`) so the
-        location rubric dimension scores them down and the recruiter can narrow
-        via the location chip / MIN MATCH. This mirrors `emit_candidate`'s
-        "soften everything except positive non-US evidence" policy so a JobDiva
-        row is never removed before it renders. Set the flag False to restore
-        the old hard radius filter.
+        Confirmed out-of-radius and state-mismatch candidates are removed
+        before Step 5. Missing locations can continue through enrichment; if
+        still unknown, the final emission gate retains them as unverified. A
+        location string that could not be geocoded is likewise retained rather
+        than misclassified as a confirmed radius failure.
         """
         if not candidates:
             return candidates
 
-        from core import sourcing_config as _sc_loc
-        soft_keep = bool(getattr(_sc_loc, "JOBDIVA_LOCATION_SOFT_KEEP", True))
         enforce_location = self._should_enforce_location(criteria)
         job_country = self._target_country(criteria)
+        from core import sourcing_config as _sc_location
+        radius_gate_enabled = getattr(
+            _sc_location, "LOCATION_RADIUS_HARD_GATE_ENABLED", True
+        )
 
         kept: List[Dict[str, Any]] = []
         non_us_dropped = 0
-        out_of_radius_kept = 0
+        out_of_radius_dropped = 0
         filtered = 0
         geocode_failed = 0
 
@@ -3083,28 +3441,44 @@ class UnifiedCandidateSearch:
                 kept.append(c)
                 continue
 
+            # The operational rollback must cover the early provider gate as
+            # well as the final Step 5 gate. Otherwise turning the switch off
+            # cannot recover candidates already discarded here.
+            if not radius_gate_enabled:
+                kept.append(c)
+                continue
+
             is_match, reason, distance = self._location_match_verdict(c, criteria)
-            if distance is not None:
+            if distance is not None and distance != _UNKNOWN_DISTANCE_SENTINEL:
                 c["distance_miles"] = round(float(distance), 1)
             if reason:
                 c["location_match_reason"] = reason
             if is_match:
                 kept.append(c)
-            elif soft_keep:
-                # Outside radius / different state — keep it visible (scored
-                # down on location), never hard-drop a JobDiva candidate here.
+            elif reason in {"outside_radius_confirmed", "state_mismatch"}:
+                # These are confirmed mismatches. Don't let source-specific
+                # soft-keep flags bypass the recruiter-configured radius.
                 c["location_out_of_radius"] = True
-                out_of_radius_kept += 1
-                kept.append(c)
+                c["location_veto_reason"] = (
+                    "outside_radius_confirmed"
+                    if reason == "outside_radius_confirmed"
+                    else reason
+                )
+                if distance is not None and distance != _UNKNOWN_DISTANCE_SENTINEL:
+                    c["distance_miles"] = round(float(distance), 1)
+                out_of_radius_dropped += 1
             else:
-                filtered += 1
+                # Keep unknown locations temporarily so resume/profile
+                # enrichment can recover them. The final emission gate is
+                # strict and drops them if the radius still can't be checked.
+                kept.append(c)
                 if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
                     geocode_failed += 1
 
         self._log_stage(
             "LocationGate",
             f"pre-filter kept {len(kept)}/{len(candidates)} candidates"
-            f" (non_us_dropped={non_us_dropped}, out_of_radius_kept={out_of_radius_kept},"
+            f" (non_us_dropped={non_us_dropped}, out_of_radius_dropped={out_of_radius_dropped},"
             f" filtered={filtered}, geocode_failures={geocode_failed})",
         )
         return kept
@@ -3529,7 +3903,23 @@ class UnifiedCandidateSearch:
             if is_jobdiva:
                 parts.append("IN {US}")
         elif criteria.location:
-            add_unique(parts, seen_must, quote(criteria.location), criteria.location)
+            # Multi-location: combine primary + additional locations as OR in
+            # the boolean string. For JobDiva TalentSearch the per-location loop
+            # in _search_jobdiva_talent_search already passes geo/zip params per
+            # location, so the combined text clause is intentionally omitted in
+            # those calls (alt_criteria has additional_locations=[]). This path
+            # only fires for the fallback single-criteria call and non-JobDiva
+            # dialects where a text OR is the only way to express multi-location.
+            loc_parts = [criteria.location]
+            for loc in criteria.additional_locations:
+                v = str(loc.value or "").strip()
+                if v and v not in loc_parts:
+                    loc_parts.append(v)
+            if len(loc_parts) == 1:
+                add_unique(parts, seen_must, quote(criteria.location), criteria.location)
+            else:
+                loc_clause = "(" + " OR ".join(quote(lp) for lp in loc_parts) + ")"
+                parts.append(loc_clause)
 
         boolean_string = " AND ".join(part for part in parts if part and part != "()") or "*"
         if exclude_terms:
@@ -3726,6 +4116,39 @@ class UnifiedCandidateSearch:
             candidate.pop(key, None)
         return True
 
+    def _hydrate_candidate_location_from_zip(self, candidate: Dict[str, Any]) -> bool:
+        """Fill a missing display location from a validated US ZIP code."""
+        if not isinstance(candidate, dict):
+            return False
+        existing = sanitize_candidate_location(candidate.get("location"))
+        if not existing:
+            existing = sanitize_candidate_location(
+                ", ".join(
+                    part for part in (
+                        str(candidate.get("city") or "").strip(),
+                        str(candidate.get("state") or "").strip(),
+                    ) if part
+                )
+            )
+        if existing:
+            candidate["location"] = existing
+            return False
+
+        from services import zip_index
+
+        entry = zip_index.lookup_zip(str(candidate.get("zipcode") or "").strip())
+        if not entry:
+            return False
+        city, state = str(entry.get("city") or "").strip(), str(entry.get("state") or "").strip()
+        location = sanitize_candidate_location(f"{city}, {state}")
+        if not location:
+            return False
+        candidate["city"] = city
+        candidate["state"] = state
+        candidate["location"] = location
+        candidate["location_source"] = candidate.get("location_source") or "zipcode"
+        return True
+
     def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
         """Return the candidate's current residence locations only.
 
@@ -3819,6 +4242,56 @@ class UnifiedCandidateSearch:
             return self._country_display_name(country)
         return self._scope_location_to_country(criteria.location, country)
 
+    def _search_location_for_deep_research(self, criteria: SearchCriteria) -> str:
+        """Location string for the Exa Pass B agent (a single prompt-based
+        call, unlike the fan-out used by the other external sources).
+
+        Pass B is a multi-minute sweep, so it runs once per request rather
+        than once per configured location. All configured locations are
+        combined into one "or"-joined string so the agent is still aware of
+        every additional location instead of only the primary one.
+        """
+        base = self._search_location_for_source(criteria)
+        if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+            return base
+        extra = [str(entry.value or "").strip() for entry in (criteria.additional_locations or [])]
+        extra = [value for value in extra if value]
+        if not extra:
+            return base
+        return " or ".join([base, *extra]) if base else " or ".join(extra)
+
+    def _location_criteria_variants(self, criteria: SearchCriteria) -> List[SearchCriteria]:
+        """Return one independent query criterion per selected location.
+
+        External providers accept one structured location per request.  A
+        combined ``New York OR Menlo Park`` string is not a portable geo query,
+        so fan out instead and merge/deduplicate the provider results.
+        Capped at _MAX_LOCATIONS total variants to protect latency and quota.
+        """
+        all_entries: List[LocationEntry] = []
+        if str(criteria.location or "").strip():
+            all_entries.append(LocationEntry(value=criteria.location, within_miles=criteria.within_miles))
+        all_entries.extend(criteria.additional_locations)
+
+        # Cap total locations
+        all_entries = all_entries[:_MAX_LOCATIONS]
+
+        variants: List[SearchCriteria] = []
+        seen = set()
+        for entry in all_entries:
+            value = str(entry.value or "").strip()
+            key = self._normalize_term(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            miles = max(1, min(100, int(entry.within_miles)))
+            variants.append(criteria.model_copy(update={
+                "location": value,
+                "within_miles": miles,
+                "additional_locations": [],
+            }))
+        return variants or [criteria]
+
     def _scope_location_to_country(self, location: Any, country_code: str) -> str:
         """Append the job's country name to a location string when no country
         is already named, so downstream services (Exa, Dice, Vetted, Unipile)
@@ -3910,6 +4383,91 @@ class UnifiedCandidateSearch:
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
     ) -> Tuple[bool, str, Optional[float]]:
+        """Multi-location wrapper: try primary location, then each
+        additional location. Returns the best (closest) match."""
+        additional = criteria.additional_locations
+        if not criteria.location and not additional:
+            return True, "no_location_requirement", None
+
+        # Try primary location first.
+        if criteria.location:
+            ok, reason, distance = self._single_location_match_verdict(candidate, criteria)
+            # If within radius for primary, return immediately.
+            if ok and reason not in ("outside_radius_confirmed", "geocode_unavailable",
+                                     "candidate_location_missing"):
+                return ok, reason, distance
+        else:
+            ok, reason, distance = True, "no_primary_location", None
+
+        # Try each additional location — build a temporary criteria with
+        # the additional location's value and radius. Return the closest
+        # match found across all locations.
+        #
+        # Precedence (high → low) — order-independent:
+        #   1. in-radius (returned immediately above/below)
+        #   2. soft-keep  (distance == _UNKNOWN_DISTANCE_SENTINEL)
+        #   3. confirmed hard-drop (real distance > radius)
+        # Within the same tier, pick the smallest distance.
+        # A soft-keep must NEVER be replaced by a hard-drop regardless of
+        # which location was evaluated first.
+        _SOFT_KEEP_REASONS = frozenset({
+            "geocode_unavailable",
+            "candidate_location_missing",
+            "broad_region_unverified",
+            "candidate_state_unknown",
+        })
+        _HARD_DROP_REASONS = frozenset({"outside_radius_confirmed", "state_mismatch"})
+
+        def _verdict_rank(r: str, d: Optional[float]) -> int:
+            """Lower rank = higher priority."""
+            if r not in _SOFT_KEEP_REASONS and r not in _HARD_DROP_REASONS:
+                return 0  # in-radius (shouldn't be best yet, but be safe)
+            if r in _SOFT_KEEP_REASONS or d == _UNKNOWN_DISTANCE_SENTINEL:
+                return 1  # soft-keep
+            return 2  # hard-drop
+
+        best_ok, best_reason, best_distance = ok, reason, distance
+        for loc_entry in additional:
+            loc_value = str(loc_entry.value or "").strip()
+            if not loc_value:
+                continue
+            loc_miles = max(1, min(100, int(loc_entry.within_miles)))
+            # Build a shallow copy of criteria with this location.
+            alt_criteria = criteria.model_copy(update={
+                "location": loc_value,
+                "within_miles": loc_miles,
+                "additional_locations": [],  # prevent recursion
+            })
+            alt_ok, alt_reason, alt_distance = self._single_location_match_verdict(
+                candidate, alt_criteria
+            )
+            # If within radius for this location, return immediately.
+            if alt_ok and alt_reason not in ("outside_radius_confirmed",
+                                              "geocode_unavailable",
+                                              "candidate_location_missing"):
+                return alt_ok, f"multi_loc_{alt_reason}", alt_distance
+            # Skip results where the zip-index entirely failed (distance is None):
+            # we can't compare them against an existing soft-keep or hard-drop.
+            if alt_distance is None:
+                continue
+            # Promote to best if it is higher-priority, or same tier but closer.
+            alt_rank = _verdict_rank(alt_reason, alt_distance)
+            best_rank = _verdict_rank(best_reason, best_distance) if best_distance is not None else 3
+            if alt_rank < best_rank or (
+                alt_rank == best_rank
+                and alt_distance != _UNKNOWN_DISTANCE_SENTINEL
+                and (best_distance is None or alt_distance < best_distance)
+            ):
+                best_ok, best_reason, best_distance = alt_ok, alt_reason, alt_distance
+
+        return best_ok, best_reason, best_distance
+
+    def _single_location_match_verdict(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> Tuple[bool, str, Optional[float]]:
+        """Check candidate against a single location from criteria."""
         if not criteria.location:
             return True, "no_location_requirement", None
 
@@ -3935,11 +4493,6 @@ class UnifiedCandidateSearch:
         if not required["city"] and not required["state"] and not required.get("zip"):
             return True, "empty_location_requirement", None
 
-        # B1: opt-out for "open to relocation" candidates whose actual location
-        # is unknown or outside the radius. Default keeps them (soft-keep).
-        relocation_flag = bool(candidate.get("open_to_relocation"))
-        include_relocation = bool(getattr(criteria, "include_relocation_candidates", True))
-
         candidate_locs = self._candidate_structured_locations(candidate)
 
         # Direct zip from the source payload (JobDiva JobAgent) — usable even
@@ -3951,13 +4504,48 @@ class UnifiedCandidateSearch:
             direct_zip = direct_zip_entry["zip"]
 
         if not candidate_locs and not direct_zip:
-            if relocation_flag and not include_relocation:
-                return False, "relocation_excluded_by_filter", None
-            # Soft-keep with sentinel distance so the UI counts these under
-            # BEYOND 25MI instead of silently treating them as in-radius.
-            # Common with JobDiva-JobAgent applicants whose city/state field
-            # is blank in the API response (data quality, not a remote signal).
-            return True, "candidate_location_missing_keep", _UNKNOWN_DISTANCE_SENTINEL
+            # A candidate without a usable location cannot be confirmed
+            # inside any configured radius. It may pass the early source
+            # screen so résumé enrichment can recover the location; if it
+            # remains unknown, the final gate retains it as unverified.
+            return False, "candidate_location_missing", _UNKNOWN_DISTANCE_SENTINEL
+
+        # Metro/region labels (Bay Area, Greater Chicago Area, etc.) are
+        # intentionally retained for display but do not identify a precise
+        # point. Never use a geocoder's representative centroid to hard-drop
+        # these candidates for a small radius. If a separate precise city/ZIP
+        # is present, keep evaluating that stronger evidence instead.
+        broad_locs = [loc for loc in candidate_locs if is_broad_region_location(loc)]
+        precise_locs = []
+        precise_candidate_locs = []
+        for loc in candidate_locs:
+            if is_broad_region_location(loc):
+                continue
+            parsed_loc = self._parse_location(loc)
+            if parsed_loc.get("zip") or (parsed_loc.get("city") and parsed_loc.get("state")):
+                precise_locs.append(parsed_loc)
+                precise_candidate_locs.append(loc)
+        if broad_locs and not direct_zip and not precise_locs:
+            known_states = set()
+            for loc in broad_locs:
+                state = self._parse_location(loc).get("state") or ""
+                # Ignore a leftover token such as "united" from
+                # "New York, United States". Only a real state code counts,
+                # plus the LinkedIn region table (Chicago → IL, Detroit → MI).
+                if len(state) == 2 and state.upper() in self._US_STATE_CODES:
+                    known_states.add(state.lower())
+                for code in inferred_region_states(loc):
+                    known_states.add(code.lower())
+            if required.get("state") and known_states and required["state"] not in known_states:
+                # The state list can still miss a border. Keep the row when
+                # the metro's core city sits inside this circle. Chicago
+                # against Richardson stays a mismatch: Chicago is outside.
+                if _broad_core_inside_radius(broad_locs, required, criteria):
+                    return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
+                return False, "state_mismatch", None
+            if required.get("state") and known_states and not required.get("city"):
+                return True, "state_match", None
+            return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
@@ -3975,9 +4563,9 @@ class UnifiedCandidateSearch:
                     if state == required["state"]:
                         return True, "state_match", None
             if not seen_states:
-                # Candidate has location text but no parseable state →
-                # soft-keep and let enrichment decide.
-                return True, "candidate_state_unknown_keep", None
+                # Defer unparseable text to résumé enrichment. If it remains
+                # unknown, the final Step 5 gate retains it as unverified.
+                return False, "candidate_state_unknown", _UNKNOWN_DISTANCE_SENTINEL
             return False, "state_mismatch", None
 
         # Hard cap 100 mi everywhere (defense-in-depth — UI also caps).
@@ -4003,13 +4591,27 @@ class UnifiedCandidateSearch:
         if required.get("zip"):
             required_point = zip_index.zip_centroid(required["zip"])
         if required_point is None and required.get("city") and required.get("state"):
-            required_point = zip_index.city_state_centroid(required["city"], required["state"])
+            # Representative ZIP, not the average of every ZIP. The average
+            # for Richardson sits ~4.5 miles south of the city and was
+            # keeping DeSoto, Cedar Hill, and northeast Arlington.
+            required_point = zip_index.city_state_representative_point(
+                required["city"], required["state"]
+            )
 
         offline_state_mismatch_distance: Optional[float] = None
         best_offline_distance: Optional[float] = None
         unresolved_locs: List[str] = []
+        # "Edison" with no state exists in several states. Showing it is
+        # right; geocoding it would pin the wrong Edison and hard-drop
+        # someone who is inside a circle.
+        saw_ambiguous_city = False
 
-        parse_targets = list(candidate_locs)
+        # When an exact city/state signal accompanies a broad region label,
+        # evaluate the exact signal and avoid using the region centroid as a
+        # second, misleading candidate point.
+        parse_targets = list(
+            precise_candidate_locs if broad_locs and precise_candidate_locs else candidate_locs
+        )
         if direct_zip:
             parse_targets.append(direct_zip)
 
@@ -4018,6 +4620,14 @@ class UnifiedCandidateSearch:
             cand_city = parsed.get("city", "")
             cand_state = parsed.get("state", "")
             cand_zip = parsed.get("zip", "")
+
+            if cand_city and not cand_state and not cand_zip:
+                only_state = zip_index.unique_state_for_city(cand_city)
+                if only_state:
+                    cand_state = only_state.lower()
+                else:
+                    saw_ambiguous_city = True
+                    continue
 
             # Exact zip match → same point, ~0 mi.
             if cand_zip and required.get("zip") and cand_zip == required["zip"]:
@@ -4037,7 +4647,7 @@ class UnifiedCandidateSearch:
             # flakiness whenever both sides resolve against the index.
             cand_point = zip_index.zip_centroid(cand_zip) if cand_zip else None
             if cand_point is None and cand_city and cand_state:
-                cand_point = zip_index.city_state_centroid(cand_city, cand_state)
+                cand_point = zip_index.city_state_representative_point(cand_city, cand_state)
             if cand_point is not None and required_point is not None:
                 d = haversine_miles(cand_point[0], cand_point[1], required_point[0], required_point[1])
                 if best_offline_distance is None or d < best_offline_distance:
@@ -4076,9 +4686,10 @@ class UnifiedCandidateSearch:
             # closest-distance with the offline estimate.
             closest_distance = offline_d
             if not unresolved_locs:
-                if relocation_flag and not include_relocation:
-                    return False, "relocation_excluded_by_filter", offline_d
-                return True, "outside_radius_soft_keep", offline_d
+                return False, "outside_radius_confirmed", offline_d
+
+        if best_offline_distance is None and saw_ambiguous_city and not unresolved_locs:
+            return False, "candidate_state_unknown", _UNKNOWN_DISTANCE_SENTINEL
 
         # Network path: Nominatim for the strings the offline index couldn't
         # place. Geocode the cleaned "City, ST" reconstruction as target —
@@ -4103,20 +4714,21 @@ class UnifiedCandidateSearch:
             closest_distance = offline_state_mismatch_distance
 
         if geocode_failure:
-            # Nominatim is best-effort and rate-limited. A geocode miss is
-            # not evidence the candidate is outside the radius — soft-keep
-            # but report the sentinel distance so BEYOND 25MI counts them.
-            return True, "geocode_unavailable_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
-        if relocation_flag and not include_relocation:
-            return False, "relocation_excluded_by_filter", closest_distance
-        # No hard filter: a candidate geocoded as outside the radius is
-        # still kept and shown under BEYOND 25MI with the real distance.
-        # The recruiter decides whether to widen radius or skip them.
-        return True, "outside_radius_soft_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
+            # Geocoding failure is not proof of a radius mismatch. Preserve
+            # this result as unverified; confirmed distances outside every
+            # configured radius are still rejected by the final Step 5 gate.
+            return False, "geocode_unavailable", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
+        return False, "outside_radius_confirmed", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
-        return bool(normalized_location)
+        if normalized_location:
+            return True
+        # Multi-location: enforce if any additional location is set.
+        for loc in criteria.additional_locations:
+            if str(loc.value or "").strip():
+                return True
+        return False
 
     def _parse_location(self, value: Any) -> Dict[str, str]:
         state_aliases = {
@@ -4167,8 +4779,28 @@ class UnifiedCandidateSearch:
 
         city = parts[0] if parts else ""
         state = ""
+        # Words of parts[1] that are NOT the state name. "New Jersey" is two
+        # words; taking only "New" left Edison and Poughkeepsie unresolvable
+        # and soft-kept them as if the profile had no location.
+        state_part_leftover: List[str] = []
         if len(parts) > 1:
-            state = parts[1].split()[0]
+            state_tokens = parts[1].split()
+            resolved_state = ""
+            consumed = 0
+            for n in (3, 2, 1):
+                if len(state_tokens) < n:
+                    continue
+                code = resolve_state_code(" ".join(state_tokens[:n]))
+                if code:
+                    resolved_state = code
+                    consumed = n
+                    break
+            if resolved_state:
+                state = resolved_state
+                state_part_leftover = state_tokens[consumed:]
+            elif state_tokens:
+                state = state_tokens[0]
+                state_part_leftover = state_tokens[1:]
         elif len(parts) == 1:
             tokens = parts[0].split()
             # Bare state input ("CA", "California", "Calif") — recognise via
@@ -4205,8 +4837,7 @@ class UnifiedCandidateSearch:
         # is ONLY a country name ("Toronto, Canada") moves to country.
         country = ""
         after_state_tokens: List[str] = []
-        if len(parts) > 1:
-            after_state_tokens.extend(parts[1].split()[1:])
+        after_state_tokens.extend(state_part_leftover)
         for extra_part in parts[2:]:
             after_state_tokens.extend(extra_part.split())
         for tok in reversed([t.strip() for t in after_state_tokens if t.strip()]):
@@ -4490,15 +5121,21 @@ class UnifiedCandidateSearch:
                 resume_location_term,
             ])
 
-        resume_years = 0
-        raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
-        if raw_years is not None:
-            try:
-                match = re.search(r"\d+(?:\.\d+)?", str(raw_years))
-                if match:
-                    resume_years = float(match.group(0))
-            except Exception:
-                resume_years = 0
+        resume_years = 0.0
+        # The résumé's own timeline is the total. A parsed "6" must not
+        # hide "6+" or a career that runs past the recruiter's ceiling.
+        measured_years = self._measured_total_years(candidate)
+        if measured_years:
+            resume_years = measured_years
+        else:
+            raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
+            if raw_years is not None:
+                try:
+                    match = re.search(r"\d+(?:\.\d+)?", str(raw_years))
+                    if match:
+                        resume_years = float(match.group(0))
+                except Exception:
+                    resume_years = 0.0
 
         match_text = self._candidate_match_text(candidate)
         return {
@@ -4800,16 +5437,27 @@ class UnifiedCandidateSearch:
         # heuristic default (which JobDiva can populate as a constant
         # like 4 from title alone, killing real candidates pre-LLM).
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if enforce_years and min_years > 0:
+        max_years = getattr(criteria, "max_experience_years", None)
+
+        if enforce_years:
             years = float(profile.get("years_of_experience") or 0)
-            if 0 < years < min_years:
-                return {
-                    "passes": False,
-                    "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
-                    "matched": self._dedupe_terms(matched),
-                    "excluded": self._dedupe_terms(excluded),
-                    "min_years_failure": True,
-                }
+            if years > 0:
+                if min_years > 0 and years < min_years:
+                    return {
+                        "passes": False,
+                        "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
+                        "matched": self._dedupe_terms(matched),
+                        "excluded": self._dedupe_terms(excluded),
+                        "min_years_failure": True,
+                    }
+                if max_years is not None and int(max_years) > 0 and years > int(max_years):
+                    return {
+                        "passes": False,
+                        "missing": [f"YOE: maximum {int(max_years)} years (resume shows {int(years)})"],
+                        "matched": self._dedupe_terms(matched),
+                        "excluded": self._dedupe_terms(excluded),
+                        "max_years_failure": True,
+                    }
 
         if self._should_enforce_location(criteria):
             location_ok, reason, distance = self._location_match_verdict(candidate, criteria)
@@ -5035,7 +5683,10 @@ class UnifiedCandidateSearch:
                 if days <= 180:
                     return 0.5
                 return 0.3
-        if candidate.get("open_to_work") or candidate.get("open_to_relocation"):
+        if candidate.get("open_to_work") or (
+            criteria.include_relocation_candidates
+            and candidate.get("open_to_relocation")
+        ):
             return 0.8
         return None
 
@@ -5054,10 +5705,27 @@ class UnifiedCandidateSearch:
             return None
 
     def _location_hard_gate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Optional[str]:
-        """Evidence-based location gate. Returns a veto reason string ONLY when
-        the candidate's location is KNOWN and confirmed outside the radius;
-        returns None (no veto) when location is unknown/unparseable — those
-        candidates are kept (soft) per the existing location policy."""
+        """Hard-drop only candidates *confirmed* outside the radius; soft-keep everything else.
+
+        The two hard-drop cases are:
+          - ``state_mismatch``: candidate's state is known and differs from the
+            required state.
+          - ``outside_radius_confirmed``: geocoding succeeded and the measured
+            distance exceeds every configured radius.
+
+        Candidates whose location is blank, broad (e.g. "San Francisco Bay Area"),
+        or temporarily unresolvable (geocoder outage) are soft-kept so that a
+        data gap is never mistaken for a confirmed out-of-radius result. The
+        recruiter sees an "unverified location" badge for these rows.
+
+        The strict gate can be disabled operationally with
+        LOCATION_RADIUS_HARD_GATE_ENABLED.
+        """
+        for key in (
+            "location_veto_reason", "location_out_of_radius",
+            "distance_miles", "location_match_reason",
+        ):
+            candidate.pop(key, None)
         if not self._should_enforce_location(criteria):
             return None
         ok, reason, distance = self._location_match_verdict(candidate, criteria)
@@ -5065,51 +5733,58 @@ class UnifiedCandidateSearch:
             candidate["distance_miles"] = (
                 None if distance == _UNKNOWN_DISTANCE_SENTINEL else round(float(distance), 1)
             )
-        # Confirmed-outside reasons. "outside_radius_soft_keep" only counts as
-        # confirmed when we have a real (non-sentinel) distance beyond the radius.
-        miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
-        # Stamp the badge fields for every scored candidate — previously only
-        # the JobDiva LocationGate set them, so Exa/LinkedIn rows never showed
-        # the out-of-radius badge even with a confirmed distance.
+        # Stamp the distance badge for all known out-of-radius candidates.
         if (
             isinstance(distance, (int, float))
             and distance != _UNKNOWN_DISTANCE_SENTINEL
-            and distance > miles
+            and reason == "outside_radius_confirmed"
         ):
             candidate["location_out_of_radius"] = True
             candidate.setdefault("location_match_reason", reason)
-        # JobDiva-JobAgent exemption: these rows follow the criteria the
-        # recruiter authored inside JobDiva (which may deliberately reach
-        # beyond the job's radius), so a confirmed mismatch never zeroes
-        # their score — the badge fields stamped above still render the
-        # distance and the recruiter filters via the UI chips. Every other
-        # source falls through to the hard veto below.
-        # Résumé-is-final policy: the exemption trusts JobDiva's own location
-        # filtering, which is exactly what a conflicting résumé location just
-        # contradicted — then the mismatch vetoes like any other source.
-        from core import sourcing_config as _sc_gate
-        resume_contradicts_profile = bool(
-            candidate.get("location_source") == "resume" and candidate.get("location_conflict")
-        )
-        if (
-            str(candidate.get("source") or "") == "JobDiva-JobAgent"
-            and not getattr(_sc_gate, "JOBAGENT_LOCATION_HARD_VETO", False)
-            and not resume_contradicts_profile
-        ):
+
+        if ok:
             return None
-        if reason in ("state_mismatch", "relocation_excluded_by_filter"):
+
+        candidate["location_match_reason"] = reason
+        if reason == "geocode_unavailable":
+            # We have a location string but the geocoder could not resolve
+            # it. Don't turn a transient network failure into a false
+            # confirmed mismatch; retain the row without an out-of-radius
+            # badge and let the recruiter see the known text location.
+            return None
+
+        from core import sourcing_config as _sc_location
+        if not getattr(_sc_location, "LOCATION_RADIUS_HARD_GATE_ENABLED", True):
+            # Kill switch preserves the radius badge/reason while allowing
+            # results through for rollback during a geodata incident.
+            return None
+
+        if reason == "state_mismatch":
             # Machine-readable veto marker for the emit-time drop gates and
             # telemetry (the human string below feeds explainability only).
             candidate["location_veto_reason"] = reason
             return f"location outside {criteria.location}"
         if (
-            reason == "outside_radius_soft_keep"
+            reason == "outside_radius_confirmed"
             and isinstance(distance, (int, float))
             and distance != _UNKNOWN_DISTANCE_SENTINEL
-            and distance > miles
         ):
             candidate["location_veto_reason"] = "outside_radius_confirmed"
-            return f"location {round(float(distance))}mi outside {criteria.location} ({miles}mi radius)"
+            return f"location {round(float(distance))}mi outside every configured radius"
+
+        # Unresolvable locations (blank profile, broad region like "San Francisco
+        # Bay Area", or any other case where we cannot confirm the candidate is
+        # outside the radius) are soft-kept. Hard-drop is reserved exclusively
+        # for candidates whose distance is *confirmed* to exceed the limit
+        # (outside_radius_confirmed above) or who are in the wrong state
+        # (state_mismatch above). Dropping on mere inability to geocode would
+        # incorrectly remove valid local candidates whose location strings are
+        # imprecise (e.g. "Greater Chicago Area") or temporarily unavailable.
+        # The recruiter sees an "unverified location" badge instead.
+        candidate["location_match_reason"] = reason or "location_unverified"
+        if distance == _UNKNOWN_DISTANCE_SENTINEL:
+            candidate["distance_miles"] = None
+        # Do NOT return a veto string — soft-keep the candidate.
         return None
 
     # ------------------------------------------------------------------
@@ -5780,8 +6455,15 @@ class UnifiedCandidateSearch:
             hard_filters["certifications"] = "n/a"
 
         # ── Hard filter: mandatory location (evidence-based) ─────────────
+        # The emission gate drops missing local locations, but a geocoder
+        # failure is retained as unverified. Scoring only hard-fails a
+        # confirmed mismatch; uncertainty must not read as "definitely
+        # somewhere else".
         location_veto = self._location_hard_gate(candidate, criteria)
-        if location_veto:
+        confirmed_location_veto = location_veto and candidate.get("location_veto_reason") in (
+            "state_mismatch", "outside_radius_confirmed",
+        )
+        if confirmed_location_veto:
             hard_fail_reasons.append(location_veto)
             hard_filters["location"] = "fail"
         else:
@@ -5851,26 +6533,9 @@ class UnifiedCandidateSearch:
             score_details["band"] = band
             explainability.insert(0, _MATRIX_BAND_LINES.get(band["tier"], ""))
 
-        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
-        # _location_hard_gate exemption) — say so in the score popup, so the
-        # distance badge and a non-zero score don't read as a contradiction.
-        if (
-            not hard_fail_reasons
-            and candidate.get("location_out_of_radius")
-            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
-        ):
-            _dist = candidate.get("distance_miles")
-            _note = (
-                f"~{round(float(_dist))} mi from the job location"
-                if isinstance(_dist, (int, float))
-                else "Outside the job's location radius"
-            )
-            explainability.insert(
-                1,
-                f"{_note} — kept: JobDiva agent results follow the "
-                "recruiter's own criteria, so location isn't hard-enforced",
-            )
-
+        # Step 5 enforces the configured radius for every source, including
+        # JobDiva-JobAgent — a confirmed-outside location is already a
+        # hard_fail_reasons entry by this point, so no per-source carve-out.
         explainability = [line for line in explainability if line]
         if not explainability or (len(explainability) == 1 and not buckets):
             explainability = ["No active rubric criteria were available for scoring"]
@@ -6098,9 +6763,14 @@ class UnifiedCandidateSearch:
                 matched_required_skills.append(f"{label}: {round(s * 100)}%")
 
         # ---- Location hard gate (evidence-based). Only vetoes when the
-        # candidate's location is known AND confirmed outside the radius. ----
+        # candidate's location is known AND confirmed outside the radius.
+        # Missing local locations are dropped at emission; geocoder failures
+        # remain unverified and must not read as confirmed mismatches here.
         location_veto = self._location_hard_gate(candidate, criteria)
-
+        if location_veto and candidate.get("location_veto_reason") not in (
+            "state_mismatch", "outside_radius_confirmed",
+        ):
+            location_veto = None
         score = 0
         if weighted_max > 0:
             score = round(max(0.0, min(100.0, (sum(weighted_scores) / weighted_max) * 100)))
@@ -6128,27 +6798,6 @@ class UnifiedCandidateSearch:
         else:
             explainability.insert(0, "Limited fit against active rubric and sourcing filters")
 
-        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
-        # _location_hard_gate exemption) — say so in the score popup, so the
-        # distance badge and a non-zero score don't read as a contradiction.
-        if (
-            not hard_veto_hits
-            and not location_veto
-            and candidate.get("location_out_of_radius")
-            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
-        ):
-            _dist = candidate.get("distance_miles")
-            _note = (
-                f"~{round(float(_dist))} mi from the job location"
-                if isinstance(_dist, (int, float))
-                else "Outside the job's location radius"
-            )
-            explainability.insert(
-                1,
-                f"{_note} — kept: JobDiva agent results follow the "
-                "recruiter's own criteria, so location isn't hard-enforced",
-            )
-
         if not explainability:
             explainability = ["No active resume-match filters were available for scoring"]
 
@@ -6171,6 +6820,34 @@ class UnifiedCandidateSearch:
     _YEARS_REGEX = re.compile(
         r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.IGNORECASE
     )
+    _EXPERIENCE_MONTHS = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+    _EXPERIENCE_RANGE_RE = re.compile(
+        r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*"
+        r"(?:(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+((?:19|20)\d{2})|(Present|Current|Now|Ongoing))\b",
+        re.IGNORECASE,
+    )
+    _EXPLICIT_TOTAL_YEARS_RE = re.compile(
+        r"\b(\d{1,2})\s*(\+)?\s*(?:years?|yrs?)\s+of\s+"
+        r"(?:professional\s+|relevant\s+|total\s+|industry\s+)?experience\b",
+        re.IGNORECASE,
+    )
 
     def _heuristic_years_from_text(self, text: str) -> int:
         if not text:
@@ -6188,42 +6865,171 @@ class UnifiedCandidateSearch:
                 best = value
         return best
 
-    def _candidate_below_min_years_pre_llm(
+    def _month_index(self, month_name: str, year: int) -> Optional[int]:
+        month = self._EXPERIENCE_MONTHS.get(str(month_name or "").strip().lower().rstrip("."))
+        if not month or year < 1900 or year > 2100:
+            return None
+        return year * 12 + month
+
+    _EXPERIENCE_HEADING_RE = re.compile(
+        r"(?im)^[ \t]*(?:professional\s+|work\s+)?(?:experience|employment|work\s+history)\b.*$"
+    )
+    _EXPERIENCE_END_RE = re.compile(
+        r"(?im)^[ \t]*(?:education|academic|certifications?|licenses|skills|technical\s+skills|"
+        r"projects|publications|awards|references)\b.*$"
+    )
+    _NUMERIC_RANGE_RE = re.compile(
+        r"\b(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*"
+        r"(?:(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})|(present|current|now|ongoing))\b",
+        re.IGNORECASE,
+    )
+    _YEAR_RANGE_RE = re.compile(
+        r"\b((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*((?:19|20)\d{2}|present|current|now|ongoing)\b",
+        re.IGNORECASE,
+    )
+
+    def _experience_section(self, text: str) -> str:
+        """The work-history block only. Education and projects stay out."""
+        match = self._EXPERIENCE_HEADING_RE.search(str(text or ""))
+        if not match:
+            return ""
+        rest = text[match.end():]
+        end = self._EXPERIENCE_END_RE.search(rest)
+        return rest[:end.start()] if end else rest
+
+    def _add_span(self, spans: List[Tuple[int, int]], start: Optional[int], end: Optional[int]) -> None:
+        if start is None or end is None or end < start or end - start > 50 * 12:
+            return
+        spans.append((start, end + 1))
+
+    def _timeline_years(self, text: str, now: Any = None) -> Optional[float]:
+        """Union of employment date ranges, in years. Skill lines are ignored."""
+        from datetime import datetime, timezone
+
+        if now is None:
+            now = datetime.now(timezone.utc)
+        now_index = now.year * 12 + now.month
+        spans: List[Tuple[int, int]] = []
+        body = str(text or "")
+        for match in self._EXPERIENCE_RANGE_RE.finditer(body):
+            start = self._month_index(match.group(1), int(match.group(2)))
+            if match.group(5):
+                end = now_index
+            else:
+                end = self._month_index(match.group(3), int(match.group(4)))
+            self._add_span(spans, start, end)
+        for match in self._NUMERIC_RANGE_RE.finditer(body):
+            start = int(match.group(1)) + int(match.group(2)) * 12
+            if match.group(5):
+                end = now_index
+            else:
+                end = int(match.group(3)) + int(match.group(4)) * 12
+            self._add_span(spans, start, end)
+        for match in self._YEAR_RANGE_RE.finditer(body):
+            prefix = body[max(0, match.start() - 12):match.start()]
+            if re.search(r"(?i)jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec", prefix):
+                continue
+            start_year = int(match.group(1))
+            start = start_year * 12 + 1
+            if re.fullmatch(r"(?i)present|current|now|ongoing", match.group(2) or ""):
+                end = now_index
+            else:
+                end = int(match.group(2)) * 12 + 12
+            self._add_span(spans, start, end)
+        if not spans:
+            return None
+        spans.sort()
+        merged: List[List[int]] = []
+        for start, end in spans:
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        months = sum(end - start for start, end in merged)
+        if months <= 0:
+            return None
+        return round(months / 12.0, 2)
+
+    def _explicit_total_years(self, text: str) -> Optional[float]:
+        """A stated career total, such as '7+ years of experience'.
+
+        'N+' is just over N, so a ceiling of N excludes it. A skill line
+        like 'java: 9 years' is not a career total.
+        """
+        best: Optional[float] = None
+        for match in self._EXPLICIT_TOTAL_YEARS_RE.finditer(str(text or "")[:4000]):
+            try:
+                years = int(match.group(1))
+            except ValueError:
+                continue
+            if years <= 0 or years > 50:
+                continue
+            value = years + (0.1 if match.group(2) else 0.0)
+            best = value if best is None else max(best, value)
+        return best
+
+    def _measured_total_years(self, candidate: Dict[str, Any], now: Any = None) -> Optional[float]:
+        """Total career years from work history, for every source.
+
+        Job dates win. A summary line such as "15+ years of experience" cannot
+        raise a shorter work history. "6+" is used only when the résumé has
+        no job dates, and it counts as just over 6. Education, projects, and
+        per-skill lines ("java: 9 years") are not the career.
+        """
+        enhanced = candidate.get("enhanced_info") or {}
+        job_lines: List[str] = []
+        if isinstance(enhanced, dict):
+            for item in enhanced.get("company_experience") or []:
+                if not isinstance(item, dict):
+                    continue
+                start = str(item.get("start_date") or item.get("start") or "").strip()
+                end = str(item.get("end_date") or item.get("end") or "").strip()
+                if start or end:
+                    job_lines.append(f"{start} - {end}")
+        experience_text = ""
+        if job_lines:
+            experience_text = "\n".join(job_lines)
+        else:
+            sections = [
+                self._experience_section(str(candidate.get(key) or ""))
+                for key in ("resume_text", "deep_text")
+            ]
+            experience_text = "\n".join(section for section in sections if section)
+        timeline = self._timeline_years(experience_text, now=now) if experience_text else None
+        if timeline:
+            return timeline
+        stated_parts = [
+            str(candidate.get(key) or "")
+            for key in ("headline", "summary", "abstract", "resume_text", "deep_text")
+        ]
+        return self._explicit_total_years("\n".join(stated_parts))
+
+    def _candidate_outside_years_range_pre_llm(
         self,
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
     ) -> bool:
-        """Cheap regex check before LLM enrichment runs.
+        """True when the résumé's total years sit outside Min YOE or Max YOE.
 
-        True only when the candidate's headline / abstract / resume_text
-        head contains a parseable years number AND that number is below
-        `criteria.min_experience_years`. Returns False when no number is
-        found (deferred to the post-LLM gate via `_filter_assessment`).
-
-        core.sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK: when set, skip the
-        heuristic entirely for JobDiva-sourced candidates. JobDiva's
-        experience_years can be a constant default per the comment at line
-        ~1849, and the regex pulls numbers out of "5+ years" copy that may
-        not reflect the actual resume. Defer YOE to the post-LLM gate
-        (Stage 5).
+        Unknown totals are left for the post-parse gate. This does not use
+        JobDiva's stored experience_years field or a per-skill 'N years' line.
         """
-        from core import sourcing_config
-        if sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK:
-            source = str(candidate.get("source") or "").lower()
-            if source.startswith("jobdiva"):
-                return False
-
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if min_years <= 0:
+        max_years = getattr(criteria, "max_experience_years", None)
+        try:
+            max_years = int(max_years) if max_years is not None else 0
+        except (TypeError, ValueError):
+            max_years = 0
+        if min_years <= 0 and max_years <= 0:
             return False
-        haystack = " ".join([
-            str(candidate.get("headline") or ""),
-            str(candidate.get("title") or ""),
-            str(candidate.get("abstract") or ""),
-            str(candidate.get("resume_text") or "")[:1500],
-        ])
-        years = self._heuristic_years_from_text(haystack)
-        return 0 < years < min_years
+        years = self._measured_total_years(candidate)
+        if not years:
+            return False
+        if min_years > 0 and years < min_years:
+            return True
+        if max_years > 0 and years > max_years:
+            return True
+        return False
 
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
         """Collect match dimensions for PRE-SCREENING.
@@ -6381,7 +7187,15 @@ class UnifiedCandidateSearch:
         for company in criteria.companies:
             add_terms("companies", "must", [company])
         if self._should_enforce_location(criteria):
-            add_terms("location", "must", [criteria.location])
+            all_loc_values = []
+            if criteria.location:
+                all_loc_values.append(criteria.location)
+            for loc in criteria.additional_locations:
+                v = str(loc.value or "").strip()
+                if v and v not in all_loc_values:
+                    all_loc_values.append(v)
+            if all_loc_values:
+                add_terms("location", "must", all_loc_values)
 
         # PR-B: lift Certifications + Education filters from the Step-4
         # rubric into pre-screen. Other categories (skill / title /
@@ -6650,18 +7464,18 @@ class UnifiedCandidateSearch:
                     # resume text confidently shows fewer years than the
                     # configured floor, before paying for LLM enrichment.
                     # Soft-keep if no number is parseable.
-                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                    if self._candidate_outside_years_range_pre_llm(candidate, criteria):
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                            "skipping LLM for candidate_id=%s reason=outside_years_range_pre_llm threshold=%s" % (
                                 candidate_id,
                                 int(criteria.min_experience_years or 0),
                             ),
                         )
                         return {"status": "failed_filter", "candidate": None}
 
-                    if criteria.bypass_screening:
+                    if criteria.bypass_screening and not self._has_experience_years_range(criteria):
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
                         # In bypass mode, we still ensure name/title/location are basic-hydrated
                         # even without LLM if JobDiva already has them.
@@ -7034,11 +7848,11 @@ class UnifiedCandidateSearch:
                         return
 
                     # PR-B: cheap pre-LLM YOE gate.
-                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                    if self._candidate_outside_years_range_pre_llm(candidate, criteria):
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s (kept, scored)" % (
+                            "skipping LLM for candidate_id=%s reason=outside_years_range_pre_llm threshold=%s (kept, scored)" % (
                                 cid,
                                 int(criteria.min_experience_years or 0),
                             ),
@@ -7046,7 +7860,7 @@ class UnifiedCandidateSearch:
                         await _keep("kept_min_years")
                         return
 
-                    if criteria.bypass_screening:
+                    if criteria.bypass_screening and not self._has_experience_years_range(criteria):
                         self._log_stage(
                             "ResumeScreen",
                             f"Bypassing LLM extraction for candidate_id={cid} (auto-sync mode)",
@@ -7413,7 +8227,39 @@ class UnifiedCandidateSearch:
             logger.warning(f"client-employee filter skipped ({source_label}): {exc}")
             return candidates
 
+    async def _fan_out_multi_location_search(
+        self,
+        criteria: SearchCriteria,
+        single_loc_fn: Callable,
+        source_type: str,
+    ) -> Dict[str, Any]:
+        """Fan out a single-location search function over all location variants.
+
+        Uses asyncio.gather with bounded concurrency (3 parallel calls) to
+        protect latency and provider quota. Deduplicates the merged results.
+        Capped at _MAX_LOCATIONS total variants.
+        """
+        variants = self._location_criteria_variants(criteria)
+        _sem = asyncio.Semaphore(3)
+
+        async def _guarded(variant: SearchCriteria) -> Dict[str, Any]:
+            async with _sem:
+                return await single_loc_fn(variant)
+
+        results = await asyncio.gather(*[_guarded(v) for v in variants])
+        merged: List[Dict[str, Any]] = []
+        for r in results:
+            merged.extend(r.get("candidates") or [])
+        return {
+            "candidates": self._deduplicate_candidates(merged),
+            "source_type": source_type,
+        }
+
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_linkedin, "LinkedIn-Unipile"
+            )
         try:
             # Unipile expects skills as a list of dicts. Carry each term's real
             # rubric priority (Must Have vs Preferred) so the Unipile layer can
@@ -7629,6 +8475,10 @@ class UnifiedCandidateSearch:
         return False
 
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_dice, "Dice"
+            )
         try:
             # Structured criteria feed natural-language queries (one role per
             # search — Exa doesn't parse boolean syntax). Only the recruiter-
@@ -7654,6 +8504,10 @@ class UnifiedCandidateSearch:
             return {"candidates": [], "source_type": "Dice"}
 
     async def _search_vetted(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_vetted, "VettedDB"
+            )
         try:
             candidates = await self.vetted_service.search_candidates(
                 skills=criteria.sourcing_skill_values(),
@@ -7666,6 +8520,10 @@ class UnifiedCandidateSearch:
             return {"candidates": [], "source_type": "VettedDB"}
 
     async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        if criteria.additional_locations:
+            return await self._fan_out_multi_location_search(
+                criteria, self._search_exa, "LinkedIn-Exa"
+            )
         try:
             # Floor at 30 so the Exa Research Pass B has a meaningful seed-URL
             # sample even when the recruiter's page_size is small, and cap at
