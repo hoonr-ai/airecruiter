@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, getActiveUserEmail } from "@/lib/api";
 import { toCsv, UTF8_BOM } from "@/lib/csv";
 import { EMPTY_DATE, formatEasternDate, formatEasternDateTime, withEasternLabel } from "@/lib/date";
+import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
@@ -723,6 +724,10 @@ export default function GlobalCandidatesPage() {
       setToast({ message: "Start Date cannot be after End Date.", type: "error" });
       return;
     }
+    if (completedStartDate && completedEndDate && completedStartDate > completedEndDate) {
+      setToast({ message: "Completed From cannot be after Completed To.", type: "error" });
+      return;
+    }
 
     setIsExporting(true);
     try {
@@ -791,7 +796,7 @@ export default function GlobalCandidatesPage() {
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
           const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
           const feedback = knownFeedback(c.feedback);
-          const completedAt = (c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at) as string | undefined;
+          const completedAt = getCandidateCompletedAt(c);
 
           return [
             c.jobdiva_id || "",
@@ -1203,7 +1208,7 @@ export default function GlobalCandidatesPage() {
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] border-l border-slate-200">
                         {(() => {
-                          const completedAt = (c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at) as string | undefined;
+                          const completedAt = getCandidateCompletedAt(c);
                           return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
                         })()}
                       </TableCell>

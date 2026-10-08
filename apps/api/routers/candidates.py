@@ -3775,6 +3775,33 @@ def _launched_status_filter(status: Optional[str]) -> Tuple[str, List[Any]]:
     return " AND la.status = %s", [status]
 
 
+# Single source of truth for "when did this candidate complete their
+# interview" on the SQL side — first_completed_at (the live-merged value the
+# list endpoint also prefers when building cand["engage_completed_at"], see
+# that assignment below) beats the stored engage_completed_at. The frontend's
+# getCandidateCompletedAt (apps/web/lib/candidate-completed-at.ts) mirrors
+# this exact order so a candidate is never filtered on one timestamp while a
+# different one displays.
+_COMPLETED_AT_JSON_EXPR = (
+    "NULLIF(COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at'), '')"
+)
+# sc.data is a free-form JSON blob written by several upstream paths with no
+# shared validation, so a malformed string there must not fail the whole
+# listing with a 500 — CASE WHEN ... ELSE NULL is evaluated in declared
+# order per the SQL standard (unlike a bare AND, whose operand order the
+# planner may rearrange), so this is a safe "try-cast, else NULL" idiom: a
+# row that fails the pattern check is excluded from the date-range match
+# (as if it had no completed-at), never raises.
+_COMPLETED_AT_TS_PATTERN = r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})"
+
+
+def _safe_completed_at_timestamptz_expr() -> str:
+    return (
+        f"(CASE WHEN {_COMPLETED_AT_JSON_EXPR} ~ '{_COMPLETED_AT_TS_PATTERN}' "
+        f"THEN CAST({_COMPLETED_AT_JSON_EXPR} AS timestamptz) ELSE NULL END)"
+    )
+
+
 def _launched_filter_conditions(
     search: Optional[str],
     status: Optional[str],
@@ -3858,13 +3885,13 @@ def _launched_filter_conditions(
         if not date_pattern.match(completed_start_date):
             raise HTTPException(status_code=400, detail="Invalid completed_start_date format, expected YYYY-MM-DD")
         dt = datetime.strptime(completed_start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
-        search_condition += " AND CAST(NULLIF(COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at'), '') AS timestamptz) >= %s"
+        search_condition += f" AND {_safe_completed_at_timestamptz_expr()} >= %s"
         params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
     if completed_end_date:
         if not date_pattern.match(completed_end_date):
             raise HTTPException(status_code=400, detail="Invalid completed_end_date format, expected YYYY-MM-DD")
         dt = datetime.strptime(completed_end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
-        search_condition += " AND CAST(NULLIF(COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at'), '') AS timestamptz) <= %s"
+        search_condition += f" AND {_safe_completed_at_timestamptz_expr()} <= %s"
         params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
 
     return search_condition, params, feedback_exists_condition, feedback_order_by

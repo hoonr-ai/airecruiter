@@ -229,6 +229,18 @@ def test_malformed_date_is_a_400_not_a_500():
     assert exc.value.status_code == 400
 
 
+def test_malformed_completed_start_date_is_a_400_not_a_500():
+    with pytest.raises(cr.HTTPException) as exc:
+        cr._launched_filter_conditions(None, None, None, None, None, None, None, "09/21/2026", None)
+    assert exc.value.status_code == 400
+
+
+def test_malformed_completed_end_date_is_a_400_not_a_500():
+    with pytest.raises(cr.HTTPException) as exc:
+        cr._launched_filter_conditions(None, None, None, None, None, None, None, None, "09/21/2026")
+    assert exc.value.status_code == 400
+
+
 def test_non_admin_is_refused():
     with pytest.raises(cr.HTTPException) as exc:
         asyncio.run(cr.get_launched_candidates(
@@ -617,7 +629,10 @@ def test_pg_pages_are_stable_and_match_the_total(pg):
 
 def test_pg_completed_date_filter_uses_data_timestamp(pg):
     _seed_two_jobs(pg)
-    # c1 job A has completed date via engage_completed_at
+    # c99's completed date (engage_completed_at, 09-22) is deliberately a
+    # different day than its audit row's created_at (09-20, _audit's default)
+    # — the filter must key off the completion timestamp, not the launch/audit
+    # timestamp _launch_date_filter already covers.
     _sourced(pg, A_REF, "c99", {"engage_completed_at": "2026-09-22T14:00:00Z", "engage_status": "passed"})
     _audit(pg, A_REF, "c99", "i-c99", "completed", "2026-09-20 10:00:00")
 
@@ -625,3 +640,65 @@ def test_pg_completed_date_filter_uses_data_timestamp(pg):
     rows = _rows(_call(completed_start_date="2026-09-22", completed_end_date="2026-09-22"))
     assert (A_REF, "c99") in rows
     assert len(rows) == 1
+
+
+def test_pg_completed_date_filter_prefers_first_completed_at(pg):
+    """first_completed_at (the live-merged value the list endpoint also
+    prefers, see cand["engage_completed_at"] = first_completed_at) must win
+    over a stale stored engage_completed_at — same COALESCE order as the SQL
+    filter and the frontend's getCandidateCompletedAt."""
+    _seed_two_jobs(pg)
+    _sourced(pg, A_REF, "c98", {
+        "first_completed_at": "2026-09-22T14:00:00Z",
+        "engage_completed_at": "2026-01-01T00:00:00Z",  # stale, must be ignored
+        "engage_status": "passed",
+    })
+    _audit(pg, A_REF, "c98", "i-c98", "completed", "2026-09-20 10:00:00")
+
+    # A window around first_completed_at only — would miss if engage_completed_at won.
+    rows = _rows(_call(completed_start_date="2026-09-22", completed_end_date="2026-09-22"))
+    assert (A_REF, "c98") in rows
+
+    # A window around the stale engage_completed_at only — must NOT match.
+    rows = _rows(_call(completed_start_date="2026-01-01", completed_end_date="2026-01-01"))
+    assert (A_REF, "c98") not in rows
+
+
+def test_pg_completed_date_filter_excludes_candidates_with_no_completed_timestamp(pg):
+    _seed_two_jobs(pg)
+    # c1/c2/c9 from _seed_two_jobs carry no first_completed_at/engage_completed_at.
+    rows = _rows(_call(completed_start_date="2020-01-01", completed_end_date="2030-01-01"))
+    assert rows == {}
+
+
+def test_pg_completed_date_filter_tolerates_malformed_stored_value(pg):
+    """sc.data is free-form JSON with no shared validation — a non-timestamp
+    value there must not 500 the whole listing (the CASE-guarded cast treats
+    it as no completed-at, same as missing)."""
+    _seed_two_jobs(pg)
+    _sourced(pg, A_REF, "c97", {"engage_completed_at": "pending", "engage_status": "in_progress"})
+    _audit(pg, A_REF, "c97", "i-c97", "sent", "2026-09-20 10:00:00")
+
+    rows = _rows(_call(completed_start_date="2020-01-01", completed_end_date="2030-01-01"))
+    assert (A_REF, "c97") not in rows
+
+    # And the unfiltered call (which also reaches this row) must not 500 either.
+    all_rows = _rows(_call())
+    assert (A_REF, "c97") in all_rows
+
+
+def test_pg_completed_date_filter_end_boundary_across_dst_fallback(pg):
+    """2026-11-01 is the US DST fallback day: 23:59:59 America/New_York that
+    evening is already EST (UTC-5), not EDT (UTC-4) — a hardcoded offset
+    instead of a real zoneinfo conversion would shift this boundary by an
+    hour. completed_end_date="2026-11-01" must include an instant exactly at
+    that boundary and exclude one one second later."""
+    _seed_two_jobs(pg)
+    _sourced(pg, A_REF, "c96", {"engage_completed_at": "2026-11-02T04:59:59Z"})  # 2026-11-01 23:59:59 EST
+    _audit(pg, A_REF, "c96", "i-c96", "completed", "2026-09-20 10:00:00")
+    _sourced(pg, B_REF, "c95", {"engage_completed_at": "2026-11-02T05:00:00Z"})  # 2026-11-02 00:00:00 EST
+    _audit(pg, B_REF, "c95", "i-c95", "completed", "2026-09-20 10:00:00")
+
+    rows = _rows(_call(completed_start_date="2026-11-01", completed_end_date="2026-11-01"))
+    assert (A_REF, "c96") in rows
+    assert (B_REF, "c95") not in rows

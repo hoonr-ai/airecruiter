@@ -68,8 +68,7 @@ import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
-
-
+import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -854,7 +853,10 @@ export default function CandidateRankingsPage() {
         if (field === "name") val = c.name || "";
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
-        else if (field === "engage_completed_at") val = c.engage_completed_at || c.data?.engage_completed_at ? formatEasternDateTime((c.engage_completed_at || c.data?.engage_completed_at) as string | undefined) : "N/A";
+        else if (field === "engage_completed_at") {
+          const completedAt = getCandidateCompletedAt(c);
+          val = completedAt ? formatEasternDateTime(completedAt) : "N/A";
+        }
         else if (field === "screening_score") val = String(c.match_score || 0);
         else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
@@ -931,11 +933,26 @@ export default function CandidateRankingsPage() {
           case "engage_status":
             primary = normalizeInterviewStatus(a).label.localeCompare(normalizeInterviewStatus(b).label);
             break;
-          case "engage_completed_at":
-            const dateA = a.engage_completed_at || a.data?.engage_completed_at || "";
-            const dateB = b.engage_completed_at || b.data?.engage_completed_at || "";
-            primary = dateA.localeCompare(dateB);
+          case "engage_completed_at": {
+            // Compare parsed instants, not raw strings — localeCompare only
+            // sorted correctly when every value happened to be ISO-8601 with
+            // the same offset format. Missing values always sort last in
+            // both directions: `dir` flips the real-date comparison below as
+            // usual, but a missing-vs-present result is pre-multiplied by
+            // `dir` here so the later `dir * primary` cancels it back to a
+            // constant sign.
+            const rawA = getCandidateCompletedAt(a);
+            const rawB = getCandidateCompletedAt(b);
+            const timeA = rawA ? Date.parse(rawA) : NaN;
+            const timeB = rawB ? Date.parse(rawB) : NaN;
+            const missingA = Number.isNaN(timeA);
+            const missingB = Number.isNaN(timeB);
+            if (missingA && missingB) primary = 0;
+            else if (missingA) primary = dir;
+            else if (missingB) primary = -dir;
+            else primary = timeA - timeB;
             break;
+          }
           default:
             primary = 0;
         }
@@ -2609,6 +2626,7 @@ export default function CandidateRankingsPage() {
                       <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
@@ -2831,7 +2849,10 @@ export default function CandidateRankingsPage() {
                         </TableCell>
 
                         <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] align-middle py-3 px-2 border-l border-slate-200">
-                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatEasternDateTime((candidate.engage_completed_at || candidate.data?.engage_completed_at) as string | undefined) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
+                          {(() => {
+                            const completedAt = getCandidateCompletedAt(candidate);
+                            return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
+                          })()}
                         </TableCell>
 
                         <TableCell
