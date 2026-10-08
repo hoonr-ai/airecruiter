@@ -67,28 +67,9 @@ import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
+import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 
-// Utility function to format dates
-const formatDate = (dateStr: string) => {
-  if (!dateStr) return "—";
-  try {
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-      month: '2-digit',
-      day: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-      timeZoneName: 'short'
-    }).replace(",", "");
-  } catch {
-    return dateStr;
-  }
-};
+
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -874,7 +855,7 @@ export default function CandidateRankingsPage() {
         if (field === "name") val = c.name || "";
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
-        else if (field === "engage_completed_at") val = c.engage_completed_at || c.data?.engage_completed_at ? formatDate(c.engage_completed_at || c.data?.engage_completed_at) : "N/A";
+        else if (field === "engage_completed_at") val = c.engage_completed_at || c.data?.engage_completed_at ? formatEasternDateTime(c.engage_completed_at || c.data?.engage_completed_at) : "N/A";
         else if (field === "screening_score") val = String(c.match_score || 0);
         else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
@@ -2520,7 +2501,7 @@ export default function CandidateRankingsPage() {
                         onClick={() => toggleSort("engage_completed_at")}
                         className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
                       >
-                        <span>COMPLETED AT</span>
+                        <span>{withEasternLabel("COMPLETED AT")}</span>
                         <div className="flex items-center gap-1 ml-2">
                           {sortField === "engage_completed_at"
                             ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
@@ -2536,7 +2517,7 @@ export default function CandidateRankingsPage() {
                       </button>
                       {activeFilterField === "engage_completed_at" && (
                         <ColumnFilterPopup
-                          field="engage_completed_at" label="COMPLETED AT"
+                          field="engage_completed_at" label={withEasternLabel("COMPLETED AT")}
                           onClose={() => setActiveFilterField(null)}
                           onApply={(f) => { setColumnFilters(p => ({ ...p, engage_completed_at: f })); setActiveFilterField(null); }}
                           onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.engage_completed_at; return n; }); setActiveFilterField(null); }}
@@ -2809,7 +2790,7 @@ export default function CandidateRankingsPage() {
                                   {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
                                     <div className="flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100">
                                       <div className="text-[11px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
-                                        <Mail className="w-3 h-3" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                        <Mail className="w-3 h-3" /> {formatEasternDateTime(candidate.engage_created_at || candidate.data?.engage_created_at)}
                                       </div>
                                       {(() => {
                                         const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
@@ -2820,7 +2801,7 @@ export default function CandidateRankingsPage() {
                                             className={`text-[11px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
                                             title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
                                           >
-                                            <Phone className="w-3 h-3" /> {formatDate(phoneTime.toISOString())}
+                                            <Phone className="w-3 h-3" /> {formatEasternDateTime(phoneTime.toISOString())}
                                           </div>
                                         );
                                       })()}
@@ -2851,7 +2832,7 @@ export default function CandidateRankingsPage() {
                         </TableCell>
 
                         <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] align-middle py-3 px-2 border-l border-slate-200">
-                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatDate(candidate.engage_completed_at || candidate.data?.engage_completed_at) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
+                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatEasternDateTime(candidate.engage_completed_at || candidate.data?.engage_completed_at) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
                         </TableCell>
 
                         <TableCell
