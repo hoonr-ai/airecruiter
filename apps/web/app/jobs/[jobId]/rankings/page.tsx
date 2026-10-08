@@ -276,7 +276,6 @@ interface Candidate {
   jobdiva_candidate_id?: string;
   candidate_id?: string;
   engage_interview_id?: string;
-  engage_completed_at?: string;
   name: string;
   email: string;
   phone?: string;
