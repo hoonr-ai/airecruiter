@@ -126,7 +126,7 @@ def test_status_filter_edge_values():
 
 def test_statements_take_exactly_the_params_the_endpoint_passes():
     search_condition, params, fb_cond, fb_order = cr._launched_filter_conditions(
-        "jane", "pass", "Reject", "LinkedIn", 60, "2026-09-01", "2026-09-30",
+        "jane", "pass", "Reject", "LinkedIn", 60, "2026-09-01", "2026-09-30", "2026-09-01", "2026-09-30"
     )
     rows_sql, count_sql = cr._launched_candidates_sql(search_condition, fb_cond, fb_order)
     # '%%' is psycopg2's escaped literal percent, not a placeholder.
@@ -148,7 +148,7 @@ def _squash(sql):
 
 def _shipped(feedback=None):
     search_condition, _, fb_cond, fb_order = cr._launched_filter_conditions(
-        None, None, feedback, None, None, None, None,
+        None, None, feedback, None, None, None, None, None, None
     )
     rows_sql, count_sql = cr._launched_candidates_sql(search_condition, fb_cond, fb_order)
     return _squash(rows_sql), _squash(count_sql), _squash(fb_cond)
@@ -225,7 +225,7 @@ def test_shipped_feedback_condition_sits_in_where_not_order_by():
 
 def test_malformed_date_is_a_400_not_a_500():
     with pytest.raises(cr.HTTPException) as exc:
-        cr._launched_filter_conditions(None, None, None, None, None, "09/21/2026", None)
+        cr._launched_filter_conditions(None, None, None, None, None, "09/21/2026", None, None, None)
     assert exc.value.status_code == 400
 
 
@@ -235,6 +235,7 @@ def test_non_admin_is_refused():
             user=UserIdentity(email="r@x.com", role="team_lead"),
             limit=50, offset=0, search=None, status=None, feedback=None,
             source=None, min_score=None, start_date=None, end_date=None,
+            completed_start_date=None, completed_end_date=None,
         ))
     assert exc.value.status_code == 403
 
@@ -347,7 +348,8 @@ def _submittal(conn, job_id, candidate_id, submit_date):
 
 def _call(**kw):
     args = dict(limit=50, offset=0, search=None, status=None, feedback=None, source=None,
-                min_score=None, start_date=None, end_date=None)
+                min_score=None, start_date=None, end_date=None,
+                completed_start_date=None, completed_end_date=None)
     args.update(kw)
     return asyncio.run(cr.get_launched_candidates(user=ADMIN, **args))
 
@@ -612,3 +614,14 @@ def test_pg_pages_are_stable_and_match_the_total(pg):
     for offset in range(0, total, 3):
         seen += [r["id"] for r in _call(limit=3, offset=offset)["candidates"]]
     assert len(seen) == total == len(set(seen)) == 15
+
+def test_pg_completed_date_filter_uses_data_timestamp(pg):
+    _seed_two_jobs(pg)
+    # c1 job A has completed date via engage_completed_at
+    _sourced(pg, A_REF, "c99", {"engage_completed_at": "2026-09-22T14:00:00Z", "engage_status": "passed"})
+    _audit(pg, A_REF, "c99", "i-c99", "completed", "2026-09-20 10:00:00")
+
+    # Filter with completed_start_date
+    rows = _rows(_call(completed_start_date="2026-09-22", completed_end_date="2026-09-22"))
+    assert (A_REF, "c99") in rows
+    assert len(rows) == 1

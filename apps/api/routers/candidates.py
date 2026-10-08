@@ -3858,14 +3858,14 @@ def _launched_filter_conditions(
         if not date_pattern.match(completed_start_date):
             raise HTTPException(status_code=400, detail="Invalid completed_start_date format, expected YYYY-MM-DD")
         dt = datetime.strptime(completed_start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
-        search_condition += " AND COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at') >= %s"
-        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        search_condition += " AND CAST(NULLIF(COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at'), '') AS timestamptz) >= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
     if completed_end_date:
         if not date_pattern.match(completed_end_date):
             raise HTTPException(status_code=400, detail="Invalid completed_end_date format, expected YYYY-MM-DD")
         dt = datetime.strptime(completed_end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
-        search_condition += " AND COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at') <= %s"
-        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        search_condition += " AND CAST(NULLIF(COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at'), '') AS timestamptz) <= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
 
     return search_condition, params, feedback_exists_condition, feedback_order_by
 
