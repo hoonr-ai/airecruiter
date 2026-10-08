@@ -486,6 +486,8 @@ export default function GlobalCandidatesPage() {
   const [availableSources, setAvailableSources] = useState<string[]>([]);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
+  const [completedStartDate, setCompletedStartDate] = useState("");
+  const [completedEndDate, setCompletedEndDate] = useState("");
   const [isExporting, setIsExporting] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
@@ -626,7 +628,7 @@ export default function GlobalCandidatesPage() {
 
   const fetchIdRef = useRef(0);
 
-  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, replace: boolean = false) => {
+  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, completedStart: string, completedEnd: string, replace: boolean = false) => {
     fetchIdRef.current += 1;
     const currentFetchId = fetchIdRef.current;
 
@@ -655,6 +657,12 @@ export default function GlobalCandidatesPage() {
       }
       if (endDate) {
         query.append("end_date", endDate);
+      }
+      if (completedStart) {
+        query.append("completed_start_date", completedStart);
+      }
+      if (completedEnd) {
+        query.append("completed_end_date", completedEnd);
       }
 
       const candData = await api.candidates.getAllLaunched(query.toString());
@@ -691,11 +699,11 @@ export default function GlobalCandidatesPage() {
 
   useEffect(() => {
     const request = window.setTimeout(() => {
-      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, true)
+      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, true)
         .finally(() => setIsLoading(false));
     }, 0);
     return () => window.clearTimeout(request);
-  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, fetchCandidates]);
+  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, fetchCandidates]);
 
   const loadMore = async () => {
     if (isFetchingMore) return;
@@ -704,7 +712,7 @@ export default function GlobalCandidatesPage() {
 
     setIsFetchingMore(true);
     setOffset(nextOffset);
-    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, false);
+    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, false);
     setIsFetchingMore(false);
   };
 
@@ -735,6 +743,8 @@ export default function GlobalCandidatesPage() {
         if (filterMinScore !== "") query.append("min_score", String(filterMinScore));
         if (exportStartDate) query.append("start_date", exportStartDate);
         if (exportEndDate) query.append("end_date", exportEndDate);
+        if (completedStartDate) query.append("completed_start_date", completedStartDate);
+        if (completedEndDate) query.append("completed_end_date", completedEndDate);
 
         const candData = await api.candidates.getAllLaunched(query.toString());
         if (candData.status === "success" && Array.isArray(candData.candidates) && candData.candidates.length > 0) {
@@ -880,6 +890,24 @@ export default function GlobalCandidatesPage() {
                   type="date"
                   value={exportEndDate}
                   onChange={(e) => setExportEndDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
+                />
+              </div>
+              <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-3 h-9 shadow-sm">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pr-1">
+                  Completed <span className="text-slate-400">From</span>
+                </label>
+                <input
+                  type="date"
+                  value={completedStartDate}
+                  onChange={(e) => setCompletedStartDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
+                />
+                <span className="text-slate-400 text-[11px] uppercase font-bold mx-0.5">to</span>
+                <input
+                  type="date"
+                  value={completedEndDate}
+                  onChange={(e) => setCompletedEndDate(e.target.value)}
                   className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
                 />
               </div>

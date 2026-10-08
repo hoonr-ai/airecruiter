@@ -3783,6 +3783,8 @@ def _launched_filter_conditions(
     min_score: Optional[int],
     start_date: Optional[str],
     end_date: Optional[str],
+    completed_start_date: Optional[str] = None,
+    completed_end_date: Optional[str] = None,
 ) -> Tuple[str, List[Any], str, str]:
     """(search_condition, params, feedback_exists_condition, feedback_order_by).
 
@@ -3836,7 +3838,7 @@ def _launched_filter_conditions(
     # the Postgres 'AT TIME ZONE' cast flipping based on whether the column is
     # naive or timestamptz.
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    if start_date or end_date:
+    if start_date or end_date or completed_start_date or completed_end_date:
         from zoneinfo import ZoneInfo
         ny_tz = ZoneInfo("America/New_York")
     if start_date:
@@ -3851,6 +3853,19 @@ def _launched_filter_conditions(
         dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
         search_condition += " AND la.created_at <= %s"
         params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00"))
+
+    if completed_start_date:
+        if not date_pattern.match(completed_start_date):
+            raise HTTPException(status_code=400, detail="Invalid completed_start_date format, expected YYYY-MM-DD")
+        dt = datetime.strptime(completed_start_date, "%Y-%m-%d").replace(tzinfo=ny_tz)
+        search_condition += " AND COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at') >= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if completed_end_date:
+        if not date_pattern.match(completed_end_date):
+            raise HTTPException(status_code=400, detail="Invalid completed_end_date format, expected YYYY-MM-DD")
+        dt = datetime.strptime(completed_end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=ny_tz)
+        search_condition += " AND COALESCE(sc.data->>'first_completed_at', sc.data->>'engage_completed_at') <= %s"
+        params.append(dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     return search_condition, params, feedback_exists_condition, feedback_order_by
 
@@ -4129,6 +4144,8 @@ async def get_launched_candidates(
     min_score: Optional[int] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    completed_start_date: Optional[str] = Query(None),
+    completed_end_date: Optional[str] = Query(None),
 ):
     """
     Fetches all launched candidates across all jobs, one row per (job,
@@ -4147,6 +4164,7 @@ async def get_launched_candidates(
 
         search_condition, params, feedback_exists_condition, feedback_order_by = _launched_filter_conditions(
             search, status, feedback, source, min_score, start_date, end_date,
+            completed_start_date, completed_end_date,
         )
         rows_sql, count_sql = _launched_candidates_sql(
             search_condition, feedback_exists_condition, feedback_order_by,
