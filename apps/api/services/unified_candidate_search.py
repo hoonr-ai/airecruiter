@@ -1097,10 +1097,14 @@ class UnifiedCandidateSearch:
             # unlike the normal JobDiva relevance gate (which intentionally
             # remains advisory).  Do not let JOBDIVA_BYPASS_PASS_GATE leak an
             # enriched candidate outside that range back into Step 5.
-            range_failure = self._has_experience_years_range(criteria) and (
-                assessment.get("min_years_failure")
-                or assessment.get("max_years_failure")
-            ) if isinstance(assessment, dict) else False
+            min_set = int(getattr(criteria, "min_experience_years", 0) or 0) > 0
+            max_set = self._has_experience_years_range(criteria)
+            range_failure = False
+            if isinstance(assessment, dict):
+                range_failure = (
+                    (min_set and assessment.get("min_years_failure"))
+                    or (max_set and assessment.get("max_years_failure"))
+                )
             if range_failure:
                 self._log_stage(
                     "ExperienceGate",
@@ -4555,15 +4559,21 @@ class UnifiedCandidateSearch:
                 resume_location_term,
             ])
 
-        resume_years = 0
-        raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
-        if raw_years is not None:
-            try:
-                match = re.search(r"\d+(?:\.\d+)?", str(raw_years))
-                if match:
-                    resume_years = float(match.group(0))
-            except Exception:
-                resume_years = 0
+        resume_years = 0.0
+        # The résumé's own timeline is the total. A parsed "6" must not
+        # hide "6+" or a career that runs past the recruiter's ceiling.
+        measured_years = self._measured_total_years(candidate)
+        if measured_years:
+            resume_years = measured_years
+        else:
+            raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
+            if raw_years is not None:
+                try:
+                    match = re.search(r"\d+(?:\.\d+)?", str(raw_years))
+                    if match:
+                        resume_years = float(match.group(0))
+                except Exception:
+                    resume_years = 0.0
 
         match_text = self._candidate_match_text(candidate)
         return {
@@ -6247,6 +6257,34 @@ class UnifiedCandidateSearch:
     _YEARS_REGEX = re.compile(
         r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.IGNORECASE
     )
+    _EXPERIENCE_MONTHS = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+    _EXPERIENCE_RANGE_RE = re.compile(
+        r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*"
+        r"(?:(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+((?:19|20)\d{2})|(Present|Current|Now|Ongoing))\b",
+        re.IGNORECASE,
+    )
+    _EXPLICIT_TOTAL_YEARS_RE = re.compile(
+        r"\b(\d{1,2})\s*(\+)?\s*(?:years?|yrs?)\s+of\s+"
+        r"(?:professional\s+|relevant\s+|total\s+|industry\s+)?experience\b",
+        re.IGNORECASE,
+    )
 
     def _heuristic_years_from_text(self, text: str) -> int:
         if not text:
@@ -6264,42 +6302,116 @@ class UnifiedCandidateSearch:
                 best = value
         return best
 
+    def _month_index(self, month_name: str, year: int) -> Optional[int]:
+        month = self._EXPERIENCE_MONTHS.get(str(month_name or "").strip().lower().rstrip("."))
+        if not month or year < 1900 or year > 2100:
+            return None
+        return year * 12 + month
+
+    def _timeline_years(self, text: str) -> Optional[float]:
+        """Union of employment date ranges, in years. Skill lines are ignored."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        now_index = now.year * 12 + now.month
+        spans: List[Tuple[int, int]] = []
+        for match in self._EXPERIENCE_RANGE_RE.finditer(str(text or "")):
+            start = self._month_index(match.group(1), int(match.group(2)))
+            if match.group(5):
+                end = now_index
+            else:
+                end = self._month_index(match.group(3), int(match.group(4)))
+            if start is None or end is None or end < start or end - start > 50 * 12:
+                continue
+            spans.append((start, end + 1))
+        if not spans:
+            return None
+        spans.sort()
+        merged: List[List[int]] = []
+        for start, end in spans:
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        months = sum(end - start for start, end in merged)
+        if months <= 0:
+            return None
+        return round(months / 12.0, 2)
+
+    def _explicit_total_years(self, text: str) -> Optional[float]:
+        """A stated career total, such as '7+ years of experience'.
+
+        'N+' is just over N, so a ceiling of N excludes it. A skill line
+        like 'java: 9 years' is not a career total.
+        """
+        best: Optional[float] = None
+        for match in self._EXPLICIT_TOTAL_YEARS_RE.finditer(str(text or "")[:4000]):
+            try:
+                years = int(match.group(1))
+            except ValueError:
+                continue
+            if years <= 0 or years > 50:
+                continue
+            value = years + (0.1 if match.group(2) else 0.0)
+            best = value if best is None else max(best, value)
+        return best
+
+    def _measured_total_years(self, candidate: Dict[str, Any]) -> Optional[float]:
+        """Total career years from the résumé, for every source.
+
+        Uses the employment timeline and a stated 'years of experience'.
+        Per-skill durations ('java: 6 years') are not the total.
+        """
+        chunks: List[str] = []
+        for key in ("resume_text", "deep_text", "summary", "abstract", "headline"):
+            value = candidate.get(key)
+            if value:
+                chunks.append(str(value))
+        enhanced = candidate.get("enhanced_info") or {}
+        if isinstance(enhanced, dict):
+            for item in enhanced.get("company_experience") or []:
+                if not isinstance(item, dict):
+                    continue
+                start = str(item.get("start_date") or item.get("start") or "").strip()
+                end = str(item.get("end_date") or item.get("end") or "").strip()
+                if start or end:
+                    chunks.append(f"{start} - {end}")
+        blob = "\n".join(chunks)[:20000]
+        if not blob.strip():
+            return None
+        timeline = self._timeline_years(blob)
+        stated = self._explicit_total_years(blob)
+        values = [value for value in (timeline, stated) if value]
+        if not values:
+            return None
+        return max(values)
+
     def _candidate_below_min_years_pre_llm(
         self,
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
     ) -> bool:
-        """Cheap regex check before LLM enrichment runs.
+        """True when the résumé's total years sit outside Min YOE or Max YOE.
 
-        True only when the candidate's headline / abstract / resume_text
-        head contains a parseable years number AND that number is below
-        `criteria.min_experience_years`. Returns False when no number is
-        found (deferred to the post-LLM gate via `_filter_assessment`).
-
-        core.sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK: when set, skip the
-        heuristic entirely for JobDiva-sourced candidates. JobDiva's
-        experience_years can be a constant default per the comment at line
-        ~1849, and the regex pulls numbers out of "5+ years" copy that may
-        not reflect the actual resume. Defer YOE to the post-LLM gate
-        (Stage 5).
+        Unknown totals are left for the post-parse gate. This does not use
+        JobDiva's stored experience_years field or a per-skill 'N years' line.
         """
-        from core import sourcing_config
-        if sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK:
-            source = str(candidate.get("source") or "").lower()
-            if source.startswith("jobdiva"):
-                return False
-
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if min_years <= 0:
+        max_years = getattr(criteria, "max_experience_years", None)
+        try:
+            max_years = int(max_years) if max_years is not None else 0
+        except (TypeError, ValueError):
+            max_years = 0
+        if min_years <= 0 and max_years <= 0:
             return False
-        haystack = " ".join([
-            str(candidate.get("headline") or ""),
-            str(candidate.get("title") or ""),
-            str(candidate.get("abstract") or ""),
-            str(candidate.get("resume_text") or "")[:1500],
-        ])
-        years = self._heuristic_years_from_text(haystack)
-        return 0 < years < min_years
+        years = self._measured_total_years(candidate)
+        if not years:
+            return False
+        if min_years > 0 and years < min_years:
+            return True
+        if max_years > 0 and years > max_years:
+            return True
+        return False
 
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
         """Collect match dimensions for PRE-SCREENING.
