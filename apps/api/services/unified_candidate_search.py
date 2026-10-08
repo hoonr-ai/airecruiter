@@ -17,7 +17,9 @@ from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import (
     haversine_miles,
+    inferred_region_states,
     is_broad_region_location,
+    region_core_city,
     normalize_location_string,
     sanitize_candidate_location,
     within_radius,
@@ -243,6 +245,54 @@ logger = logging.getLogger(__name__)
 # to always exceed the UI's within_miles radius so the BEYOND 25MI badge
 # counts these rows instead of silently passing them as in-radius.
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
+
+
+def _broad_core_inside_radius(broad_locs, required: Dict[str, str], criteria: "SearchCriteria") -> bool:
+    """Whether a metro's core city falls inside this one search circle.
+
+    Offline ZIP points only. The broad label is not sent to a geocoder.
+    """
+    from services import zip_index
+
+    miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+    required_point = None
+    if required.get("zip"):
+        required_point = zip_index.zip_centroid(required["zip"])
+    if required_point is None and required.get("city") and required.get("state"):
+        required_point = zip_index.city_state_representative_point(
+            required["city"], required["state"]
+        )
+    if required_point is None:
+        return False
+    for loc in broad_locs:
+        core = region_core_city(loc)
+        if not core:
+            continue
+        point = zip_index.city_state_representative_point(core[0], core[1])
+        if point is None:
+            continue
+        distance = haversine_miles(
+            point[0], point[1], required_point[0], required_point[1]
+        )
+        if distance <= miles:
+            return True
+    return False
+
+
+def _richer_profile_location(current: str, recovered: str) -> str:
+    """Return the profile location when it is new, including a wrong city.
+
+    Pass A can store a blank line, a bare city, or a city taken from a job
+    description. The later profile read replaces any of those. An identical
+    string is left alone.
+    """
+    current_text = str(current or "").strip()
+    recovered_text = str(recovered or "").strip()
+    if not recovered_text:
+        return ""
+    if recovered_text.casefold() == current_text.casefold():
+        return ""
+    return recovered_text
 
 
 def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
@@ -554,6 +604,21 @@ class UnifiedCandidateSearch:
             return int(criteria.max_experience_years or 0) > 0
         except (TypeError, ValueError):
             return False
+
+    @staticmethod
+    def _experience_range_failure(criteria: "SearchCriteria", assessment: Any) -> bool:
+        """Whether Min YOE or Max YOE rejected this candidate."""
+        if not isinstance(assessment, dict):
+            return False
+        try:
+            min_set = int(getattr(criteria, "min_experience_years", 0) or 0) > 0
+        except (TypeError, ValueError):
+            min_set = False
+        max_set = UnifiedCandidateSearch._has_experience_years_range(criteria)
+        return bool(
+            (min_set and assessment.get("min_years_failure"))
+            or (max_set and assessment.get("max_years_failure"))
+        )
 
 
     def _log_stage(self, stage: str, message: str) -> None:
@@ -1144,10 +1209,7 @@ class UnifiedCandidateSearch:
             # unlike the normal JobDiva relevance gate (which intentionally
             # remains advisory).  Do not let JOBDIVA_BYPASS_PASS_GATE leak an
             # enriched candidate outside that range back into Step 5.
-            range_failure = self._has_experience_years_range(criteria) and (
-                assessment.get("min_years_failure")
-                or assessment.get("max_years_failure")
-            ) if isinstance(assessment, dict) else False
+            range_failure = self._experience_range_failure(criteria, assessment)
             if range_failure:
                 self._log_stage(
                     "ExperienceGate",
@@ -1933,7 +1995,7 @@ class UnifiedCandidateSearch:
                         # PR-B: cheap pre-LLM YOE gate for external sources too.
                         # Drops candidates whose headline / abstract / resume
                         # snippet shows fewer years than the configured floor.
-                        if self._candidate_below_min_years_pre_llm(cand, criteria):
+                        if self._candidate_outside_years_range_pre_llm(cand, criteria):
                             return {"status": "failed_filter"}
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
@@ -2272,6 +2334,55 @@ class UnifiedCandidateSearch:
                         cid = str(existing.get("candidate_id") or existing.get("id") or "")
                         if not cid:
                             continue
+                        # Pass A can store a blank line or the wrong city.
+                        # The agent reads the profile line. Write that place
+                        # onto the row. If it is outside every circle or
+                        # outside the country, remove the card: Step 5 already
+                        # drops a row when this event arrives with
+                        # stage "dropped". A place inside a circle, or a vague
+                        # label, stays and the badge updates.
+                        recovered_location = sanitize_candidate_location(entry.get("location"))
+                        current_location = sanitize_candidate_location(existing.get("location"))
+                        # A later read of the profile can replace a bare city
+                        # ("Edison") with the line LinkedIn actually shows
+                        # ("Edison, New Jersey, United States").
+                        upgraded = _richer_profile_location(current_location, recovered_location)
+                        if upgraded:
+                            existing["location"] = upgraded
+                            recovered_location = upgraded
+                            outside_country = self._is_likely_outside_country(
+                                existing, self._target_country(criteria)
+                            )
+                            recovered_veto = None if outside_country else self._location_hard_gate(
+                                existing, criteria
+                            )
+                            if outside_country or recovered_veto:
+                                self._log_stage(
+                                    "LocationGate",
+                                    f"dropping candidate_id={cid} after Exa location recovery "
+                                    f"location={recovered_location!r} "
+                                    f"reason={existing.get('location_veto_reason') or 'non_us_candidate'}",
+                                )
+                                await queue.put({
+                                    "type": "candidate_detail",
+                                    "candidate_id": cid,
+                                    "stage": "dropped",
+                                    "patch": {
+                                        "_stage": "dropped",
+                                        "_drop_reason": (
+                                            "non_us_candidate" if outside_country else "location_mismatch"
+                                        ),
+                                    },
+                                })
+                                continue
+                            patch_fields["location"] = recovered_location
+                            # A confirmed in-radius place clears the
+                            # unverified badge the blank row was showing.
+                            patch_fields["location_match_reason"] = (
+                                existing.get("location_match_reason") or ""
+                            )
+                            if existing.get("distance_miles") is not None:
+                                patch_fields["distance_miles"] = existing["distance_miles"]
                         prior_sources = existing.get("sources") or [existing.get("source") or "LinkedIn-Exa"]
                         if not isinstance(prior_sources, list):
                             prior_sources = [str(prior_sources)]
@@ -4417,10 +4528,20 @@ class UnifiedCandidateSearch:
         if broad_locs and not direct_zip and not precise_locs:
             known_states = set()
             for loc in broad_locs:
-                state = self._parse_location(loc).get("state")
-                if state:
-                    known_states.add(state)
+                state = self._parse_location(loc).get("state") or ""
+                # Ignore a leftover token such as "united" from
+                # "New York, United States". Only a real state code counts,
+                # plus the LinkedIn region table (Chicago → IL, Detroit → MI).
+                if len(state) == 2 and state.upper() in self._US_STATE_CODES:
+                    known_states.add(state.lower())
+                for code in inferred_region_states(loc):
+                    known_states.add(code.lower())
             if required.get("state") and known_states and required["state"] not in known_states:
+                # The state list can still miss a border. Keep the row when
+                # the metro's core city sits inside this circle. Chicago
+                # against Richardson stays a mismatch: Chicago is outside.
+                if _broad_core_inside_radius(broad_locs, required, criteria):
+                    return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
                 return False, "state_mismatch", None
             if required.get("state") and known_states and not required.get("city"):
                 return True, "state_match", None
@@ -4470,11 +4591,20 @@ class UnifiedCandidateSearch:
         if required.get("zip"):
             required_point = zip_index.zip_centroid(required["zip"])
         if required_point is None and required.get("city") and required.get("state"):
-            required_point = zip_index.city_state_centroid(required["city"], required["state"])
+            # Representative ZIP, not the average of every ZIP. The average
+            # for Richardson sits ~4.5 miles south of the city and was
+            # keeping DeSoto, Cedar Hill, and northeast Arlington.
+            required_point = zip_index.city_state_representative_point(
+                required["city"], required["state"]
+            )
 
         offline_state_mismatch_distance: Optional[float] = None
         best_offline_distance: Optional[float] = None
         unresolved_locs: List[str] = []
+        # "Edison" with no state exists in several states. Showing it is
+        # right; geocoding it would pin the wrong Edison and hard-drop
+        # someone who is inside a circle.
+        saw_ambiguous_city = False
 
         # When an exact city/state signal accompanies a broad region label,
         # evaluate the exact signal and avoid using the region centroid as a
@@ -4490,6 +4620,14 @@ class UnifiedCandidateSearch:
             cand_city = parsed.get("city", "")
             cand_state = parsed.get("state", "")
             cand_zip = parsed.get("zip", "")
+
+            if cand_city and not cand_state and not cand_zip:
+                only_state = zip_index.unique_state_for_city(cand_city)
+                if only_state:
+                    cand_state = only_state.lower()
+                else:
+                    saw_ambiguous_city = True
+                    continue
 
             # Exact zip match → same point, ~0 mi.
             if cand_zip and required.get("zip") and cand_zip == required["zip"]:
@@ -4509,7 +4647,7 @@ class UnifiedCandidateSearch:
             # flakiness whenever both sides resolve against the index.
             cand_point = zip_index.zip_centroid(cand_zip) if cand_zip else None
             if cand_point is None and cand_city and cand_state:
-                cand_point = zip_index.city_state_centroid(cand_city, cand_state)
+                cand_point = zip_index.city_state_representative_point(cand_city, cand_state)
             if cand_point is not None and required_point is not None:
                 d = haversine_miles(cand_point[0], cand_point[1], required_point[0], required_point[1])
                 if best_offline_distance is None or d < best_offline_distance:
@@ -4549,6 +4687,9 @@ class UnifiedCandidateSearch:
             closest_distance = offline_d
             if not unresolved_locs:
                 return False, "outside_radius_confirmed", offline_d
+
+        if best_offline_distance is None and saw_ambiguous_city and not unresolved_locs:
+            return False, "candidate_state_unknown", _UNKNOWN_DISTANCE_SENTINEL
 
         # Network path: Nominatim for the strings the offline index couldn't
         # place. Geocode the cleaned "City, ST" reconstruction as target —
@@ -4638,8 +4779,28 @@ class UnifiedCandidateSearch:
 
         city = parts[0] if parts else ""
         state = ""
+        # Words of parts[1] that are NOT the state name. "New Jersey" is two
+        # words; taking only "New" left Edison and Poughkeepsie unresolvable
+        # and soft-kept them as if the profile had no location.
+        state_part_leftover: List[str] = []
         if len(parts) > 1:
-            state = parts[1].split()[0]
+            state_tokens = parts[1].split()
+            resolved_state = ""
+            consumed = 0
+            for n in (3, 2, 1):
+                if len(state_tokens) < n:
+                    continue
+                code = resolve_state_code(" ".join(state_tokens[:n]))
+                if code:
+                    resolved_state = code
+                    consumed = n
+                    break
+            if resolved_state:
+                state = resolved_state
+                state_part_leftover = state_tokens[consumed:]
+            elif state_tokens:
+                state = state_tokens[0]
+                state_part_leftover = state_tokens[1:]
         elif len(parts) == 1:
             tokens = parts[0].split()
             # Bare state input ("CA", "California", "Calif") — recognise via
@@ -4676,8 +4837,7 @@ class UnifiedCandidateSearch:
         # is ONLY a country name ("Toronto, Canada") moves to country.
         country = ""
         after_state_tokens: List[str] = []
-        if len(parts) > 1:
-            after_state_tokens.extend(parts[1].split()[1:])
+        after_state_tokens.extend(state_part_leftover)
         for extra_part in parts[2:]:
             after_state_tokens.extend(extra_part.split())
         for tok in reversed([t.strip() for t in after_state_tokens if t.strip()]):
@@ -4961,15 +5121,21 @@ class UnifiedCandidateSearch:
                 resume_location_term,
             ])
 
-        resume_years = 0
-        raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
-        if raw_years is not None:
-            try:
-                match = re.search(r"\d+(?:\.\d+)?", str(raw_years))
-                if match:
-                    resume_years = float(match.group(0))
-            except Exception:
-                resume_years = 0
+        resume_years = 0.0
+        # The résumé's own timeline is the total. A parsed "6" must not
+        # hide "6+" or a career that runs past the recruiter's ceiling.
+        measured_years = self._measured_total_years(candidate)
+        if measured_years:
+            resume_years = measured_years
+        else:
+            raw_years = enhanced.get("years_of_experience") or candidate.get("experience_years")
+            if raw_years is not None:
+                try:
+                    match = re.search(r"\d+(?:\.\d+)?", str(raw_years))
+                    if match:
+                        resume_years = float(match.group(0))
+                except Exception:
+                    resume_years = 0.0
 
         match_text = self._candidate_match_text(candidate)
         return {
@@ -6654,6 +6820,34 @@ class UnifiedCandidateSearch:
     _YEARS_REGEX = re.compile(
         r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.IGNORECASE
     )
+    _EXPERIENCE_MONTHS = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+    _EXPERIENCE_RANGE_RE = re.compile(
+        r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*"
+        r"(?:(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+((?:19|20)\d{2})|(Present|Current|Now|Ongoing))\b",
+        re.IGNORECASE,
+    )
+    _EXPLICIT_TOTAL_YEARS_RE = re.compile(
+        r"\b(\d{1,2})\s*(\+)?\s*(?:years?|yrs?)\s+of\s+"
+        r"(?:professional\s+|relevant\s+|total\s+|industry\s+)?experience\b",
+        re.IGNORECASE,
+    )
 
     def _heuristic_years_from_text(self, text: str) -> int:
         if not text:
@@ -6671,42 +6865,171 @@ class UnifiedCandidateSearch:
                 best = value
         return best
 
-    def _candidate_below_min_years_pre_llm(
+    def _month_index(self, month_name: str, year: int) -> Optional[int]:
+        month = self._EXPERIENCE_MONTHS.get(str(month_name or "").strip().lower().rstrip("."))
+        if not month or year < 1900 or year > 2100:
+            return None
+        return year * 12 + month
+
+    _EXPERIENCE_HEADING_RE = re.compile(
+        r"(?im)^[ \t]*(?:professional\s+|work\s+)?(?:experience|employment|work\s+history)\b.*$"
+    )
+    _EXPERIENCE_END_RE = re.compile(
+        r"(?im)^[ \t]*(?:education|academic|certifications?|licenses|skills|technical\s+skills|"
+        r"projects|publications|awards|references)\b.*$"
+    )
+    _NUMERIC_RANGE_RE = re.compile(
+        r"\b(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*"
+        r"(?:(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})|(present|current|now|ongoing))\b",
+        re.IGNORECASE,
+    )
+    _YEAR_RANGE_RE = re.compile(
+        r"\b((?:19|20)\d{2})\s*(?:-|–|—|\bto\b)\s*((?:19|20)\d{2}|present|current|now|ongoing)\b",
+        re.IGNORECASE,
+    )
+
+    def _experience_section(self, text: str) -> str:
+        """The work-history block only. Education and projects stay out."""
+        match = self._EXPERIENCE_HEADING_RE.search(str(text or ""))
+        if not match:
+            return ""
+        rest = text[match.end():]
+        end = self._EXPERIENCE_END_RE.search(rest)
+        return rest[:end.start()] if end else rest
+
+    def _add_span(self, spans: List[Tuple[int, int]], start: Optional[int], end: Optional[int]) -> None:
+        if start is None or end is None or end < start or end - start > 50 * 12:
+            return
+        spans.append((start, end + 1))
+
+    def _timeline_years(self, text: str, now: Any = None) -> Optional[float]:
+        """Union of employment date ranges, in years. Skill lines are ignored."""
+        from datetime import datetime, timezone
+
+        if now is None:
+            now = datetime.now(timezone.utc)
+        now_index = now.year * 12 + now.month
+        spans: List[Tuple[int, int]] = []
+        body = str(text or "")
+        for match in self._EXPERIENCE_RANGE_RE.finditer(body):
+            start = self._month_index(match.group(1), int(match.group(2)))
+            if match.group(5):
+                end = now_index
+            else:
+                end = self._month_index(match.group(3), int(match.group(4)))
+            self._add_span(spans, start, end)
+        for match in self._NUMERIC_RANGE_RE.finditer(body):
+            start = int(match.group(1)) + int(match.group(2)) * 12
+            if match.group(5):
+                end = now_index
+            else:
+                end = int(match.group(3)) + int(match.group(4)) * 12
+            self._add_span(spans, start, end)
+        for match in self._YEAR_RANGE_RE.finditer(body):
+            prefix = body[max(0, match.start() - 12):match.start()]
+            if re.search(r"(?i)jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec", prefix):
+                continue
+            start_year = int(match.group(1))
+            start = start_year * 12 + 1
+            if re.fullmatch(r"(?i)present|current|now|ongoing", match.group(2) or ""):
+                end = now_index
+            else:
+                end = int(match.group(2)) * 12 + 12
+            self._add_span(spans, start, end)
+        if not spans:
+            return None
+        spans.sort()
+        merged: List[List[int]] = []
+        for start, end in spans:
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        months = sum(end - start for start, end in merged)
+        if months <= 0:
+            return None
+        return round(months / 12.0, 2)
+
+    def _explicit_total_years(self, text: str) -> Optional[float]:
+        """A stated career total, such as '7+ years of experience'.
+
+        'N+' is just over N, so a ceiling of N excludes it. A skill line
+        like 'java: 9 years' is not a career total.
+        """
+        best: Optional[float] = None
+        for match in self._EXPLICIT_TOTAL_YEARS_RE.finditer(str(text or "")[:4000]):
+            try:
+                years = int(match.group(1))
+            except ValueError:
+                continue
+            if years <= 0 or years > 50:
+                continue
+            value = years + (0.1 if match.group(2) else 0.0)
+            best = value if best is None else max(best, value)
+        return best
+
+    def _measured_total_years(self, candidate: Dict[str, Any], now: Any = None) -> Optional[float]:
+        """Total career years from work history, for every source.
+
+        Job dates win. A summary line such as "15+ years of experience" cannot
+        raise a shorter work history. "6+" is used only when the résumé has
+        no job dates, and it counts as just over 6. Education, projects, and
+        per-skill lines ("java: 9 years") are not the career.
+        """
+        enhanced = candidate.get("enhanced_info") or {}
+        job_lines: List[str] = []
+        if isinstance(enhanced, dict):
+            for item in enhanced.get("company_experience") or []:
+                if not isinstance(item, dict):
+                    continue
+                start = str(item.get("start_date") or item.get("start") or "").strip()
+                end = str(item.get("end_date") or item.get("end") or "").strip()
+                if start or end:
+                    job_lines.append(f"{start} - {end}")
+        experience_text = ""
+        if job_lines:
+            experience_text = "\n".join(job_lines)
+        else:
+            sections = [
+                self._experience_section(str(candidate.get(key) or ""))
+                for key in ("resume_text", "deep_text")
+            ]
+            experience_text = "\n".join(section for section in sections if section)
+        timeline = self._timeline_years(experience_text, now=now) if experience_text else None
+        if timeline:
+            return timeline
+        stated_parts = [
+            str(candidate.get(key) or "")
+            for key in ("headline", "summary", "abstract", "resume_text", "deep_text")
+        ]
+        return self._explicit_total_years("\n".join(stated_parts))
+
+    def _candidate_outside_years_range_pre_llm(
         self,
         candidate: Dict[str, Any],
         criteria: SearchCriteria,
     ) -> bool:
-        """Cheap regex check before LLM enrichment runs.
+        """True when the résumé's total years sit outside Min YOE or Max YOE.
 
-        True only when the candidate's headline / abstract / resume_text
-        head contains a parseable years number AND that number is below
-        `criteria.min_experience_years`. Returns False when no number is
-        found (deferred to the post-LLM gate via `_filter_assessment`).
-
-        core.sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK: when set, skip the
-        heuristic entirely for JobDiva-sourced candidates. JobDiva's
-        experience_years can be a constant default per the comment at line
-        ~1849, and the regex pulls numbers out of "5+ years" copy that may
-        not reflect the actual resume. Defer YOE to the post-LLM gate
-        (Stage 5).
+        Unknown totals are left for the post-parse gate. This does not use
+        JobDiva's stored experience_years field or a per-skill 'N years' line.
         """
-        from core import sourcing_config
-        if sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK:
-            source = str(candidate.get("source") or "").lower()
-            if source.startswith("jobdiva"):
-                return False
-
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if min_years <= 0:
+        max_years = getattr(criteria, "max_experience_years", None)
+        try:
+            max_years = int(max_years) if max_years is not None else 0
+        except (TypeError, ValueError):
+            max_years = 0
+        if min_years <= 0 and max_years <= 0:
             return False
-        haystack = " ".join([
-            str(candidate.get("headline") or ""),
-            str(candidate.get("title") or ""),
-            str(candidate.get("abstract") or ""),
-            str(candidate.get("resume_text") or "")[:1500],
-        ])
-        years = self._heuristic_years_from_text(haystack)
-        return 0 < years < min_years
+        years = self._measured_total_years(candidate)
+        if not years:
+            return False
+        if min_years > 0 and years < min_years:
+            return True
+        if max_years > 0 and years > max_years:
+            return True
+        return False
 
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
         """Collect match dimensions for PRE-SCREENING.
@@ -7141,11 +7464,11 @@ class UnifiedCandidateSearch:
                     # resume text confidently shows fewer years than the
                     # configured floor, before paying for LLM enrichment.
                     # Soft-keep if no number is parseable.
-                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                    if self._candidate_outside_years_range_pre_llm(candidate, criteria):
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                            "skipping LLM for candidate_id=%s reason=outside_years_range_pre_llm threshold=%s" % (
                                 candidate_id,
                                 int(criteria.min_experience_years or 0),
                             ),
@@ -7525,11 +7848,11 @@ class UnifiedCandidateSearch:
                         return
 
                     # PR-B: cheap pre-LLM YOE gate.
-                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                    if self._candidate_outside_years_range_pre_llm(candidate, criteria):
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s (kept, scored)" % (
+                            "skipping LLM for candidate_id=%s reason=outside_years_range_pre_llm threshold=%s (kept, scored)" % (
                                 cid,
                                 int(criteria.min_experience_years or 0),
                             ),

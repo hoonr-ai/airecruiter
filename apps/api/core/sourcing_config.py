@@ -43,17 +43,6 @@ STRIP_YEARS_FROM_BOOLEAN = True
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# #5 — Skip pre-LLM YOE heuristic for JobDiva sources
-# ─────────────────────────────────────────────────────────────────────────
-# When True, the regex-based YOE pre-check at Stage 2 is skipped for
-# candidates whose `source` starts with "JobDiva". JobDiva's `experience_years`
-# field is often a constant default (4) populated from the job title alone,
-# which causes real candidates to be dropped before their resume is parsed.
-# Real YOE check still runs at Stage 5 against the LLM-extracted value.
-SKIP_JOBDIVA_YOE_PRECHECK = True
-
-
-# ─────────────────────────────────────────────────────────────────────────
 # #3 — Stage-5 post-LLM filter ratio
 # ─────────────────────────────────────────────────────────────────────────
 # Threshold for `_filter_assessment(enforce_years=True)` — candidate passes

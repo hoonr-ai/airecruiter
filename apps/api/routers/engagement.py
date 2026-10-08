@@ -24,7 +24,13 @@ import os
 import httpx
 import re
 from datetime import datetime, timezone, timedelta
-from routers._helpers import get_db_connection, _verify_job_access_by_id
+from routers._helpers import (
+    get_db_connection,
+    _verify_job_access_by_id,
+    get_article_for_title,
+    is_legacy_default_bot_intro,
+    normalize_bot_intro_tokens,
+)
 from services.pair_auth import get_pair_auth_headers
 
 from core.email import (
@@ -1217,17 +1223,16 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             job_t = _clean_job_title_for_intro(raw_title_str)
             raw_loc_str = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
             job_l = _clean_location_for_intro(raw_loc_str)
-            if not raw_company_intro.strip():
+            article = get_article_for_title(job_t)
+            if not raw_company_intro.strip() or is_legacy_default_bot_intro(raw_company_intro):
                 raw_company_intro = (
                     f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
-                    f"We are helping our client recruit for a {job_t} in {job_l}, and you seem to be a good fit for the role. "
-                    f"Please note that conversation may be recorded for verification and quality purposes. "
-                    f"Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+                    f"We are helping our client recruit for {article} {job_t} in {job_l}, and you have been shortlisted for this role. "
+                    f"Please note that this conversation may be recorded for verification and quality purposes. "
+                    f"Are you available for a quick 3-5 mins conversation to increase the possibilities of getting hired?"
                 )
             else:
-                raw_company_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_t, raw_company_intro, flags=re.IGNORECASE)
-                raw_company_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_l, raw_company_intro, flags=re.IGNORECASE)
-                raw_company_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = normalize_bot_intro_tokens(raw_company_intro, job_t, job_l)
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {

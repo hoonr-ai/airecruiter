@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, getActiveUserEmail } from "@/lib/api";
 import { toCsv, UTF8_BOM } from "@/lib/csv";
 import { EMPTY_DATE, formatEasternDate, formatEasternDateTime, withEasternLabel } from "@/lib/date";
+import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
@@ -34,7 +35,7 @@ import { SubmissionModal, type SubmissionPayload } from "@/components/Submission
 
 // On-screen column count. The skeleton rows and the empty state span this many
 // cells, so keep it in step with the header row.
-const TABLE_COLUMN_COUNT = 14;
+const TABLE_COLUMN_COUNT = 15;
 
 type FeedbackAction = "Submit" | "Reject" | "Unreachable";
 type SubmissionKind = "internal" | "external";
@@ -215,6 +216,7 @@ interface Candidate {
   engage_status: string;
   engage_interview_id: string;
   engage_created_at: string;
+  engage_completed_at?: string;
   engage_score: number;
   total_fit_score?: number | null;
   audit_payload?: { hard_filter_details?: HardFilterDetail[] };
@@ -485,6 +487,8 @@ export default function GlobalCandidatesPage() {
   const [availableSources, setAvailableSources] = useState<string[]>([]);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
+  const [completedStartDate, setCompletedStartDate] = useState("");
+  const [completedEndDate, setCompletedEndDate] = useState("");
   const [isExporting, setIsExporting] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
@@ -625,7 +629,20 @@ export default function GlobalCandidatesPage() {
 
   const fetchIdRef = useRef(0);
 
-  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, replace: boolean = false) => {
+  const fetchCandidates = useCallback(async (opts: {
+    currentOffset: number;
+    search: string;
+    status: string;
+    feedback: string;
+    source: string;
+    minScore: number | "";
+    startDate: string;
+    endDate: string;
+    completedStart: string;
+    completedEnd: string;
+    replace?: boolean;
+  }) => {
+    const { currentOffset, search, status, feedback, source, minScore, startDate, endDate, completedStart, completedEnd, replace = false } = opts;
     fetchIdRef.current += 1;
     const currentFetchId = fetchIdRef.current;
 
@@ -654,6 +671,12 @@ export default function GlobalCandidatesPage() {
       }
       if (endDate) {
         query.append("end_date", endDate);
+      }
+      if (completedStart) {
+        query.append("completed_start_date", completedStart);
+      }
+      if (completedEnd) {
+        query.append("completed_end_date", completedEnd);
       }
 
       const candData = await api.candidates.getAllLaunched(query.toString());
@@ -690,11 +713,23 @@ export default function GlobalCandidatesPage() {
 
   useEffect(() => {
     const request = window.setTimeout(() => {
-      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, true)
+      void fetchCandidates({
+        currentOffset: 0,
+        search: searchQuery,
+        status: filterStatus,
+        feedback: filterFeedback,
+        source: filterSource,
+        minScore: filterMinScore,
+        startDate: exportStartDate,
+        endDate: exportEndDate,
+        completedStart: completedStartDate,
+        completedEnd: completedEndDate,
+        replace: true
+      })
         .finally(() => setIsLoading(false));
     }, 0);
     return () => window.clearTimeout(request);
-  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, fetchCandidates]);
+  }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, fetchCandidates]);
 
   const loadMore = async () => {
     if (isFetchingMore) return;
@@ -703,7 +738,19 @@ export default function GlobalCandidatesPage() {
 
     setIsFetchingMore(true);
     setOffset(nextOffset);
-    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, false);
+    await fetchCandidates({
+      currentOffset: nextOffset,
+      search: searchQuery,
+      status: filterStatus,
+      feedback: filterFeedback,
+      source: filterSource,
+      minScore: filterMinScore,
+      startDate: exportStartDate,
+      endDate: exportEndDate,
+      completedStart: completedStartDate,
+      completedEnd: completedEndDate,
+      replace: false
+    });
     setIsFetchingMore(false);
   };
 
@@ -712,6 +759,10 @@ export default function GlobalCandidatesPage() {
   const handleExportWithDateRange = async () => {
     if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
       setToast({ message: "Start Date cannot be after End Date.", type: "error" });
+      return;
+    }
+    if (completedStartDate && completedEndDate && completedStartDate > completedEndDate) {
+      setToast({ message: "Completed From cannot be after Completed To.", type: "error" });
       return;
     }
 
@@ -734,6 +785,8 @@ export default function GlobalCandidatesPage() {
         if (filterMinScore !== "") query.append("min_score", String(filterMinScore));
         if (exportStartDate) query.append("start_date", exportStartDate);
         if (exportEndDate) query.append("end_date", exportEndDate);
+        if (completedStartDate) query.append("completed_start_date", completedStartDate);
+        if (completedEndDate) query.append("completed_end_date", completedEndDate);
 
         const candData = await api.candidates.getAllLaunched(query.toString());
         if (candData.status === "success" && Array.isArray(candData.candidates) && candData.candidates.length > 0) {
@@ -763,7 +816,8 @@ export default function GlobalCandidatesPage() {
           withEasternLabel("Launched Date"),
           "Screening Level",
           "Resume Screening Score",
-          "Pass Status",
+          "Engage Status",
+          withEasternLabel("Completed At"),
           "Engage Score",
           "Total Fit Score",
           "Candidate Feedback",
@@ -779,6 +833,7 @@ export default function GlobalCandidatesPage() {
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
           const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
           const feedback = knownFeedback(c.feedback);
+          const completedAt = getCandidateCompletedAt(c);
 
           return [
             c.jobdiva_id || "",
@@ -792,6 +847,7 @@ export default function GlobalCandidatesPage() {
             c.screening_level || "",
             resumeScore > 0 ? String(resumeScore) : "N/A",
             normalizeInterviewStatus(c.pass_status ?? c.engage_status).label,
+            completedAt ? formatEasternDateTime(completedAt) : "N/A",
             engageScoreStr,
             totalFitScoreStr,
             feedback ? FEEDBACK_DISPLAY[feedback] : "",
@@ -877,6 +933,24 @@ export default function GlobalCandidatesPage() {
                   type="date"
                   value={exportEndDate}
                   onChange={(e) => setExportEndDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
+                />
+              </div>
+              <div className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-3 h-9 shadow-sm">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider pr-1">
+                  Completed <span className="text-slate-400">From</span>
+                </label>
+                <input
+                  type="date"
+                  value={completedStartDate}
+                  onChange={(e) => setCompletedStartDate(e.target.value)}
+                  className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
+                />
+                <span className="text-slate-400 text-[11px] uppercase font-bold mx-0.5">to</span>
+                <input
+                  type="date"
+                  value={completedEndDate}
+                  onChange={(e) => setCompletedEndDate(e.target.value)}
                   className="h-7 text-[12px] bg-transparent focus:outline-none w-[100px]"
                 />
               </div>
@@ -994,7 +1068,8 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[220px] min-w-[220px] max-w-[220px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("LAUNCHED DATE")}</TableHead>
                 <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SCREENING LEVEL</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
-                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">PASS STATUS</TableHead>
+                <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
+                <TableHead className="w-[200px] min-w-[200px] max-w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("COMPLETED AT")}</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("CANDIDATE FEEDBACK")}</TableHead>
@@ -1166,6 +1241,13 @@ export default function GlobalCandidatesPage() {
                             />
                           )}
                         </div>
+                      </TableCell>
+
+                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] border-l border-slate-200">
+                        {(() => {
+                          const completedAt = getCandidateCompletedAt(c);
+                          return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
+                        })()}
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
