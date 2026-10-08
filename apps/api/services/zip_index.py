@@ -121,10 +121,12 @@ def extract_zip(text: str) -> Optional[str]:
 
 # (city_lower, "ST") -> (lat, lng, zip nearest the averaged centroid)
 _CITY_INDEX: Optional[Dict[Tuple[str, str], Tuple[float, float, str]]] = None
+# city_lower -> the states that have that city name. Built with the city index.
+_CITY_STATES: Optional[Dict[str, frozenset]] = None
 
 
 def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
-    global _CITY_INDEX
+    global _CITY_INDEX, _CITY_STATES
     if _CITY_INDEX is None:
         with _lock:
             if _CITY_INDEX is None:
@@ -138,7 +140,11 @@ def _city_index() -> Dict[Tuple[str, str], Tuple[float, float, str]]:
                     lng = sum(r[2] for r in rows) / len(rows)
                     rep = min(rows, key=lambda r: (r[1] - lat) ** 2 + (r[2] - lng) ** 2)[0]
                     index[key] = (round(lat, 4), round(lng, 4), rep)
+                states: Dict[str, set] = {}
+                for name, state in index:
+                    states.setdefault(name, set()).add(state)
                 _CITY_INDEX = index
+                _CITY_STATES = {name: frozenset(found) for name, found in states.items()}
     return _CITY_INDEX
 
 
@@ -255,8 +261,9 @@ def unique_state_for_city(city: str) -> Optional[str]:
     city_key = _clean(city).lower()
     if not city_key:
         return None
-    states = {state for name, state in _city_index() if name == city_key}
-    if len(states) == 1:
+    _city_index()
+    states = (_CITY_STATES or {}).get(city_key)
+    if states and len(states) == 1:
         return next(iter(states))
     return None
 
@@ -270,7 +277,7 @@ def is_known_city(city: str, state: Optional[str] = None) -> bool:
     if state:
         key = _city_key(city, state)
         return bool(key and key in index)
-    return any(name == city_key for name, _state in index)
+    return city_key in (_CITY_STATES or {})
 
 
 def city_state_default_zip(city: str, state: str) -> Optional[str]:

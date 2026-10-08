@@ -19,6 +19,7 @@ from services.location import (
     haversine_miles,
     inferred_region_states,
     is_broad_region_location,
+    region_core_city,
     normalize_location_string,
     sanitize_candidate_location,
     within_radius,
@@ -246,25 +247,52 @@ logger = logging.getLogger(__name__)
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
 
 
-def _richer_profile_location(current: str, recovered: str) -> str:
-    """Replace a blank or bare-city label with the profile's full location line.
+def _broad_core_inside_radius(broad_locs, required: Dict[str, str], criteria: "SearchCriteria") -> bool:
+    """Whether a metro's core city falls inside this one search circle.
 
-    "Edison" becomes "Edison, New Jersey, United States" once the profile
-    text is read. A location that already has a state is left alone.
+    Offline ZIP points only. The broad label is not sent to a geocoder.
+    """
+    from services import zip_index
+
+    miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+    required_point = None
+    if required.get("zip"):
+        required_point = zip_index.zip_centroid(required["zip"])
+    if required_point is None and required.get("city") and required.get("state"):
+        required_point = zip_index.city_state_representative_point(
+            required["city"], required["state"]
+        )
+    if required_point is None:
+        return False
+    for loc in broad_locs:
+        core = region_core_city(loc)
+        if not core:
+            continue
+        point = zip_index.city_state_representative_point(core[0], core[1])
+        if point is None:
+            continue
+        distance = haversine_miles(
+            point[0], point[1], required_point[0], required_point[1]
+        )
+        if distance <= miles:
+            return True
+    return False
+
+
+def _richer_profile_location(current: str, recovered: str) -> str:
+    """Return the profile location when it is new, including a wrong city.
+
+    Pass A can store a blank line, a bare city, or a city taken from a job
+    description. The later profile read replaces any of those. An identical
+    string is left alone.
     """
     current_text = str(current or "").strip()
     recovered_text = str(recovered or "").strip()
     if not recovered_text:
         return ""
-    if not current_text:
-        return recovered_text
-    if (
-        "," in recovered_text
-        and "," not in current_text
-        and current_text.lower() in recovered_text.lower()
-    ):
-        return recovered_text
-    return ""
+    if recovered_text.casefold() == current_text.casefold():
+        return ""
+    return recovered_text
 
 
 def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
@@ -2294,12 +2322,13 @@ class UnifiedCandidateSearch:
                         cid = str(existing.get("candidate_id") or existing.get("id") or "")
                         if not cid:
                             continue
-                        # Pass A often stores a blank location because the
-                        # highlight text omitted the profile line. The agent
-                        # reads that line. Fill it before the patch, and drop
-                        # the row if the recovered place is outside every
-                        # radius or outside the country — a blank location
-                        # was soft-kept and is already on screen.
+                        # Pass A can store a blank line or the wrong city.
+                        # The agent reads the profile line. Write that place
+                        # onto the row. If it is outside every circle or
+                        # outside the country, remove the card: Step 5 already
+                        # drops a row when this event arrives with
+                        # stage "dropped". A place inside a circle, or a vague
+                        # label, stays and the badge updates.
                         recovered_location = sanitize_candidate_location(entry.get("location"))
                         current_location = sanitize_candidate_location(existing.get("location"))
                         # A later read of the profile can replace a bare city
@@ -4496,6 +4525,11 @@ class UnifiedCandidateSearch:
                 for code in inferred_region_states(loc):
                     known_states.add(code.lower())
             if required.get("state") and known_states and required["state"] not in known_states:
+                # The state list can still miss a border. Keep the row when
+                # the metro's core city sits inside this circle. Chicago
+                # against Richardson stays a mismatch: Chicago is outside.
+                if _broad_core_inside_radius(broad_locs, required, criteria):
+                    return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
                 return False, "state_mismatch", None
             if required.get("state") and known_states and not required.get("city"):
                 return True, "state_match", None
@@ -8519,7 +8553,7 @@ class UnifiedCandidateSearch:
             
             name = f"{cand.get('firstName', '')} {cand.get('lastName', '')}".lower().strip()
             city = cand.get("city", "").lower().strip()
-
+            
             if email:
                 key = f"email:{email}"
             elif phone_key:

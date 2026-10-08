@@ -142,6 +142,18 @@ CASES = [
         ("Secaucus", "NJ"),
     ),
     (
+        "Location: Open to work",
+        ("", ""),
+    ),
+    (
+        "Location: Worldwide",
+        ("", ""),
+    ),
+    (
+        "Location: Remote",
+        ("", ""),
+    ),
+    (
         "Location: Hyderabad\nJagadeesh - Hyderabad, Telangana, India | LinkedIn",
         ("Hyderabad, India", ""),
     ),

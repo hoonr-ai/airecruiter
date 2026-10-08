@@ -10,6 +10,7 @@ from services.location import (
     is_plausible_city_token,
     extract_us_location_from_text,
     location_line_label,
+    _RE_METROPLEX,
 )
 from core.vendor_limiter import EXA as _exa_limit
 
@@ -164,10 +165,7 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
 
     # 4a. "Dallas-Fort Worth Metroplex" — keep the full label. A word-boundary
     # city pattern restarts at the hyphen and stores "Fort Worth Metroplex".
-    metroplex = re.search(
-        r"\b((?:[A-Z][A-Za-z]+(?:-[A-Z][A-Za-z]+)*)(?:\s+[A-Z][A-Za-z]+)*)\s+Metroplex\b",
-        head,
-    )
+    metroplex = _RE_METROPLEX.search(head)
     if metroplex:
         return metroplex.group(0).strip(), ""
 
@@ -662,10 +660,9 @@ class ExaService:
                 category="people",
                 type="auto",
                 num_results=limit,
-                # A short page excerpt carries the LinkedIn header
-                # ("Edison, New Jersey, United States") when highlights
-                # only say "Location: Edison".
-                text={"max_characters": 2500},
+                # The LinkedIn place is in the page header. 1000 characters
+                # reaches that line without pulling the whole profile.
+                text={"max_characters": 1000},
                 highlights={"max_characters": 4000},
             )
             if include_domains:

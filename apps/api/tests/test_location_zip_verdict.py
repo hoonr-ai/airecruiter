@@ -697,6 +697,33 @@ def test_qa_radius_uses_representative_city_point_not_zip_average(svc):
         assert veto, location
 
 
+def test_greater_philadelphia_inside_pennington_radius_stays_unverified(svc, monkeypatch):
+    """Philadelphia is in Pennsylvania and inside 50 miles of Pennington, NJ.
+
+    The metro label must not hard-drop on the state line. Chicago is outside
+    that circle, so it still drops.
+    """
+    import services.unified_candidate_search as ucs
+
+    def unexpected_geocode(*args, **kwargs):
+        raise AssertionError("broad region labels must not be treated as point locations")
+
+    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    pennington = _criteria(location="Pennington, NJ", within_miles=50)
+    ok, reason, _distance = svc._location_match_verdict(
+        {"location": "Greater Philadelphia Area"}, pennington
+    )
+    assert not ok and reason == "broad_region_unverified", (ok, reason)
+    assert svc._location_hard_gate(
+        {"location": "Greater Philadelphia Area"}, pennington
+    ) is None
+
+    chicago = svc._location_hard_gate(
+        {"location": "Greater Chicago Area"}, pennington
+    )
+    assert chicago
+
+
 def test_qa_linkedin_strings_are_judged_not_left_blank(svc):
     criteria = _qa_criteria()
     edison = svc._location_match_verdict(

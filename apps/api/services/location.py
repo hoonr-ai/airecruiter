@@ -1,7 +1,10 @@
 import json
+import logging
 import math
 import re
 from typing import Optional, Tuple, Dict
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from pydantic import BaseModel
@@ -101,20 +104,20 @@ _STATE_COUNTRY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# LinkedIn's own metro labels, mapped to the states they actually cover.
+# LinkedIn's own metro labels, mapped to every state the metro touches.
 # A city-name lookup is not enough: "Detroit" is also a town in Texas, but
-# "Detroit Metropolitan Area" is metro Detroit. Used to hard-drop a region
-# whose states miss every configured search location, and to soft-keep one
-# that overlaps a search location without pretending it is a point.
+# "Detroit Metropolitan Area" is metro Detroit. A label whose states miss
+# the search is not a hard-drop until its core city is also outside the
+# radius — Philadelphia is inside 50 miles of Pennington, NJ.
 _REGION_STATE_LABELS = {
-    "greater chicago area": frozenset({"IL"}),
-    "chicagoland": frozenset({"IL"}),
+    "greater chicago area": frozenset({"IL", "IN", "WI"}),
+    "chicagoland": frozenset({"IL", "IN", "WI"}),
     "detroit metropolitan area": frozenset({"MI"}),
     "greater detroit area": frozenset({"MI"}),
     "san francisco bay area": frozenset({"CA"}),
     "greater san francisco bay area": frozenset({"CA"}),
     "silicon valley": frozenset({"CA"}),
-    "greater boston area": frozenset({"MA"}),
+    "greater boston area": frozenset({"MA", "NH", "RI"}),
     "greater seattle area": frozenset({"WA"}),
     "seattle metro area": frozenset({"WA"}),
     # normalize_location_string() deletes the word "metro", so the gate
@@ -122,16 +125,44 @@ _REGION_STATE_LABELS = {
     "seattle area": frozenset({"WA"}),
     "greater los angeles area": frozenset({"CA"}),
     "los angeles metropolitan area": frozenset({"CA"}),
-    "greater philadelphia area": frozenset({"PA"}),
+    "greater philadelphia area": frozenset({"PA", "NJ", "DE"}),
     "greater atlanta area": frozenset({"GA"}),
     "greater phoenix area": frozenset({"AZ"}),
     "phoenix metropolitan area": frozenset({"AZ"}),
     "dallas-fort worth metroplex": frozenset({"TX"}),
     "dallas fort worth metroplex": frozenset({"TX"}),
     "fort worth metroplex": frozenset({"TX"}),
-    "new york city metropolitan area": frozenset({"NY", "NJ"}),
-    "greater new york area": frozenset({"NY", "NJ"}),
+    "new york city metropolitan area": frozenset({"NY", "NJ", "CT", "PA"}),
+    "greater new york area": frozenset({"NY", "NJ", "CT", "PA"}),
     "dallas area": frozenset({"TX"}),
+}
+
+# One city used only to decide whether a broad label can reach a circle.
+# The label itself stays unverified; this point is not shown as the address.
+_REGION_CORE_CITY = {
+    "greater chicago area": ("Chicago", "IL"),
+    "chicagoland": ("Chicago", "IL"),
+    "detroit metropolitan area": ("Detroit", "MI"),
+    "greater detroit area": ("Detroit", "MI"),
+    "san francisco bay area": ("San Francisco", "CA"),
+    "greater san francisco bay area": ("San Francisco", "CA"),
+    "silicon valley": ("San Jose", "CA"),
+    "greater boston area": ("Boston", "MA"),
+    "greater seattle area": ("Seattle", "WA"),
+    "seattle metro area": ("Seattle", "WA"),
+    "seattle area": ("Seattle", "WA"),
+    "greater los angeles area": ("Los Angeles", "CA"),
+    "los angeles metropolitan area": ("Los Angeles", "CA"),
+    "greater philadelphia area": ("Philadelphia", "PA"),
+    "greater atlanta area": ("Atlanta", "GA"),
+    "greater phoenix area": ("Phoenix", "AZ"),
+    "phoenix metropolitan area": ("Phoenix", "AZ"),
+    "dallas-fort worth metroplex": ("Dallas", "TX"),
+    "dallas fort worth metroplex": ("Dallas", "TX"),
+    "fort worth metroplex": ("Dallas", "TX"),
+    "new york city metropolitan area": ("New York", "NY"),
+    "greater new york area": ("New York", "NY"),
+    "dallas area": ("Dallas", "TX"),
 }
 
 
@@ -144,6 +175,20 @@ def _region_label_key(value) -> str:
         flags=re.IGNORECASE,
     )
     return text.casefold()
+
+
+def region_core_city(value) -> Optional[Tuple[str, str]]:
+    """Core city for a named metro, or None when the label has no core.
+
+    Used to avoid hard-dropping a metro whose center sits inside a search
+    circle in another state. "Greater Philadelphia Area" against Pennington
+    is the case: the label says Pennsylvania, and Philadelphia is inside
+    50 miles.
+    """
+    core = _REGION_CORE_CITY.get(_region_label_key(value))
+    if not core:
+        return None
+    return core
 
 
 def inferred_region_states(value) -> frozenset:
@@ -163,7 +208,8 @@ def inferred_region_states(value) -> frozenset:
     # state name. Import lazily: us_state_index does not import this module.
     try:
         from services.us_state_index import resolve_state_code
-    except Exception:
+    except ImportError:
+        logger.exception("us_state_index import failed while reading region states")
         return frozenset()
     code = resolve_state_code(key)
     if code:
@@ -183,7 +229,8 @@ def is_broad_region_location(value) -> bool:
         return False
     try:
         from services.us_state_index import resolve_state_code
-    except Exception:
+    except ImportError:
+        logger.exception("us_state_index import failed while reading a state label")
         return False
     return bool(resolve_state_code(state_country.group("region")))
 
@@ -521,6 +568,20 @@ def is_plausible_city_token(value: str, state: Optional[str] = None) -> bool:
     return True
 
 
+# A LinkedIn "Location:" line sometimes carries a work arrangement. Those
+# are not cities and must not be stored as the profile place.
+_PROFILE_LABEL_DENY = frozenset({
+    "remote",
+    "hybrid",
+    "onsite",
+    "on site",
+    "on-site",
+    "wfh",
+    "open to work",
+    "worldwide",
+})
+
+
 def profile_location_label(raw: str) -> str:
     """Turn one LinkedIn ``Location:`` value into the string we display.
 
@@ -533,6 +594,8 @@ def profile_location_label(raw: str) -> str:
     text = re.sub(r"\s+", " ", str(raw or "")).strip(" .")
     text = re.split(r"\s+[·•|]\s+", text, maxsplit=1)[0].strip(" .")
     if not text:
+        return ""
+    if text.casefold() in _PROFILE_LABEL_DENY:
         return ""
     cleaned = sanitize_candidate_location(text)
     if not cleaned:
@@ -552,6 +615,9 @@ def profile_location_label(raw: str) -> str:
         return token
     # "Location: Hyderabad" has no US city and no country token. Still show
     # it. The country gate runs when the same profile also says India.
+    # Work-arrangement lines ("Open to work", "Worldwide") are not cities.
+    if cleaned.casefold() in _PROFILE_LABEL_DENY:
+        return ""
     if re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{0,60}", cleaned) and len(cleaned.split()) <= 4:
         return cleaned
     return ""
@@ -635,7 +701,7 @@ def extract_us_location_from_text(text: str, _from_line: bool = False) -> str:
         if labeled:
             return labeled
 
-    # 5. "based in X" / "located in X" / "currently in X"
+    # 7. "based in X" / "located in X" / "currently in X"
     match = _RE_BASED_LOCATED.search(body)
     if match:
         cleaned = normalize_location_string(match.group(1))
