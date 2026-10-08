@@ -295,6 +295,7 @@ interface Candidate {
   jobdiva_candidate_id?: string;
   candidate_id?: string;
   engage_interview_id?: string;
+  engage_completed_at?: string;
   name: string;
   email: string;
   phone?: string;
@@ -638,7 +639,7 @@ export default function CandidateRankingsPage() {
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
   type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
-  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
+  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status" | "engage_completed_at";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
   interface ColumnFilter {
@@ -873,6 +874,7 @@ export default function CandidateRankingsPage() {
         if (field === "name") val = c.name || "";
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
+        else if (field === "engage_completed_at") val = c.engage_completed_at || c.data?.engage_completed_at ? formatDate(c.engage_completed_at || c.data?.engage_completed_at) : "N/A";
         else if (field === "screening_score") val = String(c.match_score || 0);
         else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
@@ -948,6 +950,11 @@ export default function CandidateRankingsPage() {
             break;
           case "engage_status":
             primary = normalizeInterviewStatus(a).label.localeCompare(normalizeInterviewStatus(b).label);
+            break;
+          case "engage_completed_at":
+            const dateA = a.engage_completed_at || a.data?.engage_completed_at || "";
+            const dateB = b.engage_completed_at || b.data?.engage_completed_at || "";
+            primary = dateA.localeCompare(dateB);
             break;
           default:
             primary = 0;
@@ -2510,6 +2517,38 @@ export default function CandidateRankingsPage() {
                   <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
+                        onClick={() => toggleSort("engage_completed_at")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>COMPLETED AT</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "engage_completed_at"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "engage_completed_at" ? null : "engage_completed_at"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["engage_completed_at"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Completed At"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "engage_completed_at" && (
+                        <ColumnFilterPopup
+                          field="engage_completed_at" label="COMPLETED AT"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, engage_completed_at: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.engage_completed_at; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["engage_completed_at"]}
+                        />
+                      )}
+                    </div>
+                  </TableHead>
+
+                  <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
                         onClick={() => toggleSort("engage_score")}
                         className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
                       >
@@ -2811,7 +2850,9 @@ export default function CandidateRankingsPage() {
                           })()}
                         </TableCell>
 
-
+                        <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] align-middle py-3 px-2 border-l border-slate-200">
+                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatDate(candidate.engage_completed_at || candidate.data?.engage_completed_at) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
+                        </TableCell>
 
                         <TableCell
                           className="border-b border-slate-200 text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"

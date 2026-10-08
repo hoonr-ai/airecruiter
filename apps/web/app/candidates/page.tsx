@@ -34,7 +34,7 @@ import { SubmissionModal, type SubmissionPayload } from "@/components/Submission
 
 // On-screen column count. The skeleton rows and the empty state span this many
 // cells, so keep it in step with the header row.
-const TABLE_COLUMN_COUNT = 14;
+const TABLE_COLUMN_COUNT = 15;
 
 type FeedbackAction = "Submit" | "Reject" | "Unreachable";
 type SubmissionKind = "internal" | "external";
@@ -215,6 +215,7 @@ interface Candidate {
   engage_status: string;
   engage_interview_id: string;
   engage_created_at: string;
+  engage_completed_at?: string;
   engage_score: number;
   total_fit_score?: number | null;
   audit_payload?: { hard_filter_details?: HardFilterDetail[] };
@@ -764,6 +765,7 @@ export default function GlobalCandidatesPage() {
           "Screening Level",
           "Resume Screening Score",
           "Engage Status",
+          withEasternLabel("Completed At"),
           "Engage Score",
           "Total Fit Score",
           "Candidate Feedback",
@@ -792,6 +794,7 @@ export default function GlobalCandidatesPage() {
             c.screening_level || "",
             resumeScore > 0 ? String(resumeScore) : "N/A",
             normalizeInterviewStatus(c.pass_status ?? c.engage_status).label,
+            c.engage_completed_at ? formatEasternDateTime(c.engage_completed_at) : "N/A",
             engageScoreStr,
             totalFitScoreStr,
             feedback ? FEEDBACK_DISPLAY[feedback] : "",
@@ -995,6 +998,7 @@ export default function GlobalCandidatesPage() {
                 <TableHead className="w-[180px] min-w-[180px] max-w-[180px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">SCREENING LEVEL</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">RESUME SCREENING SCORE</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE STATUS</TableHead>
+                <TableHead className="w-[200px] min-w-[200px] max-w-[200px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("COMPLETED AT")}</TableHead>
                 <TableHead className="w-[240px] min-w-[240px] max-w-[240px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">ENGAGE SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">TOTAL FIT SCORE</TableHead>
                 <TableHead className="w-[260px] min-w-[260px] max-w-[260px] text-center text-[12px] font-bold text-slate-500 uppercase tracking-wider border-l border-slate-200">{withEasternLabel("CANDIDATE FEEDBACK")}</TableHead>
@@ -1166,6 +1170,10 @@ export default function GlobalCandidatesPage() {
                             />
                           )}
                         </div>
+                      </TableCell>
+
+                      <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] border-l border-slate-200">
+                        {c.engage_completed_at ? formatEasternDateTime(c.engage_completed_at) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
