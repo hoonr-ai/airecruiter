@@ -11,7 +11,11 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/codebase/airecruiter/apps/api
 Environment=PATH=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin
 Environment=PYTHONPATH=/home/ubuntu/codebase/airecruiter/apps/api
-ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8
+# --limit-max-requests: a worker exits gracefully after ~5000 requests and the
+# uvicorn supervisor (>= 0.30) starts a fresh one, so slow per-worker memory
+# growth can't reach the kernel OOM killer. Startup work runs once per boot,
+# not per recycled worker (core/startup_once.py).
+ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8 --limit-max-requests 5000
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10

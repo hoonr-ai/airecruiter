@@ -212,6 +212,22 @@ def test_create_job_application_with_resume_payload():
     assert call["json"]["resumesource"] == 0
 
 
+@pytest.mark.parametrize("raw", ["grew revenue 50% a year", "100%", "bad %zz escape", "literal %41"])
+def test_create_job_application_with_resume_escapes_percent_for_urldecoder(raw):
+    from urllib.parse import unquote
+
+    calls = _capture(lambda s: s.create_job_application_with_resume(
+        candidate_id=None, job_id=str(JOB_ID), resume_text=raw, filename="x.txt",
+    ))
+    payload = _only(calls, "/apiv2/jobdiva/CreateJobApplicationWithResume")["json"]
+    # What JobDiva's URLDecoder yields must be the original text, and must not throw.
+    assert unquote(payload["textfile"], errors="strict") == raw
+    assert "%25" in payload["textfile"]
+    # The uploaded document itself is base64 and stays byte-exact.
+    import base64 as _b64
+    assert _b64.b64decode(payload["filecontent"]).decode("utf-8") == raw
+
+
 def test_pair_resume_source_is_schema_exact_on_both_application_endpoints(monkeypatch):
     """The provenance marker rides in `resumesource`, a field BOTH schemas define
     (CreateJobApplicationDef lists it as optional) -- so JobDiva keeps it."""
@@ -322,3 +338,14 @@ def test_update_candidate_social_links_payload_is_schema_exact():
     _assert_contract("/apiv2/jobdiva/updateCandidateSNLinks", call["json"])
     # Only JobDiva's own network names go out.
     assert call["json"] == {"id": 777, "socialnetworks": [{"name": "LinkedIn", "link": "https://www.linkedin.com/in/ada"}]}
+
+
+def test_urldecoder_escape_round_trips_plus_and_percent():
+    from urllib.parse import unquote_plus
+
+    from services.jobdiva import _escape_for_urldecoder
+
+    for text in ["C++ and A+ grades", "+1 (555) 010-0000", "grew 30% a year", "100%", "%zz", "%2B literal"]:
+        encoded = _escape_for_urldecoder(text)
+        assert "+" not in encoded
+        assert unquote_plus(encoded) == text

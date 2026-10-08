@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { REJECTION_REASONS } from "@/lib/rejection";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -35,8 +36,6 @@ import { cn } from "@/lib/utils";
 import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
-import { useRejectReason } from "@/hooks/use-reject-reason";
-import { RejectReasonSelect } from "@/components/RejectReasonSelect";
 interface TranscriptionItem {
   question: string;
   answer: string;
@@ -183,12 +182,7 @@ export default function CandidateEvaluationReportPage() {
 
   // Feedback Integration States
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
-  const {
-    rejectReason, setRejectReason,
-    otherRejectText, setOtherRejectText,
-    reset: resetRejectReason,
-    finalReason, isReasonValid
-  } = useRejectReason();
+  const [rejectReason, setRejectReason] = useState("");
   const [syncingCandidateId, setSyncingCandidateId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "warning" | "info" } | null>(null);
 
@@ -252,7 +246,8 @@ export default function CandidateEvaluationReportPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (candidateId && finalReason) {
+    const trimmedReason = rejectReason.trim();
+    if (candidateId && trimmedReason) {
       setSyncingCandidateId(candidateId);
       try {
         const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
@@ -260,7 +255,7 @@ export default function CandidateEvaluationReportPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             feedback_type: 'Reject',
-            reason: finalReason
+            reason: trimmedReason
           })
         });
 
@@ -280,7 +275,7 @@ export default function CandidateEvaluationReportPage() {
               candidate: {
                 ...prev.candidate,
                 feedback_type: 'Reject',
-                feedback_reason: finalReason,
+                feedback_reason: trimmedReason,
                 feedback_at: new Date().toISOString()
               }
             };
@@ -297,7 +292,7 @@ export default function CandidateEvaluationReportPage() {
         setIntegrationModalOpen(null);
       } finally {
         setSyncingCandidateId(null);
-        resetRejectReason();
+        setRejectReason('');
       }
     }
   };
@@ -921,22 +916,31 @@ export default function CandidateEvaluationReportPage() {
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => { setIntegrationModalOpen(null); resetRejectReason(); }} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidate?.name || "Winci Zu"}</strong>.
                   </p>
-                  <RejectReasonSelect
-                    rejectReason={rejectReason}
-                    setRejectReason={setRejectReason}
-                    otherRejectText={otherRejectText}
-                    setOtherRejectText={setOtherRejectText}
-                  />
+                  <div className="space-y-2">
+                    <label htmlFor={`reject-reason-${candidate?.name || "report"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <select
+                      id={`reject-reason-${candidate?.name || "report"}`}
+                      aria-label="Rejection Reason"
+                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
+                      value={rejectReason}
+                      onChange={e => setRejectReason(e.target.value)}
+                    >
+                      <option value="" disabled>Select a reason...</option>
+                      {REJECTION_REASONS.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <button 
-                    onClick={() => { setIntegrationModalOpen(null); resetRejectReason(); }} 
+                    onClick={() => setIntegrationModalOpen(null)} 
                     className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-all"
                   >
                     Cancel
@@ -944,7 +948,7 @@ export default function CandidateEvaluationReportPage() {
                   <button
                     className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold rounded-lg shadow-md transition-all disabled:opacity-50"
                     onClick={handleConfirmReject}
-                    disabled={!isReasonValid || !!syncingCandidateId}
+                    disabled={!rejectReason || !!syncingCandidateId}
                   >
                     {syncingCandidateId ? 'Syncing...' : 'Confirm Rejection'}
                   </button>

@@ -33,6 +33,7 @@ from routers._helpers import (
     get_dict_cursor_connection,
     _get_job_draft_sync,
     _verify_job_access_by_id,
+    optional_monitored_jobs_columns,
 )
 from core.auth import get_current_user, get_user_scope_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
@@ -2220,17 +2221,18 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # `auto_assign_service.refresh_job_performance_metrics` during
             # every auto-sync cycle. Dashboard reads are now a single
             # indexed SELECT — no JOIN, no aggregate, no JSONB extraction.
+            optional = optional_monitored_jobs_columns(cursor, "mj.")
             select_sql = (
-                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.recruiter_emails, mj.status, "
-                "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
-                "mj.processing_status, mj.is_archived, mj.archive_reason, mj.screening_level, "
-                "mj.resumes_shortlisted, "
-                "mj.pair_external_subs, mj.pair_submits, mj.feedback_completed, "
-                "mj.candidates_sourced, mj.candidates_launched, "
-                "mj.complete_submissions, mj.pass_submissions, "
-                "mj.jobdiva_total_subs, "
-                "mj.jobdiva_criteria_unconfigured, "
-                "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.recruiter_emails, mj.status, \n"
+                "       mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, \n"
+                "       mj.processing_status, mj.is_archived, mj.archive_reason, mj.screening_level, \n"
+                "       mj.resumes_shortlisted, \n"
+                "       mj.pair_external_subs, mj.pair_submits, mj.feedback_completed, \n"
+                "       mj.candidates_sourced, mj.candidates_launched, \n"
+                "       mj.complete_submissions, mj.pass_submissions, \n"
+                "       mj.jobdiva_total_subs, \n"
+                "       mj.jobdiva_criteria_unconfigured, \n"
+                f"       mj.pair_launched_at, {optional['pair_launched_by']} AS pair_launched_by, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at \n"
                 "FROM monitored_jobs mj"
             )
 
@@ -2331,7 +2333,10 @@ def _filter_jobs_for_user(
         else:
             emails = []
         clean_emails = [str(e).strip().lower() for e in emails if e]
-        if not allowed_emails.isdisjoint(clean_emails):
+        launcher_email = str(job.get("pair_launched_by") or "").strip().lower()
+        if not allowed_emails.isdisjoint(clean_emails) or (launcher_email and launcher_email in allowed_emails):
+            # Do not return launcher email to the frontend for all users to see
+            job.pop("pair_launched_by", None)
             filtered_jobs[jid] = job
 
     res = dict(payload)

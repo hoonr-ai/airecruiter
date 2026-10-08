@@ -1,14 +1,24 @@
-export function resolveRejectReason(reason: string, otherText: string): string | undefined {
-  const trimmedReason = reason?.trim();
-  const trimmedOther = otherText?.trim();
-
-  if (trimmedReason === "__other__") {
-    return trimmedOther || undefined;
-  }
-  
-  return trimmedReason || undefined;
-}
-
-export function isRejectReasonValid(reason: string, otherText: string): boolean {
-  return !!resolveRejectReason(reason, otherText);
-}
+export const REJECTION_REASONS = [
+  "Skills do not meet requirements",
+  "Communication skills",
+  "Domain experience mismatch",
+  "More qualified candidates identified",
+  "Overqualified for the role",
+  "Compensation expectations exceed budget",
+  "Not aligned with employment type (W2 / C2C / 1099)",
+  "Work authorization / visa constraints",
+  "Not comfortable with background check / drug test",
+  "Not local and not open to relocation",
+  "Open to remote only",
+  "Not available within required timeline",
+  "Accepted another offer",
+  "Candidate withdrew interest",
+  "Career gap concern",
+  "Job Hopping (short-term engagements throughout or in the last 5-7 years)",
+  "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience",
+  "Already submitted to same client / hiring manager by another vendor",
+  "Previously rejected by client",
+  "Not eligible for rehire",
+  "Past performance concern (Internal note as per past Pyramid client feedback)",
+  "Candidate does not want to work with the same client",
+];

@@ -24,6 +24,34 @@ def _block_real_db_connections(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _block_real_redis(monkeypatch):
+    """core.config loads apps/api/.env, whose REDIS_URL is a shared instance.
+    The JobDiva / Apollo / vendor limiters must never touch it from the suite;
+    tests that need Redis set REDIS_URL themselves (fake or a local test DB)."""
+    from core import config as cfg
+    from core import vendor_limiter
+    from services import jobdiva_rate_limit
+
+    monkeypatch.setattr(cfg, "REDIS_URL", "", raising=False)
+    monkeypatch.setattr(jobdiva_rate_limit, "_redis_client", None)
+    monkeypatch.setattr(vendor_limiter, "_redis_client", None)
+    for lim in (vendor_limiter.OPENAI, vendor_limiter.EXA, vendor_limiter.UNIPILE):
+        monkeypatch.setattr(lim, "_local_next", 0.0)
+        monkeypatch.setattr(lim, "_local_cooldown_until", 0.0)
+    # Scripted Unipile fakes make many calls per test; pacing them is just delay.
+    monkeypatch.setattr(vendor_limiter.UNIPILE, "min_interval_s", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_amplitude_events(monkeypatch):
+    """core.logging ships every WARNING/ERROR to Amplitude through httpx when
+    AMPLITUDE_API_KEY is set (it is, in apps/api/.env). From the suite that
+    sent real events and, in tests that stub httpx, showed up as extra
+    requests in their call counts."""
+    monkeypatch.setattr("core.amplitude.AMPLITUDE_API_KEY", "", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_kipplo_calls(monkeypatch):
     """Kipplo bills per hit and core.config loads apps/api/.env, so a key there
     must never reach a real lookup from the suite. Kipplo tests set a fake key

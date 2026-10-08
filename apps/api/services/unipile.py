@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional
 from core import (
     UNIPILE_API_KEY, UNIPILE_DSN, UNIPILE_ACCOUNT_ID, UNIPILE_ACCOUNT_IDS
 )
+from core.vendor_limiter import UNIPILE as _unipile_limit
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,19 @@ _ACCOUNTS_CACHE_TTL_S = 300
 _COOLDOWN_AUTH_S = 30 * 60      # 401/403/checkpoint — needs human attention
 _COOLDOWN_RATE_LIMIT_S = 15 * 60  # 429 — LinkedIn throttled this account
 _COOLDOWN_TRANSIENT_S = 5 * 60  # 5xx — brief backoff, likely recovers
+
+# Longest a request waits for a slot in the shared Unipile limiter.
+_SLOT_WAIT_S = 30.0
+
+
+async def _unipile_slot() -> None:
+    """Wait for a turn in the cross-worker Unipile budget before each request.
+
+    Raises httpx.TimeoutException when none comes up, which every caller
+    already treats as a network failure (no account is benched).
+    """
+    if not await _unipile_limit.acquire(max_wait_s=_SLOT_WAIT_S):
+        raise httpx.TimeoutException("Unipile shared rate limit: no slot")
 
 
 class UnipileService:
@@ -75,6 +89,7 @@ class UnipileService:
         url = f"{self.api_url}/accounts"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
+                await _unipile_slot()
                 resp = await client.get(url, headers=self._get_headers())
                 if resp.status_code == 200:
                     data = resp.json()
@@ -541,6 +556,7 @@ class UnipileService:
         
         try:
              async with httpx.AsyncClient(timeout=10.0) as client:
+                 await _unipile_slot()
                  resp = await client.get(url, params=params, headers=self._get_headers())
                  if resp.status_code == 200:
                      items = resp.json().get("items", [])
@@ -874,6 +890,7 @@ class UnipileService:
                 for attempt, lim in enumerate(limits):
                     params = {"account_id": account_id, "limit": lim}
                     logger.info(f"Unipile Recruiter Search Payload (limit={lim}): {json.dumps(payload)}")
+                    await _unipile_slot()
                     resp = await client.post(url, params=params, json=payload, headers=self._get_headers())
 
                     if resp.status_code in [200, 201]:
@@ -1174,6 +1191,7 @@ class UnipileService:
                     if cursor:
                         body["cursor"] = cursor
                     logger.info(f"Unipile Classic Search Payload (limit={page_size}): {json.dumps(body)[:400]}")
+                    await _unipile_slot()
                     resp = await client.post(
                         url, params={"account_id": account_id, "limit": page_size}, json=body, headers=self._get_headers()
                     )
@@ -1240,6 +1258,7 @@ class UnipileService:
         
         try:
              async with httpx.AsyncClient(timeout=15.0) as client:
+                 await _unipile_slot()
                  resp = await client.post(url, json=payload, headers=self._get_headers())
                  if resp.status_code in [200, 201]:
                      return True
@@ -1275,6 +1294,7 @@ class UnipileService:
                  # `skills`, `certifications` (issuer `organization`),
                  # `summary` and `is_open_to_work`.
                  params = {"account_id": account_id, "linkedin_sections": "*"}
+                 await _unipile_slot()
                  resp = await client.get(url, params=params, headers=self._get_headers())
                  
                  if resp.status_code == 200:

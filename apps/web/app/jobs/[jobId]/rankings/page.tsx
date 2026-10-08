@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { REJECTION_REASONS } from "@/lib/rejection";
 import {
   ArrowLeft,
   Search,
@@ -66,30 +67,8 @@ import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
-import { useRejectReason } from "@/hooks/use-reject-reason";
-import { RejectReasonSelect } from "@/components/RejectReasonSelect";
-
-// Utility function to format dates
-const formatDate = (dateStr: string) => {
-  if (!dateStr) return "—";
-  try {
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-      month: '2-digit',
-      day: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-      timeZoneName: 'short'
-    }).replace(",", "");
-  } catch {
-    return dateStr;
-  }
-};
+import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
+import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -556,12 +535,7 @@ export default function CandidateRankingsPage() {
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
-  const {
-    rejectReason, setRejectReason,
-    otherRejectText, setOtherRejectText,
-    reset: resetRejectReason,
-    finalReason, isReasonValid
-  } = useRejectReason();
+  const [rejectReason, setRejectReason] = useState("");
 
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
@@ -593,16 +567,17 @@ export default function CandidateRankingsPage() {
   };
 
   const handleConfirmReject = async () => {
-    if (actionCandidateId && finalReason) {
+    const trimmedReason = rejectReason?.trim() || "";
+    if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
       const rejectedAt = new Date().toISOString();
       try {
         const res = await api.candidates.feedback(jobId as string, String(actionCandidateId), {
           feedback_type: 'Reject',
-          reason: finalReason
+          reason: trimmedReason
         });
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
-        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: finalReason }));
+        setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
         if (res?.jobdiva_sync === 'error') {
           setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
@@ -616,7 +591,7 @@ export default function CandidateRankingsPage() {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
         setActionCandidateId(null);
-        resetRejectReason();
+        setRejectReason('');
       }
     }
   };
@@ -643,7 +618,7 @@ export default function CandidateRankingsPage() {
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
   type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
-  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
+  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status" | "engage_completed_at";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
   interface ColumnFilter {
@@ -878,6 +853,10 @@ export default function CandidateRankingsPage() {
         if (field === "name") val = c.name || "";
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
+        else if (field === "engage_completed_at") {
+          const completedAt = getCandidateCompletedAt(c);
+          val = completedAt ? formatEasternDateTime(completedAt) : "N/A";
+        }
         else if (field === "screening_score") val = String(c.match_score || 0);
         else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
@@ -954,6 +933,26 @@ export default function CandidateRankingsPage() {
           case "engage_status":
             primary = normalizeInterviewStatus(a).label.localeCompare(normalizeInterviewStatus(b).label);
             break;
+          case "engage_completed_at": {
+            // Compare parsed instants, not raw strings — localeCompare only
+            // sorted correctly when every value happened to be ISO-8601 with
+            // the same offset format. Missing values always sort last in
+            // both directions: `dir` flips the real-date comparison below as
+            // usual, but a missing-vs-present result is pre-multiplied by
+            // `dir` here so the later `dir * primary` cancels it back to a
+            // constant sign.
+            const rawA = getCandidateCompletedAt(a);
+            const rawB = getCandidateCompletedAt(b);
+            const timeA = rawA ? Date.parse(rawA) : NaN;
+            const timeB = rawB ? Date.parse(rawB) : NaN;
+            const missingA = Number.isNaN(timeA);
+            const missingB = Number.isNaN(timeB);
+            if (missingA && missingB) primary = 0;
+            else if (missingA) primary = dir;
+            else if (missingB) primary = -dir;
+            else primary = timeA - timeB;
+            break;
+          }
           default:
             primary = 0;
         }
@@ -2515,6 +2514,38 @@ export default function CandidateRankingsPage() {
                   <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
+                        onClick={() => toggleSort("engage_completed_at")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>{withEasternLabel("COMPLETED AT")}</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "engage_completed_at"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "engage_completed_at" ? null : "engage_completed_at"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["engage_completed_at"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Completed At"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "engage_completed_at" && (
+                        <ColumnFilterPopup
+                          field="engage_completed_at" label={withEasternLabel("COMPLETED AT")}
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, engage_completed_at: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.engage_completed_at; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["engage_completed_at"]}
+                        />
+                      )}
+                    </div>
+                  </TableHead>
+
+                  <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
                         onClick={() => toggleSort("engage_score")}
                         className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
                       >
@@ -2594,6 +2625,7 @@ export default function CandidateRankingsPage() {
                       <TableCell className="border-b border-slate-200 w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[160px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[260px] border-l border-slate-200 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
+                      <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[200px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
                       <TableCell className="border-b border-slate-200 w-[220px] border-l border-slate-200 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
@@ -2775,7 +2807,7 @@ export default function CandidateRankingsPage() {
                                   {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
                                     <div className="flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100">
                                       <div className="text-[11px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
-                                        <Mail className="w-3 h-3" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                        <Mail className="w-3 h-3" /> {formatEasternDateTime((candidate.engage_created_at || candidate.data?.engage_created_at) as string | undefined)}
                                       </div>
                                       {(() => {
                                         const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
@@ -2786,7 +2818,7 @@ export default function CandidateRankingsPage() {
                                             className={`text-[11px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
                                             title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
                                           >
-                                            <Phone className="w-3 h-3" /> {formatDate(phoneTime.toISOString())}
+                                            <Phone className="w-3 h-3" /> {formatEasternDateTime(phoneTime.toISOString())}
                                           </div>
                                         );
                                       })()}
@@ -2816,7 +2848,12 @@ export default function CandidateRankingsPage() {
                           })()}
                         </TableCell>
 
-
+                        <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] align-middle py-3 px-2 border-l border-slate-200">
+                          {(() => {
+                            const completedAt = getCandidateCompletedAt(candidate);
+                            return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
+                          })()}
+                        </TableCell>
 
                         <TableCell
                           className="border-b border-slate-200 text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
@@ -2902,7 +2939,7 @@ export default function CandidateRankingsPage() {
                               onValueChange={(val) => {
                                 if (val === "Reject") {
                                   setActionCandidateId(candidate.id);
-                                  resetRejectReason();
+                                  setRejectReason("");
                                   setIntegrationModalOpen('reject');
                                 } else if (val === "Submit") {
                                   setActionCandidateId(candidate.id);
@@ -3111,25 +3148,34 @@ export default function CandidateRankingsPage() {
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => { setIntegrationModalOpen(null); resetRejectReason(); }} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
-                  <RejectReasonSelect
-                    rejectReason={rejectReason}
-                    setRejectReason={setRejectReason}
-                    otherRejectText={otherRejectText}
-                    setOtherRejectText={setOtherRejectText}
-                  />
+                  <div className="space-y-2">
+                    <label htmlFor={`reject-reason-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <select
+                      id={`reject-reason-${actionCandidateId || "rankings"}`}
+                      aria-label="Rejection Reason"
+                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
+                      value={rejectReason}
+                      onChange={e => setRejectReason(e.target.value)}
+                    >
+                      <option value="" disabled>Select a reason...</option>
+                      {REJECTION_REASONS.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => { setIntegrationModalOpen(null); resetRejectReason(); }} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}
-                    disabled={!isReasonValid || syncingCandidateId === actionCandidateId}
+                    disabled={!rejectReason || syncingCandidateId === actionCandidateId}
                     className="font-bold"
                   >
                     {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}
