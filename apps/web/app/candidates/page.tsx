@@ -791,6 +791,7 @@ export default function GlobalCandidatesPage() {
           const engageScoreStr = c.engage_score !== null && c.engage_score !== undefined ? `${c.engage_score}` : "Waiting";
           const totalFitScoreStr = c.total_fit_score !== null && c.total_fit_score !== undefined ? `${c.total_fit_score}` : "Waiting";
           const feedback = knownFeedback(c.feedback);
+          const completedAt = c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at;
 
           return [
             c.jobdiva_id || "",
@@ -804,7 +805,7 @@ export default function GlobalCandidatesPage() {
             c.screening_level || "",
             resumeScore > 0 ? String(resumeScore) : "N/A",
             normalizeInterviewStatus(c.pass_status ?? c.engage_status).label,
-            c.engage_completed_at ? formatEasternDateTime(c.engage_completed_at) : "N/A",
+            completedAt ? formatEasternDateTime(completedAt) : "N/A",
             engageScoreStr,
             totalFitScoreStr,
             feedback ? FEEDBACK_DISPLAY[feedback] : "",
@@ -1201,7 +1202,10 @@ export default function GlobalCandidatesPage() {
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-600 text-[12px] border-l border-slate-200">
-                        {c.engage_completed_at ? formatEasternDateTime(c.engage_completed_at) : <span className="text-slate-400 italic text-[11px]">N/A</span>}
+                        {(() => {
+                          const completedAt = c.engage_completed_at || c.data?.engage_completed_at || c.data?.first_completed_at;
+                          return completedAt ? formatEasternDateTime(completedAt) : <span className="text-slate-400 italic text-[11px]">N/A</span>;
+                        })()}
                       </TableCell>
 
                       <TableCell className="border-b border-slate-200 text-center font-medium text-slate-700 text-[13px] border-l border-slate-200">
