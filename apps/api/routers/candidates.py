@@ -3803,6 +3803,7 @@ def _safe_completed_at_timestamptz_expr() -> str:
 
 
 def _launched_filter_conditions(
+    *,
     search: Optional[str],
     status: Optional[str],
     feedback: Optional[str],
@@ -4190,8 +4191,8 @@ async def get_launched_candidates(
         from psycopg2.extras import RealDictCursor
 
         search_condition, params, feedback_exists_condition, feedback_order_by = _launched_filter_conditions(
-            search, status, feedback, source, min_score, start_date, end_date,
-            completed_start_date, completed_end_date,
+            search=search, status=status, feedback=feedback, source=source, min_score=min_score, start_date=start_date, end_date=end_date,
+            completed_start_date=completed_start_date, completed_end_date=completed_end_date,
         )
         rows_sql, count_sql = _launched_candidates_sql(
             search_condition, feedback_exists_condition, feedback_order_by,

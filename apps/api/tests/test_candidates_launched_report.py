@@ -126,7 +126,7 @@ def test_status_filter_edge_values():
 
 def test_statements_take_exactly_the_params_the_endpoint_passes():
     search_condition, params, fb_cond, fb_order = cr._launched_filter_conditions(
-        "jane", "pass", "Reject", "LinkedIn", 60, "2026-09-01", "2026-09-30", "2026-09-01", "2026-09-30"
+        search="jane", status="pass", feedback="Reject", source="LinkedIn", min_score=60, start_date="2026-09-01", end_date="2026-09-30", completed_start_date="2026-09-01", completed_end_date="2026-09-30"
     )
     rows_sql, count_sql = cr._launched_candidates_sql(search_condition, fb_cond, fb_order)
     # '%%' is psycopg2's escaped literal percent, not a placeholder.
@@ -148,7 +148,7 @@ def _squash(sql):
 
 def _shipped(feedback=None):
     search_condition, _, fb_cond, fb_order = cr._launched_filter_conditions(
-        None, None, feedback, None, None, None, None, None, None
+        search=None, status=None, feedback=feedback, source=None, min_score=None, start_date=None, end_date=None, completed_start_date=None, completed_end_date=None
     )
     rows_sql, count_sql = cr._launched_candidates_sql(search_condition, fb_cond, fb_order)
     return _squash(rows_sql), _squash(count_sql), _squash(fb_cond)
@@ -225,19 +225,19 @@ def test_shipped_feedback_condition_sits_in_where_not_order_by():
 
 def test_malformed_date_is_a_400_not_a_500():
     with pytest.raises(cr.HTTPException) as exc:
-        cr._launched_filter_conditions(None, None, None, None, None, "09/21/2026", None, None, None)
+        cr._launched_filter_conditions(search=None, status=None, feedback=None, source=None, min_score=None, start_date="09/21/2026", end_date=None, completed_start_date=None, completed_end_date=None)
     assert exc.value.status_code == 400
 
 
 def test_malformed_completed_start_date_is_a_400_not_a_500():
     with pytest.raises(cr.HTTPException) as exc:
-        cr._launched_filter_conditions(None, None, None, None, None, None, None, "09/21/2026", None)
+        cr._launched_filter_conditions(search=None, status=None, feedback=None, source=None, min_score=None, start_date=None, end_date=None, completed_start_date="09/21/2026", completed_end_date=None)
     assert exc.value.status_code == 400
 
 
 def test_malformed_completed_end_date_is_a_400_not_a_500():
     with pytest.raises(cr.HTTPException) as exc:
-        cr._launched_filter_conditions(None, None, None, None, None, None, None, None, "09/21/2026")
+        cr._launched_filter_conditions(search=None, status=None, feedback=None, source=None, min_score=None, start_date=None, end_date=None, completed_start_date=None, completed_end_date="09/21/2026")
     assert exc.value.status_code == 400
 
 

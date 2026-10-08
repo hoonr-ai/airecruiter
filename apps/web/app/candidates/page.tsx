@@ -629,7 +629,20 @@ export default function GlobalCandidatesPage() {
 
   const fetchIdRef = useRef(0);
 
-  const fetchCandidates = useCallback(async (currentOffset: number, search: string, status: string, feedback: string, source: string, minScore: number | "", startDate: string, endDate: string, completedStart: string, completedEnd: string, replace: boolean = false) => {
+  const fetchCandidates = useCallback(async (opts: {
+    currentOffset: number;
+    search: string;
+    status: string;
+    feedback: string;
+    source: string;
+    minScore: number | "";
+    startDate: string;
+    endDate: string;
+    completedStart: string;
+    completedEnd: string;
+    replace?: boolean;
+  }) => {
+    const { currentOffset, search, status, feedback, source, minScore, startDate, endDate, completedStart, completedEnd, replace = false } = opts;
     fetchIdRef.current += 1;
     const currentFetchId = fetchIdRef.current;
 
@@ -700,7 +713,19 @@ export default function GlobalCandidatesPage() {
 
   useEffect(() => {
     const request = window.setTimeout(() => {
-      void fetchCandidates(0, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, true)
+      void fetchCandidates({
+        currentOffset: 0,
+        search: searchQuery,
+        status: filterStatus,
+        feedback: filterFeedback,
+        source: filterSource,
+        minScore: filterMinScore,
+        startDate: exportStartDate,
+        endDate: exportEndDate,
+        completedStart: completedStartDate,
+        completedEnd: completedEndDate,
+        replace: true
+      })
         .finally(() => setIsLoading(false));
     }, 0);
     return () => window.clearTimeout(request);
@@ -713,7 +738,19 @@ export default function GlobalCandidatesPage() {
 
     setIsFetchingMore(true);
     setOffset(nextOffset);
-    await fetchCandidates(nextOffset, searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, false);
+    await fetchCandidates({
+      currentOffset: nextOffset,
+      search: searchQuery,
+      status: filterStatus,
+      feedback: filterFeedback,
+      source: filterSource,
+      minScore: filterMinScore,
+      startDate: exportStartDate,
+      endDate: exportEndDate,
+      completedStart: completedStartDate,
+      completedEnd: completedEndDate,
+      replace: false
+    });
     setIsFetchingMore(false);
   };
 
