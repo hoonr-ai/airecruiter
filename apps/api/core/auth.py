@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from fastapi import Request, HTTPException, Depends, APIRouter, Header
 
 try:
@@ -383,6 +383,32 @@ def resolve_report_scope(user: UserIdentity, requested: Optional[str], what: str
     )
 
 
+def parse_recruiter_emails(raw: Any) -> List[str]:
+    """Normalize a `recruiter_emails` value — stored as a JSON string, a bare
+    string, or a native list depending on the read path — into a clean,
+    deduplicated, lowercased list. Shared by every caller that decides
+    access/visibility/launch eligibility off this field, so they can't drift
+    (verify_job_access, routers/jobs.py's _filter_jobs_for_user,
+    routers/candidates.py's launch gate)."""
+    if isinstance(raw, str):
+        try:
+            emails = json.loads(raw) if raw.strip().startswith("[") else [raw]
+        except json.JSONDecodeError:
+            emails = [raw] if raw else []
+    elif isinstance(raw, list):
+        emails = raw
+    else:
+        emails = []
+    seen: Set[str] = set()
+    deduped: List[str] = []
+    for e in emails:
+        cleaned = str(e).strip().lower() if e else ""
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            deduped.append(cleaned)
+    return deduped
+
+
 def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
     """
     Verify if the given user has permission to access or modify this job.
@@ -391,18 +417,7 @@ def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
     if user.is_admin:
         return
 
-    raw_emails = job_data.get("recruiter_emails", [])
-    if isinstance(raw_emails, str):
-        try:
-            emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
-        except Exception:
-            emails = [raw_emails] if raw_emails else []
-    elif isinstance(raw_emails, list):
-        emails = raw_emails
-    else:
-        emails = []
-
-    clean_assigned_emails = [str(e).strip().lower() for e in emails if e]
+    clean_assigned_emails = parse_recruiter_emails(job_data.get("recruiter_emails", []))
 
     # If job has no assigned recruiters (legacy or unassigned), allow authenticated recruiters to access/claim it
     if not clean_assigned_emails:

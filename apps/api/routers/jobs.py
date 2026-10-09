@@ -35,7 +35,7 @@ from routers._helpers import (
     _verify_job_access_by_id,
     optional_monitored_jobs_columns,
 )
-from core.auth import get_current_user, get_user_scope_emails, UserIdentity
+from core.auth import get_current_user, get_user_scope_emails, parse_recruiter_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
 from services.launched_candidates import fetch_launched_candidates, interview_id_of
 
@@ -2327,17 +2327,7 @@ def _filter_jobs_for_user(
 
     filtered_jobs = {}
     for jid, job in payload["jobs"].items():
-        raw_emails = job.get("recruiter_emails", [])
-        if isinstance(raw_emails, str):
-            try:
-                emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
-            except Exception:
-                emails = [raw_emails] if raw_emails else []
-        elif isinstance(raw_emails, list):
-            emails = raw_emails
-        else:
-            emails = []
-        clean_emails = [str(e).strip().lower() for e in emails if e]
+        clean_emails = parse_recruiter_emails(job.get("recruiter_emails", []))
         launcher_email = str(job.get("pair_launched_by") or "").strip().lower()
         if not allowed_emails.isdisjoint(clean_emails) or (launcher_email and launcher_email in allowed_emails):
             # Do not return launcher email to the frontend for all users to see
