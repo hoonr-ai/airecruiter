@@ -20,9 +20,23 @@ from routers.engagement import (
     _check_and_fire_candidate_passed_notification,
 )
 from routers.hard_filter_utils import count_pending_hard_filters
+from services.notifications_service import create_candidate_passed_notifications
 from services.outreach_normalization import normalize_channel, normalize_phase
 
 router = APIRouter(tags=["Voice Agent Integration"])
+
+# asyncio only holds a WEAK reference to a task created via asyncio.create_task
+# and not otherwise retained — fire-and-forget background work like the
+# notification task below can be garbage-collected mid-flight if nothing else
+# holds a strong reference. This set is that reference; add_done_callback
+# removes the entry once the task finishes so the set doesn't grow forever.
+_background_tasks: set = set()
+
+
+def _run_in_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 
@@ -538,7 +552,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         ):
             if target_job_id and target_candidate_id:
                 int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
-                asyncio.create_task(
+                _run_in_background(
                     _check_and_fire_candidate_passed_notification(
                         interview_id=int_id,
                         detail_payload=detail_payload,
@@ -546,7 +560,19 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         candidate_id=target_candidate_id,
                     )
                 )
-            
+
+        # In-app notification: independent of the stricter email-pass gate
+        # above, keyed on engage_status.PASS_STATUSES so a candidate who
+        # reads "Pass" on Rankings/launch report always generates one.
+        if target_job_id and target_candidate_id:
+            _run_in_background(
+                create_candidate_passed_notifications(
+                    job_id=target_job_id,
+                    candidate_id=target_candidate_id,
+                    detail_payload=detail_payload,
+                )
+            )
+
         return {"success": True, "message": "Interview results processed successfully"}
 
     except Exception as e:

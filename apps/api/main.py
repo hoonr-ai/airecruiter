@@ -234,6 +234,9 @@ async def lifespan(app: FastAPI):
         # JobDiva BI mirror behind the PAIR Dashboard.
         if jobdiva_bi_sync is not None:
             steps.append(("jobdiva_bi_schema_init", jobdiva_bi_sync.init_jobdiva_bi_schema, 10))
+        # In-app notifications table.
+        if notifications_router is not None and hasattr(notifications_router, "init_notifications_schema"):
+            steps.append(("notifications_schema_init", notifications_router.init_notifications_schema, 10))
 
         # Imported inside each step so a broken module fails only its step.
         async def _scs_init():
@@ -319,6 +322,23 @@ async def lifespan(app: FastAPI):
         id="monitored_jobs_cache_warmer",
         replace_existing=True,
     )
+
+    # Safety net for the webhook-triggered in-app notification (a crashed
+    # worker loses an asyncio.create_task before it completes, or a status
+    # changes outside the webhook path). Backfills anything the webhook path
+    # missed; dedup is the notifications table's own unique index, so this
+    # can never double-insert.
+    try:
+        from services.notifications_service import reconcile_missed_pass_notifications
+        scheduler.add_job(
+            reconcile_missed_pass_notifications,
+            "interval",
+            minutes=10,
+            id="notifications_reconciliation",
+            replace_existing=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"notifications_reconciliation_schedule_failed: {e}; continuing")
     # Prime cache once at startup so the first dashboard request after
     # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
     # failure is logged inside the warmer and never blocks boot. Stays
@@ -406,6 +426,7 @@ live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
 apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
+notifications_router = _safe_import("notifications")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -473,6 +494,7 @@ _mount(campaigns_router, "campaigns", prefix="/api")
 _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+_mount(notifications_router, "notifications", prefix="/api/v1/notifications")
 
 from core.auth import auth_router
 app.include_router(auth_router)

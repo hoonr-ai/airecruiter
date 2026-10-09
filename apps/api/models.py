@@ -468,3 +468,26 @@ class CandidateFeedbackRequest(BaseModel):
     submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
     manager_email: Optional[str] = None
     recruiter_notes: Optional[str] = None
+
+
+class NotificationItem(BaseModel):
+    id: int
+    type: str
+    job_id: Optional[str] = None
+    jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    title: str
+    body: Optional[str] = None
+    score: Optional[float] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    read_at: Optional[str] = None
+    created_at: str
+
+
+class NotificationListResponse(BaseModel):
+    notifications: List[NotificationItem]
+    unread_count: int
+
+
+class UnreadCountResponse(BaseModel):
+    unread_count: int

@@ -573,4 +573,37 @@ export const api = {
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
+  notifications: {
+    list: (params?: { limit?: number; beforeId?: number; unreadOnly?: boolean }) => {
+      const qs = new URLSearchParams();
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.beforeId) qs.set("before_id", String(params.beforeId));
+      if (params?.unreadOnly) qs.set("unread_only", "true");
+      const queryStr = qs.toString();
+      return req<NotificationListResponse>(`/api/v1/notifications${queryStr ? `?${queryStr}` : ""}`);
+    },
+    unreadCount: () => req<{ unread_count: number }>(`/api/v1/notifications/unread-count`),
+    markRead: (id: number) => req<{ success: boolean }>(`/api/v1/notifications/${id}/read`, { method: "POST" }),
+    markAllRead: () => req<{ success: boolean }>(`/api/v1/notifications/mark-all-read`, { method: "POST" }),
+    streamUrl: () => `${API_BASE}/api/v1/notifications/stream`,
+  },
 };
+
+export interface NotificationItem {
+  id: number;
+  type: string;
+  job_id: string | null;
+  jobdiva_id: string | null;
+  candidate_id: string | null;
+  title: string;
+  body: string | null;
+  score: number | null;
+  metadata: Record<string, unknown>;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationListResponse {
+  notifications: NotificationItem[];
+  unread_count: number;
+}
