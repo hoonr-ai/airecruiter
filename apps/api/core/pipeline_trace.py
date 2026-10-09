@@ -6,6 +6,11 @@ New Relic ``PipelineStage`` custom event, tagged with the current
 ``pipeline_run_id``. Sum them per run to see where wall-clock time goes:
 
     SELECT sum(ms) FROM PipelineStage WHERE run_id = '...' FACET stage
+
+PII policy: ``span(**attrs)`` values are shipped to New Relic, so attrs must
+be non-PII identifiers/counters only (job_id, batch_idx, scope, n, source).
+``_safe_attrs`` enforces this: only int/float/bool and short strings pass,
+and keys that look like PII (name, email, phone, resume, ...) are dropped.
 """
 
 from __future__ import annotations
@@ -33,8 +38,30 @@ def new_run(jobdiva_id: Any) -> str:
     return rid
 
 
+_MAX_STR_LEN = 64
+_PII_KEY_PARTS = (
+    "name", "email", "mail", "phone", "mobile", "resume", "cv", "address",
+    "linkedin", "url", "text", "ssn", "dob", "birth", "contact", "body",
+    "content", "message", "token", "password", "secret",
+)
+
+
+def _safe_attrs(attrs: dict) -> dict:
+    """Keep only non-PII scalar attrs: numbers/bools and short strings."""
+    out = {}
+    for k, v in attrs.items():
+        key = str(k).lower()
+        if any(part in key for part in _PII_KEY_PARTS):
+            continue
+        if isinstance(v, (bool, int, float)):
+            out[k] = v
+        elif isinstance(v, str) and len(v) <= _MAX_STR_LEN and "@" not in v:
+            out[k] = v
+    return out
+
+
 def _emit(stage: str, ms: int, ok: bool, attrs: dict) -> None:
-    payload = {"run_id": run_id.get(), "job_id": job_id.get(), "stage": stage, "ms": ms, "ok": ok, **attrs}
+    payload = {"run_id": run_id.get(), "job_id": job_id.get(), "stage": stage, "ms": ms, "ok": ok, **_safe_attrs(attrs)}
     try:
         logger.info("pipeline_stage stage=%s ms=%d ok=%s run_id=%s", stage, ms, ok, payload["run_id"], extra={"pipeline": payload})
         record_custom_event("PipelineStage", payload)

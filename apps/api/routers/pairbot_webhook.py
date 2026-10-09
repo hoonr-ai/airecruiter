@@ -28,7 +28,16 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["Webhooks"])
 _HANDLED = {"creation_completed", "creation_failed"}
 
 
-def _apply(bulk_id: str, status: str, event: dict, error: Optional[str]) -> int:
+_TERMINAL = ("creation_completed", "creation_failed")
+
+
+def _apply(bulk_id: str, status: str, event: dict, error: Optional[str]) -> str:
+    """Conditionally move a batch to a terminal creation status.
+
+    Returns "updated" when a non-terminal row moved, "duplicate" when the row
+    already holds this same terminal status (idempotent retry), "conflict"
+    when it holds the other terminal status (late event, ignored) and
+    "unknown" when no row has this bulk_id."""
     from routers.engagement import _launch_db
 
     rows = _launch_db(
@@ -36,12 +45,24 @@ def _apply(bulk_id: str, status: str, event: dict, error: Optional[str]) -> int:
         UPDATE launch_batches
            SET status = %s, creation_event = %s::jsonb, error = %s, updated_at = now()
          WHERE pairbot_bulk_id = %s
+           AND (status IS NULL OR status NOT IN ('creation_completed', 'creation_failed'))
         RETURNING id
         """,
         (status, json.dumps(event), error, bulk_id),
         True,
     )
-    return len(rows or [])
+    if rows:
+        return "updated"
+    current = _launch_db(
+        "SELECT status FROM launch_batches WHERE pairbot_bulk_id = %s",
+        (bulk_id,),
+        True,
+    )
+    if not current:
+        return "unknown"
+    if any(r[0] == status for r in current):
+        return "duplicate"
+    return "conflict"
 
 
 @router.post("/pairbot/creation")
@@ -71,11 +92,18 @@ async def receive_pairbot_creation_webhook(
     if status == "creation_failed":
         error = str(data.get("message") or f"Pairbot creation_failed for bulk_id={bulk_id}")
     try:
-        updated = await asyncio.to_thread(_apply, bulk_id, status, data, error)
+        outcome = await asyncio.to_thread(_apply, bulk_id, status, data, error)
     except Exception as exc:  # noqa: BLE001
         logger.error("Pairbot creation webhook DB update failed bulk_id=%s: %s", bulk_id, exc)
         raise HTTPException(status_code=500, detail="update failed")
-    if not updated:
+    if outcome == "unknown":
         # Not an async-launch batch (legacy flow) — acknowledge idempotently.
         return {"status": "ignored", "reason": "unknown bulk_id"}
-    return {"status": "ok", "updated": updated}
+    if outcome == "duplicate":
+        return {"status": "ok", "duplicate": True}
+    if outcome == "conflict":
+        logger.warning(
+            "Pairbot creation webhook ignored: bulk_id=%s already terminal, got %s", bulk_id, status
+        )
+        return {"status": "ignored", "reason": "already in a terminal state"}
+    return {"status": "ok", "updated": True}

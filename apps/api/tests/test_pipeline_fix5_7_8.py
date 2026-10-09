@@ -205,3 +205,139 @@ def test_apply_contact_enrichment_skips_low_score(monkeypatch):
 def test_provider_semaphore_is_eight():
     from services import contact_enrichment as ce
     assert ce._PROVIDER_SEMAPHORE._value == 8
+
+
+# ---- Review follow-ups ---------------------------------------------------------
+
+@needs_redis
+def test_jobagent_cache_aliases_share_one_entry(redis_env, fernet):
+    result = {"candidates": [{"id": str(i)} for i in range(5)]}
+
+    async def run():
+        await jac.register_aliases("REF-1", ("12345",))
+        await jac.put("12345", result, resume_count=5)          # write via numeric
+        via_ref = await jac.get("REF-1", resume_count=5)          # read via ref
+        via_num = await jac.get("12345", resume_count=5)
+        n = await jac.invalidate("12345")                         # edit via numeric
+        gone_ref = await jac.get("REF-1", resume_count=5)
+        await jac.put("REF-1", result, resume_count=5)
+        n2 = await jac.invalidate("REF-1")                        # edit via ref
+        gone_num = await jac.get("12345", resume_count=5)
+        return via_ref, via_num, n, gone_ref, n2, gone_num
+
+    via_ref, via_num, n, gone_ref, n2, gone_num = asyncio.run(run())
+    assert via_ref and via_num and via_ref["cache_hit"]
+    assert n == 1 and gone_ref is None and n2 == 1 and gone_num is None
+
+
+@needs_redis
+def test_jobagent_invalidate_uses_key_index_not_scan(redis_env, fernet, monkeypatch):
+    async def run():
+        await jac.put("J7", {"candidates": [{"id": "1"}]}, resume_count=1)
+        client = rl._get_redis()
+
+        def no_scan(*a, **k):
+            raise AssertionError("SCAN used")
+
+        monkeypatch.setattr(client, "scan_iter", no_scan)
+        return await jac.invalidate("J7"), await jac.get("J7", resume_count=1)
+
+    assert asyncio.run(run()) == (1, None)
+
+
+def test_yield_budget_caps_total_pause(monkeypatch):
+    async def always_busy(_job):
+        return True
+
+    monkeypatch.setattr(act, "other_job_active", always_busy)
+
+    async def run():
+        with act.yield_budget(total_s=0.3) as b:
+            t0 = time.monotonic()
+            for _ in range(5):
+                await act.wait_while_busy("j", include_self=False, label="t", max_pause_s=0.2, poll_s=0.02)
+            return time.monotonic() - t0, b.exhausted_logged
+
+    elapsed, exhausted = asyncio.run(run())
+    assert elapsed < 0.6 and exhausted
+
+
+def test_yield_budget_env_default(monkeypatch):
+    monkeypatch.delenv("JOBDIVA_AUTOSYNC_MAX_YIELD_S", raising=False)
+    with act.yield_budget() as b:
+        assert b.total_s == 300
+        with act.yield_budget(total_s=1) as inner:
+            assert inner is b  # one cap per run
+
+
+def test_active_job_refresh_task_tracked_and_cancelled(no_redis):
+    from core import tasks
+
+    async def run():
+        async with act.active_job("j1") as aj:
+            inside = aj._task in tasks._TASKS
+            t = aj._task
+        return inside, t.done(), aj._task
+
+    inside, done, after = asyncio.run(run())
+    assert inside and done and after is None
+
+
+def test_detail_cache_ttl_default_and_env(monkeypatch):
+    import importlib
+    from services import jobdiva_detail_cache as dc
+    monkeypatch.delenv("JOBDIVA_DETAIL_CACHE_TTL_S", raising=False)
+    assert importlib.reload(dc).TTL_S == 2 * 3600
+    monkeypatch.setenv("JOBDIVA_DETAIL_CACHE_TTL_S", "600")
+    assert importlib.reload(dc).TTL_S == 600
+    monkeypatch.delenv("JOBDIVA_DETAIL_CACHE_TTL_S")
+    importlib.reload(dc)
+
+
+def test_contact_min_score_single_source():
+    from core import config, sourcing_config
+    assert sourcing_config.CONTACT_ENRICH_MIN_SCORE == config.CONTACT_ENRICH_MIN_SCORE
+
+
+def test_intake_prewarm_single_flight_without_redis(no_redis, monkeypatch):
+    from routers import jobs
+    from services import jobdiva_jobagent_cache as cache
+    monkeypatch.setattr(jobs, "_PREWARM_INFLIGHT", set())
+    import core.config as cfg
+    monkeypatch.setattr(cfg, "JOB_INTAKE_PREWARM_ENABLED", True, raising=False)
+    calls = []
+
+    async def fake_prewarm(job_id, aliases=()):
+        calls.append((job_id, aliases))
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(cache, "prewarm_job", fake_prewarm)
+
+    async def run():
+        jobs._schedule_intake_prewarm(123, "REF-9")
+        jobs._schedule_intake_prewarm(123, "REF-9")  # double click
+        await asyncio.sleep(0.2)
+        jobs._schedule_intake_prewarm(123, "REF-9")  # after completion: runs again
+        await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    assert calls == [("REF-9", ("123",)), ("REF-9", ("123",))]
+    assert jobs._PREWARM_INFLIGHT == set()
+
+
+@needs_redis
+def test_intake_prewarm_redis_lock(redis_env, monkeypatch):
+    from routers import jobs
+    monkeypatch.setattr(jobs, "_PREWARM_LOCK_PREFIX", f"test:{redis_env}:prewarm:")
+
+    async def run():
+        t1 = await jobs._acquire_prewarm_lock("R1")
+        t2 = await jobs._acquire_prewarm_lock("R1")  # other worker
+        ttl = await rl._get_redis().ttl(f"test:{redis_env}:prewarm:R1")
+        await jobs._release_prewarm_lock("R1", t1)
+        t3 = await jobs._acquire_prewarm_lock("R1")
+        await jobs._release_prewarm_lock("R1", t3)
+        return t1, t2, ttl, t3
+
+    t1, t2, ttl, t3 = asyncio.run(run())
+    assert t1 and t2 is None and 0 < ttl <= 600 and t3

@@ -241,17 +241,13 @@ def _csv_env(name: str, default: str) -> tuple:
 
 CONTACT_ENRICH_SOURCE_PREFIXES = _csv_env("CONTACT_ENRICH_SOURCE_PREFIXES", "LinkedIn,JobDiva")
 CONTACT_ENRICH_UNSCORED_OK_PREFIXES = _csv_env("CONTACT_ENRICH_UNSCORED_OK_PREFIXES", "JobDiva")
-# Single knob: core.config.CONTACT_ENRICH_MIN_SCORE (env CONTACT_ENRICH_MIN_SCORE).
+# Single source of truth: core.config.CONTACT_ENRICH_MIN_SCORE (env
+# CONTACT_ENRICH_MIN_SCORE); re-exported here for sourcing callers. The
+# ImportError fallback only covers an import cycle / stripped-down test env.
 try:
-    from core.config import CONTACT_ENRICH_MIN_SCORE as _CFG_CONTACT_MIN
-    CONTACT_ENRICH_MIN_SCORE = int(_CFG_CONTACT_MIN)
-except Exception:
-    try:
-        CONTACT_ENRICH_MIN_SCORE = int(
-            _os.getenv("CONTACT_ENRICH_MIN_SCORE", str(EXTERNAL_SOURCE_MIN_SCORE)).strip()
-        )
-    except ValueError:
-        CONTACT_ENRICH_MIN_SCORE = EXTERNAL_SOURCE_MIN_SCORE
+    from core.config import CONTACT_ENRICH_MIN_SCORE  # noqa: F401  (re-export)
+except ImportError:
+    CONTACT_ENRICH_MIN_SCORE = EXTERNAL_SOURCE_MIN_SCORE
 
 # Which providers the contact lookups ask (user 2026-09-29: "make it for apollo
 # and exa only", cheapest first, "but get the contact details at the end").
@@ -340,7 +336,7 @@ JOBDIVA_ENRICH_CONCURRENCY = int(
 # historically safe width so the wider LLM fan-out can't burst JobDiva's
 # rate limiter (see CANDIDATES_DETAIL_CONCURRENCY history below).
 JOBDIVA_RESUME_FETCH_CONCURRENCY = int(
-    _os.getenv("JOBDIVA_RESUME_FETCH_CONCURRENCY", "10").strip() or "10"
+    _os.getenv("JOBDIVA_RESUME_FETCH_CONCURRENCY", "5").strip() or "5"
 )
 
 
@@ -603,10 +599,10 @@ EMPLOYER_RESOLUTION_ENABLED = _os.getenv(
 # fresh-parse burst against the LLM.
 try:
     EMPLOYER_RESOLUTION_CONCURRENCY = int(
-        _os.getenv("EMPLOYER_RESOLUTION_CONCURRENCY", "10").strip() or "10"
+        _os.getenv("EMPLOYER_RESOLUTION_CONCURRENCY", "6").strip() or "6"
     )
 except ValueError:
-    EMPLOYER_RESOLUTION_CONCURRENCY = 10
+    EMPLOYER_RESOLUTION_CONCURRENCY = 6
 
 # Per-candidate ceiling on one resume parse (crisp + extract LLM calls).
 try:

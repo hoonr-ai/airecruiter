@@ -14,7 +14,7 @@ import asyncio
 import hashlib
 import html
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
@@ -3115,13 +3115,22 @@ async def _send_bulk_interview_core(
                 pass
 
 @router.get("/engage/bulk-status/stream")
-async def stream_engagement_status(bulk_id: Optional[str] = None, launch_id: Optional[str] = None):
+async def stream_engagement_status(
+    request: Request,
+    bulk_id: Optional[str] = None,
+    launch_id: Optional[str] = None,
+):
     """Proxy Pairbot's per-bulk SSE stream, or (Fix 3) replay the progress
-    events of an async launch keyed by `launch_id`."""
+    events of an async launch keyed by `launch_id`.
+
+    The launch_id branch requires an authenticated user who requested the
+    launch, is an admin, or otherwise has access to the launch's job. The
+    bulk_id branch is unchanged."""
     from fastapi.responses import StreamingResponse
     import httpx
 
     if launch_id:
+        await _authorize_launch_stream(request, launch_id)
         return StreamingResponse(
             _launch_progress_stream(launch_id),
             media_type="text/event-stream",
@@ -3289,46 +3298,69 @@ async def _precompute_launch_signals(
 
 _LAUNCH_TABLES_READY = {"done": False}
 
+# Statements mirror migrations/20261009_pair_launch_pipeline.sql. Run once at
+# startup (main.py lifespan -> init_launch_tables), never per request.
+_LAUNCH_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS launch_runs (
+        id uuid PRIMARY KEY,
+        job_id text NOT NULL,
+        requested_by text,
+        status text NOT NULL,
+        events jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at timestamptz DEFAULT now(),
+        finished_at timestamptz,
+        last_event_at timestamptz DEFAULT now()
+    )
+    """,
+    "ALTER TABLE launch_runs ADD COLUMN IF NOT EXISTS last_event_at timestamptz DEFAULT now()",
+    """
+    CREATE INDEX IF NOT EXISTS ix_launch_runs_running
+    ON launch_runs (last_event_at) WHERE status = 'running'
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS launch_events (
+        launch_id uuid NOT NULL REFERENCES launch_runs(id) ON DELETE CASCADE,
+        seq int NOT NULL,
+        payload jsonb NOT NULL,
+        created_at timestamptz DEFAULT now(),
+        PRIMARY KEY (launch_id, seq)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS launch_batches (
+        id uuid PRIMARY KEY,
+        launch_id uuid REFERENCES launch_runs(id),
+        idx int,
+        candidate_ids text[],
+        pairbot_bulk_id text,
+        status text,
+        error text,
+        creation_event jsonb,
+        idempotency_key text UNIQUE,
+        updated_at timestamptz DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_launch_batches_bulk ON launch_batches (pairbot_bulk_id)",
+    "CREATE INDEX IF NOT EXISTS ix_launch_batches_launch ON launch_batches (launch_id)",
+)
+
 
 def _ensure_launch_tables() -> None:
-    """CREATE IF NOT EXISTS for the async-launch tables. Mirrors
-    migrations/20261009_launch_runs.sql (same convention as
-    _ensure_audit_table)."""
+    """CREATE IF NOT EXISTS for the async-launch tables."""
     if _LAUNCH_TABLES_READY["done"]:
         return
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS launch_runs (
-                    id uuid PRIMARY KEY,
-                    job_id text NOT NULL,
-                    requested_by text,
-                    status text NOT NULL,
-                    events jsonb NOT NULL DEFAULT '[]'::jsonb,
-                    created_at timestamptz DEFAULT now(),
-                    finished_at timestamptz
-                );
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS launch_batches (
-                    id uuid PRIMARY KEY,
-                    launch_id uuid REFERENCES launch_runs(id),
-                    idx int,
-                    candidate_ids text[],
-                    pairbot_bulk_id text,
-                    status text,
-                    error text,
-                    creation_event jsonb,
-                    idempotency_key text UNIQUE,
-                    updated_at timestamptz DEFAULT now()
-                );
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS ix_launch_batches_bulk
-                ON launch_batches (pairbot_bulk_id);
-            """)
+            for stmt in _LAUNCH_DDL:
+                cur.execute(stmt)
             conn.commit()
     _LAUNCH_TABLES_READY["done"] = True
+
+
+async def init_launch_tables() -> None:
+    """Startup hook (main.py lifespan). Fail-soft: the caller logs errors."""
+    await asyncio.to_thread(_ensure_launch_tables)
 
 
 def _launch_batch_idempotency_key(launch_id: str, idx: int, candidate_ids: List[str]) -> str:
@@ -3425,21 +3457,130 @@ async def _wait_for_creation_webhook_or_sse(bulk_id: str, *, timeout_seconds: fl
         await asyncio.gather(sse, hook, return_exceptions=True)
 
 
+_LAUNCH_TERMINAL_STATUSES = ("completed", "failed", "aborted")
+
+
+def _launch_stale_minutes() -> int:
+    try:
+        return max(1, int(_launch_flag("LAUNCH_STALE_MINUTES", 20) or 20))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _launch_stream_max_seconds() -> float:
+    try:
+        return float(_launch_flag("LAUNCH_STREAM_MAX_SECONDS", 45 * 60) or 45 * 60)
+    except (TypeError, ValueError):
+        return 45 * 60.0
+
+
+def _launch_append_event(launch_id: str, seq: int, evt: Dict[str, Any]) -> None:
+    """Append one event row and bump launch_runs.last_event_at (one statement)."""
+    _launch_db(
+        """
+        WITH ins AS (
+            INSERT INTO launch_events (launch_id, seq, payload)
+            VALUES (%s, %s, %s::jsonb)
+            ON CONFLICT (launch_id, seq) DO NOTHING
+            RETURNING 1
+        )
+        UPDATE launch_runs SET last_event_at = now() WHERE id = %s
+        """,
+        (launch_id, seq, json.dumps(evt), launch_id),
+    )
+
+
+def _launch_finalize(launch_id: str, status: str) -> None:
+    """Write the terminal status, only if the run is still 'running'."""
+    _launch_db(
+        "UPDATE launch_runs SET status = %s, finished_at = now() "
+        "WHERE id = %s AND status = 'running'",
+        (status, launch_id),
+    )
+
+
+def _sweep_stale_launch_runs(launch_id: Optional[str] = None) -> int:
+    """Mark 'running' launches with no event for LAUNCH_STALE_MINUTES as
+    'failed' (worker died / was killed without writing a final status).
+    Scoped to one launch when `launch_id` is given. Returns rows swept."""
+    sql = (
+        "UPDATE launch_runs SET status = 'failed', finished_at = now() "
+        "WHERE status = 'running' "
+        "AND COALESCE(last_event_at, created_at) < now() - make_interval(mins => %s)"
+    )
+    params: tuple = (_launch_stale_minutes(),)
+    if launch_id:
+        sql += " AND id = %s"
+        params = params + (launch_id,)
+    rows = _launch_db(sql + " RETURNING id", params, True)
+    n = len(rows or [])
+    if n:
+        logger.warning("launch_runs stale sweep marked %d run(s) failed", n)
+    return n
+
+
+async def _authorize_launch_stream(request: Request, launch_id: str) -> None:
+    """Requester, admins, or users with access to the launch's job only."""
+    user = await asyncio.to_thread(get_current_user, request, None)
+    try:
+        rows = await asyncio.to_thread(
+            _launch_db,
+            "SELECT job_id, requested_by FROM launch_runs WHERE id = %s",
+            (launch_id,),
+            True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("launch auth lookup failed launch_id=%s: %s", launch_id, exc)
+        raise HTTPException(status_code=503, detail="Launch lookup failed")
+    if not rows:
+        raise HTTPException(status_code=404, detail="Launch not found")
+    job_id, requested_by = rows[0]
+    if user.is_admin:
+        return
+    if requested_by and str(requested_by).strip().lower() == (user.email or "").strip().lower():
+        return
+    await asyncio.to_thread(_verify_job_access_by_id, str(job_id), user)
+
+
 async def _launch_progress_stream(launch_id: str):
-    """SSE replay of an async launch's events (launch_runs.events)."""
-    sent = 0
+    """SSE replay of an async launch's events (launch_events, by seq).
+
+    Each connection replays from seq 0 (the frontend skips already-seen
+    events by count) and then reads only rows with seq > last seen. Ends on a
+    terminal status, a stale run (swept to 'failed'), or after
+    LAUNCH_STREAM_MAX_SECONDS."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _launch_stream_max_seconds()
+    last_seq = -1
+    last_type: Optional[str] = None
     idle = 0
     while True:
+        if loop.time() >= deadline:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'launch progress stream timed out; refresh to check status'})}\n\n"
+            return
         try:
+            # Status first: events are written before the final status, so a
+            # terminal status read here means every event is already visible.
             rows = await asyncio.to_thread(
                 _launch_db,
-                "SELECT status, events FROM launch_runs WHERE id = %s",
-                (launch_id,),
+                "SELECT status, COALESCE(last_event_at, created_at) "
+                "< now() - make_interval(mins => %s) FROM launch_runs WHERE id = %s",
+                (_launch_stale_minutes(), launch_id),
                 True,
             )
+            events = []
+            if rows:
+                events = await asyncio.to_thread(
+                    _launch_db,
+                    "SELECT seq, payload FROM launch_events "
+                    "WHERE launch_id = %s AND seq > %s ORDER BY seq",
+                    (launch_id, last_seq),
+                    True,
+                ) or []
         except Exception as exc:  # noqa: BLE001
             logger.warning("launch progress read failed launch_id=%s: %s", launch_id, exc)
             rows = None
+            events = []
         if not rows:
             idle += 1
             if idle > 30:
@@ -3447,13 +3588,22 @@ async def _launch_progress_stream(launch_id: str):
                 return
             await asyncio.sleep(1.0)
             continue
-        status, events = rows[0]
-        if isinstance(events, str):
-            events = json.loads(events)
-        for ev in (events or [])[sent:]:
+        status, stale = rows[0]
+        for seq, ev in events:
+            if isinstance(ev, str):
+                ev = json.loads(ev)
+            last_seq = seq
+            last_type = ev.get("type") if isinstance(ev, dict) else None
             yield f"data: {json.dumps(ev)}\n\n"
-        sent = len(events or [])
-        if status in ("completed", "failed", "aborted"):
+        if status == "running" and stale:
+            try:
+                if await asyncio.to_thread(_sweep_stale_launch_runs, launch_id):
+                    status = "failed"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("launch stale sweep failed launch_id=%s: %s", launch_id, exc)
+        if status in _LAUNCH_TERMINAL_STATUSES:
+            if status == "failed" and last_type not in ("error", "done"):
+                yield f"data: {json.dumps({'type': 'error', 'message': 'launch did not complete'})}\n\n"
             return
         yield ": keepalive\n\n"
         await asyncio.sleep(1.5)
@@ -3644,7 +3794,7 @@ async def _run_one_batch(
 
 
 @router.post("/engage/launch")
-async def launch_bulk_interviews(request: LaunchRequest):
+async def launch_bulk_interviews(request: LaunchRequest, http_request: Request = None):
     """Single-call, backend-owned Launch PAIR orchestration.
 
     Replaces the frontend's per-batch generate -> send -> SSE loop: the browser
@@ -3843,12 +3993,26 @@ async def launch_bulk_interviews(request: LaunchRequest):
     if request.async_launch and _launch_flag("LAUNCH_ASYNC", False):
         launch_id = str(uuid.uuid4())
         run_id = _trace_new_run(request.job_id)
+        requested_by: Optional[str] = None
+        if http_request is not None:
+            try:
+                _user = await asyncio.to_thread(get_current_user, http_request, None)
+                requested_by = (_user.email or "").strip().lower() or None
+            except HTTPException:
+                requested_by = None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("async launch: could not resolve requester: %s", exc)
         try:
-            await asyncio.to_thread(_ensure_launch_tables)
+            # Lazy safety net for runs whose worker died without a final write.
+            await asyncio.to_thread(_sweep_stale_launch_runs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("launch_runs stale sweep failed: %s", exc)
+        try:
             await asyncio.to_thread(
                 _launch_db,
-                "INSERT INTO launch_runs (id, job_id, status) VALUES (%s, %s, 'running')",
-                (launch_id, str(request.job_id)),
+                "INSERT INTO launch_runs (id, job_id, requested_by, status, last_event_at) "
+                "VALUES (%s, %s, %s, 'running', now())",
+                (launch_id, str(request.job_id), requested_by),
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("async launch could not be recorded: %s", exc, exc_info=True)
@@ -3856,36 +4020,53 @@ async def launch_bulk_interviews(request: LaunchRequest):
 
         async def _run_async() -> None:
             final = "completed"
+            seq = {"n": 0}
+            cancelled = False
+
+            def _append_sync(evt: Dict[str, Any]) -> None:
+                _launch_append_event(launch_id, seq["n"], evt)
+                seq["n"] += 1
+
             try:
                 async for chunk in _work(launch_id=launch_id, run_id=run_id):
                     evt = json.loads(chunk[len("data: "):].strip())
                     if evt.get("type") == "error":
                         final = "aborted"
-                    await asyncio.to_thread(
-                        _launch_db,
-                        "UPDATE launch_runs SET events = events || %s::jsonb WHERE id = %s",
-                        (json.dumps([evt]), launch_id),
-                    )
-            except Exception as exc:  # noqa: BLE001
+                    await asyncio.to_thread(_append_sync, evt)
+            except asyncio.CancelledError:
+                # Shutdown drain (or similar) cancelled us. Awaiting a thread
+                # here could itself be cancelled, so write synchronously.
+                final = "failed"
+                cancelled = True
+                logger.warning("async launch %s cancelled", launch_id)
+                try:
+                    _append_sync({"type": "error", "message": "launch interrupted (server restart)"})
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            except BaseException as exc:
                 final = "failed"
                 logger.error("async launch %s crashed: %s", launch_id, exc, exc_info=True)
                 try:
-                    await asyncio.to_thread(
-                        _launch_db,
-                        "UPDATE launch_runs SET events = events || %s::jsonb WHERE id = %s",
-                        (json.dumps([{"type": "error", "message": str(exc)}]), launch_id),
-                    )
-                except Exception:  # noqa: BLE001
+                    await asyncio.shield(asyncio.to_thread(
+                        _append_sync, {"type": "error", "message": str(exc)}
+                    ))
+                except BaseException:  # noqa: BLE001
                     pass
                 raise
             finally:
                 try:
-                    await asyncio.to_thread(
-                        _launch_db,
-                        "UPDATE launch_runs SET status = %s, finished_at = now() WHERE id = %s",
-                        (final, launch_id),
-                    )
-                except Exception as exc:  # noqa: BLE001
+                    if cancelled:
+                        _launch_finalize(launch_id, final)
+                    else:
+                        await asyncio.shield(asyncio.to_thread(_launch_finalize, launch_id, final))
+                except BaseException as exc:  # noqa: BLE001
+                    if not cancelled:
+                        # Shield was interrupted: make sure the row is final.
+                        try:
+                            _launch_finalize(launch_id, final)
+                        except Exception:  # noqa: BLE001
+                            pass
                     logger.warning("launch_runs final status write failed %s: %s", launch_id, exc)
 
         _spawn_task(_run_async(), name=f"launch:{launch_id}")

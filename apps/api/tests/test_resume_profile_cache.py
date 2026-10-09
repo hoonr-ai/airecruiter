@@ -130,3 +130,73 @@ def test_process_candidate_common_uses_cache(store, monkeypatch):
     assert a["company_experience"] == b["company_experience"]
     assert a["current_title"] == b["current_title"] == "Senior Engineer"
     assert [s.get("skill") for s in a["skills"]] == [s.get("skill") for s in b["skills"]]
+
+
+def test_jobdiva_cached_parse_skips_second_lookup(monkeypatch):
+    from services import sourced_candidates_storage as scs
+
+    calls = {"n": 0}
+
+    async def _lookup(_text):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(scs.ResumeProfileService, "lookup", staticmethod(_lookup))
+    seen = {}
+
+    async def _fake_common(candidate, **kw):
+        seen.update(kw)
+        res = kw["cached_parse"] if kw["cached_parse"] is not None else await scs.ResumeProfileService.lookup("x")
+        return res
+
+    monkeypatch.setattr(scs, "_process_candidate_common", _fake_common)
+    parsed = {"name": "Jane"}
+    out = asyncio.run(scs.process_jobdiva_candidate({"candidate_id": "1", "resume_text": RESUME}, cached_parse=parsed))
+    assert out is parsed and calls["n"] == 0
+    asyncio.run(scs.process_jobdiva_candidate({"candidate_id": "1", "resume_text": RESUME}))
+    assert calls["n"] == 1
+
+
+def test_common_uses_cached_parse_without_lookup(monkeypatch):
+    from services import sourced_candidates_storage as scs
+
+    async def _boom(_text):
+        raise AssertionError("lookup must not run when cached_parse given")
+
+    monkeypatch.setattr(scs.ResumeProfileService, "lookup", staticmethod(_boom))
+
+    class _Stop(Exception):
+        pass
+
+    async def _no_parse(*a, **k):
+        raise _Stop
+
+    monkeypatch.setattr(scs.ResumeProfileService, "get_or_parse", staticmethod(_no_parse))
+    # A cached parse proceeds past the lookup; any later failure is fine as long
+    # as it is not the lookup assertion.
+    try:
+        asyncio.run(scs._process_candidate_common(
+            {"candidate_id": "1"}, RESUME, RESUME, "JobDiva", {}, cached_parse={"error": "x"},
+        ))
+    except AssertionError:
+        raise
+    except Exception:
+        pass
+
+
+def test_pipeline_trace_drops_pii_attrs(monkeypatch):
+    from core import pipeline_trace as pt
+
+    sent = []
+    monkeypatch.setattr(pt, "record_custom_event", lambda name, payload: sent.append(payload))
+    with pt.span_sync(
+        "stage_x", batch_idx=2, n=5, scope="batch", source="JobDiva", job_id="123", ratio=0.5, ok_flag=True,
+        name="Jane Doe", candidate_email="j@x.com", phone="555", resume_text="long", note="a@b.com",
+        blob="x" * 500, obj={"a": 1},
+    ):
+        pass
+    p = sent[0]
+    for k in ("batch_idx", "n", "scope", "source", "ratio", "ok_flag"):
+        assert k in p
+    for k in ("name", "candidate_email", "phone", "resume_text", "note", "blob", "obj"):
+        assert k not in p

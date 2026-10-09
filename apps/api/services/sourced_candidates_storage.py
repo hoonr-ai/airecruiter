@@ -1445,6 +1445,7 @@ async def _process_candidate_common(
     source: str,
     fallbacks: Dict[str, Any],
     min_text_length: int = 50,
+    cached_parse: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Shared pipeline: crisp → LLM extract → build enhanced_info → save → return.
 
@@ -1473,7 +1474,11 @@ async def _process_candidate_common(
     # RESUME_PARSER_VERSION is 1 — a version bump must force a re-parse.
     # All DB work runs off the event loop and fails open.
     cache_text = resume_text_to_save or resume_text_for_llm
-    enhanced_info_result: Optional[Dict[str, Any]] = await ResumeProfileService.lookup(cache_text)
+    # `cached_parse`: a parsed_resumes hit the caller already fetched for this
+    # exact text — reuse it instead of a second DB round trip.
+    enhanced_info_result: Optional[Dict[str, Any]] = (
+        cached_parse if cached_parse is not None else await ResumeProfileService.lookup(cache_text)
+    )
     if enhanced_info_result is not None:
         logger.info(f"💾 [{source} Candidate:{candidate_id}] parsed_resumes cache HIT, skipping crisp+LLM")
     else:
@@ -1595,7 +1600,7 @@ async def _process_candidate_common(
     }
 
 
-async def process_jobdiva_candidate(candidate: Dict[str, Any]):
+async def process_jobdiva_candidate(candidate: Dict[str, Any], cached_parse: Optional[Dict[str, Any]] = None):
     candidate_id = candidate.get("candidate_id", "unknown")
     original_resume_text = candidate.get("resume_text", "")
     if not _has_real_resume_text(original_resume_text):
@@ -1617,6 +1622,7 @@ async def process_jobdiva_candidate(candidate: Dict[str, Any]):
         resume_text_to_save=original_resume_text,
         source=candidate.get("source", "JobDiva"),
         fallbacks=fallbacks,
+        cached_parse=cached_parse,
     )
 
 

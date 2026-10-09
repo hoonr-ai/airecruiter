@@ -216,6 +216,8 @@ async def lifespan(app: FastAPI):
         # so a slow/locked DB can no longer crash-loop the app).
         if engagement is not None and hasattr(engagement, "init_engagement_tables"):
             steps.append(("engagement_audit_init", engagement.init_engagement_tables, 10))
+        if engagement is not None and hasattr(engagement, "init_launch_tables"):
+            steps.append(("launch_tables_init", engagement.init_launch_tables, 10))
         # monitored_jobs columns. Previously two handlers in routers/jobs.py ran
         # ALTER TABLE on every request and stalled GET /jobs/monitored for 60-90s.
         if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):

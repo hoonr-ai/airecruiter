@@ -299,9 +299,12 @@ def test_async_launch_returns_202_and_records_events(monkeypatch, fake_launch):
     calls, _ = fake_launch
     monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
     monkeypatch.setattr(cfg, "LAUNCH_ASYNC", True)
-    monkeypatch.setattr(eng, "_ensure_launch_tables", lambda: None)
     writes: List[tuple] = []
-    monkeypatch.setattr(eng, "_launch_db", lambda sql, params, fetch=False: writes.append((sql, params)))
+
+    def fake_db(sql, params, fetch=False):
+        writes.append((sql, params))
+        return [] if fetch else None
+    monkeypatch.setattr(eng, "_launch_db", fake_db)
 
     async def go():
         resp = await eng.launch_bulk_interviews(eng.LaunchRequest(
@@ -315,7 +318,9 @@ def test_async_launch_returns_202_and_records_events(monkeypatch, fake_launch):
     assert resp.status_code == 202
     launch_id = json.loads(resp.body)["launch_id"]
     assert all(c["idx"] in (0, 1) for c in calls) and len(calls) == 2
-    events = [json.loads(p[0])[0] for s, p in writes if "events = events ||" in s]
+    appends = [p for s, p in writes if "INSERT INTO launch_events" in s]
+    assert [p[1] for p in appends] == list(range(len(appends)))  # seq 0..n-1
+    events = [json.loads(p[2]) for p in appends]
     assert events[0]["type"] == "start" and events[0]["launch_id"] == launch_id
     assert events[-1]["type"] == "done"
     assert any("status = %s, finished_at" in s and p[0] == "completed" for s, p in writes)
@@ -362,7 +367,9 @@ def test_pairbot_creation_webhook(monkeypatch):
 
     def fake_db(sql, params, fetch=False):
         seen.append(params)
-        return [("row",)] if params[3] == "bulk-1" else []
+        if "UPDATE launch_batches" in sql:
+            return [("row",)] if params[3] == "bulk-1" else []
+        return []
     monkeypatch.setattr(eng, "_launch_db", fake_db)
     app = FastAPI()
     app.include_router(pairbot_webhook.router)

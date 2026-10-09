@@ -9,7 +9,14 @@ are the call inputs that change the result besides the job (``require_resume``
 today); ``resume_count`` is stored in the value instead, so a cached full
 tranche also serves the smaller quick-first call (sliced to the requested
 count — JobAgent results are rank-ordered). Edits to the job's criteria
-delete every ``jd:ja:{job_id}:*`` key (``invalidate``).
+delete every key for the job (``invalidate``).
+
+Aliases: a job is known by its numeric JobDiva id and its ref code. The
+intake prewarm records ``jd:ja:alias:{id} -> canonical`` for both forms, and
+get/put/invalidate resolve through it, so either form reads, writes and
+invalidates the same entries. Written keys are tracked in the per-job set
+``jd:ja:keys:{canonical}`` so ``invalidate`` needs no SCAN (SCAN remains a
+fallback for entries without an index).
 
 Values carry candidate PII (resume text, email, phone), so they are
 Fernet-encrypted with the same derived key as ``jobdiva_detail_cache``.
@@ -42,7 +49,54 @@ def criteria_hash(criteria: Dict[str, Any]) -> str:
 
 
 def cache_key(job_id: Any, require_resume: bool = True) -> str:
+    """Key for an already-canonical job id (see ``canonical_job_id``)."""
     return f"{_PREFIX}{job_id}:{criteria_hash({'require_resume': bool(require_resume)})}"
+
+
+def _alias_key(job_id: Any) -> str:
+    return f"{_PREFIX}alias:{job_id}"
+
+
+def _keyset_key(canonical: Any) -> str:
+    return f"{_PREFIX}keys:{canonical}"
+
+
+async def register_aliases(canonical: Any, aliases: tuple = ()) -> None:
+    """Record that each alias (numeric id / ref code) names ``canonical``, so
+    get/put/invalidate via any form resolve to the one canonical key space."""
+    if not canonical:
+        return
+    client = _rl._get_redis()
+    if client is None:
+        return
+    others = [str(a) for a in aliases if a and str(a) != str(canonical)]
+    if not others:
+        return
+    ttl = max(_ttl_s(), 1) * 2  # outlive the entries the mapping points at
+    try:
+        pipe = client.pipeline(transaction=False)
+        pipe.set(_alias_key(canonical), str(canonical), ex=ttl)
+        for a in others:
+            pipe.set(_alias_key(a), str(canonical), ex=ttl)
+        await pipe.execute()
+    except Exception as exc:
+        _rl._mark_redis_down(exc)
+
+
+async def canonical_job_id(job_id: Any, client: Any = None) -> str:
+    """Resolve ``job_id`` through the alias map; unknown ids are their own canonical."""
+    jid = str(job_id)
+    client = client if client is not None else _rl._get_redis()
+    if client is None:
+        return jid
+    try:
+        val = await client.get(_alias_key(jid))
+    except Exception as exc:
+        _rl._mark_redis_down(exc)
+        return jid
+    if not val:
+        return jid
+    return val.decode() if isinstance(val, bytes) else str(val)
 
 
 def _client_and_cipher():
@@ -54,15 +108,9 @@ def _client_and_cipher():
     return _rl._get_redis(), fernet
 
 
-async def get(job_id: Any, *, resume_count: int, require_resume: bool = True) -> Optional[Dict[str, Any]]:
-    """Cached result with at least ``resume_count`` requested, sliced to it; else None."""
-    if not job_id:
-        return None
-    client, fernet = _client_and_cipher()
-    if client is None:
-        return None
+async def _get_canonical(client, fernet, canon: str, resume_count: int, require_resume: bool):
     try:
-        raw = await client.get(cache_key(job_id, require_resume))
+        raw = await client.get(cache_key(canon, require_resume))
     except Exception as exc:
         _rl._mark_redis_down(exc)
         return None
@@ -80,6 +128,17 @@ async def get(job_id: Any, *, resume_count: int, require_resume: bool = True) ->
     return result
 
 
+async def get(job_id: Any, *, resume_count: int, require_resume: bool = True) -> Optional[Dict[str, Any]]:
+    """Cached result with at least ``resume_count`` requested, sliced to it; else None."""
+    if not job_id:
+        return None
+    client, fernet = _client_and_cipher()
+    if client is None:
+        return None
+    canon = await canonical_job_id(job_id, client)
+    return await _get_canonical(client, fernet, canon, resume_count, require_resume)
+
+
 async def put(job_id: Any, result: Dict[str, Any], *, resume_count: int, require_resume: bool = True) -> None:
     if not job_id or not isinstance(result, dict):
         return
@@ -88,32 +147,52 @@ async def put(job_id: Any, result: Dict[str, Any], *, resume_count: int, require
     client, fernet = _client_and_cipher()
     if client is None:
         return
-    key = cache_key(job_id, require_resume)
+    canon = await canonical_job_id(job_id, client)
+    key = cache_key(canon, require_resume)
     try:
         # Never replace a larger cached tranche with a smaller one.
-        existing = await get(job_id, resume_count=int(resume_count) + 1, require_resume=require_resume)
+        existing = await _get_canonical(client, fernet, canon, int(resume_count) + 1, require_resume)
         if existing is not None:
             return
         token = fernet.encrypt(json.dumps(
             {"resume_count": int(resume_count), "result": result}, default=str
         ).encode()).decode()
-        await client.set(key, token, ex=_ttl_s())
+        ttl = _ttl_s()
+        pipe = client.pipeline(transaction=False)
+        pipe.set(key, token, ex=ttl)
+        # Per-job key index so invalidate needs no SCAN.
+        pipe.sadd(_keyset_key(canon), key)
+        pipe.expire(_keyset_key(canon), ttl + 60)
+        await pipe.execute()
     except Exception as exc:
         _rl._mark_redis_down(exc)
 
 
 async def invalidate(job_id: Any) -> int:
-    """Delete every cached JobAgent result for ``job_id``. Returns keys deleted."""
+    """Delete every cached JobAgent result for ``job_id`` (any alias form).
+    Returns keys deleted."""
     if not job_id:
         return 0
     client = _rl._get_redis()
     if client is None:
         return 0
     try:
-        keys = [k async for k in client.scan_iter(match=f"{_PREFIX}{job_id}:*", count=100)]
-        if keys:
-            await client.delete(*keys)
-        return len(keys)
+        canon = await canonical_job_id(job_id, client)
+        ids = {canon, str(job_id)}
+        keys: set = set()
+        for jid in ids:
+            members = await client.smembers(_keyset_key(jid))
+            keys.update(m.decode() if isinstance(m, bytes) else str(m) for m in (members or ()))
+        if not keys:
+            # Fallback for entries written before the key index existed.
+            for jid in ids:
+                keys.update([
+                    k.decode() if isinstance(k, bytes) else str(k)
+                    async for k in client.scan_iter(match=f"{_PREFIX}{jid}:*", count=100)
+                ])
+        n = int(await client.delete(*keys)) if keys else 0
+        await client.delete(*[_keyset_key(j) for j in ids])
+        return n
     except Exception as exc:
         _rl._mark_redis_down(exc)
         return 0
@@ -130,13 +209,14 @@ async def prewarm_job(job_id: Any, aliases: tuple = ()) -> None:
 
         resume_count = int(getattr(_sc, "JOBAGENT_RESUME_COUNT", 150) or 150)
         with _rl.background_context():
+            # Searches may key on the numeric id or the ref code: map every
+            # alias to job_id so both forms share one cache entry.
+            await register_aliases(job_id, aliases)
             if await get(job_id, resume_count=resume_count) is None:
                 result = await jobdiva_service.search_via_job_agent(
                     job_id=str(job_id), resume_count=resume_count, require_resume=True,
                 )
-                # Searches may key on the numeric id or the ref code.
-                for jid in {str(job_id), *(str(a) for a in aliases if a)}:
-                    await put(jid, result, resume_count=resume_count)
+                await put(job_id, result, resume_count=resume_count)
             try:
                 token = await jobdiva_service.authenticate()
                 if token:
