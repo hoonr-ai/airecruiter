@@ -3,7 +3,7 @@
 Repeat searches, background hydration and single-id lookups ask for the same
 candidates within minutes; each miss spends JobDiva BI quota (incident
 2026-09-29, docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Records are
-cached for ``JOBDIVA_DETAIL_CACHE_TTL_S`` (default 20 min, 0 disables). Only
+cached for ``JOBDIVA_DETAIL_CACHE_TTL_S`` (default 24 h, 0 disables). Only
 hits are cached — a missing record is always re-fetched. No Redis → no cache,
 never an error.
 
@@ -27,9 +27,9 @@ log = logging.getLogger(__name__)
 
 _PREFIX = "jobdiva:cand_detail:"
 try:
-    TTL_S = int((os.getenv("JOBDIVA_DETAIL_CACHE_TTL_S") or "").strip() or 20 * 60)
+    TTL_S = int((os.getenv("JOBDIVA_DETAIL_CACHE_TTL_S") or "").strip() or 24 * 3600)
 except ValueError:
-    TTL_S = 20 * 60
+    TTL_S = 24 * 3600
 
 _fernet: Optional[Any] = None
 _fernet_failed = False

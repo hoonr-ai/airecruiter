@@ -181,7 +181,7 @@ EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIME
 # deep-search agent, default 1): with the contact lookups sharing that single
 # slot, a 25-row job queued them one at a time for minutes. Create-time 429s
 # are retried with backoff in exa_enrich_by_linkedin.
-EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "3")))
+EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "8")))
 # The same bound for the on-demand chain (Launch PAIR, the phone button), per
 # worker. Launch PAIR's grouped lookup (/candidates/enrich-contacts) runs a whole
 # group in one worker, and Exa caps active agent runs per account (50, shared
@@ -707,3 +707,24 @@ def embedding_skill_match_for_family(family: Optional[str] = None) -> bool:
     if family in EMBEDDING_SKILL_MATCH_BY_FAMILY:
         return EMBEDDING_SKILL_MATCH_BY_FAMILY[family]
     return EMBEDDING_SKILL_MATCH
+
+# ---- PAIR pipeline optimization (see "pipeline optimization.md") ----
+# Fix 1: resolve employer signals once per launch instead of once per batch.
+LAUNCH_GATE_ONCE = get_env_bool("LAUNCH_GATE_ONCE", True)
+# Fix 2: launch batches sent to Pairbot concurrently. Locked to 1 (sequential)
+# until Pairbot is confirmed to handle concurrent bulk creates.
+LAUNCH_BATCH_PARALLELISM = max(1, int(get_env_with_default("LAUNCH_BATCH_PARALLELISM", "1")))
+# Fix 3: /engage/launch returns 202 + launch_id and runs in the background.
+# Off by default until the frontend `launchAsync` flag ships.
+LAUNCH_ASYNC = get_env_bool("LAUNCH_ASYNC", False)
+# Fix 4: reuse parsed resumes keyed by sha256. Bump when parse prompts change.
+PARSED_RESUME_CACHE_ENABLED = get_env_bool("PARSED_RESUME_CACHE_ENABLED", True)
+RESUME_PARSER_VERSION = int(get_env_with_default("RESUME_PARSER_VERSION", "1"))
+# Fix 5: TTL of the "job is actively being searched/launched" Redis marker that
+# pauses background hydration and AutoSync.
+JOBDIVA_ACTIVE_JOB_TTL_S = int(get_env_with_default("JOBDIVA_ACTIVE_JOB_TTL_S", "900"))
+# Fix 7: JobAgentSearch result cache TTL (seconds) and intake prewarm switch.
+JOBAGENT_CACHE_TTL_S = int(get_env_with_default("JOBAGENT_CACHE_TTL_S", str(12 * 3600)))
+JOB_INTAKE_PREWARM_ENABLED = get_env_bool("JOB_INTAKE_PREWARM_ENABLED", True)
+# Fix 8: only run contact enrichment for candidates at/above this score.
+CONTACT_ENRICH_MIN_SCORE = int(get_env_with_default("CONTACT_ENRICH_MIN_SCORE", "60"))

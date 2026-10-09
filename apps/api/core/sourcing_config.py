@@ -120,8 +120,12 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE = 100
 # burning rate budget there blocks the rows that matter.
 FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES = 100
 
-# Sleep (seconds) between hydration pages to spread JobDiva load.
-FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
+# Sleep (seconds) between hydration pages to spread JobDiva load. 0 since the
+# shared JobDiva BI token bucket (services/jobdiva_rate_limit.py) already paces
+# every background call; set >0 to add extra spacing.
+FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = float(
+    _os.getenv("FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S", "0") or 0
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -237,12 +241,17 @@ def _csv_env(name: str, default: str) -> tuple:
 
 CONTACT_ENRICH_SOURCE_PREFIXES = _csv_env("CONTACT_ENRICH_SOURCE_PREFIXES", "LinkedIn,JobDiva")
 CONTACT_ENRICH_UNSCORED_OK_PREFIXES = _csv_env("CONTACT_ENRICH_UNSCORED_OK_PREFIXES", "JobDiva")
+# Single knob: core.config.CONTACT_ENRICH_MIN_SCORE (env CONTACT_ENRICH_MIN_SCORE).
 try:
-    CONTACT_ENRICH_MIN_SCORE = int(
-        _os.getenv("CONTACT_ENRICH_MIN_SCORE", str(EXTERNAL_SOURCE_MIN_SCORE)).strip()
-    )
-except ValueError:
-    CONTACT_ENRICH_MIN_SCORE = EXTERNAL_SOURCE_MIN_SCORE
+    from core.config import CONTACT_ENRICH_MIN_SCORE as _CFG_CONTACT_MIN
+    CONTACT_ENRICH_MIN_SCORE = int(_CFG_CONTACT_MIN)
+except Exception:
+    try:
+        CONTACT_ENRICH_MIN_SCORE = int(
+            _os.getenv("CONTACT_ENRICH_MIN_SCORE", str(EXTERNAL_SOURCE_MIN_SCORE)).strip()
+        )
+    except ValueError:
+        CONTACT_ENRICH_MIN_SCORE = EXTERNAL_SOURCE_MIN_SCORE
 
 # Which providers the contact lookups ask (user 2026-09-29: "make it for apollo
 # and exa only", cheapest first, "but get the contact details at the end").
@@ -331,7 +340,7 @@ JOBDIVA_ENRICH_CONCURRENCY = int(
 # historically safe width so the wider LLM fan-out can't burst JobDiva's
 # rate limiter (see CANDIDATES_DETAIL_CONCURRENCY history below).
 JOBDIVA_RESUME_FETCH_CONCURRENCY = int(
-    _os.getenv("JOBDIVA_RESUME_FETCH_CONCURRENCY", "5").strip() or "5"
+    _os.getenv("JOBDIVA_RESUME_FETCH_CONCURRENCY", "10").strip() or "10"
 )
 
 
@@ -381,7 +390,7 @@ UNIPILE_NO_RECRUITER_TTL_S = 24 * 3600
 # requests, so default to 1-at-a-time with an inter-request gap and a longer
 # backoff. This trades a little latency (mostly in background hydration,
 # which is already paced) for actually getting the records back.
-CANDIDATES_DETAIL_CONCURRENCY = 1
+CANDIDATES_DETAIL_CONCURRENCY = max(1, int(_os.getenv("CANDIDATES_DETAIL_CONCURRENCY", "1") or 1))
 
 # Backoff (seconds) before each CandidatesDetail chunk retry. Length also
 # bounds the retry count (len == max retries after the first attempt).
@@ -594,10 +603,10 @@ EMPLOYER_RESOLUTION_ENABLED = _os.getenv(
 # fresh-parse burst against the LLM.
 try:
     EMPLOYER_RESOLUTION_CONCURRENCY = int(
-        _os.getenv("EMPLOYER_RESOLUTION_CONCURRENCY", "6").strip() or "6"
+        _os.getenv("EMPLOYER_RESOLUTION_CONCURRENCY", "10").strip() or "10"
     )
 except ValueError:
-    EMPLOYER_RESOLUTION_CONCURRENCY = 6
+    EMPLOYER_RESOLUTION_CONCURRENCY = 10
 
 # Per-candidate ceiling on one resume parse (crisp + extract LLM calls).
 try:

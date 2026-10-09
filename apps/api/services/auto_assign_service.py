@@ -979,6 +979,16 @@ class AutoAssignService:
             # to False — only the search emits a truthy value when JobDiva's
             # JobAgent returned "Criteria Not Assigned" for this job.
             jobdiva_criteria_unconfigured = False
+            # Back off while a recruiter search or PAIR launch is running —
+            # for this job or any other (jd:active:*), so the interactive path
+            # gets the JobDiva BI quota. Bounded by MAX_PAUSE_S.
+            try:
+                from services import jobdiva_activity as _jd_activity
+                await _jd_activity.wait_while_busy(
+                    str(search_job_id or target_job_id), include_self=True, label="autosync"
+                )
+            except Exception as _act_exc:
+                logger.debug(f"[AutoAssignService] activity check skipped: {_act_exc}")
             async for event in unified_search_service.search_candidates(criteria):
                 if event.get("type") == "stage":
                     logger.debug(f"🤖 [AutoAssignService] Sync Stage for {target_job_id}: {event.get('data')}")

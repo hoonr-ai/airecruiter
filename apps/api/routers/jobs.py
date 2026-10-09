@@ -454,6 +454,31 @@ async def parse_job_description(request: ParsedJobRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _schedule_intake_prewarm(numeric_id: Any, ref_code: Any) -> None:
+    """Fix 7: warm the JobAgentSearch cache + applicant/detail path in the
+    background at job intake so the first sourcing search is fast. Never
+    blocks or fails the request."""
+    try:
+        from core.config import JOB_INTAKE_PREWARM_ENABLED
+        if not JOB_INTAKE_PREWARM_ENABLED or not (numeric_id or ref_code):
+            return
+        from core import pipeline_trace
+        from core.tasks import spawn
+        from services.jobdiva_jobagent_cache import prewarm_job
+
+        primary = str(ref_code or numeric_id)
+        aliases = tuple(a for a in (str(numeric_id or ""),) if a and a != primary)
+
+        async def _run() -> None:
+            pipeline_trace.new_run(primary)
+            async with pipeline_trace.span("intake_prewarm", job_id=primary):
+                await prewarm_job(primary, aliases=aliases)
+
+        spawn(_run(), name=f"intake_prewarm:{primary}")
+    except Exception as exc:
+        logger.warning(f"intake prewarm not scheduled for {ref_code or numeric_id}: {exc}")
+
+
 @router.post("/jobs/fetch")
 async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: BackgroundTasks):
     """
@@ -623,7 +648,8 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             # Explicitly merge screening_level to preserve UI state on refetch
             if "screening_level" in local_data and local_data["screening_level"]:
                 job["screening_level"] = local_data["screening_level"]
-        
+
+        _schedule_intake_prewarm(numeric_id, ref_code)
         return job
         
     except Exception as e:
@@ -2479,12 +2505,15 @@ async def extract_job_skills(job_id: str, request: SkillsExtractionRequest):
         extractor = JobSkillsExtractor(OPENAI_API_KEY)
         
         # Extract skills and map to Ronak's ontology
-        analysis = extractor.analyze_job_skills(
-            job_id=job_id,
-            jobdiva_description=request.jobdiva_description,
-            ai_description=request.ai_description,
-            recruiter_notes=request.recruiter_notes
-        )
+        from core import pipeline_trace
+        pipeline_trace.new_run(job_id)
+        with pipeline_trace.span_sync("intake_skill_extraction", job_id=str(job_id)):
+            analysis = extractor.analyze_job_skills(
+                job_id=job_id,
+                jobdiva_description=request.jobdiva_description,
+                ai_description=request.ai_description,
+                recruiter_notes=request.recruiter_notes
+            )
         
         # Save to database  
         db_service = JobSkillsDB()

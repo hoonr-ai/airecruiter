@@ -359,6 +359,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
+    try:
+        from core.tasks import drain as _drain_background_tasks
+        await _drain_background_tasks()
+    except Exception as _drain_err:  # noqa: BLE001
+        logger.warning("background task drain failed: %s", _drain_err)
     
 # Defensive router import. Previously a single `from routers import engagement,
 # ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive`
@@ -406,6 +411,7 @@ live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
 apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
+pairbot_webhook_router = _safe_import("pairbot_webhook")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -472,6 +478,7 @@ _mount(campaigns_router, "campaigns", prefix="/api")
 # for it with its own rate zone (Apollo delivers in bursts after a big launch).
 _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
+_mount(pairbot_webhook_router, "pairbot_webhook")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 from core.auth import auth_router

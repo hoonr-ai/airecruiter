@@ -20,6 +20,9 @@ from models import SourcedCandidate
 from services.candidate_profiles_db import candidate_profiles_db
 from services.location import sanitize_candidate_location
 from core.db import get_db_connection
+from core.config import RESUME_PARSER_VERSION
+from services.resume_profile import ResumeProfileService
+from services import resume_profile as _resume_profile
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +188,11 @@ def _ensure_sourced_candidates_schema() -> None:
                     conn.execute(text(stmt))
                 except Exception as e:
                     logger.warning(f"schema index create skipped: {stmt!r}: {e}")
+
+        try:
+            _resume_profile.ensure_schema()  # parsed_resumes (Fix 4)
+        except Exception as e:
+            logger.warning(f"parsed_resumes schema init skipped: {e}")
 
         logger.info("sourced_candidates schema ready")
     except Exception as e:
@@ -1458,21 +1466,34 @@ async def _process_candidate_common(
     # Resume-hash cache: the same resume parsed once costs money; look up by
     # SHA256 of the resume text before calling crisp+extract. On hit we skip
     # both LLM calls entirely.
-    resume_hash = _resume_text_hash(resume_text_to_save or resume_text_for_llm)
-    enhanced_info_result: Optional[Dict[str, Any]] = None
-    if resume_hash:
-        cached = _lookup_cached_enhanced_info_by_resume_hash(resume_hash)
-        if cached:
-            logger.info(
-                f"💾 [{source} Candidate:{candidate_id}] resume_hash cache HIT, "
-                f"skipping crisp+LLM"
-            )
-            enhanced_info_result = cached
+    #
+    # Fix 4: the versioned `parsed_resumes` table (services/resume_profile.py)
+    # is checked first and stores the raw LLM extraction. The legacy
+    # candidate_enhanced_info lookup is unversioned, so it only serves while
+    # RESUME_PARSER_VERSION is 1 — a version bump must force a re-parse.
+    # All DB work runs off the event loop and fails open.
+    cache_text = resume_text_to_save or resume_text_for_llm
+    enhanced_info_result: Optional[Dict[str, Any]] = await ResumeProfileService.lookup(cache_text)
+    if enhanced_info_result is not None:
+        logger.info(f"💾 [{source} Candidate:{candidate_id}] parsed_resumes cache HIT, skipping crisp+LLM")
+    else:
+        resume_hash = _resume_text_hash(cache_text)
+        if resume_hash and int(RESUME_PARSER_VERSION or 1) <= 1:
+            cached = await asyncio.to_thread(_lookup_cached_enhanced_info_by_resume_hash, resume_hash)
+            if cached:
+                logger.info(
+                    f"💾 [{source} Candidate:{candidate_id}] resume_hash cache HIT, "
+                    f"skipping crisp+LLM"
+                )
+                enhanced_info_result = cached
 
     if enhanced_info_result is None:
-        crisped = await crisp_resume_with_ai(resume_text_for_llm, max_length=12000)
-        logger.info(f"📄 [{source} Candidate:{candidate_id}] Crisped to {len(crisped)} chars")
-        enhanced_info_result = await extract_enhanced_info_with_llm(crisped)
+        async def _parse(_text: str) -> Dict[str, Any]:
+            crisped = await crisp_resume_with_ai(resume_text_for_llm, max_length=12000)
+            logger.info(f"📄 [{source} Candidate:{candidate_id}] Crisped to {len(crisped)} chars")
+            return await extract_enhanced_info_with_llm(crisped)
+
+        enhanced_info_result = await ResumeProfileService.get_or_parse(cache_text, _parse)
 
     extraction_error: Optional[str] = None
     if enhanced_info_result.get("error"):
