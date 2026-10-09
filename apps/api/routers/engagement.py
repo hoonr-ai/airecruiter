@@ -14,7 +14,7 @@ import asyncio
 import hashlib
 import html
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
@@ -32,6 +32,8 @@ from routers._helpers import (
     normalize_bot_intro_tokens,
 )
 from services.pair_auth import get_pair_auth_headers
+from core.tasks import spawn as _spawn_task
+from core.pipeline_trace import new_run as _trace_new_run, span as _trace_span
 
 from core.email import (
     notify_pair_launched,
@@ -924,6 +926,35 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
     return await _generate_payload_for(request)
 
 
+_LIVE_SOURCED_ROWS_SQL = """
+    SELECT DISTINCT ON (candidate_id)
+        candidate_id, name, email, phone, headline, location, data{extra}
+    FROM sourced_candidates
+    WHERE candidate_id = ANY(%s)
+      AND dnc_stopped_at IS NULL
+    ORDER BY candidate_id, updated_at DESC
+"""
+
+
+def _fetch_live_sourced_rows(cur, candidate_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Newest non-DNC sourced_candidates row per id, in one round-trip.
+
+    Keeps the schema-drift fallback: some environments still lack
+    `resume_match_percentage`, so retry without it after a rollback.
+    """
+    ids = [c for c in dict.fromkeys(candidate_ids) if c]
+    if not ids:
+        return {}
+    try:
+        cur.execute(_LIVE_SOURCED_ROWS_SQL.format(extra=", resume_match_percentage"), (ids,))
+        rows = cur.fetchall()
+    except Exception:
+        cur.connection.rollback()
+        cur.execute(_LIVE_SOURCED_ROWS_SQL.format(extra=""), (ids,))
+        rows = cur.fetchall()
+    return {r["candidate_id"]: r for r in rows}
+
+
 async def _generate_payload_for(request: GeneratePayloadRequest):
     """
     Generate an interview payload for a candidate.
@@ -941,44 +972,30 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
         resumes = []
         candidate_phone = ""
         dnc_blocked_ids: List[str] = []
+        # Fix 6: one ANY() query instead of one query per candidate (N+1).
+        # DISTINCT ON keeps the newest live row per candidate; output order is
+        # re-imposed from request.candidate_ids below because positional
+        # matching downstream (launch retry set) depends on it.
+        rows_by_cid = _fetch_live_sourced_rows(cur, list(request.candidate_ids))
+        missing_ids = [cid for cid in dict.fromkeys(request.candidate_ids) if cid not in rows_by_cid]
+        dnc_set: set = set()
+        if missing_ids:
+            # Either the candidate isn't sourced for any job, or every row is
+            # dnc_stopped. One probe tells them apart for all misses at once.
+            cur.execute("""
+                SELECT DISTINCT candidate_id FROM sourced_candidates
+                WHERE candidate_id = ANY(%s) AND dnc_stopped_at IS NOT NULL
+            """, (missing_ids,))
+            dnc_set = {r["candidate_id"] for r in cur.fetchall()}
         for cid in request.candidate_ids:
-            try:
-                cur.execute("""
-                    SELECT candidate_id, name, email, phone, headline, location, data, resume_match_percentage
-                    FROM sourced_candidates
-                    WHERE candidate_id = %s
-                      AND dnc_stopped_at IS NULL
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                """, (cid,))
-                row = cur.fetchone()
-            except Exception:
-                cur.connection.rollback()
-                cur.execute("""
-                    SELECT candidate_id, name, email, phone, headline, location, data
-                    FROM sourced_candidates
-                    WHERE candidate_id = %s
-                      AND dnc_stopped_at IS NULL
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                """, (cid,))
-                row = cur.fetchone()
-            if not row:
-                # Either the candidate isn't sourced for any job, or every
-                # row is dnc_stopped. Probe a second query to tell them
-                # apart so we can log the DNC skip explicitly.
-                cur.execute("""
-                    SELECT 1 FROM sourced_candidates
-                    WHERE candidate_id = %s AND dnc_stopped_at IS NOT NULL
-                    LIMIT 1
-                """, (cid,))
-                if cur.fetchone():
-                    dnc_blocked_ids.append(cid)
-                    logger.info(
-                        "engagement_dnc_skip candidate_id=%s reason=dnc_stopped_at_set",
-                        cid,
-                    )
-                    continue
+            row = rows_by_cid.get(cid)
+            if not row and cid in dnc_set:
+                dnc_blocked_ids.append(cid)
+                logger.info(
+                    "engagement_dnc_skip candidate_id=%s reason=dnc_stopped_at_set",
+                    cid,
+                )
+                continue
 
             if row:
                 name = row.get("name", "Unknown")
@@ -2271,7 +2288,12 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
     return await _send_bulk_interview_core(request)
 
 
-async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
+async def _send_bulk_interview_core(
+    request: SendBulkInterviewRequest,
+    precomputed_signals: Optional[Dict[str, Dict[str, Any]]] = None,
+    launch_id: Optional[str] = None,
+    batch_idx: Optional[int] = None,
+):
     """
     Send the (potentially edited) interview payload to the PAIR bulk-interviews API.
     Saves the request and response to engage_interview_audit for traceability.
@@ -2458,17 +2480,34 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 except Exception:  # noqa: BLE001
                     employer_verification_state = None  # type: ignore[assignment]
                 _resolved_signals: Dict[str, Dict[str, Any]] = {}
-                try:
-                    from services.employer_resolution import resolve_employer_signals
-                    _resolved_signals = await asyncio.wait_for(
-                        resolve_employer_signals([c for _, _, c in _gate_rows]),
-                        timeout=240.0
-                    )
-                except Exception as _res_err:  # noqa: BLE001
-                    logger.warning(
-                        "employer resolution failed for job %s (gating on stored signals): %s",
-                        job_id_from_payload, _res_err,
-                    )
+                # Fix 1: /engage/launch resolves once for the whole pool and
+                # passes the result in. Every id the launch pass covered is a
+                # key (empty dict = nothing resolved), so only rows it missed
+                # are resolved here. Legacy /engage/send-bulk passes None.
+                if precomputed_signals is not None:
+                    _resolved_signals = {
+                        _cid: precomputed_signals[_cid]
+                        for _cid, _, _ in _gate_rows
+                        if _cid in precomputed_signals
+                    }
+                    _to_resolve = [
+                        c for _cid, _, c in _gate_rows if _cid not in precomputed_signals
+                    ]
+                else:
+                    _to_resolve = [c for _, _, c in _gate_rows]
+                if _to_resolve:
+                    try:
+                        from services.employer_resolution import resolve_employer_signals
+                        async with _trace_span("employer_gate", scope="batch", n=len(_to_resolve)):
+                            _resolved_signals.update(await asyncio.wait_for(
+                                resolve_employer_signals(_to_resolve),
+                                timeout=240.0
+                            ) or {})
+                    except Exception as _res_err:  # noqa: BLE001
+                        logger.warning(
+                            "employer resolution failed for job %s (gating on stored signals): %s",
+                            job_id_from_payload, _res_err,
+                        )
 
                 _gate_rows = [
                     (
@@ -2479,6 +2518,12 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     )
                     for _cid, _cname, _cdata in _gate_rows
                 ]
+                # Launch-level freshness stamps ride on the precomputed entry.
+                if precomputed_signals is not None:
+                    for _cid, _, _cdata in _gate_rows:
+                        _ts = (precomputed_signals.get(_cid) or {}).get("resume_updated_at")
+                        if _ts and not _cdata.get("resume_updated_at"):
+                            _cdata["resume_updated_at"] = _ts
                 # Resume freshness (phase 3): stamp JobDiva's resume timestamp
                 # onto resume-verified candidates so a years-old "Present"
                 # classifies as verified_stale, not verified. Advisory only —
@@ -2489,10 +2534,15 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     # on the launch path — a slow JobDiva must cost seconds,
                     # not a batch-long stall (TimeoutError lands in the
                     # except below and the launch proceeds unstamped).
-                    await asyncio.wait_for(
-                        stamp_resume_freshness([c for _, _, c in _gate_rows]),
-                        timeout=20.0,
-                    )
+                    _fresh_rows = [
+                        c for _cid, _, c in _gate_rows
+                        if precomputed_signals is None or _cid not in precomputed_signals
+                    ]
+                    if _fresh_rows:
+                        await asyncio.wait_for(
+                            stamp_resume_freshness(_fresh_rows),
+                            timeout=20.0,
+                        )
                 except Exception as _fresh_err:  # noqa: BLE001
                     logger.warning(
                         "resume-freshness check failed for job %s: %s",
@@ -2594,11 +2644,21 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             # before the 202 response arrives — without this, a client-side
             # retry has no id to look up and would create a second bulk.
             client_bulk_id = str(uuid.uuid4())
+            _launch_idem_key: Optional[str] = None
+            if launch_id is not None and batch_idx is not None:
+                # Fix 3: deterministic per (launch, batch, ids) so a re-run of
+                # the same async batch reuses Pairbot's bulk instead of
+                # creating a duplicate.
+                _launch_idem_key = _launch_batch_idempotency_key(
+                    launch_id, batch_idx, request.real_candidate_ids
+                )
+                client_bulk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, _launch_idem_key))
             if isinstance(payload_obj, dict):
                 payload_obj["bulk_id"] = client_bulk_id
             logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
-            response = await _post_to_pairbot(external_url, payload_obj)
+            async with _trace_span("pairbot_post", batch_idx=batch_idx):
+                response = await _post_to_pairbot(external_url, payload_obj)
 
             response_data = {}
             try:
@@ -2639,7 +2699,18 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     len(request.real_candidate_ids),
                 )
                 try:
-                    creation_event = await _wait_for_pairbot_creation(bulk_id)
+                    if _launch_idem_key is not None:
+                        _launch_batch_set_bulk(
+                            _launch_idem_key, bulk_id, launch_id=launch_id,
+                            idx=batch_idx, candidate_ids=list(request.real_candidate_ids),
+                        )
+                    async with _trace_span("pairbot_wait_creation", batch_idx=batch_idx):
+                        if _launch_idem_key is not None:
+                            # Webhook (POST /webhooks/pairbot/creation) first,
+                            # SSE wait as the fallback — whichever lands first.
+                            creation_event = await _wait_for_creation_webhook_or_sse(bulk_id)
+                        else:
+                            creation_event = await _wait_for_pairbot_creation(bulk_id)
                 except Exception as wait_err:
                     # A dead stream or a wait timeout is NOT proof creation
                     # failed — PairBot already accepted the bulk and may
@@ -2842,9 +2913,10 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 _batch_job_id = job_id_from_payload
 
                 async def _run_batch_provisioning() -> None:
-                    await _provision_batch_to_jobdiva(_batch_cids, _batch_job_id)
+                    async with _trace_span("jobdiva_provisioning", n=len(_batch_cids)):
+                        await _provision_batch_to_jobdiva(_batch_cids, _batch_job_id)
 
-                asyncio.create_task(_run_batch_provisioning())
+                _spawn_task(_run_batch_provisioning())
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
                 # Direct lookup by candidate_id == source_candidate_id (always
@@ -2960,7 +3032,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 # v22: initial launch — immediate sync of existing JobDiva applicants.
                 # Applicants are assigned to rankings with match_score=0 (N/A).
                 logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
-                asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
+                _spawn_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
 
             # Manual rankings Screen sends should create the interview only.
             # Wizard Launch/re-source flows pass notify_recruiters=True so the
@@ -2974,7 +3046,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     if request.send_job_posting_email is not None
                     else request.is_initial_launch
                 )
-                asyncio.create_task(
+                _spawn_task(
                     _send_pair_launch_email(
                         job_id=job_id_from_payload,
                         candidate_count=len(interview_results),
@@ -3043,12 +3115,32 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 pass
 
 @router.get("/engage/bulk-status/stream")
-async def stream_engagement_status(bulk_id: str):
+async def stream_engagement_status(
+    request: Request,
+    bulk_id: Optional[str] = None,
+    launch_id: Optional[str] = None,
+):
+    """Proxy Pairbot's per-bulk SSE stream, or (Fix 3) replay the progress
+    events of an async launch keyed by `launch_id`.
+
+    The launch_id branch requires an authenticated user who requested the
+    launch, is an admin, or otherwise has access to the launch's job. The
+    bulk_id branch is unchanged."""
     from fastapi.responses import StreamingResponse
     import httpx
-    
+
+    if launch_id:
+        await _authorize_launch_stream(request, launch_id)
+        return StreamingResponse(
+            _launch_progress_stream(launch_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    if not bulk_id:
+        raise HTTPException(status_code=400, detail="bulk_id or launch_id is required")
+
     external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
-    
+
     async def proxy_stream():
         async with httpx.AsyncClient() as client:
             try:
@@ -3058,7 +3150,7 @@ async def stream_engagement_status(bulk_id: str):
             except Exception as e:
                 logger.error(f"Error proxying SSE stream for bulk_id {bulk_id}: {e}")
                 yield b"data: {\"status\": \"error\"}\n\n"
-                
+
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")
 
 
@@ -3076,6 +3168,9 @@ class LaunchRequest(BaseModel):
     send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
     batch_size: Optional[int] = None
+    # Fix 3: frontend `launchAsync` opt-in. Honoured only when the server's
+    # LAUNCH_ASYNC flag is on; otherwise the SSE response is returned as before.
+    async_launch: bool = False
 
 
 # Backend batch size for the launch orchestrator's per-batch Pairbot calls.
@@ -3087,8 +3182,619 @@ _LAUNCH_PAIRBOT_BATCH_SIZE = 75
 _LAUNCH_BATCH_DELAY_SECONDS = 0.35
 
 
+def _launch_flag(name: str, default: Any) -> Any:
+    """Read a launch flag from core.config at call time (monkeypatchable)."""
+    try:
+        import core.config as _cfg
+        return getattr(_cfg, name, default)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+# --- Fix 1: employer gate once per launch ----------------------------------
+
+async def _precompute_launch_signals(
+    job_id: str, candidate_ids: List[str]
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Resolve employer signals + resume freshness ONCE for the whole launch.
+
+    Returns {candidate_id: signals} with a key for EVERY row it loaded (empty
+    dict when nothing was resolved), so per-batch gates know which ids are
+    covered. Returns None when the rows could not be loaded — batches then
+    fall back to the per-batch pass. A resolution failure fails open exactly
+    like the per-batch gate: covered ids gate on stored signals.
+    """
+    def _load() -> List[Dict[str, Any]]:
+        conn = _get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT job_id, jobdiva_id FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s
+                ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
+                LIMIT 1
+                """,
+                (job_id, job_id),
+            )
+            jrow = cur.fetchone()
+            jid = str((jrow[0] if jrow else None) or job_id)
+            jdid = str((jrow[1] if jrow else None) or "")
+            cur.execute(
+                """
+                SELECT candidate_id, data, name, headline, resume_text, source
+                FROM sourced_candidates
+                WHERE candidate_id = ANY(%s)
+                  AND (jobdiva_id = %s OR jobdiva_id = %s)
+                """,
+                (list(candidate_ids), jid, jdid),
+            )
+            rows = cur.fetchall() or []
+            signals = _fetch_stored_employer_signals(conn, [str(r[0]) for r in rows])
+            out: Dict[str, Dict[str, Any]] = {}
+            for r in rows:
+                cdata = r[1] or {}
+                if isinstance(cdata, str):
+                    try:
+                        cdata = json.loads(cdata)
+                    except Exception:
+                        cdata = {}
+                cdata = _merge_employer_signals(
+                    cdata, headline=str(r[3] or ""), signals=signals.get(str(r[0]))
+                )
+                cdata.setdefault("candidate_id", str(r[0]))
+                if r[4] and not cdata.get("resume_text"):
+                    cdata["resume_text"] = str(r[4])
+                if r[5] and not cdata.get("source"):
+                    cdata["source"] = str(r[5])
+                out.setdefault(str(r[0]), cdata)
+            cur.close()
+            return list(out.values())
+        finally:
+            conn.close()
+
+    try:
+        cands = await asyncio.to_thread(_load)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("launch gate preload failed for job %s (per-batch fallback): %s", job_id, exc)
+        return None
+
+    result: Dict[str, Dict[str, Any]] = {str(c["candidate_id"]): {} for c in cands}
+    if not cands:
+        return result
+    try:
+        from services.employer_resolution import resolve_employer_signals
+        try:
+            import core.sourcing_config as _sc
+            conc = int(getattr(_sc, "EMPLOYER_RESOLUTION_CONCURRENCY", 6) or 6)
+        except Exception:  # noqa: BLE001
+            conc = 6
+        timeout = min(600.0, 30.0 + 2.0 * len(cands) / max(1, conc))
+        resolved = await asyncio.wait_for(resolve_employer_signals(cands), timeout=timeout) or {}
+        for cid, sig in resolved.items():
+            if cid in result and sig:
+                result[cid] = dict(sig)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "employer resolution failed for job %s (gating on stored signals): %s", job_id, exc
+        )
+    try:
+        from services.employer_resolution import stamp_resume_freshness
+        merged = [
+            _merge_employer_signals(c, signals=result.get(str(c["candidate_id"])) or None)
+            for c in cands
+        ]
+        await asyncio.wait_for(stamp_resume_freshness(merged), timeout=20.0)
+        for c in merged:
+            ts = c.get("resume_updated_at")
+            if ts:
+                result[str(c["candidate_id"])]["resume_updated_at"] = ts
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resume-freshness check failed for job %s: %s", job_id, exc)
+    return result
+
+
+# --- Fix 3: launch_runs / launch_batches -------------------------------------
+
+_LAUNCH_TABLES_READY = {"done": False}
+
+# Statements mirror migrations/20261009_pair_launch_pipeline.sql. Run once at
+# startup (main.py lifespan -> init_launch_tables), never per request.
+_LAUNCH_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS launch_runs (
+        id uuid PRIMARY KEY,
+        job_id text NOT NULL,
+        requested_by text,
+        status text NOT NULL,
+        events jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at timestamptz DEFAULT now(),
+        finished_at timestamptz,
+        last_event_at timestamptz DEFAULT now()
+    )
+    """,
+    "ALTER TABLE launch_runs ADD COLUMN IF NOT EXISTS last_event_at timestamptz DEFAULT now()",
+    """
+    CREATE INDEX IF NOT EXISTS ix_launch_runs_running
+    ON launch_runs (last_event_at) WHERE status = 'running'
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS launch_events (
+        launch_id uuid NOT NULL REFERENCES launch_runs(id) ON DELETE CASCADE,
+        seq int NOT NULL,
+        payload jsonb NOT NULL,
+        created_at timestamptz DEFAULT now(),
+        PRIMARY KEY (launch_id, seq)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS launch_batches (
+        id uuid PRIMARY KEY,
+        launch_id uuid REFERENCES launch_runs(id),
+        idx int,
+        candidate_ids text[],
+        pairbot_bulk_id text,
+        status text,
+        error text,
+        creation_event jsonb,
+        idempotency_key text UNIQUE,
+        updated_at timestamptz DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_launch_batches_bulk ON launch_batches (pairbot_bulk_id)",
+    "CREATE INDEX IF NOT EXISTS ix_launch_batches_launch ON launch_batches (launch_id)",
+)
+
+
+def _ensure_launch_tables() -> None:
+    """CREATE IF NOT EXISTS for the async-launch tables."""
+    if _LAUNCH_TABLES_READY["done"]:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for stmt in _LAUNCH_DDL:
+                cur.execute(stmt)
+            conn.commit()
+    _LAUNCH_TABLES_READY["done"] = True
+
+
+async def init_launch_tables() -> None:
+    """Startup hook (main.py lifespan). Fail-soft: the caller logs errors."""
+    await asyncio.to_thread(_ensure_launch_tables)
+
+
+def _launch_batch_idempotency_key(launch_id: str, idx: int, candidate_ids: List[str]) -> str:
+    raw = f"{launch_id}:{idx}:{','.join(sorted(str(c) for c in candidate_ids))}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _launch_db(sql: str, params: tuple, fetch: bool = False) -> Any:
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall() if fetch else None
+        conn.commit()
+        cur.close()
+        return rows
+    finally:
+        conn.close()
+
+
+def _launch_batch_set_bulk(idem_key: str, bulk_id: str, *, launch_id: Optional[str] = None,
+                           idx: Optional[int] = None, candidate_ids: Optional[List[str]] = None) -> None:
+    """Record the Pairbot bulk_id for an async-launch batch (fail-open)."""
+    try:
+        _launch_db(
+            """
+            INSERT INTO launch_batches (id, launch_id, idx, candidate_ids, pairbot_bulk_id,
+                                        status, idempotency_key, updated_at)
+            VALUES (%s, %s, %s, %s, %s, 'creating', %s, now())
+            ON CONFLICT (idempotency_key) DO UPDATE
+              SET pairbot_bulk_id = EXCLUDED.pairbot_bulk_id,
+                  status = 'creating', updated_at = now()
+            """,
+            (str(uuid.uuid4()), launch_id, idx, list(candidate_ids or []), bulk_id, idem_key),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("launch_batch_set_bulk failed key=%s: %s", idem_key, exc)
+
+
+async def _poll_launch_batch_creation(bulk_id: str, *, timeout_seconds: float = 600.0) -> Dict[str, Any]:
+    """Jittered DB poll for the creation status the Pairbot webhook writes."""
+    import random
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while loop.time() < deadline:
+        await asyncio.sleep(2.0 + random.random() * 2.0)
+        try:
+            rows = await asyncio.to_thread(
+                _launch_db,
+                "SELECT status, creation_event, error FROM launch_batches "
+                "WHERE pairbot_bulk_id = %s ORDER BY updated_at DESC LIMIT 1",
+                (bulk_id,),
+                True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("launch batch poll failed bulk_id=%s: %s", bulk_id, exc)
+            continue
+        if not rows:
+            continue
+        status, event, error = rows[0]
+        if status == "creation_completed":
+            if isinstance(event, str):
+                try:
+                    event = json.loads(event)
+                except Exception:
+                    event = None
+            return event if isinstance(event, dict) else {"status": status}
+        if status == "creation_failed":
+            raise RuntimeError(error or f"Pairbot creation_failed for bulk_id={bulk_id}")
+    raise TimeoutError(f"Timed out waiting for Pairbot creation webhook bulk_id={bulk_id}")
+
+
+async def _wait_for_creation_webhook_or_sse(bulk_id: str, *, timeout_seconds: float = 600.0) -> Dict[str, Any]:
+    """Race the webhook-backed poll against the legacy SSE wait. The first
+    success wins; if one fails, the other gets the rest of the budget."""
+    sse = asyncio.ensure_future(_wait_for_pairbot_creation(bulk_id, timeout_seconds=timeout_seconds))
+    hook = asyncio.ensure_future(_poll_launch_batch_creation(bulk_id, timeout_seconds=timeout_seconds))
+    pending = {sse, hook}
+    first_error: Optional[BaseException] = None
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                if t.exception() is None:
+                    return t.result()
+                if first_error is None:
+                    first_error = t.exception()
+        assert first_error is not None
+        raise first_error
+    finally:
+        for t in (sse, hook):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(sse, hook, return_exceptions=True)
+
+
+_LAUNCH_TERMINAL_STATUSES = ("completed", "failed", "aborted")
+
+
+def _launch_stale_minutes() -> int:
+    try:
+        return max(1, int(_launch_flag("LAUNCH_STALE_MINUTES", 20) or 20))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _launch_stream_max_seconds() -> float:
+    try:
+        return float(_launch_flag("LAUNCH_STREAM_MAX_SECONDS", 45 * 60) or 45 * 60)
+    except (TypeError, ValueError):
+        return 45 * 60.0
+
+
+def _launch_append_event(launch_id: str, seq: int, evt: Dict[str, Any]) -> None:
+    """Append one event row and bump launch_runs.last_event_at (one statement)."""
+    _launch_db(
+        """
+        WITH ins AS (
+            INSERT INTO launch_events (launch_id, seq, payload)
+            VALUES (%s, %s, %s::jsonb)
+            ON CONFLICT (launch_id, seq) DO NOTHING
+            RETURNING 1
+        )
+        UPDATE launch_runs SET last_event_at = now() WHERE id = %s
+        """,
+        (launch_id, seq, json.dumps(evt), launch_id),
+    )
+
+
+def _launch_finalize(launch_id: str, status: str) -> None:
+    """Write the terminal status, only if the run is still 'running'."""
+    _launch_db(
+        "UPDATE launch_runs SET status = %s, finished_at = now() "
+        "WHERE id = %s AND status = 'running'",
+        (status, launch_id),
+    )
+
+
+def _sweep_stale_launch_runs(launch_id: Optional[str] = None) -> int:
+    """Mark 'running' launches with no event for LAUNCH_STALE_MINUTES as
+    'failed' (worker died / was killed without writing a final status).
+    Scoped to one launch when `launch_id` is given. Returns rows swept."""
+    sql = (
+        "UPDATE launch_runs SET status = 'failed', finished_at = now() "
+        "WHERE status = 'running' "
+        "AND COALESCE(last_event_at, created_at) < now() - make_interval(mins => %s)"
+    )
+    params: tuple = (_launch_stale_minutes(),)
+    if launch_id:
+        sql += " AND id = %s"
+        params = params + (launch_id,)
+    rows = _launch_db(sql + " RETURNING id", params, True)
+    n = len(rows or [])
+    if n:
+        logger.warning("launch_runs stale sweep marked %d run(s) failed", n)
+    return n
+
+
+async def _authorize_launch_stream(request: Request, launch_id: str) -> None:
+    """Requester, admins, or users with access to the launch's job only."""
+    user = await asyncio.to_thread(get_current_user, request, None)
+    try:
+        rows = await asyncio.to_thread(
+            _launch_db,
+            "SELECT job_id, requested_by FROM launch_runs WHERE id = %s",
+            (launch_id,),
+            True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("launch auth lookup failed launch_id=%s: %s", launch_id, exc)
+        raise HTTPException(status_code=503, detail="Launch lookup failed")
+    if not rows:
+        raise HTTPException(status_code=404, detail="Launch not found")
+    job_id, requested_by = rows[0]
+    if user.is_admin:
+        return
+    if requested_by and str(requested_by).strip().lower() == (user.email or "").strip().lower():
+        return
+    await asyncio.to_thread(_verify_job_access_by_id, str(job_id), user)
+
+
+async def _launch_progress_stream(launch_id: str):
+    """SSE replay of an async launch's events (launch_events, by seq).
+
+    Each connection replays from seq 0 (the frontend skips already-seen
+    events by count) and then reads only rows with seq > last seen. Ends on a
+    terminal status, a stale run (swept to 'failed'), or after
+    LAUNCH_STREAM_MAX_SECONDS."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _launch_stream_max_seconds()
+    last_seq = -1
+    last_type: Optional[str] = None
+    idle = 0
+    while True:
+        if loop.time() >= deadline:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'launch progress stream timed out; refresh to check status'})}\n\n"
+            return
+        try:
+            # Status first: events are written before the final status, so a
+            # terminal status read here means every event is already visible.
+            rows = await asyncio.to_thread(
+                _launch_db,
+                "SELECT status, COALESCE(last_event_at, created_at) "
+                "< now() - make_interval(mins => %s) FROM launch_runs WHERE id = %s",
+                (_launch_stale_minutes(), launch_id),
+                True,
+            )
+            events = []
+            if rows:
+                events = await asyncio.to_thread(
+                    _launch_db,
+                    "SELECT seq, payload FROM launch_events "
+                    "WHERE launch_id = %s AND seq > %s ORDER BY seq",
+                    (launch_id, last_seq),
+                    True,
+                ) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("launch progress read failed launch_id=%s: %s", launch_id, exc)
+            rows = None
+            events = []
+        if not rows:
+            idle += 1
+            if idle > 30:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'launch not found'})}\n\n"
+                return
+            await asyncio.sleep(1.0)
+            continue
+        status, stale = rows[0]
+        for seq, ev in events:
+            if isinstance(ev, str):
+                ev = json.loads(ev)
+            last_seq = seq
+            last_type = ev.get("type") if isinstance(ev, dict) else None
+            yield f"data: {json.dumps(ev)}\n\n"
+        if status == "running" and stale:
+            try:
+                if await asyncio.to_thread(_sweep_stale_launch_runs, launch_id):
+                    status = "failed"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("launch stale sweep failed launch_id=%s: %s", launch_id, exc)
+        if status in _LAUNCH_TERMINAL_STATUSES:
+            if status == "failed" and last_type not in ("error", "done"):
+                yield f"data: {json.dumps({'type': 'error', 'message': 'launch did not complete'})}\n\n"
+            return
+        yield ": keepalive\n\n"
+        await asyncio.sleep(1.5)
+
+
+# --- Fix 2: one launch batch -----------------------------------------------
+
+async def _run_one_batch(
+    idx: int,
+    batch: List[str],
+    *,
+    request: "LaunchRequest",
+    precomputed_signals: Optional[Dict[str, Dict[str, Any]]],
+    abort_flag: Dict[str, bool],
+    launch_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run one launch batch and RETURN its outcome; never mutates shared
+    launch state (only the consumer aggregates). Keys:
+
+      status            completed | failed | aborted (409) | not_run (after abort)
+      event             SSE event dict for this batch (None for aborted/not_run)
+      sent, no_interview, already_sent, excluded_count, employer_unverified_count
+      skipped, excluded_records, employer_unverified, failed_ids
+    """
+    res_out: Dict[str, Any] = {
+        "idx": idx, "status": "completed", "event": None,
+        "sent": 0, "no_interview": 0, "already_sent": 0,
+        "excluded_count": 0, "employer_unverified_count": 0,
+        "skipped": [], "excluded_records": [], "employer_unverified": [], "failed_ids": [],
+    }
+    # Ids actually sent to Pairbot for this batch: batch minus DNC-blocked
+    # minus contact-gate exclusions. Failure paths must report THESE ids —
+    # reporting the original batch would re-record rows already surfaced as
+    # exclusions, putting permanently uncontactable candidates into the retry
+    # set forever.
+    sendable_ids: List[str] = batch
+
+    def _failed(error: str) -> Dict[str, Any]:
+        res_out["status"] = "failed"
+        res_out["failed_ids"] = list(sendable_ids)
+        res_out["event"] = {
+            "type": "batch", "index": idx, "status": "failed",
+            "error": error, "candidate_ids": list(sendable_ids),
+        }
+        return res_out
+
+    try:
+        async with _trace_span("payload_generation", batch_idx=idx, n=len(batch)):
+            gp = await _generate_payload_for(
+                GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
+            )
+        payload_str = gp.get("payload") if isinstance(gp, dict) else None
+        if not payload_str:
+            raise RuntimeError("generate-payload returned no payload")
+
+        # Keep real_candidate_ids aligned with the payload's resumes:
+        # generate drops DNC-stopped candidates from resumes, so drop them
+        # from real_candidate_ids too — otherwise the positional matching in
+        # _send_bulk_interview_core misaligns.
+        dnc_blocked = set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
+        real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
+        sendable_ids = real_ids
+
+        # Per-candidate contact gate. _send_bulk_interview_core's payload
+        # validation 400s the ENTIRE batch when any single resume has no
+        # usable phone/email — including the "Unknown Candidate" stub
+        # generate-payload emits for an id with no sourced_candidates row.
+        # Drop those rows here and surface them as exclusions.
+        try:
+            payload_obj = json.loads(payload_str)
+        except Exception:
+            payload_obj = None
+        resumes = payload_obj.get("resumes") if isinstance(payload_obj, dict) else None
+        if isinstance(resumes, list) and len(resumes) == len(real_ids):
+            launchable: List[tuple] = []
+            batch_dropped: List[Dict[str, str]] = []
+            for cid, resume in zip(real_ids, resumes):
+                if not isinstance(resume, dict):
+                    batch_dropped.append({
+                        "candidate_id": cid, "name": "",
+                        "reason": "invalid resume payload at launch",
+                    })
+                    continue
+                clean_email = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
+                resume["email"] = clean_email
+                has_contact = (
+                    len(_pair_phone_digits(resume.get("phone"))) >= 7 or bool(clean_email)
+                )
+                if has_contact:
+                    launchable.append((cid, resume))
+                    continue
+                name = str(resume.get("name") or "")
+                batch_dropped.append({
+                    "candidate_id": cid,
+                    "name": name,
+                    "reason": (
+                        "no candidate record found at launch"
+                        if name == "Unknown Candidate"
+                        else "no usable phone or email at launch"
+                    ),
+                })
+            if batch_dropped:
+                logger.warning(
+                    "launch batch %d: excluding %d contactless/missing rows pre-send: %s",
+                    idx, len(batch_dropped), [d["candidate_id"] for d in batch_dropped],
+                )
+                res_out["excluded_records"].extend(batch_dropped)
+                res_out["excluded_count"] += len(batch_dropped)
+                real_ids = [cid for cid, _ in launchable]
+                sendable_ids = real_ids
+                payload_obj["resumes"] = [r for _, r in launchable]
+                payload_str = json.dumps(payload_obj)
+            if not real_ids:
+                # Whole batch was uncontactable — nothing to send.
+                res_out["event"] = {
+                    "type": "batch", "index": idx, "status": "completed",
+                    "sent": 0, "no_interview": 0, "already_sent": 0,
+                    "excluded": len(batch_dropped), "bulk_id": None,
+                }
+                return res_out
+
+        send_req = SendBulkInterviewRequest(
+            payload=payload_str,
+            real_candidate_ids=real_ids,
+            is_initial_launch=False,       # fired once after the loop
+            dry_run=False,
+            notify_recruiters=False,       # fired once after the loop
+            send_job_posting_email=False,  # fired once after the loop
+            app_base_url=request.app_base_url,
+        )
+        if launch_id is not None:
+            res = await _send_bulk_interview_core(
+                send_req, precomputed_signals=precomputed_signals,
+                launch_id=launch_id, batch_idx=idx,
+            )
+        else:
+            res = await _send_bulk_interview_core(send_req, precomputed_signals=precomputed_signals)
+
+        skipped = res.get("skipped_already_sent") or []
+        res_out["skipped"] = list(skipped)
+        # Server-side exclusions (employed by hiring client, offer extended,
+        # …) are surfaced on the stream so the modal reports server skips.
+        batch_excluded = res.get("excluded_candidates") or []
+        res_out["excluded_records"].extend(batch_excluded)
+        # Candidates that passed the gate with weak/unverified employer data.
+        # Aggregated only for SUCCESSFUL sends.
+        batch_unverified = res.get("employer_unverified") or []
+
+        if res.get("success"):
+            rows = res.get("data") or []
+            # Only rows PAIR actually created an interview for count as "sent".
+            sent = sum(1 for r in rows if isinstance(r, dict) and r.get("interview_id"))
+            no_interview = len(rows) - sent
+            res_out.update({
+                "sent": sent,
+                "no_interview": no_interview,
+                "already_sent": len(skipped),
+                "employer_unverified": list(batch_unverified),
+                "employer_unverified_count": len(batch_unverified),
+            })
+            res_out["excluded_count"] += len(batch_excluded)
+            res_out["event"] = {
+                "type": "batch",
+                "index": idx,
+                "status": "completed",
+                "sent": sent,
+                "no_interview": no_interview,
+                "already_sent": len(skipped),
+                "excluded": len(batch_excluded),
+                "employer_unverified": len(batch_unverified),
+                "bulk_id": res.get("bulk_id"),
+            }
+            return res_out
+        return _failed(res.get("message") or "send failed")
+    except HTTPException as he:
+        # 409 = outreach stopped for this job -> abort the whole launch.
+        # Flag it immediately so batches not yet started don't run.
+        if getattr(he, "status_code", None) == 409:
+            abort_flag["aborted"] = True
+            res_out["status"] = "aborted"
+            res_out["failed_ids"] = list(sendable_ids)
+            res_out["message"] = str(he.detail)
+            return res_out
+        return _failed(str(he.detail))
+    except Exception as e:
+        logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
+        return _failed(str(e))
+
+
 @router.post("/engage/launch")
-async def launch_bulk_interviews(request: LaunchRequest):
+async def launch_bulk_interviews(request: LaunchRequest, http_request: Request = None):
     """Single-call, backend-owned Launch PAIR orchestration.
 
     Replaces the frontend's per-batch generate -> send -> SSE loop: the browser
@@ -3098,28 +3804,50 @@ async def launch_bulk_interviews(request: LaunchRequest):
     idempotency / DNC / audit / status write-through behave identically to the
     old flow.
 
+    The employer gate is resolved once for the whole launch (LAUNCH_GATE_ONCE),
+    batches run LAUNCH_BATCH_PARALLELISM at a time (1 = old sequential order),
+    and with LAUNCH_ASYNC + `async_launch` the work runs in a tracked
+    background task and this returns 202 {launch_id}.
+
     Difference from the old flow (intentional de-dup): the recruiter launch
     email and applicant sync fire ONCE per launch here, instead of once per
-    batch. Per-batch calls suppress them (is_initial_launch / notify_recruiters
-    / send_job_posting_email = False) and the orchestrator fires them a single
-    time after the loop.
+    batch.
     """
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json.dumps(obj)}\n\n"
 
-    async def _work():
+    async def _work(launch_id: Optional[str] = None, run_id: Optional[str] = None):
+        # Fix 0: run id for per-stage timing. Set in this task's context
+        # BEFORE batch tasks are created so they inherit it.
+        if run_id is None:
+            run_id = _trace_new_run(request.job_id)
+        # Fix 5: pause background JobDiva hydration while launching.
+        _clear_active = None
+        try:
+            from services.jobdiva_activity import mark_job_active, clear_job_active
+            await mark_job_active(str(request.job_id))
+            _clear_active = clear_job_active
+        except ImportError:
+            pass
+        except Exception as _mark_err:  # noqa: BLE001
+            logger.warning("launch: mark_job_active failed: %s", _mark_err)
+
         ids = [str(c) for c in (request.candidate_ids or []) if str(c).strip()]
         batch_size = max(1, int(request.batch_size or _LAUNCH_PAIRBOT_BATCH_SIZE))
         batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
+        parallelism = max(1, int(_launch_flag("LAUNCH_BATCH_PARALLELISM", 1) or 1))
 
-        yield _sse({
+        start_evt: Dict[str, Any] = {
             "type": "start",
             "total_candidates": len(ids),
             "total_batches": len(batches),
             "batch_size": batch_size,
-        })
+            "run_id": run_id,
+        }
+        if launch_id:
+            start_evt["launch_id"] = launch_id
 
         totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0, "employer_unverified": 0}
         all_skipped: List[str] = []
@@ -3128,12 +3856,13 @@ async def launch_bulk_interviews(request: LaunchRequest):
         failed_candidate_ids: List[str] = []
         aborted = False
         side_effects_fired = {"done": False}
+        abort_flag = {"aborted": False}
+        tasks: List[asyncio.Task] = []
 
         def _fire_once_side_effects() -> None:
             # Recruiter launch email + applicant sync fire ONCE per launch.
-            # Invoked from the finally below so a client disconnect (generator
-            # cancellation) mid-stream still fires them for candidates that were
-            # already engaged. Guarded so it runs at most once.
+            # Invoked from the finally below so a client disconnect mid-stream
+            # still fires them for candidates already engaged.
             if side_effects_fired["done"]:
                 return
             side_effects_fired["done"] = True
@@ -3144,7 +3873,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     logger.info(
                         "launch: initial launch for job %s -> applicant sync", request.job_id
                     )
-                    asyncio.create_task(
+                    _spawn_task(
                         auto_assign_service.synchronize_job_applicants(request.job_id)
                     )
                 if request.is_initial_launch or request.notify_recruiters:
@@ -3153,13 +3882,11 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         if request.send_job_posting_email is not None
                         else request.is_initial_launch
                     )
-                    # Public job-board posting only on a fully clean launch (no
-                    # failed/aborted batches) — matches the old
-                    # `i == last && totalFailedBatches == 0` gate.
+                    # Public job-board posting only on a fully clean launch.
                     send_job_posting = bool(
                         requested_job_posting and not aborted and totals["failed_batches"] == 0
                     )
-                    asyncio.create_task(
+                    _spawn_task(
                         _send_pair_launch_email(
                             job_id=request.job_id,
                             candidate_count=totals["sent"],
@@ -3171,192 +3898,86 @@ async def launch_bulk_interviews(request: LaunchRequest):
                 logger.warning("launch: side-effect firing failed: %s", _se_err)
 
         try:
-            for idx, batch in enumerate(batches):
-                if idx > 0:
-                    await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
-                # Ids actually sent to Pairbot for this batch: batch minus
-                # DNC-blocked minus contact-gate exclusions. Failure paths must
-                # report THESE ids — reporting the original batch would re-record
-                # rows already surfaced as exclusions, putting permanently
-                # uncontactable candidates into the retry set forever.
-                sendable_ids: List[str] = batch
-                try:
-                    gp = await _generate_payload_for(
-                        GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
-                    )
-                    payload_str = gp.get("payload") if isinstance(gp, dict) else None
-                    if not payload_str:
-                        raise RuntimeError("generate-payload returned no payload")
+            yield _sse(start_evt)
 
-                    # Keep real_candidate_ids aligned with the payload's resumes:
-                    # generate drops DNC-stopped candidates from resumes, so drop
-                    # them from real_candidate_ids too — otherwise the positional
-                    # matching in _send_bulk_interview_core misaligns.
-                    dnc_blocked = (
-                        set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
-                    )
-                    real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
-                    sendable_ids = real_ids
+            precomputed: Optional[Dict[str, Dict[str, Any]]] = None
+            if ids and _launch_flag("LAUNCH_GATE_ONCE", False):
+                async with _trace_span("employer_gate", scope="launch", n=len(ids)):
+                    precomputed = await _precompute_launch_signals(request.job_id, ids)
 
-                    # Per-candidate contact gate. _send_bulk_interview_core's
-                    # payload validation 400s the ENTIRE batch when any single
-                    # resume has no usable phone/email — including the
-                    # "Unknown Candidate" stub generate-payload emits for an id
-                    # with no sourced_candidates row. At batch size 75 that's a
-                    # 75-candidate blast radius for one bad row. Drop those rows
-                    # here and surface them as exclusions; everyone else launches.
-                    try:
-                        payload_obj = json.loads(payload_str)
-                    except Exception:
-                        payload_obj = None
-                    resumes = payload_obj.get("resumes") if isinstance(payload_obj, dict) else None
-                    if isinstance(resumes, list) and len(resumes) == len(real_ids):
-                        launchable: List[tuple] = []
-                        batch_dropped: List[Dict[str, str]] = []
-                        for cid, resume in zip(real_ids, resumes):
-                            if not isinstance(resume, dict):
-                                batch_dropped.append({
-                                    "candidate_id": cid, "name": "",
-                                    "reason": "invalid resume payload at launch",
-                                })
-                                continue
-                            clean_email = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
-                            resume["email"] = clean_email
-                            has_contact = (
-                                len(_pair_phone_digits(resume.get("phone"))) >= 7 or bool(clean_email)
-                            )
-                            if has_contact:
-                                launchable.append((cid, resume))
-                                continue
-                            name = str(resume.get("name") or "")
-                            batch_dropped.append({
-                                "candidate_id": cid,
-                                "name": name,
-                                "reason": (
-                                    "no candidate record found at launch"
-                                    if name == "Unknown Candidate"
-                                    else "no usable phone or email at launch"
-                                ),
-                            })
-                        if batch_dropped:
-                            logger.warning(
-                                "launch batch %d: excluding %d contactless/missing rows pre-send: %s",
-                                idx, len(batch_dropped),
-                                [d["candidate_id"] for d in batch_dropped],
-                            )
-                            all_excluded.extend(batch_dropped)
-                            totals["excluded"] += len(batch_dropped)
-                            real_ids = [cid for cid, _ in launchable]
-                            sendable_ids = real_ids
-                            payload_obj["resumes"] = [r for _, r in launchable]
-                            payload_str = json.dumps(payload_obj)
-                        if not real_ids:
-                            # Whole batch was uncontactable — nothing to send.
-                            yield _sse({
-                                "type": "batch", "index": idx, "status": "completed",
-                                "sent": 0, "no_interview": 0, "already_sent": 0,
-                                "excluded": len(batch_dropped), "bulk_id": None,
-                            })
-                            continue
+            sem = asyncio.Semaphore(parallelism)
 
-                    send_req = SendBulkInterviewRequest(
-                        payload=payload_str,
-                        real_candidate_ids=real_ids,
-                        is_initial_launch=False,       # fired once after the loop
-                        dry_run=False,
-                        notify_recruiters=False,       # fired once after the loop
-                        send_job_posting_email=False,  # fired once after the loop
-                        app_base_url=request.app_base_url,
-                    )
-                    res = await _send_bulk_interview_core(send_req)
+            async def _guarded(i: int, b: List[str]) -> Dict[str, Any]:
+                async with sem:
+                    if abort_flag["aborted"]:
+                        return {"idx": i, "status": "not_run", "failed_ids": list(b)}
+                    if i > 0:
+                        await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)  # stagger
+                    if abort_flag["aborted"]:
+                        return {"idx": i, "status": "not_run", "failed_ids": list(b)}
+                    async with _trace_span("launch_batch", batch_idx=i, n=len(b)):
+                        return await _run_one_batch(
+                            i, b, request=request, precomputed_signals=precomputed,
+                            abort_flag=abort_flag, launch_id=launch_id,
+                        )
 
-                    skipped = res.get("skipped_already_sent") or []
-                    all_skipped.extend(skipped)
-                    # Server-side exclusions (employed by hiring client, offer
-                    # extended, …) used to vanish silently — the FE could only
-                    # show the ones it predicted itself. Surface them on the
-                    # stream so the progress modal reports server skips too.
-                    batch_excluded = res.get("excluded_candidates") or []
-                    all_excluded.extend(batch_excluded)
-                    # Candidates that passed the gate with weak/unverified
-                    # employer data. Aggregated only for SUCCESSFUL sends —
-                    # the modal presents this list as "launched", and a batch
-                    # whose Pairbot send failed launched nobody (those rows go
-                    # to failedCandidates instead; totals gate the same way).
-                    batch_unverified = res.get("employer_unverified") or []
-
-                    if res.get("success"):
-                        all_employer_unverified.extend(batch_unverified)
-                        rows = res.get("data") or []
-                        # Only rows PAIR actually created an interview for count as
-                        # "sent". Rows returned without an interview_id were written
-                        # engage_status='failed' (and stay retryable) — surface them
-                        # as no_interview instead of inflating the sent tally.
-                        sent = sum(1 for r in rows if isinstance(r, dict) and r.get("interview_id"))
-                        no_interview = len(rows) - sent
-                        totals["sent"] += sent
-                        totals["already_sent"] += len(skipped)
-                        totals["no_interview"] += no_interview
-                        totals["excluded"] += len(batch_excluded)
-                        totals["employer_unverified"] += len(batch_unverified)
-                        yield _sse({
-                            "type": "batch",
-                            "index": idx,
-                            "status": "completed",
-                            "sent": sent,
-                            "no_interview": no_interview,
-                            "already_sent": len(skipped),
-                            "excluded": len(batch_excluded),
-                            "employer_unverified": len(batch_unverified),
-                            "bulk_id": res.get("bulk_id"),
-                        })
-                    else:
-                        totals["failed_batches"] += 1
-                        failed_candidate_ids.extend(sendable_ids)
-                        yield _sse({
-                            "type": "batch",
-                            "index": idx,
-                            "status": "failed",
-                            "error": res.get("message") or "send failed",
-                            "candidate_ids": sendable_ids,
-                        })
-                except HTTPException as he:
-                    # 409 = outreach stopped for this job -> abort the whole
-                    # launch. Record the aborting batch AND all remaining
-                    # (never-processed) batches so the caller's failed CSV is
-                    # complete, and surface those ids on the error event.
-                    if getattr(he, "status_code", None) == 409:
-                        aborted = True
-                        remaining = sendable_ids + [c for b in batches[idx + 1:] for c in b]
-                        totals["failed_batches"] += 1
-                        failed_candidate_ids.extend(remaining)
-                        yield _sse({
-                            "type": "error",
-                            "status_code": 409,
-                            "message": str(he.detail),
-                            "index": idx,
-                            "candidate_ids": remaining,
-                        })
-                        break
+            tasks = [asyncio.ensure_future(_guarded(i, b)) for i, b in enumerate(batches)]
+            abort_result: Optional[Dict[str, Any]] = None
+            not_run: List[Dict[str, Any]] = []
+            # Only this consumer loop touches the shared totals — no lock.
+            for fut in asyncio.as_completed(tasks):
+                r = await fut
+                status = r.get("status")
+                if status == "not_run":
+                    not_run.append(r)
+                    continue
+                all_skipped.extend(r["skipped"])
+                all_excluded.extend(r["excluded_records"])
+                totals["excluded"] += r["excluded_count"]
+                if status == "aborted":
+                    abort_result = r
+                    continue
+                if status == "completed":
+                    totals["sent"] += r["sent"]
+                    totals["already_sent"] += r["already_sent"]
+                    totals["no_interview"] += r["no_interview"]
+                    totals["employer_unverified"] += r["employer_unverified_count"]
+                    all_employer_unverified.extend(r["employer_unverified"])
+                else:
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(sendable_ids)
-                    yield _sse({
-                        "type": "batch", "index": idx, "status": "failed",
-                        "error": str(he.detail), "candidate_ids": sendable_ids,
-                    })
-                except Exception as e:
-                    logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
-                    totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(sendable_ids)
-                    yield _sse({
-                        "type": "batch", "index": idx, "status": "failed",
-                        "error": str(e), "candidate_ids": sendable_ids,
-                    })
+                    failed_candidate_ids.extend(r["failed_ids"])
+                if r.get("event"):
+                    yield _sse(r["event"])
+
+            if abort_result is not None:
+                # Same shape as the sequential flow: the aborting batch plus
+                # every batch that never ran, in batch order.
+                aborted = True
+                remaining = list(abort_result["failed_ids"]) + [
+                    c for nr in sorted(not_run, key=lambda x: x["idx"]) for c in nr["failed_ids"]
+                ]
+                totals["failed_batches"] += 1
+                failed_candidate_ids.extend(remaining)
+                yield _sse({
+                    "type": "error",
+                    "status_code": 409,
+                    "message": abort_result.get("message") or "",
+                    "index": abort_result["idx"],
+                    "candidate_ids": remaining,
+                })
         finally:
-            # Fire once even if the client disconnected mid-stream (generator
-            # cancelled) so already-engaged candidates still get the recruiter
-            # email + applicant sync.
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Fire once even if the client disconnected mid-stream.
             _fire_once_side_effects()
+            if _clear_active is not None:
+                try:
+                    await _clear_active(str(request.job_id))
+                except Exception as _clr_err:  # noqa: BLE001
+                    logger.warning("launch: clear_job_active failed: %s", _clr_err)
 
         yield _sse({
             "type": "done",
@@ -3367,6 +3988,89 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "employer_unverified": all_employer_unverified,
             "failed_candidate_ids": failed_candidate_ids,
         })
+
+    # --- Fix 3: async path -------------------------------------------------
+    if request.async_launch and _launch_flag("LAUNCH_ASYNC", False):
+        launch_id = str(uuid.uuid4())
+        run_id = _trace_new_run(request.job_id)
+        requested_by: Optional[str] = None
+        if http_request is not None:
+            try:
+                _user = await asyncio.to_thread(get_current_user, http_request, None)
+                requested_by = (_user.email or "").strip().lower() or None
+            except HTTPException:
+                requested_by = None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("async launch: could not resolve requester: %s", exc)
+        try:
+            # Lazy safety net for runs whose worker died without a final write.
+            await asyncio.to_thread(_sweep_stale_launch_runs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("launch_runs stale sweep failed: %s", exc)
+        try:
+            await asyncio.to_thread(
+                _launch_db,
+                "INSERT INTO launch_runs (id, job_id, requested_by, status, last_event_at) "
+                "VALUES (%s, %s, %s, 'running', now())",
+                (launch_id, str(request.job_id), requested_by),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("async launch could not be recorded: %s", exc, exc_info=True)
+            raise HTTPException(status_code=503, detail="Could not start launch")
+
+        async def _run_async() -> None:
+            final = "completed"
+            seq = {"n": 0}
+            cancelled = False
+
+            def _append_sync(evt: Dict[str, Any]) -> None:
+                _launch_append_event(launch_id, seq["n"], evt)
+                seq["n"] += 1
+
+            try:
+                async for chunk in _work(launch_id=launch_id, run_id=run_id):
+                    evt = json.loads(chunk[len("data: "):].strip())
+                    if evt.get("type") == "error":
+                        final = "aborted"
+                    await asyncio.to_thread(_append_sync, evt)
+            except asyncio.CancelledError:
+                # Shutdown drain (or similar) cancelled us. Awaiting a thread
+                # here could itself be cancelled, so write synchronously.
+                final = "failed"
+                cancelled = True
+                logger.warning("async launch %s cancelled", launch_id)
+                try:
+                    _append_sync({"type": "error", "message": "launch interrupted (server restart)"})
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            except BaseException as exc:
+                final = "failed"
+                logger.error("async launch %s crashed: %s", launch_id, exc, exc_info=True)
+                try:
+                    await asyncio.shield(asyncio.to_thread(
+                        _append_sync, {"type": "error", "message": str(exc)}
+                    ))
+                except BaseException:  # noqa: BLE001
+                    pass
+                raise
+            finally:
+                try:
+                    if cancelled:
+                        _launch_finalize(launch_id, final)
+                    else:
+                        await asyncio.shield(asyncio.to_thread(_launch_finalize, launch_id, final))
+                except BaseException as exc:  # noqa: BLE001
+                    if not cancelled:
+                        # Shield was interrupted: make sure the row is final.
+                        try:
+                            _launch_finalize(launch_id, final)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    logger.warning("launch_runs final status write failed %s: %s", launch_id, exc)
+
+        _spawn_task(_run_async(), name=f"launch:{launch_id}")
+        return JSONResponse(status_code=202, content={"launch_id": launch_id, "run_id": run_id})
 
     async def _gen():
         # Heartbeat pump. A single batch can hold the stream silent for many
@@ -4348,7 +5052,7 @@ async def _check_and_fire_candidate_passed_notification(
 
         # Update JobDiva Qualification: PAIR Candidates = PASS
         # We fire these asynchronously so they don't block the email or main flow
-        asyncio.create_task(
+        _spawn_task(
             jobdiva_service.update_candidate_qualification(
                 candidate_id=jd_candidate_id,
                 qualification_name=JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -4381,7 +5085,7 @@ async def _check_and_fire_candidate_passed_notification(
                 if note_id:
                     await jobdiva_service.pin_candidate_note(note_id=note_id, is_pinned=True)
 
-        asyncio.create_task(create_and_pin_note())
+        _spawn_task(create_and_pin_note())
 
         # The JobDiva profile the email links to: the same id the Cross
         # Submissions email and panel open (a JobDiva row's own id, else the
@@ -4414,7 +5118,7 @@ async def _check_and_fire_candidate_passed_notification(
         if success:
             # Flag was already set atomically before sending (race-condition-safe).
             # Refresh Performance Metrics for this job (e.g. Time to First Pass)
-            asyncio.create_task(auto_assign_service.refresh_job_performance_metrics(job_id))
+            _spawn_task(auto_assign_service.refresh_job_performance_metrics(job_id))
         else:
             logger.warning(f"⚠️ Email send failed for candidate {candidate_id} / job {job_id}. Rolling back dedup flag.")
             _rollback_passed_email_flag()

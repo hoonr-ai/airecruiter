@@ -6,7 +6,9 @@ import logging
 import re
 import time
 import copy
+import os
 import threading
+import uuid
 
 import psycopg2
 import psycopg2.extras
@@ -454,6 +456,93 @@ async def parse_job_description(request: ParsedJobRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Single-flight for the intake prewarm: Redis SET NX across workers, plus an
+# in-process set so double clicks on one worker dedupe even without Redis.
+_PREWARM_LOCK_PREFIX = "jd:prewarm:"
+_PREWARM_INFLIGHT: set = set()
+
+
+def _prewarm_lock_ttl_s() -> int:
+    try:
+        return max(1, int(os.getenv("JOB_INTAKE_PREWARM_LOCK_TTL_S", "600") or 600))
+    except ValueError:
+        return 600
+
+
+async def _acquire_prewarm_lock(job_key: str) -> Optional[str]:
+    """Returns a token when this caller owns the prewarm, else None."""
+    from services import jobdiva_rate_limit as _rl
+    client = _rl._get_redis()
+    if client is None:
+        return "local"
+    token = uuid.uuid4().hex
+    try:
+        ok = await client.set(f"{_PREWARM_LOCK_PREFIX}{job_key}", token, nx=True, ex=_prewarm_lock_ttl_s())
+    except Exception as exc:
+        _rl._mark_redis_down(exc)
+        return "local"  # in-process guard already held
+    return token if ok else None
+
+
+async def _release_prewarm_lock(job_key: str, token: str) -> None:
+    if token == "local":
+        return
+    from services import jobdiva_rate_limit as _rl
+    client = _rl._get_redis()
+    if client is None:
+        return
+    key = f"{_PREWARM_LOCK_PREFIX}{job_key}"
+    try:
+        cur = await client.get(key)
+        if (cur.decode() if isinstance(cur, bytes) else cur) == token:
+            await client.delete(key)
+    except Exception as exc:
+        _rl._mark_redis_down(exc)
+
+
+def _schedule_intake_prewarm(numeric_id: Any, ref_code: Any) -> None:
+    """Fix 7: warm the JobAgentSearch cache + applicant/detail path in the
+    background at job intake so the first sourcing search is fast. Never
+    blocks or fails the request. Single-flight per job (see above)."""
+    try:
+        from core.config import JOB_INTAKE_PREWARM_ENABLED
+        if not JOB_INTAKE_PREWARM_ENABLED or not (numeric_id or ref_code):
+            return
+        from core import pipeline_trace
+        from core.tasks import spawn
+        from services.jobdiva_jobagent_cache import prewarm_job
+
+        primary = str(ref_code or numeric_id)
+        aliases = tuple(a for a in (str(numeric_id or ""),) if a and a != primary)
+        if primary in _PREWARM_INFLIGHT:
+            logger.info(f"intake prewarm already running for {primary}; skipped")
+            return
+        _PREWARM_INFLIGHT.add(primary)
+
+        async def _run() -> None:
+            try:
+                token = await _acquire_prewarm_lock(primary)
+                if token is None:
+                    logger.info(f"intake prewarm already running for {primary} (other worker); skipped")
+                    return
+                try:
+                    pipeline_trace.new_run(primary)
+                    async with pipeline_trace.span("intake_prewarm", job_id=primary):
+                        await prewarm_job(primary, aliases=aliases)
+                finally:
+                    await _release_prewarm_lock(primary, token)
+            finally:
+                _PREWARM_INFLIGHT.discard(primary)
+
+        try:
+            spawn(_run(), name=f"intake_prewarm:{primary}")
+        except Exception:
+            _PREWARM_INFLIGHT.discard(primary)
+            raise
+    except Exception as exc:
+        logger.warning(f"intake prewarm not scheduled for {ref_code or numeric_id}: {exc}")
+
+
 @router.post("/jobs/fetch")
 async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: BackgroundTasks):
     """
@@ -624,6 +713,7 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             if "screening_level" in local_data and local_data["screening_level"]:
                 job["screening_level"] = local_data["screening_level"]
         
+        _schedule_intake_prewarm(numeric_id, ref_code)
         return job
         
     except Exception as e:
@@ -2479,12 +2569,15 @@ async def extract_job_skills(job_id: str, request: SkillsExtractionRequest):
         extractor = JobSkillsExtractor(OPENAI_API_KEY)
         
         # Extract skills and map to Ronak's ontology
-        analysis = extractor.analyze_job_skills(
-            job_id=job_id,
-            jobdiva_description=request.jobdiva_description,
-            ai_description=request.ai_description,
-            recruiter_notes=request.recruiter_notes
-        )
+        from core import pipeline_trace
+        pipeline_trace.new_run(job_id)
+        with pipeline_trace.span_sync("intake_skill_extraction", job_id=str(job_id)):
+            analysis = extractor.analyze_job_skills(
+                job_id=job_id,
+                jobdiva_description=request.jobdiva_description,
+                ai_description=request.ai_description,
+                recruiter_notes=request.recruiter_notes
+            )
         
         # Save to database  
         db_service = JobSkillsDB()

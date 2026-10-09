@@ -119,6 +119,51 @@ export type LaunchEvent =
       failed_candidate_ids: string[];
     };
 
+// Opt in to the backend's async launch (202 + launch_id). Rollout flag; the
+// server must also have LAUNCH_ASYNC on.
+const LAUNCH_ASYNC = process.env.NEXT_PUBLIC_LAUNCH_ASYNC === "true";
+const LAUNCH_FOLLOW_MAX_RETRIES = 5;
+
+// Parses an SSE body into LaunchEvents. Uses a streaming fetch reader (not
+// EventSource) because EventSource cannot set auth headers.
+async function readLaunchStream(
+  body: ReadableStream<Uint8Array>,
+  onEvent: (evt: LaunchEvent) => void,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const emit = (rawEvent: string) => {
+    const jsonStr = rawEvent
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trim())
+      .join("");
+    if (!jsonStr) return;
+    try {
+      onEvent(JSON.parse(jsonStr) as LaunchEvent);
+    } catch {
+      logger.warn("engagement.launch.parse_error", { jsonStr });
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sepIdx: number;
+    // SSE events are separated by a blank line.
+    while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+      const rawEvent = buffer.slice(0, sepIdx);
+      buffer = buffer.slice(sepIdx + 2);
+      emit(rawEvent);
+    }
+  }
+  // Flush any trailing event not terminated by a blank line.
+  if (buffer.trim()) emit(buffer);
+}
+
 export function useEngagementFlow() {
   async function generatePayload(input: GeneratePayloadInput): Promise<GeneratePayloadResult> {
     const res = await authFetch(`${API_BASE}/api/v1/engagement/engage/generate-payload`, {
@@ -187,8 +232,18 @@ export function useEngagementFlow() {
         send_job_posting_email: input.sendJobPostingEmail,
         app_base_url: input.appBaseUrl || (typeof window !== "undefined" ? window.location.origin : ""),
         batch_size: input.batchSize,
+        // Honoured only when the server's LAUNCH_ASYNC flag is also on;
+        // otherwise the server answers with the SSE stream as before.
+        async_launch: LAUNCH_ASYNC,
       }),
     });
+    // Async launch: the server queued the work and answered 202 {launch_id}.
+    // Progress comes from the launch's own replayable stream instead.
+    if (res.status === 202) {
+      const { launch_id } = (await res.json()) as { launch_id: string; run_id?: string };
+      await followLaunch(launch_id, onEvent);
+      return;
+    }
     if (!res.ok || !res.body) {
       let msg = "";
       try {
@@ -202,38 +257,42 @@ export function useEngagementFlow() {
       throw new Error(msg);
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+    await readLaunchStream(res.body, onEvent);
+  }
 
-    const emit = (rawEvent: string) => {
-      const jsonStr = rawEvent
-        .split("\n")
-        .filter((l) => l.startsWith("data:"))
-        .map((l) => l.slice(5).trim())
-        .join("");
-      if (!jsonStr) return;
+  // Follows an async launch via /engage/bulk-status/stream?launch_id=. The
+  // server replays the launch's events from the start on every connection, so
+  // after a dropped connection we reconnect and skip the events already seen.
+  // The work itself runs server-side and is unaffected by the browser.
+  async function followLaunch(launchId: string, onEvent: (evt: LaunchEvent) => void): Promise<void> {
+    const url = `${API_BASE}/api/v1/engagement/engage/bulk-status/stream?launch_id=${encodeURIComponent(launchId)}`;
+    let seen = 0;
+    let finished = false;
+    let failures = 0;
+    while (!finished) {
+      let index = 0;
       try {
-        onEvent(JSON.parse(jsonStr) as LaunchEvent);
-      } catch {
-        logger.warn("engagement.launch.parse_error", { jsonStr });
-      }
-    };
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let sepIdx: number;
-      // SSE events are separated by a blank line.
-      while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
-        const rawEvent = buffer.slice(0, sepIdx);
-        buffer = buffer.slice(sepIdx + 2);
-        emit(rawEvent);
+        const res = await authFetch(url);
+        if (!res.ok || !res.body) throw new Error(`Launch progress request failed (HTTP ${res.status})`);
+        await readLaunchStream(res.body, (evt) => {
+          if (index++ < seen) return;
+          seen = index;
+          failures = 0;
+          // A 409 "error" is still followed by "done", so only "done" ends it.
+          if (evt.type === "done") finished = true;
+          onEvent(evt);
+        });
+        // The server closes the stream once the launch is terminal.
+        finished = true;
+      } catch (e) {
+        if (++failures > LAUNCH_FOLLOW_MAX_RETRIES) {
+          logger.error("engagement.launch.follow_failed", { launchId, message: (e as Error)?.message });
+          throw e;
+        }
+        logger.warn("engagement.launch.follow_retry", { launchId, attempt: failures });
+        await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** failures, 15000)));
       }
     }
-    // Flush any trailing event not terminated by a blank line.
-    if (buffer.trim()) emit(buffer);
   }
 
   async function latestInterviewById(candidateId: string): Promise<LatestInterviewResult> {

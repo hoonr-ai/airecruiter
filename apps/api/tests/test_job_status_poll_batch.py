@@ -12,7 +12,7 @@ from services.jobdiva import JobDivaService
 @pytest.fixture(autouse=True)
 def _fast_limiter(monkeypatch):
     monkeypatch.setattr(rl, "MIN_INTERVAL_S", 0.0)
-    monkeypatch.setattr(rl, "_local_next", 0.0)
+    monkeypatch.setattr(rl, "_local_tokens", None)
     monkeypatch.setattr(rl, "_local_cooldown_until", 0.0)
     monkeypatch.setattr(rl, "_local_fg_waiting_until", 0.0)
     monkeypatch.setattr(rl, "_local_lock", None)

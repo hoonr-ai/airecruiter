@@ -3,7 +3,9 @@
 Repeat searches, background hydration and single-id lookups ask for the same
 candidates within minutes; each miss spends JobDiva BI quota (incident
 2026-09-29, docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Records are
-cached for ``JOBDIVA_DETAIL_CACHE_TTL_S`` (default 20 min, 0 disables). Only
+cached for ``JOBDIVA_DETAIL_CACHE_TTL_S`` (default 2 h, 0 disables;
+kept short because records carry PII and recruiter edits in JobDiva must show
+up the same working session). Only
 hits are cached — a missing record is always re-fetched. No Redis → no cache,
 never an error.
 
@@ -26,10 +28,11 @@ from services import jobdiva_rate_limit as _rl
 log = logging.getLogger(__name__)
 
 _PREFIX = "jobdiva:cand_detail:"
+DEFAULT_TTL_S = 2 * 3600
 try:
-    TTL_S = int((os.getenv("JOBDIVA_DETAIL_CACHE_TTL_S") or "").strip() or 20 * 60)
+    TTL_S = int((os.getenv("JOBDIVA_DETAIL_CACHE_TTL_S") or "").strip() or DEFAULT_TTL_S)
 except ValueError:
-    TTL_S = 20 * 60
+    TTL_S = DEFAULT_TTL_S
 
 _fernet: Optional[Any] = None
 _fernet_failed = False
