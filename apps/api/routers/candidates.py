@@ -30,9 +30,9 @@ from models import (
     CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
 )
 from routers._helpers import get_db_connection
-from core.auth import get_current_user, UserIdentity
+from core.auth import get_current_user, parse_recruiter_emails, UserIdentity
 from routers.jobs import invalidate_monitored_jobs_cache
-from routers._helpers import _verify_job_access_by_id
+from routers._helpers import _verify_job_access_by_id, _get_job_draft_sync
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
 
@@ -2091,6 +2091,43 @@ async def refresh_candidate_resume_match(
         logger.error(f"refresh_candidate_resume_match failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+def _enforce_recruiter_email_gate(jobdiva_id: str) -> None:
+    """Block a launch when the job has no recruiter assigned.
+
+    The wizard's own "Recruiter Email is required" check lives only inside
+    Step 1's Next button — reopening an existing draft, a direct ?step=5
+    link, or the step-indicator can all reach Step 5 (and /candidates/save)
+    without ever re-running it, since current_step is restored/overridden
+    independently of recruiter_emails. This is the one place a launch always
+    passes through, regardless of how Step 5 was reached, so it's enforced
+    here as the real gate.
+
+    A job with no monitored_jobs row at all (e.g. the GENERAL_SOURCING
+    sentinel, used for launches with no job attached) is skipped rather than
+    blocked — there's no recruiter assignment to be missing. _get_job_draft_sync
+    is the same deterministic lookup (and parse_recruiter_emails the same
+    parsing) used by verify_job_access/_filter_jobs_for_user, so this can't
+    drift from them.
+    """
+    try:
+        job_draft = _get_job_draft_sync(str(jobdiva_id))
+        if job_draft.get("status") == "success":
+            clean_emails = parse_recruiter_emails(job_draft["data"].get("recruiter_emails"))
+            if not clean_emails:
+                raise HTTPException(
+                    status_code=400,
+                    detail="This job has no recruiter email assigned. Add one before launching.",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(f"Recruiter-email launch gate failed for job {jobdiva_id}")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not verify the job's recruiter assignment. Please try again.",
+        )
+
+
 @router.post("/candidates/save")
 async def save_candidates(
     request: CandidatesSaveRequest,
@@ -2158,6 +2195,8 @@ async def save_candidates(
             raise
         except Exception as _stop_check_err:
             print(f"⚠️ Could not check outreach_stopped_at: {_stop_check_err}")
+
+        _enforce_recruiter_email_gate(request.jobdiva_id)
 
         # Record who is launching: follows each attempt until the job has a
         # successful launch (services/job_attribution.py). Its own best-effort
