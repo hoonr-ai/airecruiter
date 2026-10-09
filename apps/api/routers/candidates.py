@@ -2091,7 +2091,15 @@ async def refresh_candidate_resume_match(
         logger.error(f"refresh_candidate_resume_match failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-def _enforce_recruiter_email_gate(jobdiva_id: str) -> None:
+# The one `jobdiva_id` value /candidates/save accepts with no monitored_jobs
+# row behind it — components/sourced-candidates-view.tsx posts this to park
+# a candidate in the master pool with no job attached. Any OTHER unresolvable
+# id (mistyped, stale, deleted job) has no business launching either, so only
+# this exact sentinel skips the gate below.
+_GENERAL_SOURCING_SENTINEL = "GENERAL_SOURCING"
+
+
+async def _enforce_recruiter_email_gate(jobdiva_id: str) -> None:
     """Block a launch when the job has no recruiter assigned.
 
     The wizard's own "Recruiter Email is required" check lives only inside
@@ -2102,22 +2110,28 @@ def _enforce_recruiter_email_gate(jobdiva_id: str) -> None:
     passes through, regardless of how Step 5 was reached, so it's enforced
     here as the real gate.
 
-    A job with no monitored_jobs row at all (e.g. the GENERAL_SOURCING
-    sentinel, used for launches with no job attached) is skipped rather than
-    blocked — there's no recruiter assignment to be missing. _get_job_draft_sync
-    is the same deterministic lookup (and parse_recruiter_emails the same
-    parsing) used by verify_job_access/_filter_jobs_for_user, so this can't
-    drift from them.
+    Only the GENERAL_SOURCING sentinel (launches with no job attached) skips
+    the check — a mistyped or otherwise unresolvable job id is blocked, not
+    waved through. _get_job_draft_sync is the same deterministic lookup (and
+    parse_recruiter_emails the same parsing) used by
+    verify_job_access/_filter_jobs_for_user, so this can't drift from them;
+    run in a thread since save_candidates is async and this does a blocking
+    DB round-trip.
     """
+    if str(jobdiva_id) == _GENERAL_SOURCING_SENTINEL:
+        return
     try:
-        job_draft = _get_job_draft_sync(str(jobdiva_id))
-        if job_draft.get("status") == "success":
-            clean_emails = parse_recruiter_emails(job_draft["data"].get("recruiter_emails"))
-            if not clean_emails:
-                raise HTTPException(
-                    status_code=400,
-                    detail="This job has no recruiter email assigned. Add one before launching.",
-                )
+        job_draft = await asyncio.to_thread(_get_job_draft_sync, str(jobdiva_id))
+        clean_emails = (
+            parse_recruiter_emails(job_draft["data"].get("recruiter_emails"))
+            if job_draft.get("status") == "success"
+            else []
+        )
+        if not clean_emails:
+            raise HTTPException(
+                status_code=400,
+                detail="This job has no recruiter email assigned. Add one before launching.",
+            )
     except HTTPException:
         raise
     except Exception:
@@ -2196,7 +2210,7 @@ async def save_candidates(
         except Exception as _stop_check_err:
             print(f"⚠️ Could not check outreach_stopped_at: {_stop_check_err}")
 
-        _enforce_recruiter_email_gate(request.jobdiva_id)
+        await _enforce_recruiter_email_gate(request.jobdiva_id)
 
         # Record who is launching: follows each attempt until the job has a
         # successful launch (services/job_attribution.py). Its own best-effort

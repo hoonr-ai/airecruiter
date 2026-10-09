@@ -386,20 +386,27 @@ def resolve_report_scope(user: UserIdentity, requested: Optional[str], what: str
 def parse_recruiter_emails(raw: Any) -> List[str]:
     """Normalize a `recruiter_emails` value — stored as a JSON string, a bare
     string, or a native list depending on the read path — into a clean,
-    lowercased list. Shared by every caller that decides access/visibility/
-    launch eligibility off this field, so they can't drift (verify_job_access,
-    routers/jobs.py's _filter_jobs_for_user, routers/candidates.py's launch
-    gate)."""
+    deduplicated, lowercased list. Shared by every caller that decides
+    access/visibility/launch eligibility off this field, so they can't drift
+    (verify_job_access, routers/jobs.py's _filter_jobs_for_user,
+    routers/candidates.py's launch gate)."""
     if isinstance(raw, str):
         try:
             emails = json.loads(raw) if raw.strip().startswith("[") else [raw]
-        except Exception:
+        except json.JSONDecodeError:
             emails = [raw] if raw else []
     elif isinstance(raw, list):
         emails = raw
     else:
         emails = []
-    return [str(e).strip().lower() for e in emails if e and str(e).strip()]
+    seen: set = set()
+    deduped: List[str] = []
+    for e in emails:
+        cleaned = str(e).strip().lower() if e and str(e).strip() else ""
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            deduped.append(cleaned)
+    return deduped
 
 
 def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:

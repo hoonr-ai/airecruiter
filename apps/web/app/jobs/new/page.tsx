@@ -141,6 +141,14 @@ const PLACEHOLDER_LAUNCH_EMAILS = new Set([
   "noreply@example.com",
 ]);
 
+function hasAnyRecruiterEmail(emails: string[]): boolean {
+  // recruiterEmails is normally populated only through the add-email handler
+  // (which already trims and regex-validates), but a loaded draft's
+  // recruiter_emails is set into state as-is — a stray whitespace-only entry
+  // there would pass a bare `.length === 0` check without being a real email.
+  return emails.some(e => e && e.trim().length > 0);
+}
+
 function isValidLaunchEmail(value: string | null | undefined): boolean {
   const email = String(value || "").trim().toLowerCase();
   if (!email || !LAUNCH_EMAIL_RE.test(email)) return false;
@@ -8627,7 +8635,7 @@ function NewJobPageContent() {
     // without ever re-running it (current_step is restored/overridden
     // independently of recruiterEmails). Re-check here, the one place that
     // always runs before a launch, regardless of how Step 5 was reached.
-    if (recruiterEmails.length === 0) {
+    if (!hasAnyRecruiterEmail(recruiterEmails)) {
       showToast("Recruiter Email is required before launching PAIR. Please add one in Step 1.", "error");
       return;
     }
@@ -11291,7 +11299,7 @@ return (
                   showToast("Fetch a job first before saving.", "info");
                   return;
                 }
-                if (recruiterEmails.length === 0) {
+                if (!hasAnyRecruiterEmail(recruiterEmails)) {
                   setEmailError(true);
                   showToast("Recruiter Email is required.", "info");
                   return;
