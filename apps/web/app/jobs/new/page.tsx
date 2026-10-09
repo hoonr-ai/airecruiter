@@ -8621,6 +8621,16 @@ function NewJobPageContent() {
   }, [selectedCandidates]);
 
   const handleLaunchPairClick = async () => {
+    // Step 1's "Recruiter Email is required" check only lives inside that
+    // step's own Next button — reopening an existing draft, a direct
+    // ?step=5 link, or jumping via the step indicator can all land here
+    // without ever re-running it (current_step is restored/overridden
+    // independently of recruiterEmails). Re-check here, the one place that
+    // always runs before a launch, regardless of how Step 5 was reached.
+    if (recruiterEmails.length === 0) {
+      showToast("Recruiter Email is required before launching PAIR. Please add one in Step 1.", "error");
+      return;
+    }
     if (!hasSearched) {
       showToast("Run Search first to source candidates.", "info");
       return;

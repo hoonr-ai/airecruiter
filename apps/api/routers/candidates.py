@@ -2159,6 +2159,45 @@ async def save_candidates(
         except Exception as _stop_check_err:
             print(f"⚠️ Could not check outreach_stopped_at: {_stop_check_err}")
 
+        # Reject if the job has no assigned recruiter. The wizard's own
+        # "Recruiter Email is required" check lives only inside Step 1's
+        # Next button — reopening an existing draft, a direct ?step=5 link,
+        # or the step-indicator can all reach Step 5 (and this endpoint)
+        # without ever re-running it, since current_step is restored/
+        # overridden independently of recruiter_emails. This is the one
+        # place a launch always passes through, regardless of how Step 5
+        # was reached, so it's enforced here as the real gate.
+        try:
+            _conn = get_db_connection()
+            try:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        SELECT recruiter_emails FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                    """, (request.jobdiva_id, request.jobdiva_id))
+                    _re_row = _cur.fetchone()
+                    _raw_emails = _re_row[0] if _re_row else None
+                    if isinstance(_raw_emails, str):
+                        try:
+                            _raw_emails = json.loads(_raw_emails) if _raw_emails.strip().startswith("[") else [_raw_emails]
+                        except Exception:
+                            _raw_emails = [_raw_emails] if _raw_emails else []
+                    elif not isinstance(_raw_emails, list):
+                        _raw_emails = []
+                    _clean_emails = [str(e).strip() for e in _raw_emails if e and str(e).strip()]
+                    if not _clean_emails:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="This job has no recruiter email on file. Add one in Step 1 before launching.",
+                        )
+            finally:
+                _conn.close()
+        except HTTPException:
+            raise
+        except Exception as _recruiter_check_err:
+            print(f"⚠️ Could not check recruiter_emails: {_recruiter_check_err}")
+
         # Record who is launching: follows each attempt until the job has a
         # successful launch (services/job_attribution.py). Its own best-effort
         # statement, so a missing pair_launched_by column (the startup ALTER
