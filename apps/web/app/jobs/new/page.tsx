@@ -2374,7 +2374,16 @@ function NewJobPageContent() {
       if (draft.ai_description !== undefined && draft.ai_description !== null) setJobPosting(draft.ai_description || "");
       if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
       if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
-      if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
+      if (draft.recruiter_emails?.length) {
+        // Trim/drop blanks here, at the one path that sets this state without
+        // going through the add-email handler's own validation, so every
+        // later reader (including the Launch gate) can stay a plain length
+        // check instead of re-guarding against a stray whitespace-only entry.
+        const cleanDraftEmails = draft.recruiter_emails
+          .map((email: string) => (typeof email === "string" ? email.trim() : ""))
+          .filter((email: string) => email.length > 0);
+        if (cleanDraftEmails.length) setRecruiterEmails(cleanDraftEmails);
+      }
       if (draft.screening_level) setScreeningLevel(resolveScreeningLevel(draft.screening_level));
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
