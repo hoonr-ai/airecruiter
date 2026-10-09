@@ -20,6 +20,7 @@ from routers.engagement import (
     _check_and_fire_candidate_passed_notification,
 )
 from routers.hard_filter_utils import count_pending_hard_filters
+from services.notifications_service import create_candidate_passed_notifications
 from services.outreach_normalization import normalize_channel, normalize_phase
 
 router = APIRouter(tags=["Voice Agent Integration"])
@@ -546,7 +547,19 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         candidate_id=target_candidate_id,
                     )
                 )
-            
+
+        # In-app notification: independent of the stricter email-pass gate
+        # above, keyed on engage_status.PASS_STATUSES so a candidate who
+        # reads "Pass" on Rankings/launch report always generates one.
+        if target_job_id and target_candidate_id:
+            asyncio.create_task(
+                create_candidate_passed_notifications(
+                    job_id=target_job_id,
+                    candidate_id=target_candidate_id,
+                    detail_payload=detail_payload,
+                )
+            )
+
         return {"success": True, "message": "Interview results processed successfully"}
 
     except Exception as e:
