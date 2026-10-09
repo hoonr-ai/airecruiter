@@ -6,7 +6,7 @@ import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, Shi
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
-import { useNotificationsStream } from "@/hooks/use-notifications-stream";
+import { useNotificationsStream } from "@/context/notifications-context";
 
 export function Sidebar() {
     const pathname = usePathname();

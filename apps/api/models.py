@@ -479,7 +479,7 @@ class NotificationItem(BaseModel):
     title: str
     body: Optional[str] = None
     score: Optional[float] = None
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     read_at: Optional[str] = None
     created_at: str
 

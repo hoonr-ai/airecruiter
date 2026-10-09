@@ -1,9 +1,25 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
 import { api, authFetch, type NotificationItem } from "@/lib/api";
 
-export function useNotificationsStream() {
+interface NotificationsContextType {
+  notifications: NotificationItem[];
+  unreadCount: number;
+  isConnected: boolean;
+  refresh: () => void;
+  markRead: (id: number) => void;
+  markAllRead: () => void;
+}
+
+const NotificationsContext = createContext<NotificationsContextType | undefined>(undefined);
+
+// Mounted ONCE in app/layout.tsx. Both the sidebar badge and the /notifications
+// page read from this single provider — each used to call useNotificationsStream()
+// independently, which opened two SSE connections per tab (one per mount) and
+// kept two disconnected copies of the unread count, so "Mark all read" on the
+// page left the sidebar badge stale until its next reconnect.
+export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -32,7 +48,8 @@ export function useNotificationsStream() {
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const resetWatchdog = useCallback(() => {
     if (heartbeatWatchdogRef.current) {
@@ -63,6 +80,7 @@ export function useNotificationsStream() {
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
     isManuallyClosedRef.current = false;
+    let isNonRetriable = false;
 
     try {
       const response = await authFetch(api.notifications.streamUrl(), {
@@ -71,6 +89,14 @@ export function useNotificationsStream() {
       });
 
       if (!response.ok || !response.body) {
+        if (response.status === 401 || response.status === 403) {
+          // Logged-out / expired session: backing off and retrying forever
+          // just spams a dead endpoint. Stop; the next real page load (post
+          // re-auth) mounts a fresh provider and tries again.
+          console.warn(`Notifications stream unauthorized (${response.status}). Not retrying.`);
+          isNonRetriable = true;
+          return;
+        }
         throw new Error(`Notifications stream rejected with status ${response.status}`);
       }
 
@@ -95,10 +121,16 @@ export function useNotificationsStream() {
 
         try {
           const item: NotificationItem = JSON.parse(dataLines.join(""));
-          setNotifications((prev) => [item, ...prev.filter((n) => n.id !== item.id)]);
-          if (!item.read_at) {
-            setUnreadCount((prev) => prev + 1);
-          }
+          setNotifications((prev) => {
+            // Only bump the unread count the first time we see this id — a
+            // reconnect's truth-up refresh() may have already loaded it,
+            // and without this check that row would be counted twice.
+            const alreadyKnown = prev.some((n) => n.id === item.id);
+            if (!alreadyKnown && !item.read_at) {
+              setUnreadCount((count) => count + 1);
+            }
+            return [item, ...prev.filter((n) => n.id !== item.id)];
+          });
         } catch {
           console.debug("Ignored unparseable notification event:", dataLines.join(""));
         }
@@ -125,7 +157,7 @@ export function useNotificationsStream() {
       }
       console.warn("Notifications SSE connection dropped. Reconnecting with backoff...", err);
     } finally {
-      if (abortController.signal.aborted || isManuallyClosedRef.current) {
+      if (abortController.signal.aborted || isManuallyClosedRef.current || isNonRetriable) {
         setIsConnected(false);
         if (heartbeatWatchdogRef.current) clearTimeout(heartbeatWatchdogRef.current);
         return;
@@ -168,14 +200,22 @@ export function useNotificationsStream() {
       if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
       if (heartbeatWatchdogRef.current) clearTimeout(heartbeatWatchdogRef.current);
     };
-  }, [connectStream]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const markRead = useCallback(async (id: number) => {
-    const target = notifications.find((n) => n.id === id);
-    if (!target || target.read_at) return;
+    // Functional update, with no `notifications` in the dependency array:
+    // keeps this callback's identity stable across every notification
+    // change instead of changing on every single update.
+    let alreadyRead = false;
     setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n))
+      prev.map((n) => {
+        if (n.id !== id) return n;
+        if (n.read_at) alreadyRead = true;
+        return n.read_at ? n : { ...n, read_at: new Date().toISOString() };
+      })
     );
+    if (alreadyRead) return;
     setUnreadCount((prev) => Math.max(0, prev - 1));
     try {
       await api.notifications.markRead(id);
@@ -183,7 +223,7 @@ export function useNotificationsStream() {
       console.error("Failed to mark notification read:", err);
       refreshRef.current();
     }
-  }, [notifications]);
+  }, []);
 
   const markAllRead = useCallback(async () => {
     const now = new Date().toISOString();
@@ -197,5 +237,19 @@ export function useNotificationsStream() {
     }
   }, []);
 
-  return { notifications, unreadCount, isConnected, refresh, markRead, markAllRead };
+  return (
+    <NotificationsContext.Provider
+      value={{ notifications, unreadCount, isConnected, refresh, markRead, markAllRead }}
+    >
+      {children}
+    </NotificationsContext.Provider>
+  );
+}
+
+export function useNotificationsStream(): NotificationsContextType {
+  const ctx = useContext(NotificationsContext);
+  if (!ctx) {
+    throw new Error("useNotificationsStream must be used within a NotificationsProvider");
+  }
+  return ctx;
 }

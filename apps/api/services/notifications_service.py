@@ -182,13 +182,27 @@ async def create_candidate_passed_notifications(
 # (a crashed worker, a status flip outside the webhook) without re-scanning
 # the entire table every 10 minutes.
 RECONCILIATION_LOOKBACK_HOURS = 24
+# Upper bound per run so a backlog (e.g. after downtime) can't make one
+# reconciliation tick scan/insert unboundedly; logged if hit so a real
+# backlog is visible instead of silently dropped.
+RECONCILIATION_MAX_ROWS = 1000
 
 
 async def reconcile_missed_pass_notifications() -> None:
     """Safety-net scheduler job: backfill Pass notifications the webhook path
     missed. Uses `engage_display_sql` (the SQL twin of `format_engage_status`)
     so this can never disagree with the webhook trigger or with what Rankings
-    displays as Pass."""
+    displays as Pass.
+
+    Deliberately does NOT pre-filter candidates that already have a
+    `notifications` row: that check was keyed on (candidate_id, jobdiva_id)
+    only, blind to recipient_email, so a recruiter added to a job's
+    recruiter_emails AFTER the first notification fired would never get
+    backfilled. Every Pass candidate in the lookback window is re-evaluated
+    each run; per-recipient dedup is the table's own unique index via
+    `INSERT ... ON CONFLICT DO NOTHING` in `_insert_notification` — an
+    index-only no-op for rows already notified, so this stays cheap.
+    """
     try:
         conn = get_db_connection()
         try:
@@ -202,16 +216,19 @@ async def reconcile_missed_pass_notifications() -> None:
                     FROM sourced_candidates sc
                     JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id
                     WHERE {status_sql} = 'Pass'
-                      AND sc.updated_at >= NOW() - INTERVAL '{RECONCILIATION_LOOKBACK_HOURS} hours'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM notifications n
-                          WHERE n.candidate_id = sc.candidate_id
-                            AND n.jobdiva_id = mj.jobdiva_id
-                            AND n.type = 'candidate_passed'
-                      )
-                    """
+                      AND sc.updated_at >= NOW() - (%s * INTERVAL '1 hour')
+                    ORDER BY sc.updated_at DESC
+                    LIMIT %s
+                    """,
+                    (RECONCILIATION_LOOKBACK_HOURS, RECONCILIATION_MAX_ROWS),
                 )
                 rows = cur.fetchall()
+                if len(rows) >= RECONCILIATION_MAX_ROWS:
+                    logger.warning(
+                        "notifications_reconciliation hit RECONCILIATION_MAX_ROWS=%d; "
+                        "a backlog may exist beyond this run's window",
+                        RECONCILIATION_MAX_ROWS,
+                    )
 
                 backfilled = 0
                 for row in rows:

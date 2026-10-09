@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ScoreBadge } from "@/components/ScoreBadge";
-import { useNotificationsStream } from "@/hooks/use-notifications-stream";
+import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -55,7 +55,7 @@ export default function NotificationsPage() {
           <Bell className="h-5 w-5 text-slate-500" />
           <h1 className="text-xl font-semibold text-slate-900">Notifications</h1>
           {unreadCount > 0 && (
-            <span className="inline-flex items-center justify-center min-w-[22px] h-5.5 px-1.5 rounded-full text-[11px] font-semibold bg-primary text-white">
+            <span className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded-full text-[11px] font-semibold bg-primary text-white">
               {unreadCount}
             </span>
           )}
@@ -70,7 +70,7 @@ export default function NotificationsPage() {
 
       {notifications.length === 0 ? (
         <div className="text-center text-sm text-slate-400 py-16">
-          No notifications yet. You'll see candidates land here as soon as they pass an interview.
+          No notifications yet. You&apos;ll see candidates land here as soon as they pass an interview.
         </div>
       ) : (
         <ScrollArea className="h-[calc(100vh-180px)]">
