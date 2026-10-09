@@ -62,14 +62,30 @@ async def test_general_sourcing_sentinel_skips_without_hitting_the_db(mock_get_d
 
 @pytest.mark.anyio
 @patch("routers.candidates._get_job_draft_sync")
-async def test_unresolvable_job_id_other_than_the_sentinel_is_blocked_not_skipped(mock_get_draft):
+async def test_unresolvable_job_id_other_than_the_sentinel_is_blocked_with_not_found(mock_get_draft):
     """A mistyped, stale, or deleted job id also has no monitored_jobs row —
     but unlike GENERAL_SOURCING it is not a legitimate "no job attached"
-    launch, so it must be blocked rather than silently waved through."""
+    launch, so it must be blocked rather than silently waved through. It
+    must also get a distinct "not found" message/status rather than being
+    conflated with "job exists but has no recruiter" (400) — the two send
+    the user to fix different things."""
     mock_get_draft.return_value = {"status": "error", "message": "No data found for job 99-00000"}
     with pytest.raises(HTTPException) as excinfo:
         await _enforce_recruiter_email_gate("99-00000")
-    assert excinfo.value.status_code == 400
+    assert excinfo.value.status_code == 404
+    assert "not found" in excinfo.value.detail.lower()
+    assert "recruiter" not in excinfo.value.detail.lower()
+
+
+@pytest.mark.anyio
+@patch("routers.candidates._get_job_draft_sync")
+async def test_sentinel_match_is_case_and_whitespace_insensitive(mock_get_draft):
+    """The frontend and backend don't share a literal constant for this
+    sentinel, so a stray-cased or padded value from a future caller must
+    still hit the skip branch rather than being misread as an unresolvable
+    job id and blocked with 404."""
+    await _enforce_recruiter_email_gate(" general_sourcing ")  # must not raise
+    mock_get_draft.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -135,6 +151,10 @@ class _FakeCursor:
         self._last_result = None
 
     def execute(self, _sql, params):
+        # _fetch_one_monitored_job always passes the same id 3x (one per
+        # WHERE/UNION branch), so params[0] is safe today — but this fake
+        # does not actually validate the query shape, so it would silently
+        # match the wrong column if that parameter order ever changed.
         requested_id = params[0]
         self._last_result = self._row if requested_id == self._match_id else None
 

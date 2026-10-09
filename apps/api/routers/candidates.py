@@ -2092,10 +2092,14 @@ async def refresh_candidate_resume_match(
         raise HTTPException(status_code=500, detail=str(e))
 
 # The one `jobdiva_id` value /candidates/save accepts with no monitored_jobs
-# row behind it — components/sourced-candidates-view.tsx posts this to park
-# a candidate in the master pool with no job attached. Any OTHER unresolvable
-# id (mistyped, stale, deleted job) has no business launching either, so only
-# this exact sentinel skips the gate below.
+# row behind it — components/sourced-candidates-view.tsx (the only other
+# caller of this sentinel) posts this to park a candidate in the master pool
+# with no job attached. Any OTHER unresolvable id (mistyped, stale, deleted
+# job) has no business launching either, so only this exact sentinel skips
+# the gate below. Matched case/whitespace-insensitively since the two sides
+# aren't a shared constant — a client sending a stray-cased or padded value
+# should still hit the intended branch rather than being misread as a
+# not-found job id.
 _GENERAL_SOURCING_SENTINEL = "GENERAL_SOURCING"
 
 
@@ -2111,22 +2115,22 @@ async def _enforce_recruiter_email_gate(jobdiva_id: str) -> None:
     here as the real gate.
 
     Only the GENERAL_SOURCING sentinel (launches with no job attached) skips
-    the check — a mistyped or otherwise unresolvable job id is blocked, not
-    waved through. _get_job_draft_sync is the same deterministic lookup (and
+    the check — a mistyped or otherwise unresolvable job id is blocked with
+    404, not waved through and not conflated with "job exists but has no
+    recruiter" (400) — the two are different problems for the user to act on.
+    _get_job_draft_sync is the same deterministic lookup (and
     parse_recruiter_emails the same parsing) used by
     verify_job_access/_filter_jobs_for_user, so this can't drift from them;
     run in a thread since save_candidates is async and this does a blocking
     DB round-trip.
     """
-    if str(jobdiva_id) == _GENERAL_SOURCING_SENTINEL:
+    if str(jobdiva_id).strip().upper() == _GENERAL_SOURCING_SENTINEL:
         return
     try:
         job_draft = await asyncio.to_thread(_get_job_draft_sync, str(jobdiva_id))
-        clean_emails = (
-            parse_recruiter_emails(job_draft["data"].get("recruiter_emails"))
-            if job_draft.get("status") == "success"
-            else []
-        )
+        if job_draft.get("status") != "success":
+            raise HTTPException(status_code=404, detail="Job not found.")
+        clean_emails = parse_recruiter_emails(job_draft["data"].get("recruiter_emails"))
         if not clean_emails:
             raise HTTPException(
                 status_code=400,

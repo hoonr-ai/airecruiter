@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from fastapi import Request, HTTPException, Depends, APIRouter, Header
 
 try:
@@ -399,10 +399,10 @@ def parse_recruiter_emails(raw: Any) -> List[str]:
         emails = raw
     else:
         emails = []
-    seen: set = set()
+    seen: Set[str] = set()
     deduped: List[str] = []
     for e in emails:
-        cleaned = str(e).strip().lower() if e and str(e).strip() else ""
+        cleaned = str(e).strip().lower() if e else ""
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             deduped.append(cleaned)
