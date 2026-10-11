@@ -3,17 +3,34 @@
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useMsal } from "@azure/msal-react";
+import { InteractionStatus } from "@azure/msal-browser";
 import { identifyUser, initAnalytics, trackEvent } from "@/lib/analytics";
-import { initNewRelic, captureException } from "@/lib/newrelic";
+import { deriveAppEnv } from "@/lib/nr-config";
+import { setNrAppVersion, setNrAttribute, setNrUser } from "@/lib/newrelic";
 
 export function TelemetryBootstrap() {
   const pathname = usePathname();
-  const { accounts } = useMsal();
+  const { accounts, inProgress } = useMsal();
+  const username = accounts?.[0]?.username;
+  // No account only means "signed out" once MSAL has finished starting up.
+  const signedOut = !username && inProgress === InteractionStatus.None;
 
   useEffect(() => {
     initAnalytics();
-    initNewRelic();
+    // The New Relic agent itself is started by public/newrelic-browser-agent.js
+    // (before hydration); here we only label its data.
+    setNrAttribute("app_env", process.env.NEXT_PUBLIC_APP_ENV || deriveAppEnv(window.location.hostname));
+    setNrAppVersion(process.env.NEXT_PUBLIC_APP_VERSION);
   }, []);
+
+  useEffect(() => {
+    // NR gets a pseudonymous id (sha256 of the email, 12 hex), never the email.
+    // Signed out clears it: the agent keeps the id in its session, so the
+    // previous recruiter would otherwise own every event until the next
+    // sign-in. Not while MSAL is still loading the account, so a page load
+    // does not drop the id for a moment.
+    if (username || signedOut) void setNrUser(username).catch(() => {});
+  }, [username, signedOut]);
 
   useEffect(() => {
     trackEvent("page_view", {
@@ -38,6 +55,8 @@ export function TelemetryBootstrap() {
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
+      // Amplitude only: the New Relic agent captures uncaught errors itself
+      // (a noticeError here reported every one of them twice).
       trackEvent("frontend_error", {
         path: pathname,
         message: event.message,
@@ -45,18 +64,15 @@ export function TelemetryBootstrap() {
         line: event.lineno,
         column: event.colno,
       });
-      if (event.error) {
-        captureException(event.error, { path: pathname });
-      }
     };
 
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
       const reason = event.reason;
+      // Amplitude only, as above (the agent captures unhandled rejections).
       trackEvent("frontend_unhandled_rejection", {
         path: pathname,
         reason: reason?.message || String(reason),
       });
-      captureException(reason instanceof Error ? reason : new Error(String(reason)), { path: pathname });
     };
 
     window.addEventListener("error", onError);

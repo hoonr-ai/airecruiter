@@ -1,0 +1,77 @@
+{
+  "function": "betterPhoneUI",
+  "cases": [
+    {
+      "name": "empty incoming keeps current",
+      "input": {
+        "current": "408-555-1234",
+        "incoming": ""
+      },
+      "expected": "408-555-1234"
+    },
+    {
+      "name": "invalid incoming keeps valid current",
+      "input": {
+        "current": "408-555-1234",
+        "incoming": "123"
+      },
+      "expected": "408-555-1234"
+    },
+    {
+      "name": "invalid incoming over empty",
+      "input": {
+        "current": "",
+        "incoming": "123"
+      },
+      "expected": "123"
+    },
+    {
+      "name": "valid incoming over invalid",
+      "input": {
+        "current": "123",
+        "incoming": "408 555 1234"
+      },
+      "expected": "408 555 1234"
+    },
+    {
+      "name": "valid replaces valid",
+      "input": {
+        "current": "408-555-1234",
+        "incoming": "650-555-0000"
+      },
+      "expected": "650-555-0000"
+    },
+    {
+      "name": "both null",
+      "input": {
+        "current": null,
+        "incoming": null
+      },
+      "expected": ""
+    },
+    {
+      "name": "trims current",
+      "input": {
+        "current": " 408-555-1234 ",
+        "incoming": null
+      },
+      "expected": "408-555-1234"
+    },
+    {
+      "name": "non-NA current is not protected",
+      "input": {
+        "current": "+44 20 7946 0958",
+        "incoming": "123"
+      },
+      "expected": "123"
+    },
+    {
+      "name": "whitespace incoming",
+      "input": {
+        "current": "408-555-1234",
+        "incoming": "   "
+      },
+      "expected": "408-555-1234"
+    }
+  ]
+}

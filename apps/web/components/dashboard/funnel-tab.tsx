@@ -2,9 +2,30 @@
 
 import { Fragment, useState } from "react";
 import Link from "next/link";
-import { ArrowDown, ArrowUp, Ban, CheckCircle2, Clock, Filter, Hourglass, Rocket, Send, Timer } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Ban,
+  CheckCircle2,
+  Clock,
+  Filter,
+  Hourglass,
+  MousePointerClick,
+  Rocket,
+  Send,
+  Timer,
+  Zap,
+} from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { conversion, formatCount, formatHours, formatRate, hoursAsDays, shareOfTop } from "@/lib/dashboard";
+import {
+  conversion,
+  formatCount,
+  formatRate,
+  formatSpeedValue,
+  shareOfTop,
+  speedDetail,
+  splitSpeedMetrics,
+} from "@/lib/dashboard";
 import type { FunnelData, FunnelStage, PendingCandidate, SpeedMetric } from "./types";
 
 const STAGE_COLORS: Record<string, string> = {
@@ -129,19 +150,37 @@ const SPEED_ICONS: Record<string, typeof Rocket> = {
   time_to_first_pass: CheckCircle2,
   time_to_first_submit: Send,
   time_to_first_submit_posted: Timer,
+  added_to_launch_click: MousePointerClick,
+  launch_click_to_launch: Zap,
 };
 const SPEED_COLORS: Record<string, string> = {
   time_to_launch: "#7c3aed",
   time_to_first_pass: "#16a34a",
   time_to_first_submit: "#0891b2",
   time_to_first_submit_posted: "#9333ea",
+  added_to_launch_click: "#ea580c",
+  launch_click_to_launch: "#4f46e5",
+};
+// Hover text for the launch-timing tiles, whose names alone don't say where
+// each clock starts and stops. Keep in step with the data dictionary.
+const SPEED_HINTS: Record<string, string> = {
+  added_to_launch_click:
+    "From the requirement's arrival in PAIR to its first Launch PAIR click — the recruiter's part of the launch. A click recorded after the first launch doesn't count.",
+  launch_click_to_launch:
+    "From the Launch PAIR click to the first interview PAIR Bot created, on the version that launched first — PAIR's part of the launch.",
+};
+// What an empty tile says. For the launch timings, an empty tile means no
+// requirement in the range was launched since the click started being recorded.
+const SPEED_EMPTY: Record<string, string> = {
+  added_to_launch_click: "no launch click recorded for these requirements",
+  launch_click_to_launch: "no launch click recorded for these requirements",
 };
 
 function SpeedTile({ metric }: { metric: SpeedMetric }) {
   const Icon = SPEED_ICONS[metric.key] ?? Clock;
   const color = SPEED_COLORS[metric.key] ?? "#475569";
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-slate-100 bg-slate-50/50 p-3">
+    <div className="flex items-start gap-3 rounded-lg border border-slate-100 bg-slate-50/50 p-3" title={SPEED_HINTS[metric.key]}>
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white shadow-sm">
         <Icon className="h-4 w-4" style={{ color }} />
       </div>
@@ -150,16 +189,41 @@ function SpeedTile({ metric }: { metric: SpeedMetric }) {
           {metric.label} <span className="font-medium text-slate-400">{metric.from}</span>
         </div>
         <div className="mt-0.5 text-[20px] font-bold leading-tight tabular-nums" style={{ color }}>
-          {formatHours(metric.median_hours)}
+          {formatSpeedValue(metric.median_hours, metric.median_minutes)}
         </div>
         <div className="text-[11px] text-slate-400">
-          {metric.jobs
-            ? `median · ${hoursAsDays(metric.median_hours)} · avg ${formatHours(metric.mean_hours)} · ${metric.jobs} ${
-                metric.jobs === 1 ? "req" : "reqs"
-              }`
-            : "no requirement has reached this yet"}
+          {speedDetail(metric) ?? SPEED_EMPTY[metric.key] ?? "no requirement has reached this yet"}
         </div>
       </div>
+    </div>
+  );
+}
+
+function SpeedTiles({ speed }: { speed: SpeedMetric[] }) {
+  // Launch-timing tiles get their own labelled group under the pipeline
+  // tiles; an older API sends none, and the group isn't shown.
+  const { pipeline, launch } = splitSpeedMetrics(speed);
+  return (
+    <div className="space-y-2.5">
+      {pipeline.map((metric) => (
+        <SpeedTile key={metric.key} metric={metric} />
+      ))}
+      {launch.length > 0 && (
+        <>
+          <div className="flex items-center gap-3 pt-1.5">
+            <span
+              className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400"
+              title="The launch split at the first Launch PAIR click. Only requirements launched since the click started being recorded count."
+            >
+              Launch breakdown
+            </span>
+            <div className="h-px flex-1 bg-slate-200" />
+          </div>
+          {launch.map((metric) => (
+            <SpeedTile key={metric.key} metric={metric} />
+          ))}
+        </>
+      )}
     </div>
   );
 }
@@ -277,12 +341,8 @@ export function FunnelTab({ data, loading }: { data: FunnelData | null; loading:
             <Timer className="h-4 w-4 text-sky-600" />
             <h3 className="text-[14px] font-bold text-slate-900">Speed to Pipeline</h3>
           </div>
-          <p className="mb-4 text-[12px] text-slate-400">Hours, median across requirements — the Launch Report&apos;s times, rolled up</p>
-          <div className="space-y-2.5">
-            {data.speed.map((metric) => (
-              <SpeedTile key={metric.key} metric={metric} />
-            ))}
-          </div>
+          <p className="mb-4 text-[12px] text-slate-400">Median across requirements — the Launch Report&apos;s times, rolled up</p>
+          <SpeedTiles speed={data.speed} />
         </div>
       </div>
 

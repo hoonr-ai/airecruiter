@@ -1,0 +1,279 @@
+{
+  "function": "getCandidateExclusionReason",
+  "cases": [
+    {
+      "name": "offer accepted",
+      "input": {
+        "candidate": {
+          "offer_status": "Offer Accepted"
+        }
+      },
+      "expected": "Offer Accepted"
+    },
+    {
+      "name": "data offer extended upper",
+      "input": {
+        "candidate": {
+          "data": {
+            "offer_status": "OFFER EXTENDED"
+          }
+        }
+      },
+      "expected": "Offer Extended"
+    },
+    {
+      "name": "placed action type",
+      "input": {
+        "candidate": {
+          "action_types": [
+            "Placed"
+          ]
+        }
+      },
+      "expected": "Offer Accepted"
+    },
+    {
+      "name": "hired with space is not exact",
+      "input": {
+        "candidate": {
+          "action_types": [
+            "Hired "
+          ]
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "offer extended action",
+      "input": {
+        "candidate": {
+          "data": {
+            "action_types": [
+              "Offer Extended - 2024"
+            ]
+          }
+        }
+      },
+      "expected": "Offer Extended"
+    },
+    {
+      "name": "available false",
+      "input": {
+        "candidate": {
+          "available": false
+        }
+      },
+      "expected": "Current Employee (Pyramid / Unavailable)"
+    },
+    {
+      "name": "available string False",
+      "input": {
+        "candidate": {
+          "available": "False"
+        }
+      },
+      "expected": "Current Employee (Pyramid / Unavailable)"
+    },
+    {
+      "name": "data available false",
+      "input": {
+        "candidate": {
+          "data": {
+            "available": false
+          }
+        }
+      },
+      "expected": "Current Employee (Pyramid / Unavailable)"
+    },
+    {
+      "name": "empty data object is truthy",
+      "input": {
+        "candidate": {
+          "data": {},
+          "offer_status": "",
+          "available": true
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "QUALVALUE current employee",
+      "input": {
+        "candidate": {
+          "qualifications": [
+            {
+              "QUALVALUE": "Current Employee"
+            }
+          ]
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "QUALNAME offer accepted",
+      "input": {
+        "candidate": {
+          "data": {
+            "qualifications": [
+              {
+                "QUALNAME": "Offer - Accepted"
+              }
+            ]
+          }
+        }
+      },
+      "expected": "Offer Accepted"
+    },
+    {
+      "name": "qual exact placed is unreachable",
+      "input": {
+        "candidate": {
+          "qualifications": [
+            {
+              "qualificationValue": "placed"
+            }
+          ]
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "enhanced quals",
+      "input": {
+        "candidate": {
+          "enhanced_info": {
+            "qualifications": [
+              {
+                "name": "offer extended"
+              }
+            ]
+          }
+        }
+      },
+      "expected": "Offer Extended"
+    },
+    {
+      "name": "status 1",
+      "input": {
+        "candidate": {
+          "status": 1
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "status string 1",
+      "input": {
+        "candidate": {
+          "status": "1"
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "status true is not 1",
+      "input": {
+        "candidate": {
+          "status": true
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "status float 1",
+      "input": {
+        "candidate": {
+          "status": 1
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "null status falls to data",
+      "input": {
+        "candidate": {
+          "status": null,
+          "data": {
+            "status": 1
+          }
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "status 2",
+      "input": {
+        "candidate": {
+          "status": 2
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "employee_status",
+      "input": {
+        "candidate": {
+          "employee_status": "Current Employee"
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "availability placed",
+      "input": {
+        "candidate": {
+          "availability_status": "Placed"
+        }
+      },
+      "expected": "Offer Accepted"
+    },
+    {
+      "name": "pyramid company",
+      "input": {
+        "candidate": {
+          "current_company": "Pyramid Consulting"
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "pyramid headline",
+      "input": {
+        "candidate": {
+          "headline": "Recruiter at Pyramid Consulting, Inc."
+        }
+      },
+      "expected": "Current Employee (Pyramid)"
+    },
+    {
+      "name": "clean",
+      "input": {
+        "candidate": {
+          "name": "Jane",
+          "source": "LinkedIn",
+          "company": "Acme"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "data is a string",
+      "input": {
+        "candidate": {
+          "data": "x",
+          "offer_status": ""
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "quals not a list",
+      "input": {
+        "candidate": {
+          "qualifications": "current employee"
+        }
+      },
+      "expected": ""
+    }
+  ]
+}

@@ -111,6 +111,9 @@ def _load_context(conn, refresh: bool) -> Tuple[List[dash.Req], List[dash.Person
         first = dash.first_launch_by_req(people)
         for req in reqs:
             req.first_launch_at = first.get(req.key)
+        # Added → Launch Click / Launch Click → Launch for the speed tiles.
+        # Best-effort and savepointed: a failure blanks only those two.
+        dash.attach_launch_timings(conn, reqs)
         return reqs, people
 
     return _CONTEXT_CACHE.get_or_compute("all", compute, refresh=refresh)

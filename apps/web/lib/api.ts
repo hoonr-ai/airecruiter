@@ -113,24 +113,21 @@ export function isNetworkFetchError(e: unknown): boolean {
   return e instanceof TypeError;
 }
 
+// Global fetch patch: auth headers on every PAIR API call, however it was made.
+// Headers-aware (lib/fetch-auth.ts): a Headers/tuple `init.headers` — e.g. from
+// the New Relic agent's fetch wrapper — keeps its Content-Type, and auth is
+// only added where absent (authFetch/req already set it, so no second token
+// acquisition for those).
+import { createAuthFetch } from "./fetch-auth";
+
 if (typeof window !== "undefined" && !(window as any).__apiFetchPatched) {
   (window as any).__apiFetchPatched = true;
   const originalFetch = window.fetch.bind(window);
-  window.fetch = async function (input: RequestInfo | URL, init: RequestInit = {}) {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as any)?.url;
-    if (url && (url.startsWith(API_BASE) || url.includes(API_BASE))) {
-      const authHeaders = await getAuthHeaders();
-      const existingHeaders = (init.headers || {}) as Record<string, string>;
-      init = {
-        ...init,
-        headers: {
-          ...authHeaders,
-          ...existingHeaders,
-        },
-      };
-    }
-    return originalFetch(input, init);
-  };
+  window.fetch = createAuthFetch(
+    originalFetch,
+    (url) => url.startsWith(API_BASE) || url.includes(API_BASE),
+    getAuthHeaders,
+  );
 }
 
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
@@ -413,6 +410,15 @@ export const api = {
         method: "POST",
         body,
         keepalive: opts.keepalive,
+      }),
+    // Step 5 "Source & Launch PAIR" click — T1 of the launch timings
+    // (routers/launch_timing.py). The server keeps the first click only, so
+    // calling it on every click is safe. keepalive so a click that navigates
+    // away still lands.
+    launchClicked: (jobRef: string) =>
+      req<{ status?: string }>(`/api/v1/jobs/${encodeURIComponent(jobRef)}/launch-clicked`, {
+        method: "POST",
+        keepalive: true,
       }),
   },
   candidates: {

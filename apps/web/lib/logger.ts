@@ -1,14 +1,20 @@
 // Lightweight client-side logger. Goals:
 //   1. Replace scattered console.{log,warn,error} with a level-gated API.
-//   2. Give us one central emit() we can redirect later — e.g. POST batched
-//      records to `/api/v1/logs/client` for New Relic / Datadog ingestion —
-//      without touching every call site.
+//   2. One central emit() that fans out to every sink without touching call
+//      sites.
 //   3. Keep the bundle cost ~zero (no deps, no runtime config fetch).
 //
-// Production wiring is deliberately a stub today; filling in `remoteSink`
-// should be all that's needed to go live.
+// Sinks (remoteSink below):
+//   - Amplitude: every record at or above the threshold (`frontend_log`, plus
+//     `frontend_error_log` for errors).
+//   - New Relic: warn/error only, as a `FrontendLog` PageAction
+//     (status = level, a context `status` becomes http_status; PII-filtered
+//     by lib/newrelic.ts); errors are also reported through noticeError.
+//     debug/info stay out of New Relic (ingest budget; browser console
+//     capture is off in the loader).
 
 import { trackEvent } from "@/lib/analytics";
+import { captureException, logStep } from "@/lib/newrelic";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -44,21 +50,29 @@ function emit(level: LogLevel, msg: string, ctx?: Context) {
   remoteSink(record);
 }
 
-// Remote sink stub. Later: batch records and POST to a backend ingest
-// endpoint (e.g. `/api/v1/logs/client`) on a debounce/flush schedule.
-// Deliberately a no-op for now — keeps this file free of fetch timing
-// concerns and failure modes.
-import { captureException, logStep } from "@/lib/newrelic";
-
+// Fans a record out to Amplitude and (warn/error only) New Relic. Never
+// throws: a broken telemetry sink must not break the code that logged.
 function remoteSink(_record: unknown) {
   const record = (_record ?? {}) as Record<string, unknown>;
-  trackEvent("frontend_log", record);
+  try {
+    trackEvent("frontend_log", record);
 
-  logStep("FrontendLog", String(record.level ?? "info"), record, "frontend_logger");
+    if (record.level === "warn" || record.level === "error") {
+      // On a FrontendLog, `status` is the level; a caller's own `status` (an
+      // HTTP code, e.g. `{ status: res.status }`) is kept as http_status.
+      const { status: httpStatus, ...rest } = record;
+      const nrAttrs = httpStatus === undefined ? rest : { ...rest, http_status: httpStatus };
+      logStep("FrontendLog", String(record.level), nrAttrs, "frontend_logger");
+      if (record.level === "error") {
+        captureException(new Error(String(record.msg ?? "Frontend error")), nrAttrs);
+      }
+    }
 
-  if (record.level === "error") {
-    trackEvent("frontend_error_log", record);
-    captureException(new Error(String(record.msg ?? "Frontend error")), record);
+    if (record.level === "error") {
+      trackEvent("frontend_error_log", record);
+    }
+  } catch {
+    // telemetry is best-effort
   }
 }
 

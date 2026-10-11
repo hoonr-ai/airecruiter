@@ -1,0 +1,26 @@
+{
+  "function": "looksLikeLinkedInProfile",
+  "cases": [
+    {
+      "name": "profile",
+      "input": {
+        "url": " HTTPS://LinkedIn.com/IN/x "
+      },
+      "expected": true
+    },
+    {
+      "name": "company",
+      "input": {
+        "url": "linkedin.com/company/x"
+      },
+      "expected": false
+    },
+    {
+      "name": "null",
+      "input": {
+        "url": null
+      },
+      "expected": false
+    }
+  ]
+}

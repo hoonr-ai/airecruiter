@@ -1,0 +1,61 @@
+{
+  "function": "clampLaunchCount",
+  "cases": [
+    {
+      "name": "zero",
+      "input": {
+        "n": 0
+      },
+      "expected": 1
+    },
+    {
+      "name": "negative",
+      "input": {
+        "n": -5
+      },
+      "expected": 1
+    },
+    {
+      "name": "fraction",
+      "input": {
+        "n": 250.9
+      },
+      "expected": 250
+    },
+    {
+      "name": "over max",
+      "input": {
+        "n": 5000
+      },
+      "expected": 1000
+    },
+    {
+      "name": "string",
+      "input": {
+        "n": "7"
+      },
+      "expected": 7
+    },
+    {
+      "name": "null",
+      "input": {
+        "n": null
+      },
+      "expected": 1
+    },
+    {
+      "name": "bool",
+      "input": {
+        "n": true
+      },
+      "expected": 1
+    },
+    {
+      "name": "max",
+      "input": {
+        "n": 1000
+      },
+      "expected": 1000
+    }
+  ]
+}

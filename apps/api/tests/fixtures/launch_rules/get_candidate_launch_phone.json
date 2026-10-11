@@ -1,0 +1,108 @@
+{
+  "function": "getCandidateLaunchPhone",
+  "cases": [
+    {
+      "name": "mobile when phone empty",
+      "input": {
+        "candidate": {
+          "phone": "",
+          "mobilePhone": "408-555-1111"
+        }
+      },
+      "expected": "408-555-1111"
+    },
+    {
+      "name": "whitespace phone skipped",
+      "input": {
+        "candidate": {
+          "phone": "  ",
+          "data": {
+            "phone": "408-555-2222"
+          }
+        }
+      },
+      "expected": "408-555-2222"
+    },
+    {
+      "name": "first non-empty even if invalid",
+      "input": {
+        "candidate": {
+          "phone": "123",
+          "mobilePhone": "408-555-3333"
+        }
+      },
+      "expected": "123"
+    },
+    {
+      "name": "saved work number skipped",
+      "input": {
+        "candidate": {
+          "phone": "(408) 555-0000",
+          "data": {
+            "zoominfo_contact_enrichment": {
+              "workPhone": "408-555-0000",
+              "mobilePhone": "408-555-9999"
+            }
+          }
+        }
+      },
+      "expected": "408-555-9999"
+    },
+    {
+      "name": "work equals mobile is not excluded",
+      "input": {
+        "candidate": {
+          "phone": "408-555-0000",
+          "data": {
+            "zoominfo_contact_enrichment": {
+              "workPhone": "408-555-0000",
+              "mobilePhone": "4085550000"
+            }
+          }
+        }
+      },
+      "expected": "408-555-0000"
+    },
+    {
+      "name": "numeric phone",
+      "input": {
+        "candidate": {
+          "phone": 4085551234
+        }
+      },
+      "expected": "4085551234"
+    },
+    {
+      "name": "enhanced mobile",
+      "input": {
+        "candidate": {
+          "enhanced_info": {
+            "mobilePhone": " 408-555-4444 "
+          }
+        }
+      },
+      "expected": "408-555-4444"
+    },
+    {
+      "name": "only saved work \u2192 empty",
+      "input": {
+        "candidate": {
+          "data": {
+            "phone": "408-555-0000",
+            "zoominfo_contact_enrichment": {
+              "workPhone": "4085550000"
+            }
+          }
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "nothing",
+      "input": {
+        "candidate": {}
+      },
+      "expected": ""
+    }
+  ]
+}

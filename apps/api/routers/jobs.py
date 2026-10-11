@@ -21,6 +21,7 @@ from services.jobdiva import jobdiva_service
 from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_AGG_SQL
 from services.job_attribution import SCHEMA_STATEMENTS as ATTRIBUTION_SCHEMA_STATEMENTS, stamp_job_posted_by
 from services.job_step_time import SCHEMA_STATEMENTS as STEP_TIME_SCHEMA_STATEMENTS
+from services.launch_timing import SCHEMA_STATEMENTS as LAUNCH_TIMING_SCHEMA_STATEMENTS
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
 from models import (
@@ -250,6 +251,12 @@ def _ensure_monitored_jobs_schema() -> None:
             # Active time recruiters spend on a wizard step (Step 5 for the
             # reports); see services/job_step_time.py.
             *STEP_TIME_SCHEMA_STATEMENTS,
+            # Launch timings (services/launch_timing.py): pair_added_at (T0,
+            # DEFAULT now(), so every INSERT site below and elsewhere stamps
+            # it without naming it), first_launch_clicked_at (T1) and
+            # first_launch_at (T2). DDL only; the backfill is
+            # launch_timing.backfill_once, a background task.
+            *LAUNCH_TIMING_SCHEMA_STATEMENTS,
 
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
@@ -1900,6 +1907,12 @@ def _create_job_version_sync(job_id_or_ref: str) -> dict:
                 # (services/job_attribution.py), not to v1's people.
                 "pair_launched_by": None,
                 "pair_posted_by": None,
+                # Launch timings (services/launch_timing.py) belong to this
+                # version too: its T0 is the clone itself (NOW(), below) and
+                # its first click / first launch are its own. Copying v1's
+                # would make Added → Click negative or zero.
+                "first_launch_clicked_at": None,
+                "first_launch_at": None,
                 "outreach_stopped_at": None,
                 "candidates_sourced": 0,
                 "candidates_launched": 0,
@@ -1923,7 +1936,7 @@ def _create_job_version_sync(job_id_or_ref: str) -> dict:
                 if default and "nextval(" in str(default):
                     continue
                 insert_cols.append(name)
-                if name in ("created_at", "updated_at"):
+                if name in ("created_at", "updated_at", "pair_added_at"):
                     select_exprs.append("NOW()")
                 elif name in overrides:
                     select_exprs.append("%s")

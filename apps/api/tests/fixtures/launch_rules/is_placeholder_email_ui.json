@@ -1,0 +1,47 @@
+{
+  "function": "isPlaceholderEmailUI",
+  "cases": [
+    {
+      "name": "empty",
+      "input": {
+        "value": ""
+      },
+      "expected": true
+    },
+    {
+      "name": "no at",
+      "input": {
+        "value": "abc"
+      },
+      "expected": true
+    },
+    {
+      "name": "jobdiva",
+      "input": {
+        "value": "a@JobDiva.com"
+      },
+      "expected": true
+    },
+    {
+      "name": "noemail",
+      "input": {
+        "value": "a@noemail.pair.ai"
+      },
+      "expected": true
+    },
+    {
+      "name": "real",
+      "input": {
+        "value": "a@b.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "null",
+      "input": {
+        "value": null
+      },
+      "expected": true
+    }
+  ]
+}

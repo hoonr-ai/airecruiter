@@ -99,6 +99,51 @@ print_error() {
     echo -e "${RED}❌${NC} $1"
 }
 
+# Deployed environment for telemetry names: NEW_RELIC_ENVIRONMENT from
+# deploy.yml, else derived from the domain.
+DEPLOY_ENV="${NEW_RELIC_ENVIRONMENT:-}"
+if [ -z "$DEPLOY_ENV" ]; then
+    case "$DOMAIN_NAME" in
+        pair.pyramidci.com) DEPLOY_ENV="prod" ;;
+        pairqa.pyramidci.com) DEPLOY_ENV="qa" ;;
+    esac
+fi
+
+# ensure_trailing_newline FILE
+# Appending to a file whose last line has no newline would glue the new line
+# onto it (LAST=xNAME=...), corrupting both.
+ensure_trailing_newline() {
+    if [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ]; then
+        printf '\n' >> "$1"
+    fi
+}
+
+# upsert_env FILE NAME VALUE [quote]
+# Writes NAME=VALUE (NAME="VALUE" with quote) unless the file already holds
+# that value. Compares after stripping only the outer quotes, so a value with
+# spaces ("PAIR API (QA)") is not rewritten on every deploy. Never prints the
+# value. Returns 0 when it wrote, 1 when unchanged.
+upsert_env() {
+    local file="$1" name="$2" value="$3" quote="${4:-}" current
+    current=$(grep -E "^${name}=" "$file" | tail -n1 | cut -d= -f2-)
+    current="${current%$'\r'}"
+    case "$current" in
+        \"*\") current="${current#\"}"; current="${current%\"}" ;;
+        \'*\') current="${current#\'}"; current="${current%\'}" ;;
+    esac
+    if [ "$current" = "$value" ]; then
+        return 1
+    fi
+    sed -i "/^${name}=/d" "$file"
+    ensure_trailing_newline "$file"
+    if [ -n "$quote" ]; then
+        printf '%s="%s"\n' "$name" "$value" >> "$file"
+    else
+        printf '%s=%s\n' "$name" "$value" >> "$file"
+    fi
+    return 0
+}
+
 # Check if running as Ubuntu user
 if [ "$USER" != "ubuntu" ]; then
     print_error "Please run this script as the ubuntu user"
@@ -140,8 +185,10 @@ sudo apt install -y \
 print_status "Essential packages installed"
 
 # Install Node.js 18.x (required for Next.js)
+# No `sudo -E`: this pipes a remote script into a root shell, and -E would hand
+# it the exported deploy secrets (KIPPLO_API_KEY, NEW_RELIC_LICENSE_KEY).
 echo -e "${BLUE}🟢 Installing Node.js 18.x...${NC}"
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash -
 sudo apt install -y nodejs
 node --version
 npm --version
@@ -192,6 +239,7 @@ if [ -f "$API_DIR/.env" ]; then
     CURRENT_APP_BASE_URL=$(grep -E '^APP_BASE_URL=' "$API_DIR/.env" | tail -n1 | cut -d= -f2- | tr -d '"'"'"'" ')
 
     if [ -z "$CURRENT_APP_BASE_URL" ]; then
+        ensure_trailing_newline "$API_DIR/.env"
         echo "APP_BASE_URL=$EXPECTED_APP_BASE_URL" >> "$API_DIR/.env"
         print_status "APP_BASE_URL added to .env: $EXPECTED_APP_BASE_URL"
     elif [ "$CURRENT_APP_BASE_URL" != "$EXPECTED_APP_BASE_URL" ]; then
@@ -210,10 +258,33 @@ if [ -f "$API_DIR/.env" ]; then
         CURRENT_KIPPLO_API_KEY=$(grep -E '^KIPPLO_API_KEY=' "$API_DIR/.env" | tail -n1 | cut -d= -f2- | tr -d '"'"'"'" ')
         if [ "$CURRENT_KIPPLO_API_KEY" != "$KIPPLO_API_KEY" ]; then
             sed -i '/^KIPPLO_API_KEY=/d' "$API_DIR/.env"
+            ensure_trailing_newline "$API_DIR/.env"
             echo "KIPPLO_API_KEY=$KIPPLO_API_KEY" >> "$API_DIR/.env"
             print_status "KIPPLO_API_KEY updated in .env from the deploy secret"
         else
             print_status "KIPPLO_API_KEY matches the deploy secret"
+        fi
+    fi
+
+    # New Relic APM (docs/observability/new-relic.md). Each value is written
+    # only when deploy.yml passed it non-empty: an unset secret leaves a key
+    # added to .env by hand alone. NEW_RELIC_ENABLED (the kill switch) is never
+    # written here, so `NEW_RELIC_ENABLED=false` in .env survives deploys.
+    if [ -n "${NEW_RELIC_LICENSE_KEY:-}" ]; then
+        if upsert_env "$API_DIR/.env" NEW_RELIC_LICENSE_KEY "$NEW_RELIC_LICENSE_KEY"; then
+            print_status "NEW_RELIC_LICENSE_KEY updated in .env from the deploy secret"
+        else
+            print_status "NEW_RELIC_LICENSE_KEY matches the deploy secret"
+        fi
+    fi
+    if [ -n "${NEW_RELIC_APP_NAME:-}" ]; then
+        if upsert_env "$API_DIR/.env" NEW_RELIC_APP_NAME "$NEW_RELIC_APP_NAME" quote; then
+            print_status "NEW_RELIC_APP_NAME set to $NEW_RELIC_APP_NAME"
+        fi
+    fi
+    if [ -n "${NEW_RELIC_ENVIRONMENT:-}" ]; then
+        if upsert_env "$API_DIR/.env" NEW_RELIC_ENVIRONMENT "$NEW_RELIC_ENVIRONMENT"; then
+            print_status "NEW_RELIC_ENVIRONMENT set to $NEW_RELIC_ENVIRONMENT"
         fi
     fi
 else
@@ -228,6 +299,16 @@ npm install --legacy-peer-deps
 # Check if .env.local exists
 if [ -f "$WEB_DIR/.env.local" ]; then
     print_status "Web environment file already exists and will be used"
+
+    # Browser telemetry tags (lib/newrelic.ts): environment and release. Baked
+    # in at build time, so written before `npm run build`.
+    APP_VERSION=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "")
+    if [ -n "$DEPLOY_ENV" ] && upsert_env "$WEB_DIR/.env.local" NEXT_PUBLIC_APP_ENV "$DEPLOY_ENV"; then
+        print_status "NEXT_PUBLIC_APP_ENV set to $DEPLOY_ENV"
+    fi
+    if [ -n "$APP_VERSION" ] && upsert_env "$WEB_DIR/.env.local" NEXT_PUBLIC_APP_VERSION "$APP_VERSION"; then
+        print_status "NEXT_PUBLIC_APP_VERSION set to $APP_VERSION"
+    fi
 else
     print_warning "Web environment file not found. Please ensure .env.local is present in $WEB_DIR"
 fi
@@ -401,11 +482,16 @@ else
     print_error "Web service failed to start - check: journalctl -u airecruiter-web"
 fi
 
-# Test local connectivity
-if curl -s --max-time 5 http://localhost:8000/docs > /dev/null 2>&1; then
-    print_status "API responding on localhost:8000"
+# Test local connectivity. /api/health answers 503 when Postgres is down and
+# -f turns any 4xx/5xx into a failure (the old `curl -s /docs` passed while
+# every request 500'd, #388). Warn loudly but carry on: setup-ssl.sh still has
+# to run, and deploy.yml re-checks after it and fails the job.
+if curl -fsS --max-time 10 --retry 12 --retry-delay 5 --retry-all-errors -o /dev/null http://localhost:8000/api/health; then
+    print_status "API healthy on localhost:8000 (/api/health)"
 else
-    print_warning "API not responding on localhost:8000"
+    # Plain line first so GitHub Actions turns it into an annotation.
+    echo "::error::API health check failed on localhost:8000/api/health"
+    print_error "API health check failed - check: journalctl -u airecruiter-api -n 200"
 fi
 
 if curl -s --max-time 5 http://localhost:3000 > /dev/null 2>&1; then

@@ -81,13 +81,26 @@ def _ts_utc(col: str) -> str:
     `_parse_monitored_jobs_timestamp` (IST when the text ends in "IST",
     otherwise UTC), so both reports agree on the same row.
 
+    A third shape carries its own offset: NOW() written into a TEXT column
+    renders in the writing session's zone ("2026-06-18 01:51:52.05+05:30").
+    The 19-char truncation drops that offset, so such a row read as UTC lands
+    5h30m late whenever the session zone isn't UTC. An explicit numeric
+    offset (or Z) after the time is honoured as written.
+
     No '%' and no placeholders: safe inside parameterised statements.
     """
     return (
         f"(CASE WHEN RIGHT(UPPER(TRIM({col}::text)), 3) = 'IST' "
         f"THEN ({_ts(col)}) AT TIME ZONE 'Asia/Kolkata' "
+        f"WHEN TRIM({col}::text) ~ '{_EXPLICIT_OFFSET_RE}' "
+        f"THEN TRIM({col}::text)::timestamptz "
         f"ELSE ({_ts(col)}) AT TIME ZONE 'UTC' END)"
     )
+
+
+# "HH:MM:SS[.ffffff]" followed by Z or a numeric offset (+05:30, +0530, +05).
+# Anchored on the time so a bare date's "-18" never reads as an offset.
+_EXPLICIT_OFFSET_RE = r"[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$"
 
 
 # monitored_jobs columns added after the base table by a startup ALTER

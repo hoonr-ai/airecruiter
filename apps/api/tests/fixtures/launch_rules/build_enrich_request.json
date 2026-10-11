@@ -1,0 +1,41 @@
+{
+  "function": "buildEnrichRequest",
+  "cases": [
+    {
+      "name": "full",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn",
+          "match_score": 72.5
+        },
+        "candidateId": "c1",
+        "linkedinUrl": "https://linkedin.com/in/c1",
+        "jobdivaId": "26-123"
+      },
+      "expected": {
+        "candidate_id": "c1",
+        "jobdiva_id": "26-123",
+        "source": "LinkedIn",
+        "linkedin_url": "https://linkedin.com/in/c1",
+        "trigger": "launch",
+        "match_score": 72.5
+      }
+    },
+    {
+      "name": "no source, string score, no job",
+      "input": {
+        "candidate": {
+          "source": "",
+          "match_score": "70"
+        },
+        "candidateId": "c2",
+        "linkedinUrl": "https://linkedin.com/in/c2"
+      },
+      "expected": {
+        "candidate_id": "c2",
+        "linkedin_url": "https://linkedin.com/in/c2",
+        "trigger": "launch"
+      }
+    }
+  ]
+}

@@ -1,0 +1,149 @@
+{
+  "function": "getCandidateCurrentCompanies",
+  "cases": [
+    {
+      "name": "flat fields",
+      "input": {
+        "candidate": {
+          "current_company": " Foo ",
+          "company": "Bar",
+          "enhanced_info": {
+            "company": "Baz"
+          }
+        }
+      },
+      "expected": [
+        "Foo",
+        "Bar",
+        "Baz"
+      ]
+    },
+    {
+      "name": "experience current vs past",
+      "input": {
+        "candidate": {
+          "company_experience": [
+            {
+              "company": "Old",
+              "end_date": "2020-01"
+            },
+            {
+              "company": "Now",
+              "end_date": "Present"
+            },
+            {
+              "company_name": "Open",
+              "endDate": null
+            },
+            {
+              "employer": "Flag",
+              "end": "2021",
+              "is_current": true
+            },
+            {
+              "name": "Zero",
+              "to": 0
+            },
+            [
+              "array entry"
+            ],
+            null,
+            {
+              "company": "",
+              "end_date": ""
+            }
+          ]
+        }
+      },
+      "expected": [
+        "Now",
+        "Open",
+        "Flag"
+      ]
+    },
+    {
+      "name": "empty array blocks the fallback",
+      "input": {
+        "candidate": {
+          "company_experience": [],
+          "data": {
+            "company_experience": [
+              {
+                "company": "Hidden"
+              }
+            ]
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "data experience and exa",
+      "input": {
+        "candidate": {
+          "data": {
+            "company_experience": [
+              {
+                "company": "DataCo"
+              }
+            ],
+            "exa_recent_companies": [
+              {
+                "company": "ExaCo",
+                "end_date": "current role"
+              }
+            ]
+          }
+        }
+      },
+      "expected": [
+        "DataCo",
+        "ExaCo"
+      ]
+    },
+    {
+      "name": "headline parse and dedupe",
+      "input": {
+        "candidate": {
+          "headline": "Engineer at Foo",
+          "title": "Lead at Foo",
+          "current_company": "Foo"
+        }
+      },
+      "expected": [
+        "Foo"
+      ]
+    },
+    {
+      "name": "enhanced via data",
+      "input": {
+        "candidate": {
+          "data": {
+            "enhanced_info": {
+              "current_company": "Deep"
+            },
+            "headline": "SRE at DataHead"
+          }
+        }
+      },
+      "expected": [
+        "Deep",
+        "DataHead"
+      ]
+    },
+    {
+      "name": "false end date is past",
+      "input": {
+        "candidate": {
+          "company_experience": [
+            {
+              "company": "F",
+              "end_date": false
+            }
+          ]
+        }
+      },
+      "expected": []
+    }
+  ]
+}

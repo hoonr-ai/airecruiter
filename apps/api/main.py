@@ -36,8 +36,7 @@ def readable_ist_now() -> str:
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
 # Setup structured logging. JSON by default (override LOG_FORMAT=text for
-# local dev readability) and picks up LOG_LEVEL from env. New Relic /
-# Datadog / OpenTelemetry can layer on later with zero code change.
+# local dev readability) and picks up LOG_LEVEL from env.
 from core.logging import configure_logging, RequestIDMiddleware
 from core.advisory_lock import AdvisoryLock
 from core.startup_once import claim_once, run_schema_once
@@ -45,9 +44,14 @@ from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# Initialise New Relic as early as possible so all subsequent import-time and
-# runtime errors are captured. Safe no-op when NEW_RELIC_LICENSE_KEY is not set.
-from core.newrelic import init as _newrelic_init, is_enabled as _newrelic_enabled
+# Initialise New Relic here: after `from core import ...` has loaded apps/api/.env
+# (the agent reads its NEW_RELIC_* defaults once, at first import) and after
+# configure_logging() (init() attaches the log-forwarding handler next to the
+# stdout one), but before services/routers are imported. Web transactions come
+# from the agent's own uvicorn/Starlette hooks: never wrap `app` by hand (#388).
+# Safe no-op when NEW_RELIC_LICENSE_KEY is not set. Runbook:
+# docs/observability/new-relic.md.
+from core.newrelic import init as _newrelic_init, background_transaction, record_custom_metric
 _newrelic_init()
 
 from services.ai_service import ai_service
@@ -113,6 +117,13 @@ async def lifespan(app: FastAPI):
     # 2. Schedule "Always-On" JobDiva Sync (Zero-Setup / Production-Safe)
     from services.auto_assign_service import auto_assign_service
 
+    # Scheduler jobs run outside any request, so New Relic records nothing for
+    # them unless they open a background transaction
+    # (OtherTransaction/Task/scheduler/<job>). Every worker runs every job and
+    # 7 of 8 skip on the advisory lock within milliseconds: read max/p95, not
+    # the average; the count per `worker_pid` attribute doubles as a per-worker
+    # scheduler heartbeat.
+    @background_transaction("scheduler/always_on_sync")
     async def auto_sync_all_jobs():
         """
         Global sync agent that runs inside the app process.
@@ -273,7 +284,7 @@ async def lifespan(app: FastAPI):
     if jobdiva_bi_sync is not None and jobdiva_bi_sync.SYNC_ENABLED:
         try:
             scheduler.add_job(
-                jobdiva_bi_sync.scheduled_sync,
+                background_transaction("scheduler/jobdiva_bi_sync")(jobdiva_bi_sync.scheduled_sync),
                 "interval",
                 minutes=jobdiva_bi_sync.SYNC_INTERVAL_MINUTES,
                 id="jobdiva_bi_sync",
@@ -292,6 +303,9 @@ async def lifespan(app: FastAPI):
     # interval warmer keeps each worker's cache populated under all but
     # the most severe DB outages; combined with the empty-payload
     # fallback in get_monitored_jobs, the dashboard never goes blank.
+    # Not a New Relic transaction: every 25 s in 8 workers would be ~28k a day
+    # per environment. One timing metric instead
+    # (Custom/Scheduler/monitored_jobs_cache_warmer/ms; failures in .../errors).
     async def warm_monitored_jobs_cache():
         if jobs_router is None:
             return
@@ -299,6 +313,16 @@ async def lifespan(app: FastAPI):
         setter = getattr(jobs_router, "_set_cached_monitored_jobs", None)
         if sync_fn is None or setter is None:
             return
+        started = time.perf_counter()
+        try:
+            await _warm_monitored_jobs_cache(sync_fn, setter)
+        finally:
+            record_custom_metric(
+                "Custom/Scheduler/monitored_jobs_cache_warmer/ms",
+                (time.perf_counter() - started) * 1000,
+            )
+
+    async def _warm_monitored_jobs_cache(sync_fn, setter):
         for include_archived in (False, True):
             try:
                 payload = await asyncio.to_thread(sync_fn, include_archived, "summary")
@@ -313,6 +337,7 @@ async def lifespan(app: FastAPI):
                     f"monitored_jobs_cache_warmer failed (include_archived={include_archived}): {e}",
                     exc_info=True,
                 )
+                record_custom_metric("Custom/Scheduler/monitored_jobs_cache_warmer/errors", {"count": 1})
 
     scheduler.add_job(
         warm_monitored_jobs_cache,
@@ -336,10 +361,28 @@ async def lifespan(app: FastAPI):
     # Claimed by one worker per boot (core/startup_once).
     async def _backfill_counters_once():
         if await claim_once("backfill_monitored_jobs_counters"):
-            await jobs_router.backfill_monitored_jobs_counters()
+            async with background_transaction("scheduler/backfill_monitored_jobs_counters"):
+                await jobs_router.backfill_monitored_jobs_counters()
 
     if jobs_router is not None and hasattr(jobs_router, "backfill_monitored_jobs_counters"):
         asyncio.create_task(_backfill_counters_once())
+
+    # One-time backfill of the launch-timing columns (pair_added_at from the
+    # TEXT created_at, first_launch_at from the first interview). Batched with
+    # its own statement/lock timeouts, never inside the schema step, and
+    # claimed by one worker for the life of the deployment.
+    async def _backfill_launch_timing_once():
+        if not await claim_once("backfill_launch_timing_v1"):
+            return
+        try:
+            from services import launch_timing as _launch_timing
+            async with background_transaction("scheduler/backfill_launch_timing"):
+                summary = await asyncio.to_thread(_launch_timing.backfill_once)
+            logger.info("launch_timing_backfill_done %s", summary)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("launch_timing_backfill_failed: %s", e)
+
+    asyncio.create_task(_backfill_launch_timing_once())
 
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
@@ -352,13 +395,21 @@ async def lifespan(app: FastAPI):
         if not await claim_once("first_auto_sync"):
             return
         await asyncio.sleep(60)
+        # auto_sync_all_jobs opens its own background transaction, after the
+        # sleep (one started in a worker's first seconds would be disabled).
         await auto_sync_all_jobs()
 
     asyncio.create_task(_delayed_first_sync())
 
     yield
     
-    # Shutdown
+    # Shutdown. Raise the stop flag first so long-running work (launch-session
+    # runners) stops starting new units before the scheduler and drain go.
+    try:
+        from core.tasks import mark_stopping as _mark_stopping
+        _mark_stopping()
+    except Exception as _stop_err:  # noqa: BLE001
+        logger.warning("stop flag not set: %s", _stop_err)
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     try:
@@ -405,6 +456,7 @@ admin_analytics_router = _safe_import("admin_analytics")
 launch_report_router = _safe_import("launch_report")
 recruiter_analytics_router = _safe_import("recruiter_analytics")
 job_step_time_router = _safe_import("job_step_time")
+launch_timing_router = _safe_import("launch_timing")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
 org_hierarchy_router = _safe_import("org_hierarchy")
@@ -421,13 +473,6 @@ pairbot_webhook_router = _safe_import("pairbot_webhook")
 # http↔https loop via nginx. Failing loudly with 404 on slash mismatch is a
 # cheap fence around that whole class of misconfig.
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan, redirect_slashes=False)
-
-if _newrelic_enabled():
-    try:
-        import newrelic.agent
-        app = newrelic.agent.ASGIApplicationWrapper(app)
-    except Exception:
-        pass
 
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
@@ -466,6 +511,7 @@ _mount(admin_analytics_router, "admin_analytics")
 _mount(launch_report_router, "launch_report")
 _mount(recruiter_analytics_router, "recruiter_analytics")
 _mount(job_step_time_router, "job_step_time")
+_mount(launch_timing_router, "launch_timing")
 _mount(teams_router, "teams")
 _mount(org_hierarchy_router, "org_hierarchy")
 _mount(cross_submissions_router, "cross_submissions")
@@ -630,6 +676,7 @@ POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory l
 AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
 
 
+@background_transaction("scheduler/job_status_poll")
 async def poll_all_jobs():
     """Scheduler entry point (runs in every uvicorn worker).
 

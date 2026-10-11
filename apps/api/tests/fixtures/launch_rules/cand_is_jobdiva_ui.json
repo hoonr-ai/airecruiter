@@ -1,0 +1,58 @@
+{
+  "function": "candIsJobDivaUI",
+  "cases": [
+    {
+      "name": "source",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "sources list",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn",
+          "sources": [
+            "Exa",
+            "jobdiva-talentsearch"
+          ]
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "stamped id",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn",
+          "data": {
+            "jobdiva_candidate_id": " 123 "
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "blank stamp",
+      "input": {
+        "candidate": {
+          "source": "Exa",
+          "jobdiva_id": "  "
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "plain",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn"
+        }
+      },
+      "expected": false
+    }
+  ]
+}

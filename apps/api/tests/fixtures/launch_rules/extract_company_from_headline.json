@@ -1,0 +1,117 @@
+{
+  "function": "extractCompanyFromHeadline",
+  "cases": [
+    {
+      "name": "last at wins",
+      "input": {
+        "headline": "Engineer at Meta | ex-Amazon"
+      },
+      "expected": "Meta"
+    },
+    {
+      "name": "ex then at",
+      "input": {
+        "headline": "Ex-Google | Engineer at Stripe"
+      },
+      "expected": "Stripe"
+    },
+    {
+      "name": "at sign",
+      "input": {
+        "headline": "Engineer @Acme Corp."
+      },
+      "expected": "Acme Corp"
+    },
+    {
+      "name": "leading the",
+      "input": {
+        "headline": "Engineer at the Walt Disney Company"
+      },
+      "expected": "Walt Disney Company"
+    },
+    {
+      "name": "uppercase AT",
+      "input": {
+        "headline": "CTO AT Foo"
+      },
+      "expected": "Foo"
+    },
+    {
+      "name": "greedy group",
+      "input": {
+        "headline": "Engineer at Meta at Google"
+      },
+      "expected": "Meta at Google"
+    },
+    {
+      "name": "too many words",
+      "input": {
+        "headline": "Doing things at a very large company with many words here"
+      },
+      "expected": ""
+    },
+    {
+      "name": "trailing dash",
+      "input": {
+        "headline": "Engineer at Foo \u2014"
+      },
+      "expected": "Foo"
+    },
+    {
+      "name": "nbsp separators",
+      "input": {
+        "headline": "Engineer at\u00a0Foo"
+      },
+      "expected": "Foo"
+    },
+    {
+      "name": "em space",
+      "input": {
+        "headline": "Engineer\u2003at\u2003Foo"
+      },
+      "expected": "Foo"
+    },
+    {
+      "name": "no company",
+      "input": {
+        "headline": "Sales at"
+      },
+      "expected": ""
+    },
+    {
+      "name": "paren",
+      "input": {
+        "headline": "Data Engineer (at Foo)"
+      },
+      "expected": ""
+    },
+    {
+      "name": "too long",
+      "input": {
+        "headline": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx at Foo Bar"
+      },
+      "expected": ""
+    },
+    {
+      "name": "emoji length",
+      "input": {
+        "headline": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00 at Foo"
+      },
+      "expected": ""
+    },
+    {
+      "name": "null",
+      "input": {
+        "headline": null
+      },
+      "expected": ""
+    },
+    {
+      "name": "bullet stops",
+      "input": {
+        "headline": "Lead at Foo \u2022 Speaker"
+      },
+      "expected": "Foo"
+    }
+  ]
+}

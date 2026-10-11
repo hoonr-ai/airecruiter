@@ -1,0 +1,101 @@
+{
+  "function": "getCandidateLaunchEmail",
+  "cases": [
+    {
+      "name": "top-level empty falls through",
+      "input": {
+        "candidate": {
+          "email": "",
+          "workEmail": "W@X.com"
+        }
+      },
+      "expected": "w@x.com"
+    },
+    {
+      "name": "enhanced personal",
+      "input": {
+        "candidate": {
+          "enhanced_info": {
+            "personalEmail": "p@x.com"
+          }
+        }
+      },
+      "expected": "p@x.com"
+    },
+    {
+      "name": "zoominfo work email",
+      "input": {
+        "candidate": {
+          "data": {
+            "zoominfo_contact_enrichment": {
+              "workEmail": "z@x.com"
+            }
+          }
+        }
+      },
+      "expected": "z@x.com"
+    },
+    {
+      "name": "first truthy wins even if synthetic",
+      "input": {
+        "candidate": {
+          "email": "Auto_1@jobdiva.com",
+          "data": {
+            "email": "real@x.com"
+          }
+        }
+      },
+      "expected": "auto_1@jobdiva.com"
+    },
+    {
+      "name": "empty array is truthy in JS",
+      "input": {
+        "candidate": {
+          "email": [],
+          "workEmail": "w@x.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "zero is falsy",
+      "input": {
+        "candidate": {
+          "email": 0,
+          "workEmail": "w@x.com"
+        }
+      },
+      "expected": "w@x.com"
+    },
+    {
+      "name": "data enhanced work",
+      "input": {
+        "candidate": {
+          "data": {
+            "enhanced_info": {
+              "workEmail": " DEW@X.COM "
+            }
+          }
+        }
+      },
+      "expected": "dew@x.com"
+    },
+    {
+      "name": "nothing",
+      "input": {
+        "candidate": {}
+      },
+      "expected": ""
+    },
+    {
+      "name": "data is a string",
+      "input": {
+        "candidate": {
+          "data": "oops",
+          "personalEmail": "pe@x.com"
+        }
+      },
+      "expected": "pe@x.com"
+    }
+  ]
+}
