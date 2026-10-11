@@ -156,6 +156,71 @@ export function hoursAsDays(hours: number | null | undefined): string {
   return days < 1 ? "under a day" : `${Math.round(days * 10) / 10} days`;
 }
 
+// ---------------------------------------------------------------------------
+// Speed tiles
+// ---------------------------------------------------------------------------
+
+/**
+ * The speed tiles that split the launch at the Launch PAIR click
+ * (services/pair_dashboard.py, compute_funnel): Added → Launch Click is the
+ * recruiter's part, Launch Click → Launch the system's. An older API sends
+ * neither, and their group is simply not shown.
+ */
+export const LAUNCH_TIMING_SPEED_KEYS: readonly string[] = ["added_to_launch_click", "launch_click_to_launch"];
+
+/** The API's speed list, split into the pipeline tiles and the launch-timing tiles, each in API order. */
+export function splitSpeedMetrics<T extends { key: string }>(speed: readonly T[]): { pipeline: T[]; launch: T[] } {
+  const pipeline: T[] = [];
+  const launch: T[] = [];
+  for (const metric of speed) (LAUNCH_TIMING_SPEED_KEYS.includes(metric.key) ? launch : pipeline).push(metric);
+  return { pipeline, launch };
+}
+
+/**
+ * A speed tile's value. The launch timings also carry minute precision
+ * (median_minutes / mean_minutes) because Launch Click → Launch is usually
+ * minutes: under an hour that reads "12 min", not "0.2 hrs". Longer, or a
+ * metric without minutes, is formatHours.
+ */
+export function formatSpeedValue(hours: number | null | undefined, minutes?: number | null): string {
+  if (minutes !== null && minutes !== undefined && !Number.isNaN(minutes)) {
+    if (minutes > 0 && minutes < 0.5) return "< 1 min";
+    const whole = Math.round(minutes);
+    return whole < 60 ? `${whole} min` : formatHours(minutes / 60);
+  }
+  return formatHours(hours);
+}
+
+export type SpeedStats = {
+  median_hours: number | null;
+  mean_hours: number | null;
+  /** Launch timings only (minute precision); absent on the other tiles and from an older API. */
+  median_minutes?: number | null;
+  mean_minutes?: number | null;
+  /** Requirements with a value: the n behind the median and the average. */
+  jobs: number;
+};
+
+/**
+ * The line under a speed tile's value — "median · 1.3 days · avg 18 hrs ·
+ * 4 reqs" — or null when no requirement has a value. A minute-precision
+ * metric under a day leaves the days part out: "under a day" says nothing
+ * next to "12 min".
+ */
+export function speedDetail(metric: SpeedStats): string | null {
+  if (!metric.jobs) return null;
+  const minutePrecision = metric.median_minutes !== null && metric.median_minutes !== undefined;
+  const days = minutePrecision && (metric.median_hours ?? 0) < 24 ? "" : hoursAsDays(metric.median_hours);
+  return [
+    "median",
+    days,
+    `avg ${formatSpeedValue(metric.mean_hours, metric.mean_minutes)}`,
+    `${metric.jobs} ${metric.jobs === 1 ? "req" : "reqs"}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function shortDate(iso: string): { month: string; day: number; year: number } {

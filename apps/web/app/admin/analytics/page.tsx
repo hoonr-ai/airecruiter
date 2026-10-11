@@ -118,6 +118,15 @@ interface JobTimelineEntry {
    *  unavailable this time (jobs_timeline_step_time_available=false). */
   step5_active_minutes?: number | null;
   step5_to_launch_minutes?: number | null;
+  /** The job's first Launch PAIR click and the two launch timings in minutes
+   *  (services/launch_timing.py): Added → Click = that click − Added (PAIR);
+   *  Click → Launch = the first interview PAIR Bot created − the click. null
+   *  = not recorded (launched before click tracking began), not launched
+   *  yet, or unavailable this time (jobs_timeline_launch_timing_available
+   *  = false). */
+  launch_clicked_at?: string | null;
+  added_to_click_minutes?: number | null;
+  click_to_launch_minutes?: number | null;
 }
 
 interface LaunchSpeed {
@@ -204,6 +213,10 @@ interface AnalyticsData {
   /** false: the Step 5 time columns are null because the read failed, not
    *  because the jobs predate the tracking. */
   jobs_timeline_step_time_available?: boolean;
+  /** false: the launch-timing columns (Launch Clicked, Added → Click, Click →
+   *  Launch) are null because the read failed, not because the jobs predate
+   *  the click tracking. */
+  jobs_timeline_launch_timing_available?: boolean;
   launch_speed?: LaunchSpeed;
   weekly_trends?: WeeklyTrends;
   submission_metrics?: SubmissionMetrics;
@@ -305,9 +318,11 @@ const pairSubmitsTotal = (sm: SubmissionMetrics): number =>
     ? sm.pair_internal_submits + sm.pair_external_submits
     : sm.pair_submits ?? 0;
 
-/** Step 5 time: "1h 22m", or "—" when null — not tracked (jobs worked
- *  before 09/23/2026), not launched yet, or unavailable. A job nobody timed
- *  must never read "0m". The CSV uses formatDuration directly. */
+/** Step 5 time and the launch timings: "1h 22m", or "—" when null — not
+ *  tracked (Step 5: jobs worked before 09/23/2026; launch timings: jobs
+ *  launched before click tracking began), not launched yet, or unavailable.
+ *  A job nobody timed must never read "0m". The CSV uses formatDuration
+ *  directly. */
 const renderDurationCell = (minutes: number | null | undefined) => {
   const formatted = formatDuration(minutes);
   return formatted === EMPTY_DATE ? (
@@ -377,6 +392,9 @@ const TIMELINE_SKELETON_BARS: Array<{ center?: boolean; bar: string }> = [
   { bar: "h-4 w-20 rounded" }, // Added (PAIR)
   { bar: "h-4 w-20 rounded" }, // Launched (PAIR)
   { center: true, bar: "h-5 w-10 rounded-full" }, // Lag
+  { bar: "h-4 w-20 rounded" }, // Launch Clicked
+  { center: true, bar: "h-4 w-12 rounded" }, // Added → Click
+  { center: true, bar: "h-4 w-12 rounded" }, // Click → Launch
   { center: true, bar: "h-4 w-12 rounded" }, // Step 5 Active Time
   { center: true, bar: "h-4 w-12 rounded" }, // Step 5 → Launch
   { center: true, bar: "h-5 w-16 rounded-full" }, // Active / Archived
@@ -398,6 +416,7 @@ const TIMELINE_COLUMN_COUNT = 3 + TIMELINE_SKELETON_BARS.length;
 const timelineCsvNote = (
   metricsUnavailable: boolean,
   stepTimeUnavailable: boolean,
+  launchTimingUnavailable: boolean,
 ): string[] => [
   ...(metricsUnavailable
     ? [
@@ -412,6 +431,14 @@ const timelineCsvNote = (
     ? [
         escapeCSV(
           "Note: Step 5 time columns (Step 5 Active Time / Step 5 → Launch) were unavailable for this export and show —",
+        ),
+      ]
+    : []),
+  // Same reason: jobs launched before the click tracking show — too.
+  ...(launchTimingUnavailable
+    ? [
+        escapeCSV(
+          "Note: launch timing columns (Launch Clicked / Added → Click / Click → Launch) were unavailable for this export and show —",
         ),
       ]
     : []),
@@ -434,6 +461,9 @@ const timelineCsvHeaders = (withRecruiters: boolean): string[] => [
   withEasternLabel("Added to PAIR"),
   withEasternLabel("Launched on PAIR"),
   "Lag (days)",
+  withEasternLabel("Launch Clicked"),
+  "Added → Click",
+  "Click → Launch",
   // Durations as on screen ("1h 22m"), like the Launch Report's CSV; no zone.
   "Step 5 Active Time",
   "Step 5 → Launch",
@@ -468,6 +498,9 @@ const timelineCsvRow = (job: JobTimelineEntry, withRecruiters: boolean): string[
   formatEasternDateTime(job.added_to_curate_at),
   formatEasternDateTime(job.curate_launched_at),
   lagCsvValue(job.posted_to_launch_days),
+  formatEasternDateTime(job.launch_clicked_at),
+  formatDuration(job.added_to_click_minutes),
+  formatDuration(job.click_to_launch_minutes),
   formatDuration(job.step5_active_minutes),
   formatDuration(job.step5_to_launch_minutes),
   job.is_archived ? "Archived" : "Active",
@@ -773,6 +806,7 @@ export default function AdminAnalyticsPage() {
   // Absent (an older backend) is not "unavailable"; only an explicit false is.
   const timelineMetricsUnavailable = data?.jobs_timeline_metrics_available === false;
   const timelineStepTimeUnavailable = data?.jobs_timeline_step_time_available === false;
+  const timelineLaunchTimingUnavailable = data?.jobs_timeline_launch_timing_available === false;
   // jobs_timeline_total counts every matching job server-side (no LIMIT);
   // timelineRows is capped, so a larger total means older jobs aren't loaded
   // and any date-range filter below is only searching the loaded window.
@@ -1053,7 +1087,7 @@ export default function AdminAnalyticsPage() {
       ),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable),
+      ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable, timelineLaunchTimingUnavailable),
       toCsv(
         timelineCsvHeaders(false),
         (data.jobs_timeline || []).map((job) => timelineCsvRow(job, false)),
@@ -1088,7 +1122,7 @@ export default function AdminAnalyticsPage() {
     downloadCsv(
       [
         "--- JOB LAUNCH TIMELINE ---",
-        ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable),
+        ...timelineCsvNote(timelineMetricsUnavailable, timelineStepTimeUnavailable, timelineLaunchTimingUnavailable),
         toCsv(
           timelineCsvHeaders(true),
           filteredTimeline.map((job) => timelineCsvRow(job, true)),
@@ -2378,6 +2412,20 @@ export default function AdminAnalyticsPage() {
           </div>
         )}
 
+        {!isLoading && timelineLaunchTimingUnavailable && timelineRows.length > 0 && (
+          <div
+            role="status"
+            className="flex items-start gap-2 px-6 py-2.5 border-b border-amber-200 bg-amber-50 text-[12.5px] font-medium text-amber-800"
+          >
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+            <span>
+              Launch timing columns (Launch Clicked, Added &rarr; Click and
+              Click &rarr; Launch) couldn&apos;t be loaded this time and show
+              &ldquo;—&rdquo;. Reload to try again.
+            </span>
+          </div>
+        )}
+
         <div className="overflow-auto max-h-[700px] relative">
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
@@ -2415,16 +2463,33 @@ export default function AdminAnalyticsPage() {
                   {withEasternLabel("Added (PAIR)")}
                 </th>
                 <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
-                  {withEasternLabel("Launched (PAIR)")}
+                  <HeaderHint hint="When the job's first Launch PAIR attempt saved its candidates, just before PAIR Bot was called: shortly after the click (Launch Clicked), and set even if that attempt then failed.">
+                    {withEasternLabel("Launched (PAIR)")}
+                  </HeaderHint>
                 </th>
                 <th rowSpan={2} className="py-3 px-6 text-center">Lag</th>
+                <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
+                  <HeaderHint hint="The job's first Launch PAIR click. A click recorded after the job's first launch (a relaunch) never counts as the first. Jobs launched before click tracking began show —.">
+                    {withEasternLabel("Launch Clicked")}
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="From Added (PAIR) to the first Launch PAIR click: how long the job waited for a recruiter to launch it. — when the click wasn't recorded.">
+                    Added &rarr; Click
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="From the Launch PAIR click to the first interview PAIR Bot created (the first successful launch): how long PAIR took to launch after the click. — until the job has launched, and when the click wasn't recorded.">
+                    Click &rarr; Launch
+                  </HeaderHint>
+                </th>
                 <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
                   <HeaderHint hint="Time recruiters had Step 5 (Source) open and in use on this job, summed across every visit and every recruiter. It pauses while the tab is hidden or after 5 minutes with no activity. Tracked since 09/23/2026; jobs worked earlier show —.">
                     Step 5 Active Time
                   </HeaderHint>
                 </th>
                 <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
-                  <HeaderHint hint="Wall-clock time from the first time anyone opened Step 5 (Source) on this job to its first SUCCESSFUL launch: the first time a candidate was actually launched to PAIR (the Launch Report's PAIR Launch). That can be later than Launched (PAIR), which is the first launch click. Shows — until the job has launched successfully, and for jobs worked before tracking started on 09/23/2026.">
+                  <HeaderHint hint="Wall-clock time from the first time anyone opened Step 5 (Source) on this job to its first SUCCESSFUL launch: the first time a candidate was actually launched to PAIR (the Launch Report's PAIR Launch). So it ends after Launch Clicked and Launched (PAIR), which both come before PAIR Bot creates anything. Shows — until the job has launched successfully, and for jobs worked before tracking started on 09/23/2026.">
                     Step 5 &rarr; Launch
                   </HeaderHint>
                 </th>
@@ -2607,6 +2672,15 @@ export default function AdminAnalyticsPage() {
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderLagChip(job.posted_to_launch_days)}
+                      </td>
+                      <td className="py-3.5 px-6 whitespace-nowrap">
+                        {renderDateCell(job.launch_clicked_at)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderDurationCell(job.added_to_click_minutes)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderDurationCell(job.click_to_launch_minutes)}
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderDurationCell(job.step5_active_minutes)}

@@ -50,6 +50,7 @@ import datetime
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -83,6 +84,7 @@ from services.feedback_metrics import (
 )
 from services.job_attribution import attribution_fields
 from services.job_step_time import STEP_SOURCE, fetch_step_metrics
+from services.launch_timing import first_launch_sql, timings_for_jobs
 from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
     normalize_channel,
@@ -105,6 +107,8 @@ _DB_TZ = ZoneInfo(REPORT_DB_TIMEZONE)
 
 # Some monitored_jobs rows carry a readable_ist_now() string (".. IST").
 _IST = ZoneInfo("Asia/Kolkata")
+# "HH:MM:SS[.ffffff]" then Z or a numeric offset — see routers/_helpers._ts_utc.
+_EXPLICIT_OFFSET = re.compile(r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|(?P<sign>[+-])(?P<hh>[0-9]{2})(?::?(?P<mm>[0-9]{2}))?)$")
 
 EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
 
@@ -197,6 +201,20 @@ def _parse_monitored_jobs_timestamp(raw: Optional[str]) -> Optional[datetime.dat
     text = (raw or "").strip()
     if not text:
         return None
+    # NOW() written into the TEXT column carries the writing session's offset
+    # ("2026-06-18 01:51:52.05+05:30"); honour it, as routers/_helpers._ts_utc does.
+    m = _EXPLICIT_OFFSET.search(text)
+    if m and not text.upper().endswith("IST"):
+        sign = 1 if m.group("sign") == "+" else -1
+        hours = int(m.group("hh") or 0)
+        minutes = int(m.group("mm") or 0)
+        offset = datetime.timezone(sign * datetime.timedelta(hours=hours, minutes=minutes)) if m.group("sign") else datetime.timezone.utc
+        try:
+            naive = datetime.datetime.fromisoformat(text[:19].replace(" ", "T"))
+        except ValueError:
+            logger.warning(f"LAUNCH-REPORT: unparseable monitored_jobs timestamp {raw!r} — reported as blank")
+            return None
+        return naive.replace(tzinfo=offset)
     tz = _IST if text.upper().endswith("IST") else _DB_TZ
     # Truncate to "YYYY-MM-DD HH:MM:SS" — the same 19-char window _ts() uses,
     # which covers every shape observed in this column.
@@ -447,30 +465,25 @@ def _fetch_jobs_launched_on(
     with conn.cursor() as cur:
         # NULL for an attribution column the startup ALTER has not added yet.
         optional = optional_monitored_jobs_columns(cur, "mj.")
+    # The launch rule is services/launch_timing.first_launch_sql, shared with
+    # the launch timings so the two can never disagree on a job's PAIR Launch:
+    #   * successful launches only — the same rule the launched population
+    #     uses (services/launched_candidates.py). A failed attempt writes an
+    #     audit row with an empty or NULL interview_id; counting it listed a
+    #     job whose attempts had all failed with Launched 0, and filed a job
+    #     whose first attempt failed under the failed attempt's day and PAIR
+    #     Launch time;
+    #   * the '' guard: monitor_job_locally writes `data.get("jobdiva_id") or
+    #     ""`, so a job with no JobDiva reference stores '' rather than NULL.
+    #     Without it an audit row that also has '' matches EVERY such job at
+    #     once, silently pooling their launch counts together.
     sql = f"""
-        WITH launches AS (
-            SELECT
-                mj.job_id                                     AS job_id,
-                MIN(a.created_at)                             AS first_launch_at
+        WITH scoped AS (
+            SELECT mj.job_id, mj.jobdiva_id
             FROM monitored_jobs mj
-            JOIN engage_interview_audit a
-              -- monitor_job_locally writes `data.get("jobdiva_id") or ""`, so a
-              -- job with no JobDiva reference stores '' rather than NULL. Without
-              -- this guard an audit row that also has '' matches EVERY such job at
-              -- once, silently pooling their launch counts together.
-              ON NULLIF(a.jobdiva_id, '') IS NOT NULL
-             AND (a.jobdiva_id = NULLIF(mj.jobdiva_id, '') OR a.jobdiva_id = mj.job_id::text)
             WHERE {mj_cond}
-              -- Successful launches only — the same rule the launched
-              -- population uses (services/launched_candidates.py). A failed
-              -- attempt writes an audit row with an empty or NULL
-              -- interview_id; counting it listed a job whose attempts had all
-              -- failed with Launched 0, and filed a job whose first attempt
-              -- failed under the failed attempt's day and PAIR Launch time.
-              AND COALESCE(NULLIF(a.interview_id, ''), '') <> ''
-              AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''
-            GROUP BY mj.job_id
-        )
+        ),
+        launches AS ({first_launch_sql("scoped")})
         SELECT
             mj.job_id,
             mj.jobdiva_id,
@@ -1144,10 +1157,16 @@ def _build_row(
     outreach, displays = _summarise_launched(launched_rows, live_by_interview)
     feedback = _summarise_feedback(launched_rows, displays)
     step5 = step_metrics or {}
+    # services.launch_timing.timings_for_jobs entry, attached by
+    # _load_report_inputs. Missing (the read failed, or a caller that has
+    # none) reports the three launch-timing columns as not tracked.
+    timing = job.get("launch_timing") or {}
 
-    # PAIR Published = the job arriving in pair. PAIR Launch = "Launch PAIR"
-    # clicked, i.e. the first call out to pair-bot, which is exactly when the
-    # first engage_interview_audit row is written.
+    # PAIR Published = the job arriving in pair. PAIR Launch = the first
+    # SUCCESSFUL launch: the first engage_interview_audit row with an interview
+    # id, written once pair-bot has created the interview. That is NOT the
+    # "Launch PAIR" click — search, enrichment, the save loop and pair-bot's
+    # creation wait all sit between the two; the click is Launch Clicked.
     pair_published_at = _parse_monitored_jobs_timestamp(job.get("job_created_at_text"))
     launch_at = _parse_iso(job.get("first_launch_at"))
     jobdiva_published = _parse_posted_date(job.get("posted_date"))
@@ -1210,6 +1229,18 @@ def _build_row(
         # Turn Around Time = PAIR Launch − PAIR Published: how long the job sat
         # in pair before going out.
         "turn_around_time_minutes": _minutes_between(pair_published_at, launch_at),
+        # Launch timings (services/launch_timing.py). Launch Clicked = the
+        # job's first "Source & Launch PAIR" click. Added → Click (A) is the
+        # recruiter's part, from the job's arrival in PAIR to that click;
+        # Click → Launch (B) the system's, from the click of the first launch
+        # that created an interview to that interview. A + B can differ from
+        # Turn Around Time: B skips a failed first attempt, and Turn Around
+        # Time stays on its own definition. None (a dash) for jobs launched
+        # before the click was recorded — a click recorded after the first
+        # launch (a relaunch) is never shown as the first.
+        "launch_clicked_at": _edt(timing.get("first_launch_clicked_at")),
+        "added_to_click_minutes": timing.get("added_to_click_minutes"),
+        "click_to_launch_minutes": timing.get("click_to_launch_minutes"),
         # Step 5 ("Source") time, summed over every visit and recruiter. None,
         # never 0, for a job nobody timed (worked before the tracking existed,
         # or the read failed): the page shows a dash. A real 0 stays 0.
@@ -1304,6 +1335,23 @@ def _load_step_metrics(conn, jobs: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
         return {}
 
 
+def _load_launch_timings(conn, jobs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Launch timings for every report job in one read, keyed by str(job_id).
+
+    Best-effort like _load_step_metrics: a failed read is logged and returns
+    {}, which every row reports as not tracked. timings_for_jobs runs in a
+    savepoint, so a failure cannot abort this connection's transaction.
+    """
+    try:
+        return timings_for_jobs([job["job_id"] for job in jobs], conn)
+    except Exception as exc:
+        logger.warning(
+            f"LAUNCH-REPORT: launch timings unavailable for {len(jobs)} job(s) — reported as blank: {exc}",
+            exc_info=True,
+        )
+        return {}
+
+
 def _load_report_inputs(
     start_date: datetime.date, end_date: datetime.date, scope_team_id: Optional[str]
 ) -> Tuple[
@@ -1335,6 +1383,11 @@ def _load_report_inputs(
                 fetch_launched_candidates(conn, keys, include_feedback=True) if keys else []
             )
             sourced_by_job[job_key] = fetch_sourced_candidates(conn, keys) if keys else []
+        # Carried on each job dict (read by _build_row), so the inputs keep
+        # their shape. Savepointed, so it may run before the Step 5 read.
+        timings = _load_launch_timings(conn, jobs) if jobs else {}
+        for job in jobs:
+            job["launch_timing"] = timings.get(str(job["job_id"]))
         # Last on this connection on purpose: a failed statement aborts the
         # transaction, so any read issued after it would fail too and take
         # the whole report down with the optional columns.
