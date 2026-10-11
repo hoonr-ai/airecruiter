@@ -206,17 +206,15 @@ def _record(outcome: str, label: str, priority: str, **extra: Any) -> None:
 
 
 def _emit_counters(priority: str, label: str) -> None:
-    """Cumulative per-priority limiter counters -> NR ``JobDivaBILimiter`` + log."""
+    """Cumulative per-priority limiter counters -> NR ``JobDivaBiLimiter``
+    (outcome="counters") + log. Was a separate ``JobDivaBILimiter`` event type;
+    NRQL event types are case-sensitive, so the two never queried together."""
     d = dict(_prio_stats.get(priority) or {})
     log.info(
         "JOBDIVA_BI_COUNTERS priority=%s label=%s bi_wait_ms=%s bi_cooldown_ms=%s bi_429_total=%s",
         priority, label, d.get("bi_wait_ms", 0), d.get("bi_cooldown_ms", 0), d.get("bi_429_total", 0),
     )
-    try:
-        from core.newrelic import record_custom_event
-        record_custom_event("JobDivaBILimiter", {"priority": priority, "label": label, **d})
-    except Exception:
-        pass
+    _record("counters", label, priority, **d)
 
 
 def _get_redis() -> Optional[Any]:
