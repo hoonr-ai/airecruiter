@@ -503,6 +503,58 @@ def test_housekeeping_expires_abandoned_uploads_and_reviews(be):
     assert be.store.get_session(fresh["id"])["status"] == "collecting"
 
 
+def test_housekeeping_expires_never_claimed_queued_sessions(be):
+    """rollout #4: a queued session no worker ever claimed is cancelled
+    'queue_expired' after queued_max_s (runner off / stuck fleet); a fresh
+    one, a running one and one re-queued after it ran are left alone."""
+    jobs = [be.add_job(f"500{i}", f"26-50{i}") for i in range(5)]
+    stale = new_session_fields(jobs[0])
+    fresh = new_session_fields(jobs[1])
+    running = new_session_fields(jobs[2])
+    requeued = new_session_fields(jobs[3])
+    child = new_session_fields(jobs[4], mode="provided", trigger="needs_contact")
+    for f in (stale, fresh, running, requeued, child):
+        be.store.create_session(f, _rows("a"), None)
+    be.store.claim("W", 1, global_cap=3, lease_s=180, session_id=running["id"])
+    [c] = be.store.claim("W", 1, global_cap=3, lease_s=180, session_id=requeued["id"])
+    be.store.to_awaiting_input(Fence(requeued["id"], "W", c.claims), {"review": {"count": 1}})
+    assert be.store.confirm_review(requeued["id"], {}, {"confirmed": True})["status"] == "queued"
+    for f in (stale, running, requeued, child):
+        be.age(f["id"], "updated_at", 31 * 60)
+    be.age(fresh["id"], "updated_at", 29 * 60)
+
+    kw = dict(collecting_ttl_min=15, review_ttl_h=24, retention_days=14, recheck_h=24)
+    assert be.store.housekeeping(**kw)["queue_expired"] == []  # off unless asked
+    assert be.store.housekeeping(**kw, queued_max_s=0)["queue_expired"] == []
+    assert be.store.get_session(stale["id"])["status"] == "queued"
+    out = be.store.housekeeping(**kw, queued_max_s=1800)
+    assert sorted(out["queue_expired"]) == sorted([stale["id"], child["id"]])
+    s = be.store.get_session(stale["id"])
+    assert s["status"] == "cancelled" and s["cancel_reason"] == "queue_expired" and s["completed_at"] is not None
+    assert s["error"] == "queue expired: no worker started it in time"
+    assert be.store.events_after(stale["id"])[-1]["payload"] == {"type": "cancelled", "reason": "queue_expired"}
+    assert be.store.active_session(stale["job_id"]) is None  # the job is free again
+    assert be.store.get_session(fresh["id"])["status"] == "queued"
+    assert be.store.get_session(running["id"])["status"] == "running"
+    assert be.store.get_session(requeued["id"])["status"] == "queued"
+    assert be.store.housekeeping(**kw, queued_max_s=1800)["queue_expired"] == []  # idempotent
+
+
+def test_candidates_page_ids_filter(be):
+    f, _ = _create(be, rows=_rows("a", "b", "c", "d"))
+    sid = f["id"]
+    page, total = be.store.candidates_page(sid, ids=["c"], limit=1, light=False)
+    assert [r["candidate_id"] for r in page] == ["c"] and total == 1 and page[0]["row"]["resume_text"] == "long"
+    page, total = be.store.candidates_page(sid, ids=["d", "a", "zz"])
+    assert [r["candidate_id"] for r in page] == ["a", "d"] and total == 2
+    assert all("resume_text" not in r["row"] for r in page)
+    assert be.store.candidates_page(sid, ids=["zz"]) == ([], 0)
+    page, total = be.store.candidates_page(sid, ids=["b"], after_rev=0, after_id="")
+    assert [r["candidate_id"] for r in page] == ["b"] and total == 1
+    page, total = be.store.candidates_page(sid, ids=["a", "b"], states=["pooled"])
+    assert total == 2
+
+
 def test_housekeeping_retention_keeps_rows_under_recheck(be):
     job = be.add_job()
     f = new_session_fields(job)
@@ -734,6 +786,31 @@ def test_pg_a_fenced_write_holds_the_row_against_a_claim(pg):
         conn.close()
     [b] = pg.store.claim("B", 1, global_cap=3, lease_s=180)
     assert b.claims == 2
+
+
+def test_pg_queue_expiry_never_touches_a_session_a_claim_holds(pg):
+    """claims-safe: a claim in flight holds the row (FOR UPDATE SKIP LOCKED in
+    both), so housekeeping skips it and the claim wins."""
+    job = pg.add_job()
+    f = new_session_fields(job)
+    pg.store.create_session(f, [], None)
+    pg.age(f["id"], "updated_at", 3600)
+    conn = pg._raw()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM launch_sessions WHERE id = %s AND status = 'queued' FOR UPDATE", (f["id"],))
+        assert cur.fetchone()
+        out = pg.store.housekeeping(collecting_ttl_min=15, review_ttl_h=24, retention_days=14, recheck_h=24,
+                                    queued_max_s=1800)
+        assert out["queue_expired"] == []  # skipped, not waited on
+        cur.execute("UPDATE launch_sessions SET status = 'running', owner = 'A', claims = claims + 1 WHERE id = %s",
+                    (f["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    out = pg.store.housekeeping(collecting_ttl_min=15, review_ttl_h=24, retention_days=14, recheck_h=24,
+                                queued_max_s=1800)
+    assert out["queue_expired"] == [] and pg.store.get_session(f["id"])["status"] == "running"
 
 
 def test_pg_engage_facts_follow_the_d1_claims(pg, monkeypatch):

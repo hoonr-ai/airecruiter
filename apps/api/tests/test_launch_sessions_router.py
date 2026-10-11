@@ -505,3 +505,143 @@ def test_a_waiting_session_shows_its_queue_position(env):
     store.claim("W", 1, global_cap=3, lease_s=180, session_id=s["id"])
     assert c.get(f"/api/v1/launch-sessions/{s['id']}").json()["session"]["queue_position"] is None
     assert c.get(f"/api/v1/launch-sessions/{s2['id']}").json()["session"]["queue_position"] == 0
+
+
+# ── final-review fixes ───────────────────────────────────────────────────────
+
+def test_config_is_disabled_and_create_answers_503_while_the_runner_is_off(env, monkeypatch):
+    """rollout #4: /config's enabled needs the runner too; no session is
+    created that no worker would claim."""
+    c = client()
+    assert c.get("/api/v1/launch-sessions/config").json()["enabled"] is True
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    assert c.get("/api/v1/launch-sessions/config").json()["enabled"] is False
+    r = c.post("/api/v1/jobs/1001/launch-sessions", json=_full_body())
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "disabled"
+    assert env["store"].sessions == {} and env["claims"] == []
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "true")
+    assert c.post("/api/v1/jobs/1001/launch-sessions", json=_full_body()).status_code == 201
+
+
+def test_a_create_retried_after_a_lost_answer_replays_even_with_the_runner_off(env, monkeypatch):
+    """The first create succeeded but its answer was lost; the runner is then
+    switched off. The retry (same idempotency key) must get its session back,
+    not a 503 that sends the browser to the legacy flow next to it."""
+    c = client()
+    body = _full_body()
+    first = c.post("/api/v1/jobs/1001/launch-sessions", json=body)
+    assert first.status_code == 201
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    retry = c.post("/api/v1/jobs/1001/launch-sessions", json=body)
+    assert retry.status_code == 200 and retry.json()["session"]["id"] == first.json()["session"]["id"]
+    # A NEW click (new key) is still refused while the runner is off.
+    fresh = dict(body, idempotency_key="another-click")
+    r = c.post("/api/v1/jobs/1001/launch-sessions", json=fresh)
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "disabled"
+
+
+def test_queue_expiry_default_follows_the_runner(monkeypatch):
+    from services.launch_sessions import config as cfg_mod
+    monkeypatch.delenv("PAIR_LAUNCH_QUEUED_MAX_S", raising=False)
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "true")
+    assert cfg_mod.queued_max_s() == 21600
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    assert cfg_mod.queued_max_s() == 1800
+    monkeypatch.setenv("PAIR_LAUNCH_QUEUED_MAX_S", "0")
+    assert cfg_mod.queued_max_s() == 0
+
+
+def test_children_need_the_runner_but_a_skip_only_answer_or_a_replay_does_not(env, monkeypatch):
+    store = env["store"]
+    sid = _finished_parent(env, [
+        {"candidate_id": "n1", "row": cand("n1", email="", phone=""), "state": "needs_contact"},
+        {"candidate_id": "n2", "row": cand("n2", email="", phone=""), "state": "needs_contact"},
+        {"candidate_id": "f1", "row": cand("f1"), "state": "failed"},
+    ])
+    c = client()
+    body = {"contacts": {"n1": {"phone": "+15125550199"}}}
+    first = c.post(f"/api/v1/launch-sessions/{sid}/needs-contact", json=body)
+    assert first.status_code == 201
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    replay = c.post(f"/api/v1/launch-sessions/{sid}/needs-contact", json=body)
+    assert replay.status_code == 200 and replay.json()["session"]["id"] == first.json()["session"]["id"]
+    store.set_column(first.json()["session"]["id"], "status", "completed")
+    off = c.post(f"/api/v1/launch-sessions/{sid}/needs-contact", json={"contacts": {"n2": {"phone": "+15125550198"}}})
+    assert off.status_code == 503 and off.json()["detail"]["code"] == "disabled"
+    assert store.cands[sid]["n2"]["state"] == "needs_contact"  # still parked, offered again later
+    skip = c.post(f"/api/v1/launch-sessions/{sid}/needs-contact", json={"skip_ids": ["n2"]})
+    assert skip.status_code == 200 and skip.json() == {"session": None, "skipped": 1}
+    retry = c.post(f"/api/v1/launch-sessions/{sid}/retry-failed")
+    assert retry.status_code == 503 and retry.json()["detail"]["code"] == "disabled"
+    assert store.cands[sid]["f1"]["state"] == "failed"
+
+
+def test_server_launch_off_still_serves_existing_sessions(env, monkeypatch):
+    """rollout #3 (server side): PAIR_SERVER_LAUNCH_ENABLED gates creation
+    only — reattach lists, polls and children of an existing session work."""
+    c = client()
+    s = c.post("/api/v1/jobs/1001/launch-sessions", json=_full_body()).json()["session"]
+    monkeypatch.setenv("PAIR_SERVER_LAUNCH_ENABLED", "false")
+    assert c.get("/api/v1/launch-sessions/config").json()["enabled"] is False
+    assert [x["id"] for x in c.get("/api/v1/jobs/1001/launch-sessions?active=true").json()["sessions"]] == [s["id"]]
+    assert c.get(f"/api/v1/launch-sessions/{s['id']}").status_code == 200
+    env["store"].set_column(s["id"], "status", "completed")
+    env["store"]._insert_rows(s["id"], [{"candidate_id": "n1", "row": cand("n1", email="", phone=""),
+                                         "state": "needs_contact"}], 5)
+    r = c.post(f"/api/v1/launch-sessions/{s['id']}/needs-contact", json={"contacts": {"n1": {"phone": "+15125550199"}}})
+    assert r.status_code == 201
+
+
+def test_a_malformed_from_session_id_is_a_404_never_a_500(env, monkeypatch):
+    """security minor: Postgres raises on `WHERE id = 'abc'::uuid` — the id
+    is validated before the lookup."""
+    store = env["store"]
+    real_get = store.get_session
+
+    def pg_like_get_session(session_id):
+        uuid.UUID(str(session_id))  # psycopg2 DataError: invalid input syntax for type uuid
+        return real_get(session_id)
+
+    monkeypatch.setattr(store, "get_session", pg_like_get_session)
+    c = client()
+    for bad in ("abc", "12345678-1234-1234-1234-12345678901z", " "):
+        r = c.post("/api/v1/jobs/1001/launch-sessions", json={
+            "idempotency_key": f"rem-{bad}", "mode": "provided", "trigger": "launch_remaining",
+            "from_session_id": bad, "candidate_ids": ["r1"]})
+        assert r.status_code == 404, (bad, r.status_code)
+        assert r.json()["detail"] == "from_session_id is not a session of this job"
+    unknown = c.post("/api/v1/jobs/1001/launch-sessions", json={
+        "idempotency_key": "rem-unknown", "mode": "provided", "from_session_id": str(uuid.uuid4()),
+        "candidate_ids": ["r1"]})
+    assert unknown.status_code == 404
+    # A well-formed id of this job (any spelling) still copies its rows.
+    src = _finished_parent(env, [{"candidate_id": "r1", "row": cand("r1"), "state": "pooled"}])
+    ok = c.post("/api/v1/jobs/1001/launch-sessions", json={
+        "idempotency_key": "rem-ok", "mode": "provided", "from_session_id": src.upper(), "candidate_ids": ["r1"]})
+    assert ok.status_code == 201 and list(store.cands[ok.json()["session"]["id"]]) == ["r1"]
+
+
+def test_candidates_ids_filter_reads_rows_by_id(env):
+    """contract #1: the résumé viewer reads one row by id (no keyset position)."""
+    s = client().post("/api/v1/jobs/1001/launch-sessions", json={
+        "idempotency_key": "ids", "mode": "provided", "start": True,
+        "candidates": [dict(cand(f"v{i}", 80), resume_text=f"resume {i}") for i in range(5)]}).json()["session"]
+    sid = s["id"]
+    c = client()
+    one = c.get(f"/api/v1/launch-sessions/{sid}/candidates", params={"view": "full", "ids": "v3", "limit": 1}).json()
+    assert [r["candidate_id"] for r in one["rows"]] == ["v3"] and one["rows"][0]["row"]["resume_text"] == "resume 3"
+    assert one["total"] == 1 and one["has_more"] is False
+    two = c.get(f"/api/v1/launch-sessions/{sid}/candidates", params={"ids": "v4, v1,v4,,zz"}).json()
+    assert sorted(r["candidate_id"] for r in two["rows"]) == ["v1", "v4"] and two["total"] == 2
+    assert all("resume_text" not in r["row"] for r in two["rows"])  # the table view stays light
+    none = c.get(f"/api/v1/launch-sessions/{sid}/candidates", params={"ids": "zz"}).json()
+    assert none["rows"] == [] and none["total"] == 0
+    assert c.get(f"/api/v1/launch-sessions/{sid}/candidates", params={"ids": ""}).json()["total"] == 5
+    assert c.get(f"/api/v1/launch-sessions/{sid}/candidates",
+                 params={"ids": ",".join(f"x{i}" for i in range(50))}).status_code == 200
+    too_many = c.get(f"/api/v1/launch-sessions/{sid}/candidates", params={"ids": ",".join(f"x{i}" for i in range(51))})
+    assert too_many.status_code == 422
+    # With the keyset cursor too.
+    keyed = c.get(f"/api/v1/launch-sessions/{sid}/candidates",
+                  params={"ids": "v2", "after_rev": 0, "after_id": ""}).json()
+    assert [r["candidate_id"] for r in keyed["rows"]] == ["v2"] and keyed["has_more"] is False

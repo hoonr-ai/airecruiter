@@ -378,8 +378,10 @@ class PgStore:
         after_id: Optional[str] = None,
         updated_after: Optional[_dt.datetime] = None,
         light: bool = True,
+        ids: Optional[Sequence[str]] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """(rows, total matching). ``light`` drops résumé text / LinkedIn profile.
+        """(rows, total matching). ``light`` drops résumé text / LinkedIn profile;
+        ``ids`` keeps only those candidate ids (the primary key's second column).
 
         Incremental reads (``after_rev`` given) page by the keyset
         (rev, candidate_id) — revs are committed in order, so a cursor never
@@ -391,6 +393,9 @@ class PgStore:
             if states:
                 where.append("state = ANY(%(states)s)")
                 params["states"] = list(states)
+            if ids is not None:
+                where.append("candidate_id = ANY(%(ids)s)")
+                params["ids"] = [str(i) for i in ids]
             keyset = after_rev is not None
             if keyset:
                 where.append("(rev > %(after_rev)s OR (rev = %(after_rev)s AND candidate_id > %(after_id)s))")
@@ -1239,9 +1244,18 @@ class PgStore:
     # ── housekeeping ──────────────────────────────────────────────────────
     def housekeeping(
         self, *, collecting_ttl_min: int, review_ttl_h: int, retention_days: int, recheck_h: int,
+        queued_max_s: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Idempotent expiry + retention, run by ONE worker per tick
-        (pg_try_advisory_xact_lock). Returns what it did."""
+        (pg_try_advisory_xact_lock). Returns what it did.
+
+        ``queued_max_s`` (> 0): a session still QUEUED and never claimed
+        (claims = 0, no owner) whose updated_at — the time it was queued — is
+        older than that is cancelled ('queue_expired'). Claim-safe: the rows
+        are locked FOR UPDATE SKIP LOCKED (a row a claim holds is skipped)
+        and the UPDATE re-checks status = 'queued', so a session a worker
+        claimed in the meantime is never touched. A session re-queued after
+        it ran (a confirmed QA review: claims > 0) is never expired here."""
         def run(cur):
             cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS got", (S.HOUSEKEEPING_LOCK_KEY,))
             if not cur.fetchone()["got"]:
@@ -1268,6 +1282,21 @@ class PgStore:
             out["review_expired"] = [r["id"] for r in cur.fetchall()]
             for sid in out["collecting_expired"] + out["review_expired"]:
                 _append_event_cur(cur, sid, {"type": "cancelled", "reason": "expired"})
+            out["queue_expired"] = []
+            if queued_max_s is not None and int(queued_max_s) > 0:
+                cur.execute(
+                    "UPDATE launch_sessions SET status = 'cancelled', completed_at = now(), updated_at = now(), "
+                    "error = 'queue expired: no worker started it in time', cancel_reason = 'queue_expired' "
+                    "WHERE id IN (SELECT id FROM launch_sessions WHERE status = 'queued' AND claims = 0 "
+                    " AND owner IS NULL AND updated_at < now() - make_interval(secs => %(max_s)s) "
+                    " FOR UPDATE SKIP LOCKED) "
+                    "AND status = 'queued' AND claims = 0 AND owner IS NULL "
+                    "RETURNING id::text AS id",
+                    {"max_s": int(queued_max_s)},
+                )
+                out["queue_expired"] = [r["id"] for r in cur.fetchall()]
+                for sid in out["queue_expired"]:
+                    _append_event_cur(cur, sid, {"type": "cancelled", "reason": "queue_expired"})
             cur.execute(
                 "UPDATE launch_sessions SET recheck_at = NULL WHERE recheck_at IS NOT NULL "
                 "AND completed_at < now() - make_interval(hours => %s)",

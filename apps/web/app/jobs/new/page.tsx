@@ -760,7 +760,9 @@ function NewJobPageContent() {
     if (!resumeText || resumeText.trim() === "") {
       const tableSession = tableSessionRef.current;
       const rowId = candidateRowId(candidate);
-      if (launchSession.config?.enabled && tableSession && rowId && tableSession.rowIds.has(rowId)) {
+      // Not gated on config.enabled: a table from a server session stays
+      // readable after server launch is switched off.
+      if (tableSession && rowId && tableSession.rowIds.has(rowId)) {
         const full = await launchSession.fullRow(tableSession.id, rowId);
         const text = resumeTextOfRow(full);
         if (text.trim()) resumeText = text;
@@ -7080,6 +7082,10 @@ function NewJobPageContent() {
     } else if (outcome.kind === "active_session" && outcome.activeSessionId) {
       showToast("A PAIR launch is already running for this job — showing its progress.", "info");
       attachServerSession(outcome.activeSessionId);
+    } else if (outcome.kind === "disabled") {
+      // The runner is switched off: the rows stay where they are (parked /
+      // failed) and can be launched once it is back on.
+      showToast(`${what} is paused — PAIR launches are switched off right now. Please try again later.`, "info");
     } else {
       showToast(`${what} failed: ${"message" in outcome ? outcome.message : "please try again"}`, "error");
     }

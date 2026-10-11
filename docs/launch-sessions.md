@@ -23,7 +23,7 @@ Code:
 | status | meaning | who moves it |
 |---|---|---|
 | `collecting` | provided mode: the browser is uploading rows (≤ 50 per call) | `POST …/start` → queued; housekeeping → cancelled after 15 min idle |
-| `queued` | waiting for a worker | a claim → running |
+| `queued` | waiting for a worker | a claim → running; housekeeping → cancelled (`cancel_reason` `queue_expired`) when never claimed `PAIR_LAUNCH_QUEUED_MAX_S` after it was queued (default 30 min with the runner off, 6 h with it on) |
 | `running` | leased by a worker, or released and waiting (`phase: waiting`, `retry_at`) | the runner |
 | `awaiting_input` | QA review: waiting for `POST …/confirm`. No owner and no lease, so no worker slot is held | confirm → queued; cancel; housekeeping → cancelled after 24 h |
 | `completed` / `failed` / `cancelled` | terminal | — |
@@ -179,17 +179,17 @@ Timings: a child of a parent that launched nobody carries the parent's `clicked_
 
 | method & path | body | answer |
 |---|---|---|
-| `GET /launch-sessions/config` | — | `{enabled, poll_ms, hidden_poll_ms, max_upload_chunk, max_candidates, require_review_default}` |
-| `POST /jobs/{job}/launch-sessions` | `{idempotency_key, mode, trigger, search_attempts[{label,payload}], min_score, qualified_target, launch_count, require_review?, options{notify_recruiters, send_job_posting_email, is_initial_launch, job_board_ids (stored, unused), batch_size}, app_base_url, candidates[≤50], start, from_session_id, candidate_ids}` | 201 `{session}`; 200 same-key replay; 409 `{code: active_session, active_session_id}` / `{code: outreach_stopped}` / `{code: idempotency_key_in_use}`; 422 invalid / `{code: idempotency_mismatch}` / `{code: job_mismatch}`; 400/404/503 recruiter-email gate; 503 `{code: disabled}` |
+| `GET /launch-sessions/config` | — | `{enabled, poll_ms, hidden_poll_ms, max_upload_chunk, max_candidates, require_review_default}`. `enabled` = `PAIR_SERVER_LAUNCH_ENABLED` **and** `PAIR_LAUNCH_RUNNER_ENABLED`: whether a new click starts a server session. The browser reattaches to, watches and answers (review, needs-contact, retry) existing sessions whatever it says |
+| `POST /jobs/{job}/launch-sessions` | `{idempotency_key, mode, trigger, search_attempts[{label,payload}], min_score, qualified_target, launch_count, require_review?, options{notify_recruiters, send_job_posting_email, is_initial_launch, job_board_ids (stored, unused), batch_size}, app_base_url, candidates[≤50], start, from_session_id, candidate_ids}` | 201 `{session}`; 200 same-key replay; 409 `{code: active_session, active_session_id}` / `{code: outreach_stopped}` / `{code: idempotency_key_in_use}`; 422 invalid / `{code: idempotency_mismatch}` / `{code: job_mismatch}`; 400/404/503 recruiter-email gate; 503 `{code: disabled}` (sessions or the runner off); 404 a `from_session_id` that is not a session of this job (malformed ids included) |
 | `GET /jobs/{job}/launch-sessions?active=&needs_contact=&limit=` | — | `{sessions: [view]}` (reattach) |
 | `GET /launch-sessions/{id}` | — | `{session}`: status, phase, stage, `terminal`, `launch_complete`, `queue_position`, counts, `needs_contact_count`, timings, sourcing progress (incl. `sourcing.plan` = each attempt's label + boolean string), review, `events_tail` (20), children |
 | `GET /launch-sessions/{id}/events?after_seq=` | — | `{events, last_seq, status}` |
-| `GET /launch-sessions/{id}/candidates?state=&view=table\|full\|failed&after_rev=&after_id=&limit=&offset=` | — | `{rows, total, cand_rev, next?, has_more}` |
+| `GET /launch-sessions/{id}/candidates?state=&view=table\|full\|failed&after_rev=&after_id=&limit=&offset=&ids=` | — | `{rows, total, cand_rev, next?, has_more}`. `ids` = comma-separated candidate ids (≤ 50, else 422): the résumé viewer reads one row with `view=full&ids=<id>&limit=1` |
 | `POST /launch-sessions/{id}/candidates` | `{candidates[≤50]}` | `{added, total}`; 409 not collecting; 422 |
 | `POST /launch-sessions/{id}/start` | — | `{session}`; 409 not collecting; 422 empty |
 | `POST /launch-sessions/{id}/confirm` | `{contacts{cid:{phone,email}}, candidate_ids?}` | `{session}`; 409 not awaiting_input |
-| `POST /launch-sessions/{id}/needs-contact` | `{contacts, candidate_ids, skip_ids, idempotency_key?}` | 201 `{session: child, skipped}`; 200 `{session: null, skipped}`; 409 parent's launch not over (`launch_complete` false) / another active session |
-| `POST /launch-sessions/{id}/retry-failed` | `{candidate_ids?, idempotency_key?}` | 201 `{session: child}`; 422 nothing failed |
+| `POST /launch-sessions/{id}/needs-contact` | `{contacts, candidate_ids, skip_ids, idempotency_key?}` | 201 `{session: child, skipped}`; 200 `{session: null, skipped}`; 409 parent's launch not over (`launch_complete` false) / another active session; 503 `{code: disabled}` runner off (a skip-only answer or a replay still works) |
+| `POST /launch-sessions/{id}/retry-failed` | `{candidate_ids?, idempotency_key?}` | 201 `{session: child}`; 422 nothing failed; 503 `{code: disabled}` runner off |
 | `POST /launch-sessions/{id}/cancel` | `{reason?}` | `{session}` (cancelled now, or `cancel_requested` while running); 409 not active |
 
 Polling:
@@ -201,11 +201,20 @@ Polling:
 
 ## Kill switches and knobs
 
-- `PAIR_SERVER_LAUNCH_ENABLED=false`: the browser uses the legacy flow, and `POST create` answers 503. Sessions that already exist still finish.
-- `PAIR_LAUNCH_RUNNER_ENABLED=false`: no worker claims anything. Sessions wait, queued.
+- `PAIR_SERVER_LAUNCH_ENABLED`: `false` = new clicks use the legacy flow (`/config` `enabled: false`, `POST create` answers 503 `{code: disabled}`). It gates CREATION only: sessions that already exist still finish, and the browser still reattaches to them, shows their progress and offers their review / needs-contact / retry modals.
+- `PAIR_LAUNCH_RUNNER_ENABLED`: `false` = no worker claims anything, and creation is off too (`/config` `enabled: false`; create, needs-contact and retry-failed answer 503 `{code: disabled}`). Sessions already queued wait; housekeeping (which keeps running) cancels the never-claimed ones after `PAIR_LAUNCH_QUEUED_MAX_S` (`queue_expired`), so a job is not held for hours and an hours-old search never launches when the runner comes back. A session re-queued after it ran (a confirmed QA review) is not expired — cancel it from the UI if needed.
+- **Defaults of both:** unset (or not a boolean) = **ON on QA and local, OFF on PROD**, from `core.newrelic.resolve_environment()` (`NEW_RELIC_ENVIRONMENT`, then `APP_ENV` / `ENVIRONMENT` / `ENV`, then the `APP_BASE_URL` host); if that cannot be resolved, ON unless something looks like PROD. An explicit `true` / `false` always wins. PROD needs **both** set to `true`.
+- `PAIR_LAUNCH_QUEUED_MAX_S` (`0` = never): the queue expiry above. Default 1800 (30 min) while `PAIR_LAUNCH_RUNNER_ENABLED` is off, 21600 (6 h) while it is on — with the runner on a session only waits while the global caps are full, and a busy queue must not lose it. A create retried after a lost answer replays its existing session even while the runner is off.
 - `JOBDIVA_PROVISIONING_ENABLED=false`: no JobDiva provisioning on any path (inline, S7b, re-provision). **Set it locally** for end-to-end runs.
 - `PAIR_LAUNCH_GLOBAL_CONCURRENCY` (3, launch phase) / `PAIR_LAUNCH_SEARCH_CONCURRENCY` (8, search phase) / `PAIR_LAUNCH_WORKER_CONCURRENCY` (1).
 - All other knobs are listed in `apps/api/.env.example` (`PAIR_LAUNCH_*`).
+
+## Rollout and deploys
+
+- **Flags from GitHub.** `PAIR_SERVER_LAUNCH_ENABLED` and `PAIR_LAUNCH_RUNNER_ENABLED` are GitHub *environment variables* (Settings → Environments → `qa` / `production` → Variables). `deploy.yml` passes them to the VM and `deploy-azure.sh` writes each into `apps/api/.env` only when it is non-empty (`upsert_env`), then restarts the API. Unset = the code default (QA on, PROD off).
+  - **Turn PROD on** after QA signs off: set both to `true` in `production`, then re-run the latest `main` deploy (`gh run rerun <run-id>`) or let the next promote deploy it.
+  - **Turn it off** anywhere: set `PAIR_SERVER_LAUNCH_ENABLED` (new clicks → legacy) or `PAIR_LAUNCH_RUNNER_ENABLED` (stop claiming) to `false` and re-run the deploy. Deleting a variable does not remove a value already written to `.env` — set it explicitly instead.
+- **Deploy-time adoption latency (lease 180 s).** A deploy restarts the API (systemd SIGTERM, `TimeoutStopSec=30`). The runner sets its stop flag and releases its sessions in lifespan shutdown (a 25 s drain), but uvicorn reaches lifespan shutdown only after every open HTTP connection has closed — and the Step-5 search stream, the legacy `/engage/launch` SSE and the enrich NDJSON stream keep connections open, so systemd usually SIGKILLs the workers first. Until then, ticks in the dying workers can still claim sessions and start a unit (the stop flag is not set yet). The sessions those workers held are adopted only when their lease expires, **up to `PAIR_LAUNCH_LEASE_S` (180 s) after the kill**. Correctness holds (fencing; S7 never re-posts — the same path as a SIGKILL), it is latency: a running launch can pause up to ~3 min across a deploy. The systemd unit is deliberately unchanged here; the fix (`--timeout-graceful-shutdown 5` on ExecStart with a 20 s drain so 5 + 20 < 30, or a SIGTERM handler that sets the stop flag before uvicorn's) is a follow-up. Do not shorten the lease to hide it: a lease must outlast a slow Pairbot POST plus heartbeat hiccups.
 
 ## Runbook
 
@@ -240,6 +249,7 @@ WHERE jobdiva_id IN ('<job_id>', '<ref>') AND data->>'engage_session_id' = '<ses
 
 Interventions:
 
+- **A session cancelled with `queue_expired`:** it was never started (the runner was off, or no worker claimed it for `PAIR_LAUNCH_QUEUED_MAX_S`). Nothing was saved or sent; the recruiter clicks again (a needs-contact / retry child expired this way keeps its rows; its parent shows them handed off, and a new Source & Launch finds those people again). Check `PAIR_LAUNCH_RUNNER_ENABLED` and the `launch_session_queue_expired` warning in the API log.
 - **Unstick a session now:** `UPDATE launch_sessions SET lease_until = now(), not_before = NULL WHERE id = …`. The next tick adopts it. Never edit `owner` or `claims` by hand.
 - **Cancel it:** `POST …/cancel`. A running session is finalized by the runner, including a reconcile-only pass and releasing its claims.
 - **Rows left `unconfirmed`:** they are parked `processing` (every launch path skips them) and housekeeping re-checks them every 5 min for 24 h. After that they stay `unconfirmed` / `processing`. Settle them by hand against Pairbot's `GET /api/interviews/by-job/{job}`: listed → record the interview; provably absent → set `engage_status = 'failed'` and drop `engage_session_id` so a retry can take them. Never re-post without checking.

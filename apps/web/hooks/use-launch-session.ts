@@ -11,9 +11,9 @@ import {
   emptyRowCache,
   encodeSessionHint,
   failedRowsToCsv,
+  findFullRow,
   isLaunchComplete,
   isTerminal,
-  isTransientStatus,
   keysetBeforeCursors,
   lookupRetryDelay,
   mergeKeysetPage,
@@ -27,6 +27,8 @@ import {
   seedBrowserMarks,
   seedMarksForAttach,
   sessionHintKey,
+  shouldLookForSessions,
+  shouldRetryWrite,
   writeRetryDelay,
   type BrowserMarks,
   type CreateOutcome,
@@ -165,13 +167,17 @@ async function withinMs<T>(p: Promise<T>, ms: number): Promise<T | null> {
   }
 }
 
-/** A write retried on 429 (Retry-After honoured), 5xx and network errors; no more retries once the page is gone. */
+/**
+ * A write retried on 429 (Retry-After honoured), 5xx and network errors —
+ * never on 503 {code: disabled} (shouldRetryWrite); no more retries once the
+ * page is gone.
+ */
 async function writeWithRetry<T>(
   send: () => Promise<LaunchSessionResult<T>>,
   alive: () => boolean,
 ): Promise<LaunchSessionResult<T>> {
   let res = await send();
-  for (let attempt = 1; attempt < WRITE_ATTEMPTS && !res.ok && isTransientStatus(res.status) && alive(); attempt++) {
+  for (let attempt = 1; attempt < WRITE_ATTEMPTS && !res.ok && shouldRetryWrite(res) && alive(); attempt++) {
     await delay(writeRetryDelay(attempt, res.retryAfterMs));
     if (!alive()) break;
     res = await send();
@@ -585,7 +591,10 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
   // The user's own active session (the one this tab watched first), else a
   // banner for a teammate's, else the newest finished session of theirs that
   // still has rows parked for contact details. A failed lookup is retried
-  // with back-off for as long as the page is open.
+  // with back-off for as long as the page is open. Runs whatever
+  // config.enabled says (shouldLookForSessions): switching server launch off
+  // stops NEW server launches only — existing sessions still finish on the
+  // server and stay visible / answerable here.
   const [parked, setParked] = useState<LaunchSessionView | null>(null);
   const reattachDoneRef = useRef<string | null>(null);
   const reattachBusyRef = useRef(false);
@@ -596,7 +605,7 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
     if (reattachTimerRef.current) clearTimeout(reattachTimerRef.current);
   }, []);
   useEffect(() => {
-    if (!reattach || !ref || configState !== "ready" || !config?.enabled) return;
+    if (!shouldLookForSessions({ reattach, jobRef: ref, configState })) return;
     if (reattachDoneRef.current === ref || reattachBusyRef.current) return;
     reattachBusyRef.current = true;
     let retryInMs: number | null = null;
@@ -662,7 +671,7 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
         }
       }
     })();
-  }, [reattach, ref, configState, config, follow, reattachTry, marks, alive]);
+  }, [reattach, ref, configState, follow, reattachTry, marks, alive]);
 
   const clearParked = useCallback(() => setParked(null), []);
   const clearLost = useCallback(() => setLost(null), []);
@@ -795,36 +804,23 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
 
   /**
    * One row's FULL record (with résumé text — the table holds light rows):
-   * the keyset position just before it, limit 1; when the row moved since,
-   * a short forward scan. null when it can't be found.
+   * by id first (works for a table restored after a reload), else the keyset
+   * position just before it and a short forward scan (lib findFullRow).
+   * null when it can't be found.
    */
   const fullRow = useCallback(async (sessionId: string, candidateId: string): Promise<Record<string, unknown> | null> => {
-    const read = async (cursor: KeysetCursor, limit: number) => {
-      const res = await launchSessionsApi.candidates(sessionId, {
-        view: "full",
-        limit,
-        afterRev: cursor.after_rev,
-        afterId: cursor.after_id,
-      });
-      return res.ok ? res.data : null;
-    };
-    const known = beforeRef.current.get(sessionId)?.[candidateId];
-    if (known) {
-      const page = await read(known, 1);
-      const hit = page?.rows?.find((r) => r.candidate_id === candidateId);
-      if (hit) return hit.row ?? null;
-    }
     const cachedRev = followIdRef.current === sessionId ? Number(rowsRef.current.rows[candidateId]?.rev) : NaN;
-    let cursor: KeysetCursor = known ?? { after_rev: Number.isFinite(cachedRev) ? cachedRev : 0, after_id: "" };
-    for (let page = 0; page < FULL_ROW_SCAN_PAGES; page++) {
-      const data = await read(cursor, FULL_ROW_SCAN_LIMIT);
-      if (!data) return null;
-      const hit = data.rows?.find((r) => r.candidate_id === candidateId);
-      if (hit) return hit.row ?? null;
-      if (!data.has_more || !data.next) return null;
-      cursor = data.next;
-    }
-    return null;
+    return findFullRow({
+      candidateId,
+      read: async (q) => {
+        const res = await launchSessionsApi.candidates(sessionId, q);
+        return res.ok ? res.data : null;
+      },
+      known: beforeRef.current.get(sessionId)?.[candidateId] ?? null,
+      cachedRev,
+      scanLimit: FULL_ROW_SCAN_LIMIT,
+      scanPages: FULL_ROW_SCAN_PAGES,
+    });
   }, []);
 
   const rows = useCallback(() => rowsRef.current, []);

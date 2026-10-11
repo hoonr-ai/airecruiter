@@ -22,8 +22,13 @@ from tests.launch_sessions_fakes import (
 
 _owners = itertools.count(1)
 
-# Fast, deterministic knobs for every runner test.
+# Fast, deterministic knobs for every runner test. Both switches are set
+# explicitly: their default depends on the environment (off on PROD), and
+# apps/api/.env may say anything — tests/test_launch_sessions_config.py covers
+# the defaults.
 TEST_ENV = {
+    "PAIR_SERVER_LAUNCH_ENABLED": "true",
+    "PAIR_LAUNCH_RUNNER_ENABLED": "true",
     "PAIR_LAUNCH_REPOST_AFTER_S": "0",
     "PAIR_LAUNCH_FRESH_BULK_S": "0",
     "PAIR_LAUNCH_SETTLE_MAX_S": "1800",

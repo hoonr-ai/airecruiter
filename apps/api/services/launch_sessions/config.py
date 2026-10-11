@@ -32,17 +32,65 @@ def _int(name: str, default: int, minimum: int = 0) -> int:
     return max(minimum, value)
 
 
+_PROD_NAMES = {"prod", "production", "prd", "live"}
+_PROD_HOSTS = {"pair.pyramidci.com"}
+
+
+def _prod_looking() -> bool:
+    """The fallback when core.newrelic cannot be imported: the same signals
+    resolve_environment reads (NEW_RELIC_ENVIRONMENT / APP_ENV / ENVIRONMENT /
+    ENV, then the APP_BASE_URL host), any of them saying PROD."""
+    for var in ("NEW_RELIC_ENVIRONMENT", "APP_ENV", "ENVIRONMENT", "ENV"):
+        if (os.getenv(var) or "").strip().lower() in _PROD_NAMES:
+            return True
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse((os.getenv("APP_BASE_URL") or "").strip()).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        host = ""
+    return host in _PROD_HOSTS
+
+
+def _on_outside_prod() -> bool:
+    """The default of the two launch-session switches: ON on QA and local,
+    OFF on PROD (core.newrelic.resolve_environment: NEW_RELIC_ENVIRONMENT,
+    APP_ENV / ENVIRONMENT / ENV, then the APP_BASE_URL host). If that cannot
+    be resolved, ON only when nothing looks like PROD."""
+    try:
+        from core.newrelic import resolve_environment
+
+        return resolve_environment() != "prod"
+    except Exception:  # noqa: BLE001 — unsure → off only where it looks like PROD
+        return not _prod_looking()
+
+
 def server_launch_enabled() -> bool:
-    """PAIR_SERVER_LAUNCH_ENABLED (default true): the browser uses server
-    launch sessions; false = the legacy browser-driven Source & Launch. Gates
-    session CREATION only — sessions already created still run to the end."""
-    return _bool("PAIR_SERVER_LAUNCH_ENABLED", True)
+    """PAIR_SERVER_LAUNCH_ENABLED: the browser uses server launch sessions;
+    false = the legacy browser-driven Source & Launch. Gates session CREATION
+    only — sessions already created still run to the end, and the browser
+    still reattaches to / watches them. Unset (or not a boolean) = ON on QA
+    and local, OFF on PROD (``_on_outside_prod``); an explicit true / false
+    always wins. deploy.yml passes the GitHub environment variable of the
+    same name, which deploy-azure.sh writes into apps/api/.env when set."""
+    return _bool("PAIR_SERVER_LAUNCH_ENABLED", _on_outside_prod())
 
 
 def runner_enabled() -> bool:
-    """PAIR_LAUNCH_RUNNER_ENABLED (default true): false stops every worker
-    from claiming sessions (they wait, queued, until it is back on)."""
-    return _bool("PAIR_LAUNCH_RUNNER_ENABLED", True)
+    """PAIR_LAUNCH_RUNNER_ENABLED: false stops every worker from claiming
+    sessions (they wait, queued — housekeeping cancels never-started ones
+    after PAIR_LAUNCH_QUEUED_MAX_S — until it is back on), and turns creation
+    off too (/config answers enabled=false, create answers 503 disabled).
+    Same default and deploy wiring as PAIR_SERVER_LAUNCH_ENABLED: unset = ON
+    on QA and local, OFF on PROD."""
+    return _bool("PAIR_LAUNCH_RUNNER_ENABLED", _on_outside_prod())
+
+
+def creation_enabled() -> bool:
+    """May a new launch session be created? Only when sessions are on AND a
+    runner will pick them up (a session created with the runner off would
+    hold its job, queued, until it expired)."""
+    return server_launch_enabled() and runner_enabled()
 
 
 def poll_ms() -> int:
@@ -165,6 +213,19 @@ def settle_max_s() -> int:
 
 def collecting_ttl_min() -> int:
     return _int("PAIR_LAUNCH_COLLECTING_TTL_MIN", 15, 1)
+
+
+def queued_max_s() -> int:
+    """A session still queued — never claimed by a worker — this long after
+    it was queued is cancelled by housekeeping (cancel_reason 'queue_expired'):
+    with the runner off (or the fleet stuck) it would hold its job and then
+    launch a stale search hours later. 0 = never.
+
+    Default: 30 min while the runner is off (nothing will claim it), 6 h while
+    it is on — a busy queue (launch cap 3) can legitimately hold a session for
+    a while and must not lose it."""
+    default = 1800 if not runner_enabled() else 21600
+    return _int("PAIR_LAUNCH_QUEUED_MAX_S", default, 0)
 
 
 def review_ttl_h() -> int:

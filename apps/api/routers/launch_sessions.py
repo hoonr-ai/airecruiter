@@ -9,7 +9,7 @@ browser only creates it and watches it.
   GET  /api/v1/jobs/{job_id}/launch-sessions?active=&needs_contact=&limit=
   GET  /api/v1/launch-sessions/{id}
   GET  /api/v1/launch-sessions/{id}/events?after_seq=N
-  GET  /api/v1/launch-sessions/{id}/candidates?state=&view=&after_rev=&after_id=
+  GET  /api/v1/launch-sessions/{id}/candidates?state=&view=&after_rev=&after_id=&ids=
   POST /api/v1/launch-sessions/{id}/candidates      (provided mode, collecting)
   POST /api/v1/launch-sessions/{id}/start
   POST /api/v1/launch-sessions/{id}/confirm         (QA review)
@@ -55,6 +55,7 @@ router = APIRouter(prefix="/api/v1", tags=["Launch Sessions"])
 logger = logging.getLogger(__name__)
 
 _VIEWS = ("table", "full", "failed")
+_MAX_IDS = 50
 
 
 def _ignore_poll_transaction() -> None:
@@ -121,10 +122,13 @@ async def _session_access(session_id: str, user: UserIdentity) -> Dict[str, Any]
 
 @router.get("/launch-sessions/config")
 async def launch_sessions_config(user: UserIdentity = Depends(get_current_user)):
-    """Whether the browser should use server launch sessions, and how to poll."""
+    """Whether the browser should START new launches as server sessions, and
+    how to poll. ``enabled`` is false when sessions are off OR the runner is
+    off (nothing would pick a new session up); the browser still reattaches
+    to and watches sessions that already exist either way."""
     _ignore_poll_transaction()
     return {
-        "enabled": cfg.server_launch_enabled(),
+        "enabled": cfg.creation_enabled(),
         "poll_ms": cfg.poll_ms(),
         "hidden_poll_ms": cfg.hidden_poll_ms(),
         "max_upload_chunk": cfg.upload_chunk_max(),
@@ -201,6 +205,7 @@ async def get_launch_session_candidates(
     after_rev: Optional[int] = Query(None, ge=0),
     after_id: Optional[str] = Query(None),
     updated_after: Optional[str] = Query(None),
+    ids: Optional[str] = Query(None, description=f"comma-separated candidate ids (at most {_MAX_IDS})"),
     user: UserIdentity = Depends(get_current_user),
 ):
     """Rows for the table / modals.
@@ -212,10 +217,17 @@ async def get_launch_session_candidates(
     is never returned again. ``state`` is for one-shot reads (the review /
     needs-contact modals, ``view=failed``). ``updated_after`` is deprecated
     (best-effort: it compares the rows' transaction-start timestamps).
+    ``ids`` reads given rows by candidate id (the résumé viewer's
+    ``view=full&ids=<id>&limit=1``: a row's keyset position is not needed).
     """
     row = await _session_access(session_id, user)
     if view not in _VIEWS:
         raise HTTPException(status_code=422, detail=f"view must be one of {', '.join(_VIEWS)}")
+    id_list: Optional[List[str]] = None
+    if ids is not None:
+        id_list = list(dict.fromkeys(i.strip() for i in ids.split(",") if i.strip())) or None
+        if id_list is not None and len(id_list) > _MAX_IDS:
+            raise HTTPException(status_code=422, detail=f"ids takes at most {_MAX_IDS} candidate ids")
     states: Optional[List[str]] = None
     if state:
         states = [s.strip() for s in state.split(",") if s.strip()]
@@ -230,7 +242,7 @@ async def get_launch_session_candidates(
             raise HTTPException(status_code=422, detail="updated_after must be an ISO timestamp")
     out = await control.candidates(
         row, states=states, limit=limit, offset=offset, view=view, after_rev=after_rev,
-        after_id=after_id, updated_after=after_ts,
+        after_id=after_id, updated_after=after_ts, ids=id_list,
     )
     _ignore_poll_transaction()
     return out

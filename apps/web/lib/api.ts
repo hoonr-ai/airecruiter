@@ -6,7 +6,9 @@ import { trackEvent } from "@/lib/analytics";
 import { msalInstance } from "@/lib/msal-config";
 import type { Snapshot } from "@/app/admin/live-report/types";
 import {
+  candidatesQueryString,
   retryAfterMs,
+  type CandidatesQuery,
   type CreateSessionBody,
   type LaunchSessionRowsPage,
   type LaunchSessionView,
@@ -460,29 +462,8 @@ export const launchSessionsApi = {
     return lsFetch<{ sessions: LaunchSessionView[] }>(`${lsJob(jobRef)}${q ? `?${q}` : ""}`);
   },
   get: (id: string) => lsFetch<{ session: LaunchSessionView }>(lsSession(id)),
-  candidates: (
-    id: string,
-    q: {
-      states?: string[];
-      view?: "table" | "full" | "failed";
-      limit?: number;
-      offset?: number;
-      afterRev?: number;
-      afterId?: string;
-    } = {},
-  ) => {
-    const qs = new URLSearchParams();
-    if (q.states && q.states.length) qs.set("state", q.states.join(","));
-    if (q.view) qs.set("view", q.view);
-    if (q.limit) qs.set("limit", String(q.limit));
-    if (q.offset) qs.set("offset", String(q.offset));
-    if (typeof q.afterRev === "number") {
-      qs.set("after_rev", String(q.afterRev));
-      qs.set("after_id", q.afterId ?? "");
-    }
-    const s = qs.toString();
-    return lsFetch<LaunchSessionRowsPage>(`${lsSession(id)}/candidates${s ? `?${s}` : ""}`);
-  },
+  candidates: (id: string, q: CandidatesQuery = {}) =>
+    lsFetch<LaunchSessionRowsPage>(`${lsSession(id)}/candidates${candidatesQueryString(q)}`),
   addCandidates: (id: string, candidates: unknown[]) =>
     lsFetch<{ added: number; total: number }>(`${lsSession(id)}/candidates`, { method: "POST", body: { candidates } }),
   start: (id: string) => lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/start`, { method: "POST" }),

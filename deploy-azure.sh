@@ -287,6 +287,26 @@ if [ -f "$API_DIR/.env" ]; then
             print_status "NEW_RELIC_ENVIRONMENT set to $NEW_RELIC_ENVIRONMENT"
         fi
     fi
+
+    # Server launch sessions (docs/launch-sessions.md "Rollout and deploys"):
+    # the GitHub environment variables of the same name via deploy.yml. Written
+    # only when set, so an unset variable leaves .env - and the code default
+    # (on for QA, off for PROD) - alone. `if` keeps set -e from exiting when
+    # upsert_env reports "unchanged" (status 1).
+    if [ -n "${PAIR_SERVER_LAUNCH_ENABLED:-}" ]; then
+        if upsert_env "$API_DIR/.env" PAIR_SERVER_LAUNCH_ENABLED "$PAIR_SERVER_LAUNCH_ENABLED"; then
+            print_status "PAIR_SERVER_LAUNCH_ENABLED set to $PAIR_SERVER_LAUNCH_ENABLED"
+        else
+            print_status "PAIR_SERVER_LAUNCH_ENABLED already $PAIR_SERVER_LAUNCH_ENABLED"
+        fi
+    fi
+    if [ -n "${PAIR_LAUNCH_RUNNER_ENABLED:-}" ]; then
+        if upsert_env "$API_DIR/.env" PAIR_LAUNCH_RUNNER_ENABLED "$PAIR_LAUNCH_RUNNER_ENABLED"; then
+            print_status "PAIR_LAUNCH_RUNNER_ENABLED set to $PAIR_LAUNCH_RUNNER_ENABLED"
+        else
+            print_status "PAIR_LAUNCH_RUNNER_ENABLED already $PAIR_LAUNCH_RUNNER_ENABLED"
+        fi
+    fi
 else
     print_warning "API environment file not found. Please ensure .env is present in $API_DIR"
 fi

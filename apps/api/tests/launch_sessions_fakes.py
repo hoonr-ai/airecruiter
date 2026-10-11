@@ -225,11 +225,14 @@ class MemoryStore:
         return [c["candidate_id"] for c in self.candidate_rows(session_id, states=states)]
 
     def candidates_page(self, session_id, *, states=None, limit=200, offset=0, after_rev=None, after_id=None,
-                        updated_after=None, light=True):
+                        updated_after=None, light=True, ids=None):
         with self.lock:
             rows = self._sorted_cands(session_id)
             if states:
                 rows = [c for c in rows if c["state"] in states]
+            if ids is not None:
+                wanted = {str(i) for i in ids}
+                rows = [c for c in rows if c["candidate_id"] in wanted]
             if after_rev is not None:
                 rows = [c for c in rows if (c["rev"], c["candidate_id"]) > (after_rev, str(after_id or ""))]
                 rows.sort(key=lambda c: (c["rev"], c["candidate_id"]))
@@ -749,10 +752,10 @@ class MemoryStore:
             self._check("stream_delete")
 
     # ── housekeeping ───────────────────────────────────────────────────────
-    def housekeeping(self, *, collecting_ttl_min, review_ttl_h, retention_days, recheck_h):
+    def housekeeping(self, *, collecting_ttl_min, review_ttl_h, retention_days, recheck_h, queued_max_s=None):
         with self.lock:
             now = self.t
-            out = {"skipped": False, "collecting_expired": [], "review_expired": []}
+            out = {"skipped": False, "collecting_expired": [], "review_expired": [], "queue_expired": []}
             for s in self.sessions.values():
                 if s["status"] == "collecting" and s["updated_at"] < now - dt.timedelta(minutes=collecting_ttl_min):
                     s.update(status="cancelled", completed_at=now, updated_at=now, error="upload abandoned",
@@ -766,6 +769,15 @@ class MemoryStore:
                     out["review_expired"].append(s["id"])
             for sid in out["collecting_expired"] + out["review_expired"]:
                 self._append(sid, {"type": "cancelled", "reason": "expired"})
+            if queued_max_s is not None and int(queued_max_s) > 0:
+                for s in self.sessions.values():
+                    if s["status"] == "queued" and s["claims"] == 0 and s["owner"] is None \
+                            and s["updated_at"] < now - dt.timedelta(seconds=int(queued_max_s)):
+                        s.update(status="cancelled", completed_at=now, updated_at=now,
+                                 error="queue expired: no worker started it in time", cancel_reason="queue_expired")
+                        out["queue_expired"].append(s["id"])
+                for sid in out["queue_expired"]:
+                    self._append(sid, {"type": "cancelled", "reason": "queue_expired"})
             deleted = 0
             for s in self.sessions.values():
                 if s["recheck_at"] is not None and s["completed_at"] and s["completed_at"] < now - dt.timedelta(hours=recheck_h):

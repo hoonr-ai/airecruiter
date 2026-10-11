@@ -138,12 +138,34 @@ def _bind_search_payloads(body: CreateLaunchSessionRequest, job: Dict[str, Any])
     return out
 
 
+def _require_runner() -> None:
+    """503 {code: disabled} while PAIR_LAUNCH_RUNNER_ENABLED is off: no worker
+    would claim a new session — it would hold its job, queued, until
+    housekeeping expired it (children: with the parent's rows handed off)."""
+    if not cfg.runner_enabled():
+        raise HTTPException(status_code=503, detail={
+            "code": "disabled", "message": "PAIR launches are paused right now. Please try again later.",
+        })
+
+
 # ── create ────────────────────────────────────────────────────────────────
 
 async def create_session(job_key: str, body: CreateLaunchSessionRequest, user: Any) -> Tuple[int, Dict[str, Any]]:
     store, fx, _ = _deps()
-    if not cfg.server_launch_enabled():
-        raise HTTPException(status_code=503, detail={"code": "disabled", "message": "Server launch is turned off."})
+    if not cfg.server_launch_enabled() or not cfg.runner_enabled():
+        # A retry of a create that already succeeded (its answer was lost)
+        # must get its session back, never a 503 that sends the browser to
+        # the legacy flow next to a queued server session.
+        known = await asyncio.to_thread(store.resolve_job, job_key)
+        existing = (
+            await asyncio.to_thread(store.find_by_key, known["job_id"], body.idempotency_key)
+            if known else None
+        )
+        if existing is not None and (existing.get("requested_by") or "") == _email(user):
+            return 200, await _view(store, existing)
+        if not cfg.server_launch_enabled():
+            raise HTTPException(status_code=503, detail={"code": "disabled", "message": "Server launch is turned off."})
+        _require_runner()
     if body.trigger not in S.TRIGGERS:
         raise HTTPException(status_code=422, detail=f"unknown trigger {body.trigger!r}")
     job = await asyncio.to_thread(store.resolve_job, job_key)
@@ -230,6 +252,12 @@ async def create_session(job_key: str, body: CreateLaunchSessionRequest, user: A
 
 
 async def _rows_from_session(store: Any, source_id: str, job_id: str, ids: Sequence[str]) -> List[Dict[str, Any]]:
+    # A malformed id is "not a session of this job" (404), never a Postgres
+    # "invalid input syntax for type uuid" 500 from the lookup below.
+    try:
+        source_id = str(uuid.UUID(str(source_id)))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=404, detail="from_session_id is not a session of this job")
     source = await asyncio.to_thread(store.get_session, source_id)
     if source is None or str(source.get("job_id")) != str(job_id):
         raise HTTPException(status_code=404, detail="from_session_id is not a session of this job")
@@ -266,6 +294,7 @@ async def add_candidates(session: Dict[str, Any], body: AddCandidatesRequest) ->
 
 async def start_session(session: Dict[str, Any]) -> Dict[str, Any]:
     store, _, _ = _deps()
+    _require_runner()  # a started session nobody claims would only expire
     row, reason = await asyncio.to_thread(store.start_session, session["id"])
     if row is None:
         if reason == "empty":
@@ -420,6 +449,7 @@ async def needs_contact(parent: Dict[str, Any], body: NeedsContactRequest, user:
             )
             return 200, {"session": None, "skipped": len(skip)}
         raise HTTPException(status_code=422, detail="none of candidate_ids is waiting for contact details")
+    _require_runner()  # a skip-only answer or a replayed child needs no worker
     rows = []
     for cid in ids:
         c = parked[cid]
@@ -453,6 +483,7 @@ async def retry_failed(parent: Dict[str, Any], body: RetryFailedRequest, user: A
     existing = await _existing_child(parent, key)
     if existing is not None:
         return 200, {"session": await _view(store, existing)}
+    _require_runner()
     failed = await asyncio.to_thread(store.candidate_rows, parent["id"], states=[S.ROW_FAILED])
     if body.candidate_ids is not None:
         wanted = set(body.candidate_ids)
@@ -502,6 +533,7 @@ async def events(session: Dict[str, Any], after_seq: int, limit: int) -> Dict[st
 async def candidates(
     session: Dict[str, Any], *, states: Optional[List[str]], limit: int, offset: int, view: str,
     after_rev: Optional[int], after_id: Optional[str], updated_after: Any,
+    ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Rows for the table / modals. Incremental (``after_rev``): keyset pages
     — call again with ``next`` until ``has_more`` is false, then keep polling
@@ -512,7 +544,7 @@ async def candidates(
     rows, total = await asyncio.to_thread(
         lambda: store.candidates_page(
             session["id"], states=states, limit=limit, offset=offset, after_rev=after_rev,
-            after_id=after_id, updated_after=updated_after, light=view != "full",
+            after_id=after_id, updated_after=updated_after, light=view != "full", ids=ids,
         )
     )
     out: Dict[str, Any] = {

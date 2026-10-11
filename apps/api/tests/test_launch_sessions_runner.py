@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import uuid
 from typing import Any, Dict, List
 
 import pytest
@@ -520,6 +521,26 @@ def test_a_no_interview_answer_is_not_a_failed_batch_for_the_job_posting_email()
     assert s["counts"]["no_interview"] == 1 and s["counts"]["failed_batches"] == 0
 
 
+def _save_batch_of(world, cid):
+    return next(i for i, call in enumerate(world.save_calls) if cid in call)
+
+
+def test_engage_failures_keep_the_save_batch_index():
+    """contract #2: batch_index is the SAVE batch (25 per batch; the browser's
+    progress modal and failed CSV read it so) — a Pairbot rejection in Pairbot
+    batch 0 must not rewrite c4's save batch 1 to 0."""
+    store, world, job, fields = full_search_world()  # PAIR_LAUNCH_SAVE_BATCH=2: [c1, c2], [c4]
+    store.create_session(fields)
+    world.pairbot_mode = {"c4": "reject"}
+    s = run(drive(store, world, fields["id"]))
+    row = store.cands[fields["id"]]["c4"]
+    assert (row["state"], row["reason"], row["failure_stage"]) == ("failed", "pairbot_rejected", "engage")
+    assert _save_batch_of(world, "c4") == 1 and len(world.launch_calls) == 1  # one Pairbot batch, index 0
+    assert row["batch_index"] == 1
+    assert {cid: store.cands[fields["id"]][cid]["batch_index"] for cid in ("c1", "c2")} == {"c1": 0, "c2": 0}
+    assert s["status"] == "completed"
+
+
 def test_a_failed_batch_suppresses_the_job_posting_email():
     """A batch with no Pairbot answer is a failed batch (even though by-job
     later proves the person launched): no job-posting email, as legacy."""
@@ -648,6 +669,9 @@ def test_a_batch_failing_before_its_post_fails_its_rows_instead_of_looping():
         row = store.cands[sid][cid]
         assert (row["state"], row["reason"], row["failure_stage"]) == ("failed", "launch_failed", "engage")
         assert row["error"] == "generate-payload returned no payload"
+        # contract #2: the save batch, not the Pairbot batch (0 for all three).
+        assert row["batch_index"] == _save_batch_of(world, cid)
+    assert store.cands[sid]["c4"]["batch_index"] == 1
     data = {cid: r["data"] for (k, cid), r in store.sourced.items()}
     assert all(data[c]["engage_status"] == "" and "engage_session_id" not in data[c] for c in ("c1", "c2", "c4"))
     assert s["counts"]["failed_batches"] == 1 and s["counts"]["sent"] == 0
@@ -869,3 +893,34 @@ def test_a_do_not_contact_row_dropped_by_the_core_is_skipped_not_replanned(monke
     assert s["status"] == "completed", s.get("error")
     assert states(store, sid)["c1"] == "skipped"
     assert world.pairbot.post_count.get("c1", 0) == 0
+
+
+# ── final review: queue expiry with the runner off ───────────────────────────
+
+def test_with_the_runner_off_nothing_is_claimed_and_housekeeping_expires_the_queue(monkeypatch):
+    """rollout #4: housekeeping keeps running with PAIR_LAUNCH_RUNNER_ENABLED
+    off and cancels a never-claimed session after PAIR_LAUNCH_QUEUED_MAX_S,
+    so it neither holds its job nor launches an hours-old search later."""
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    monkeypatch.setenv("PAIR_LAUNCH_QUEUED_MAX_S", "1800")
+    store, world, job, fields = full_search_world()
+    store.create_session(fields)
+    sid = fields["id"]
+    runner = Runner(store, world)
+    assert run(runner.tick()) == 0 and store.sessions[sid]["status"] == "queued"
+    store.advance(1799)
+    assert run(runner.housekeep())["queue_expired"] == []
+    store.advance(2)
+    out = run(runner.housekeep())
+    assert out["queue_expired"] == [sid]
+    s = store.sessions[sid]
+    assert (s["status"], s["cancel_reason"]) == ("cancelled", "queue_expired")
+    assert store.active_session(job["job_id"]) is None
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "true")
+    assert run(runner.tick()) == 0 and world.search_calls == []  # never runs the stale search
+    monkeypatch.setenv("PAIR_LAUNCH_QUEUED_MAX_S", "0")  # 0 = never
+    f2 = dict(fields, id=str(uuid.uuid4()), idempotency_key="k-2")
+    store.create_session(f2)
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    store.advance(10 * 3600)
+    assert run(runner.housekeep())["queue_expired"] == [] and store.sessions[f2["id"]]["status"] == "queued"

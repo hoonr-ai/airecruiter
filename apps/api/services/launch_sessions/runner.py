@@ -37,8 +37,10 @@ Per worker (8 uvicorn workers, one runner each):
   posted, JobDiva provisioning of whoever was launched, the claims handed
   back, recruiter email (+ applicant sync) if ≥1 launched, cancelled.
 - ``housekeep()`` (every PAIR_LAUNCH_HOUSEKEEPING_S, one worker per run via
-  pg_try_advisory_xact_lock): collecting > 15 min → cancelled, awaiting_input
-  > 24 h → cancelled, retention of rows of sessions finished > 14 days, and
+  pg_try_advisory_xact_lock; it runs with the runner off too): collecting
+  > 15 min → cancelled, awaiting_input > 24 h → cancelled, queued and never
+  claimed > PAIR_LAUNCH_QUEUED_MAX_S (30 min with the runner off, 6 h on) → cancelled 'queue_expired',
+  retention of rows of sessions finished > 14 days, and
   the by-job re-check of unconfirmed rows for 24 h (rows it proves launched
   are provisioned to JobDiva).
 """
@@ -438,11 +440,18 @@ class LaunchSessionRunner:
             result = await self.db(
                 self.store.housekeeping, collecting_ttl_min=cfg.collecting_ttl_min(),
                 review_ttl_h=cfg.review_ttl_h(), retention_days=cfg.retention_days(),
-                recheck_h=cfg.unconfirmed_recheck_h(),
+                recheck_h=cfg.unconfirmed_recheck_h(), queued_max_s=cfg.queued_max_s(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("launch_session_housekeeping_failed: %s", exc)
             return {"error": str(exc)}
+        if result.get("queue_expired"):
+            # Never started: the runner is off (PAIR_LAUNCH_RUNNER_ENABLED) or
+            # the fleet is not claiming — worth a look either way.
+            logger.warning(
+                "launch_session_queue_expired n=%d runner_enabled=%s sessions=%s",
+                len(result["queue_expired"]), cfg.runner_enabled(), ",".join(result["queue_expired"][:20]),
+            )
         try:
             result["rechecked"] = await self.recheck_unconfirmed()
         except Exception as exc:  # noqa: BLE001

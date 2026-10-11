@@ -1112,3 +1112,103 @@ describe("milestones, toasts, telemetry", () => {
     assert.equal(ls.heldBackNote(undefined, 60), "");
   });
 });
+
+describe("final-review fixes (flags, row lookup by id, retries)", () => {
+  const HOOK_SOURCE = new URL("../hooks/use-launch-session.ts", import.meta.url);
+
+  test("sessions are looked for whatever config.enabled says (rollout #3)", () => {
+    assert.equal(ls.shouldLookForSessions({ reattach: true, jobRef: "26-1", configState: "ready" }), true);
+    assert.equal(ls.shouldLookForSessions({ reattach: true, jobRef: "26-1", configState: "loading" }), false);
+    assert.equal(ls.shouldLookForSessions({ reattach: true, jobRef: "26-1", configState: "failed" }), false);
+    assert.equal(ls.shouldLookForSessions({ reattach: false, jobRef: "26-1", configState: "ready" }), false);
+    assert.equal(ls.shouldLookForSessions({ reattach: true, jobRef: "  ", configState: "ready" }), false);
+    // An enabled:false answer is still a ready config: reattach / observe / parked offer run…
+    const off = ls.classifyConfigResponse({ ok: true, status: 200, data: { enabled: false } });
+    assert.equal(off.config?.enabled, false);
+    // …while new clicks keep the legacy flow (serverFlowReady reads enabled).
+    const hook = readFileSync(HOOK_SOURCE, "utf8");
+    assert.match(hook, /if \(!shouldLookForSessions\(\{ reattach, jobRef: ref, configState \}\)\) return;/);
+    assert.doesNotMatch(hook, /!config\?\.enabled\) return/);
+    assert.match(hook, /return Boolean\(cfg\?\.enabled\) && !disabledRef\.current;/);
+    // The résumé viewer of a server table is not gated on enabled either.
+    const page = readFileSync(PAGE_SOURCE, "utf8");
+    assert.doesNotMatch(page, /launchSession\.config\?\.enabled && tableSession/);
+  });
+
+  test("503 {code: disabled} is final for writes; other 5xx / 429 / network are retried", () => {
+    const disabled = { ok: false, status: 503, body: { detail: { code: "disabled", message: "paused" } } };
+    assert.equal(ls.shouldRetryWrite(disabled), false);
+    assert.equal(ls.shouldRetryWrite({ ok: false, status: 503, body: { detail: "busy" } }), true);
+    assert.equal(ls.shouldRetryWrite({ ok: false, status: 429, body: null }), true);
+    assert.equal(ls.shouldRetryWrite({ ok: false, status: 0, body: null }), true);
+    assert.equal(ls.shouldRetryWrite({ ok: false, status: 409, body: null }), false);
+    assert.equal(ls.shouldRetryWrite({ ok: true, status: 201 }), false);
+    assert.equal(ls.classifyCreateResponse(disabled).kind, "disabled");
+  });
+
+  test("a queue-expired session's toast says why in words", () => {
+    assert.equal(ls.cancelReasonText("queue_expired"), "it waited too long for a free launch slot — please launch again");
+    assert.equal(ls.cancelReasonText(" review expired "), "review expired");
+    assert.equal(ls.cancelReasonText(null), "");
+    const [t] = ls.completionToasts(view({ status: "cancelled", terminal: true, cancel_reason: "queue_expired" } as any), []);
+    assert.equal(t.message, "Launch stopped (it waited too long for a free launch slot — please launch again) — nothing more will be sent.");
+    const [u] = ls.completionToasts(view({ status: "cancelled", terminal: true, cancel_reason: "cancelled by user" } as any), []);
+    assert.equal(u.message, "Launch stopped — nothing more will be sent.");
+  });
+
+  test("candidatesQueryString carries ids (deduplicated, at most 50) next to the other filters", () => {
+    assert.equal(ls.candidatesQueryString(), "");
+    assert.equal(ls.candidatesQueryString({ view: "full", ids: ["c1"], limit: 1 }), "?view=full&limit=1&ids=c1");
+    assert.equal(ls.candidatesQueryString({ ids: [" a ", "b", "a", ""] }), "?ids=a%2Cb");
+    const many = Array.from({ length: 60 }, (_, i) => `x${i}`);
+    const sent = new URLSearchParams(ls.candidatesQueryString({ ids: many }).slice(1)).get("ids")!.split(",");
+    assert.equal(sent.length, ls.MAX_ROW_IDS);
+    assert.equal(
+      ls.candidatesQueryString({ states: ["failed", "launched"], view: "table", limit: 500, afterRev: 0, afterId: "" }),
+      "?state=failed%2Claunched&view=table&limit=500&after_rev=0&after_id=",
+    );
+    assert.equal(ls.candidatesQueryString({ offset: 200, limit: 200 }), "?limit=200&offset=200");
+  });
+
+  const fullRowsOf = (...ids: string[]) => ids.map((id, i) => row(id, { rev: i + 1, row: { candidate_id: id, resume_text: `cv ${id}` } }));
+  const pageOf = (rows: ls.LaunchSessionRow[], total = rows.length, more = false): ls.LaunchSessionRowsPage => ({
+    rows, total, cand_rev: 9, has_more: more, next: rows.length ? { after_rev: Number(rows[rows.length - 1].rev), after_id: rows[rows.length - 1].candidate_id } : undefined,
+  });
+
+  test("findFullRow reads the row by id first — a restored table needs no keyset position (contract #1)", async () => {
+    const calls: ls.CandidatesQuery[] = [];
+    const got = await ls.findFullRow({
+      candidateId: "c77",
+      read: async (q) => {
+        calls.push(q);
+        return q.ids ? pageOf(fullRowsOf("c77")) : pageOf([]);
+      },
+    });
+    assert.deepEqual(got, { candidate_id: "c77", resume_text: "cv c77" });
+    assert.deepEqual(calls, [{ view: "full", ids: ["c77"], limit: 1 }]);
+    // total 0 from an API that knows ids: not in this session — no scan.
+    calls.length = 0;
+    assert.equal(await ls.findFullRow({ candidateId: "zz", read: async (q) => { calls.push(q); return pageOf([], 0); } }), null);
+    assert.equal(calls.length, 1);
+  });
+
+  test("findFullRow falls back to the keyset position / scan on an API without ids, or a failed read", async () => {
+    // An older API ignores `ids` and answers the first row of the pool.
+    const pool = fullRowsOf("a", "b", "c", "d");
+    const older = async (q: ls.CandidatesQuery) => {
+      const after = typeof q.afterRev === "number" ? pool.filter((r) => Number(r.rev) > Number(q.afterRev)) : pool;
+      const rows = after.slice(0, q.limit ?? 10);
+      return pageOf(rows, after.length, rows.length < after.length);
+    };
+    assert.deepEqual(await ls.findFullRow({ candidateId: "c", read: older, known: { after_rev: 2, after_id: "b" } }),
+      { candidate_id: "c", resume_text: "cv c" });
+    assert.deepEqual(await ls.findFullRow({ candidateId: "d", read: older, scanLimit: 1 }), { candidate_id: "d", resume_text: "cv d" });
+    assert.equal(await ls.findFullRow({ candidateId: "nope", read: older, scanLimit: 1, scanPages: 2 }), null);
+    // The by-id read failed (null): the scan still runs.
+    let n = 0;
+    const flaky = async (q: ls.CandidatesQuery) => (n++ === 0 ? null : older(q));
+    assert.deepEqual(await ls.findFullRow({ candidateId: "b", read: flaky }), { candidate_id: "b", resume_text: "cv b" });
+    // The hook delegates to it.
+    assert.match(readFileSync(HOOK_SOURCE, "utf8"), /return findFullRow\(\{/);
+  });
+});

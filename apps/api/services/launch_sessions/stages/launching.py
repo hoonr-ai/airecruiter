@@ -339,7 +339,11 @@ async def _on_batch(
     ctx: StageContext, evt: Dict[str, Any], excluded_marked: Set[str], hook_stopped: Set[Any],
 ) -> Dict[str, int]:
     """Re-read the batch's rows (engage state is the ground truth) and move
-    each to its state; rows still possibly at Pairbot stay 'launching'."""
+    each to its state; rows still possibly at Pairbot stay 'launching'.
+
+    A failed row keeps the batch_index its SAVE batch wrote (the browser's
+    progress modal and failed CSV read it as the save batch of 25); the
+    Pairbot batch ``idx`` (75 per batch) goes in the 'batch' event only."""
     internal = evt.get("_internal") or {}
     idx = evt.get("index")
     status = str(internal.get("status") or evt.get("status") or "")
@@ -375,20 +379,20 @@ async def _on_batch(
             excluded_marked.add(cid)
         elif kind == "failed":
             items.append({"candidate_id": cid, "state": S.ROW_FAILED, "reason": "pairbot_rejected",
-                          "failure_stage": "engage", "batch_index": idx,
+                          "failure_stage": "engage",
                           "error": str(evt.get("error") or "no interview created")[:300]})
             failed += 1
         elif kind == "in_flight":
             items.append({"candidate_id": cid, "state": S.ROW_SKIPPED, "reason": "in_flight"})
         elif kind == "no_row":
             items.append({"candidate_id": cid, "state": S.ROW_FAILED, "reason": "not_saved",
-                          "failure_stage": "engage", "batch_index": idx, "error": "no saved row for this job"})
+                          "failure_stage": "engage", "error": "no saved row for this job"})
             failed += 1
         elif kind == "launchable" and batch_failed and cid in failed_ids:
             # The batch failed before its POST (nothing recorded for it):
             # failed, claim handed back — re-planning would hit the same error.
             items.append({"candidate_id": cid, "state": S.ROW_FAILED, "reason": "launch_failed",
-                          "failure_stage": "engage", "batch_index": idx,
+                          "failure_stage": "engage",
                           "error": str(evt.get("error") or "launch batch failed")[:300]})
             release.append(cid)
             failed += 1

@@ -290,6 +290,22 @@ export function classifyConfigResponse(res: {
 export const lookupRetryDelay = (attempt: number, capMs = 30000): number =>
   Math.min(capMs, 1000 * 2 ** Math.max(0, Math.floor(attempt) - 1));
 
+/**
+ * Look for this job's sessions on page load (reattach to the user's own,
+ * the banner for a teammate's, the parked needs-contact offer)? Once the
+ * config has answered — WHATEVER its `enabled` says. `enabled` gates only
+ * STARTING a new server launch (serverFlowReady): a session that already
+ * exists still runs to the end on the server when server launch (or its
+ * runner) is switched off, so the page must keep showing it, let the
+ * recruiter answer its QA review / needs-contact rows, and keep a legacy
+ * launch from starting on the job underneath it.
+ */
+export const shouldLookForSessions = (args: {
+  reattach: boolean;
+  jobRef: string | null | undefined;
+  configState: "loading" | "ready" | "failed";
+}): boolean => args.reattach && String(args.jobRef ?? "").trim() !== "" && args.configState === "ready";
+
 // ── Click-time snapshot (POST /jobs/{job}/launch-sessions) ──────────────────
 
 export type SearchAttempt<P> = { label: string; query: string; payload: P };
@@ -549,6 +565,18 @@ export function classifyCreateResponse(res: {
 /** Worth sending the same request again (same idempotency key)? */
 export const isTransientStatus = (status: number): boolean => status === 0 || status === 408 || status === 429 || status >= 500;
 
+/**
+ * Resend this write (hooks/use-launch-session writeWithRetry)? 429 / 5xx /
+ * network — but never 503 `{code: disabled}`: launches are switched off
+ * (PAIR_SERVER_LAUNCH_ENABLED / PAIR_LAUNCH_RUNNER_ENABLED), which no retry
+ * within the next half minute changes.
+ */
+export function shouldRetryWrite(res: { ok: boolean; status: number; body?: unknown }): boolean {
+  if (res.ok) return false;
+  if (res.status === 503 && detailCode(res.body) === "disabled") return false;
+  return isTransientStatus(res.status);
+}
+
 /** Retry-After (seconds or an HTTP date) → ms; null when absent / unreadable. */
 export function retryAfterMs(header: string | null | undefined, nowMs: number = Date.now()): number | null {
   if (header === null || header === undefined) return null;
@@ -756,6 +784,81 @@ export function keysetBeforeCursors(
   return out;
 }
 
+/** At most this many ids per `GET …/candidates?ids=` (the server answers 422 above it). */
+export const MAX_ROW_IDS = 50;
+
+export interface CandidatesQuery {
+  states?: readonly string[];
+  view?: "table" | "full" | "failed";
+  limit?: number;
+  offset?: number;
+  afterRev?: number;
+  afterId?: string;
+  /** Read these rows by candidate id (deduplicated; the first MAX_ROW_IDS are sent). */
+  ids?: readonly string[];
+}
+
+/** The `GET /launch-sessions/{id}/candidates` query string: "" or "?…". */
+export function candidatesQueryString(q: CandidatesQuery = {}): string {
+  const qs = new URLSearchParams();
+  if (q.states && q.states.length) qs.set("state", q.states.join(","));
+  if (q.view) qs.set("view", q.view);
+  if (q.limit) qs.set("limit", String(q.limit));
+  if (q.offset) qs.set("offset", String(q.offset));
+  if (typeof q.afterRev === "number") {
+    qs.set("after_rev", String(q.afterRev));
+    qs.set("after_id", q.afterId ?? "");
+  }
+  const ids = [...new Set((q.ids ?? []).map((i) => String(i ?? "").trim()).filter(Boolean))].slice(0, MAX_ROW_IDS);
+  if (ids.length) qs.set("ids", ids.join(","));
+  const out = qs.toString();
+  return out ? `?${out}` : "";
+}
+
+/**
+ * One row's FULL record (with résumé text — the table holds light rows).
+ *  1. By id (`view=full&ids=<id>&limit=1`): needs no keyset position, so it
+ *     also works for a table restored from storage after a reload, whose
+ *     session this page never followed. An answer with `total: 0` is final
+ *     (the row is not in that session).
+ *  2. Fallback — an API without `ids` (it ignores the parameter and answers
+ *     a page of other rows) or a failed read: the keyset position just
+ *     before the row with limit 1, then a short forward scan from that
+ *     position, else from the row's cached rev, else from the start.
+ * null when it can't be found.
+ */
+export async function findFullRow(args: {
+  candidateId: string;
+  read: (q: CandidatesQuery) => Promise<LaunchSessionRowsPage | null>;
+  known?: KeysetCursor | null;
+  cachedRev?: number;
+  scanLimit?: number;
+  scanPages?: number;
+}): Promise<Record<string, any> | null> {
+  const { candidateId, read } = args;
+  const find = (page: LaunchSessionRowsPage | null) => page?.rows?.find((r) => r.candidate_id === candidateId);
+  const byId = await read({ view: "full", ids: [candidateId], limit: 1 });
+  const direct = find(byId);
+  if (direct) return direct.row ?? null;
+  if (byId && Number(byId.total) === 0) return null;
+  const known = args.known ?? null;
+  if (known) {
+    const hit = find(await read({ view: "full", limit: 1, afterRev: known.after_rev, afterId: known.after_id }));
+    if (hit) return hit.row ?? null;
+  }
+  const rev = Number(args.cachedRev);
+  let cursor: KeysetCursor = known ?? { after_rev: Number.isFinite(rev) ? rev : 0, after_id: "" };
+  for (let page = 0; page < (args.scanPages ?? 5); page++) {
+    const data = await read({ view: "full", limit: args.scanLimit ?? 10, afterRev: cursor.after_rev, afterId: cursor.after_id });
+    if (!data) return null;
+    const hit = find(data);
+    if (hit) return hit.row ?? null;
+    if (!data.has_more || !data.next) return null;
+    cursor = data.next;
+  }
+  return null;
+}
+
 /** The résumé text of a full candidate row (the browser's stream row), "" when it has none. */
 export const resumeTextOfRow = (row: Record<string, any> | null | undefined): string =>
   String(row?.resume_text || row?.resumeText || row?.data?.resume_text || "");
@@ -773,6 +876,17 @@ export const noInterviewIds = (rows: readonly LaunchSessionRow[]): Set<string> =
 // ── Contact layers (services/launch_sessions/contacts.py) ───────────────────
 
 const clean = (v: unknown): string => String(v ?? "").trim();
+
+// Machine cancel reasons the server writes itself, in the recruiter's words.
+const CANCEL_REASON_TEXT: Record<string, string> = {
+  queue_expired: "it waited too long for a free launch slot — please launch again",
+};
+
+/** A session's cancel_reason for a toast ("" when there is none). */
+export const cancelReasonText = (reason: unknown): string => {
+  const r = clean(reason);
+  return CANCEL_REASON_TEXT[r] ?? r;
+};
 
 /**
  * The contact the browser would launch with: QA-confirmed FINAL contacts
@@ -1726,7 +1840,7 @@ export function completionToasts(
       type: "info",
       message: o.sent > 0
         ? `Launch stopped — ${o.sent} candidate${plural(o.sent)} already launched stay launched.`
-        : `Launch stopped${clean(view.cancel_reason) && !/by user|by recruiter/i.test(clean(view.cancel_reason)) ? ` (${clean(view.cancel_reason)})` : ""} — nothing more will be sent.`,
+        : `Launch stopped${cancelReasonText(view.cancel_reason) && !/by user|by recruiter/i.test(cancelReasonText(view.cancel_reason)) ? ` (${cancelReasonText(view.cancel_reason)})` : ""} — nothing more will be sent.`,
     });
     return out;
   }
