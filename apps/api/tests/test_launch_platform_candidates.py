@@ -112,6 +112,32 @@ def _norm(line: str) -> str:
     return re.sub(r'"gender_updated_at": "[^"]+"', '"gender_updated_at": "TS"', line)
 
 
+def _assert_same_stream(actual: List[str], expected: List[str]) -> None:
+    """Same lines as the pre-refactor stream. Gender patches come from
+    background tasks, so WHERE they interleave depends on the event loop's
+    scheduling (it differs between Python 3.11 and 3.12): compare everything
+    else in order, the gender patches as a set, and require each gender patch
+    to follow its candidate's row."""
+    def is_gender(line: str) -> bool:
+        return '"stage": "gender"' in line
+
+    assert [line for line in actual if not is_gender(line)] == [line for line in expected if not is_gender(line)]
+    expected_gender = sorted(line for line in expected if is_gender(line))
+    if expected_gender:
+        # A clean stream waits for every lookup: all patches must be there.
+        assert sorted(line for line in actual if is_gender(line)) == expected_gender
+    # On an error the stream ends and pending lookups are cancelled, so a
+    # patch may or may not have landed first; any that did still obey the
+    # ordering rule below.
+    for i, line in enumerate(actual):
+        if is_gender(line):
+            cid = json.loads(line)["candidate_id"]
+            assert any(
+                prev.startswith('{"type": "candidate", ') and json.loads(prev)["data"].get("candidate_id") == cid
+                for prev in actual[:i]
+            ), f"gender patch for {cid} arrived before its candidate row"
+
+
 def _endpoint_lines(req) -> List[str]:
     async def go():
         resp = await rc.search_jobdiva_candidates(req, UserIdentity(email="q@x.com", role="admin"))
@@ -135,7 +161,7 @@ def _iter_events(req, **kw) -> List[Dict[str, Any]]:
 def test_search_endpoint_output_is_identical_to_before_the_refactor(monkeypatch, name):
     rec = _install(monkeypatch)
     lines = _endpoint_lines(CandidateSearchRequest(**REQUESTS[name]))
-    assert [_norm(line) for line in lines] == GOLDEN[name]["chunks"]
+    _assert_same_stream([_norm(line) for line in lines], GOLDEN[name]["chunks"])
     assert rec["cross"] == GOLDEN[name]["cross"]
 
 
@@ -143,7 +169,7 @@ def test_search_endpoint_output_is_identical_to_before_the_refactor(monkeypatch,
 def test_iter_search_events_yields_the_endpoints_lines_as_dicts(monkeypatch, name):
     rec = _install(monkeypatch)
     events = _iter_events(CandidateSearchRequest(**REQUESTS[name]))
-    assert [_norm(json.dumps(e) + "\n") for e in events] == GOLDEN[name]["chunks"]
+    _assert_same_stream([_norm(json.dumps(e) + "\n") for e in events], GOLDEN[name]["chunks"])
     assert rec["cross"] == [["J1", "J1"]]                     # scheduled once, like the endpoint
     if name == "ok":
         gender = [e for e in events if e.get("stage") == "gender"]
