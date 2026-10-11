@@ -93,6 +93,9 @@ interface MissingContactsModalProps {
   allowPartial?: boolean;
   jobId?: string;
   jobDivaId?: string;
+  // "Skip remaining" when it should mean more than closing (server launch
+  // sessions: the skipped rows are recorded as skipped). Omitted = onClose.
+  onSkipRemaining?: () => void;
 }
 
 function countDigits(s: string) {
@@ -136,6 +139,7 @@ export function MissingContactsModal({
   allowPartial = false,
   jobId,
   jobDivaId,
+  onSkipRemaining,
 }: MissingContactsModalProps) {
   const { accounts } = useMsal();
   const username = accounts?.[0]?.username ?? accounts?.[0]?.name ?? "unknown";
@@ -546,7 +550,7 @@ export function MissingContactsModal({
                 needs_email_count: candidates.filter((c) => c.needsEmail).length,
                 skipped_candidate_ids: candidates.map((c) => c.candidate_id).join(","),
               });
-              onClose();
+              (onSkipRemaining ?? onClose)();
             }}
           >
             Skip remaining

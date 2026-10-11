@@ -66,7 +66,7 @@ jobs:
         run: |
           npm ci --legacy-peer-deps
           npm run build
-          node --experimental-strip-types --test lib/activityTimeline.test.ts lib/candidateVisibility.test.ts lib/launch-rules.test.ts lib/nr-config.test.ts lib/newrelic.test.ts lib/analytics-props.test.ts lib/fetch-auth.test.ts
+          node --experimental-strip-types --test lib/activityTimeline.test.ts lib/candidateVisibility.test.ts lib/launch-rules.test.ts lib/launch-session.test.ts lib/nr-config.test.ts lib/newrelic.test.ts lib/analytics-props.test.ts lib/fetch-auth.test.ts
 
   # ----------------------
   # QA DEPLOYMENT

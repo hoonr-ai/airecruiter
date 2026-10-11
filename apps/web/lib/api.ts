@@ -5,6 +5,12 @@
 import { trackEvent } from "@/lib/analytics";
 import { msalInstance } from "@/lib/msal-config";
 import type { Snapshot } from "@/app/admin/live-report/types";
+import {
+  retryAfterMs,
+  type CreateSessionBody,
+  type LaunchSessionRowsPage,
+  type LaunchSessionView,
+} from "@/lib/launch-session";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL!;
 
@@ -362,6 +368,143 @@ function dashboardQuery(opts?: DashboardQuery & { postedFrom?: string | null; po
   return suffix ? `?${suffix}` : "";
 }
 
+// ---- Launch sessions (backend-driven Source & Launch) ------------------------
+// apps/api/routers/launch_sessions.py; the browser rules are in
+// lib/launch-session.ts and the polling in hooks/use-launch-session.ts.
+// Not `req`: every answer comes back as a value (status, parsed body,
+// Retry-After) instead of a throw — the caller decides on attach / retry /
+// legacy fallback — and polls don't emit an api_request_* event every 3 s.
+
+export type LaunchSessionResult<T> =
+  | { ok: true; status: number; data: T }
+  | { ok: false; status: number; body: unknown; retryAfterMs: number | null; network: boolean };
+
+// Every launch-session request has a deadline (token + response + body): the
+// poll loop awaits one request at a time, and nginx holds /api/ open for a day
+// (proxy_read_timeout 86400), so a black-holed connection (VPN / Wi-Fi drop)
+// or a stuck worker would otherwise freeze it. A timeout reads as a network
+// error — retried like one; every write is safe to resend (create replays by
+// its key, uploads upsert, confirm / cancel / start answer 409 on a replay,
+// child creates use server-derived keys).
+const LS_READ_TIMEOUT_MS = 20000;
+const LS_WRITE_TIMEOUT_MS = 60000;
+
+async function lsFetch<T>(
+  path: string,
+  init: { method?: string; body?: unknown; timeoutMs?: number } = {},
+): Promise<LaunchSessionResult<T>> {
+  const method = init.method || "GET";
+  const networkError: LaunchSessionResult<T> = { ok: false, status: 0, body: null, retryAfterMs: null, network: true };
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<LaunchSessionResult<T>>((resolve) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      resolve(networkError);
+    }, init.timeoutMs ?? (method === "GET" ? LS_READ_TIMEOUT_MS : LS_WRITE_TIMEOUT_MS));
+  });
+  const run = async (): Promise<LaunchSessionResult<T>> => {
+    let res: Response;
+    try {
+      res = await authFetch(`${API_BASE}${path}`, {
+        method,
+        headers: init.body !== undefined ? { "Content-Type": "application/json" } : {},
+        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+        signal: controller?.signal,
+      });
+    } catch {
+      return networkError;
+    }
+    let body: unknown = null;
+    try {
+      const text = await res.text();
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = text;
+      }
+    } catch {
+      // A dropped / aborted body read: an error answer's status still decides.
+      if (res.ok) return networkError;
+    }
+    if (res.ok) return { ok: true, status: res.status, data: body as T };
+    return {
+      ok: false,
+      status: res.status,
+      body,
+      retryAfterMs: retryAfterMs(res.headers.get("Retry-After")),
+      network: false,
+    };
+  };
+  try {
+    return await Promise.race([run(), deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const lsJob = (jobRef: string) => `/api/v1/jobs/${encodeURIComponent(jobRef)}/launch-sessions`;
+const lsSession = (id: string) => `/api/v1/launch-sessions/${encodeURIComponent(id)}`;
+type LsContacts = Record<string, { phone?: string; email?: string }>;
+
+export const launchSessionsApi = {
+  config: () => lsFetch<unknown>(`/api/v1/launch-sessions/config`),
+  create: (jobRef: string, body: CreateSessionBody) =>
+    lsFetch<{ session: LaunchSessionView }>(lsJob(jobRef), { method: "POST", body }),
+  listForJob: (jobRef: string, opts: { active?: boolean; needsContact?: boolean; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.active) qs.set("active", "true");
+    if (opts.needsContact) qs.set("needs_contact", "true");
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    const q = qs.toString();
+    return lsFetch<{ sessions: LaunchSessionView[] }>(`${lsJob(jobRef)}${q ? `?${q}` : ""}`);
+  },
+  get: (id: string) => lsFetch<{ session: LaunchSessionView }>(lsSession(id)),
+  candidates: (
+    id: string,
+    q: {
+      states?: string[];
+      view?: "table" | "full" | "failed";
+      limit?: number;
+      offset?: number;
+      afterRev?: number;
+      afterId?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (q.states && q.states.length) qs.set("state", q.states.join(","));
+    if (q.view) qs.set("view", q.view);
+    if (q.limit) qs.set("limit", String(q.limit));
+    if (q.offset) qs.set("offset", String(q.offset));
+    if (typeof q.afterRev === "number") {
+      qs.set("after_rev", String(q.afterRev));
+      qs.set("after_id", q.afterId ?? "");
+    }
+    const s = qs.toString();
+    return lsFetch<LaunchSessionRowsPage>(`${lsSession(id)}/candidates${s ? `?${s}` : ""}`);
+  },
+  addCandidates: (id: string, candidates: unknown[]) =>
+    lsFetch<{ added: number; total: number }>(`${lsSession(id)}/candidates`, { method: "POST", body: { candidates } }),
+  start: (id: string) => lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/start`, { method: "POST" }),
+  confirm: (id: string, body: { contacts: LsContacts; candidate_ids?: string[] }) =>
+    lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/confirm`, { method: "POST", body }),
+  needsContact: (
+    id: string,
+    body: { contacts: LsContacts; candidate_ids: string[]; skip_ids: string[]; idempotency_key?: string },
+  ) =>
+    lsFetch<{ session: LaunchSessionView | null; skipped: number }>(`${lsSession(id)}/needs-contact`, {
+      method: "POST",
+      body,
+    }),
+  retryFailed: (id: string, body: { candidate_ids?: string[]; idempotency_key?: string } = {}) =>
+    lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/retry-failed`, { method: "POST", body }),
+  cancel: (id: string, reason?: string) =>
+    lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/cancel`, {
+      method: "POST",
+      body: reason ? { reason: reason.slice(0, 200) } : {},
+    }),
+};
+
 export const api = {
   jobs: {
     fetch: (body: { job_id: string }) =>
@@ -579,4 +722,5 @@ export const api = {
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
+  launchSessions: launchSessionsApi,
 };
