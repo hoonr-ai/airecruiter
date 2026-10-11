@@ -1,0 +1,76 @@
+{
+  "function": "chooseSelectionPool",
+  "cases": [
+    {
+      "name": "table at least as long",
+      "input": {
+        "table": [
+          {
+            "candidate_id": "a"
+          },
+          {
+            "candidate_id": "b"
+          }
+        ],
+        "accumulated": [
+          {
+            "candidate_id": "a"
+          }
+        ]
+      },
+      "expected": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "equal lengths keep the table",
+      "input": {
+        "table": [
+          {
+            "candidate_id": "t"
+          }
+        ],
+        "accumulated": [
+          {
+            "candidate_id": "acc"
+          }
+        ]
+      },
+      "expected": [
+        "t"
+      ]
+    },
+    {
+      "name": "shorter table falls back to accumulated",
+      "input": {
+        "table": [
+          {
+            "candidate_id": "a"
+          }
+        ],
+        "accumulated": [
+          {
+            "candidate_id": "a",
+            "match_score": 40
+          },
+          {
+            "candidate_id": "b"
+          }
+        ]
+      },
+      "expected": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "both empty",
+      "input": {
+        "table": [],
+        "accumulated": []
+      },
+      "expected": []
+    }
+  ]
+}

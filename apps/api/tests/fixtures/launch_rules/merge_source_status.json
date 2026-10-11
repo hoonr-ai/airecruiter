@@ -1,0 +1,61 @@
+{
+  "function": "mergeSourceStatus",
+  "cases": [
+    {
+      "name": "ok is sticky",
+      "input": {
+        "prev": {
+          "JobDiva": {
+            "source": "JobDiva",
+            "status": "ok",
+            "count": 3
+          }
+        },
+        "status": {
+          "source": "JobDiva",
+          "status": "error"
+        }
+      },
+      "expected": {
+        "JobDiva": {
+          "source": "JobDiva",
+          "status": "ok",
+          "count": 3
+        }
+      }
+    },
+    {
+      "name": "error then ok",
+      "input": {
+        "prev": {
+          "LinkedIn": {
+            "source": "LinkedIn",
+            "status": "error"
+          }
+        },
+        "status": {
+          "source": "LinkedIn",
+          "status": "ok",
+          "count": 1
+        }
+      },
+      "expected": {
+        "LinkedIn": {
+          "source": "LinkedIn",
+          "status": "ok",
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "no source",
+      "input": {
+        "prev": {},
+        "status": {
+          "status": "ok"
+        }
+      },
+      "expected": {}
+    }
+  ]
+}

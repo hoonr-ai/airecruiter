@@ -1,0 +1,72 @@
+{
+  "function": "applyStreamPatch",
+  "cases": [
+    {
+      "name": "patch wins",
+      "input": {
+        "row": {
+          "candidate_id": "a",
+          "match_score": 50,
+          "email": "a@x.com"
+        },
+        "patch": {
+          "match_score": 80,
+          "offer_status": "Offer Accepted"
+        }
+      },
+      "expected": {
+        "candidate_id": "a",
+        "match_score": 80,
+        "email": "a@x.com",
+        "offer_status": "Offer Accepted"
+      }
+    },
+    {
+      "name": "phone downgrade blocked",
+      "input": {
+        "row": {
+          "candidate_id": "a",
+          "phone": "408-555-1234"
+        },
+        "patch": {
+          "phone": ""
+        }
+      },
+      "expected": {
+        "candidate_id": "a",
+        "phone": "408-555-1234"
+      }
+    },
+    {
+      "name": "phone upgrade",
+      "input": {
+        "row": {
+          "candidate_id": "a",
+          "phone": "12"
+        },
+        "patch": {
+          "phone": " 408-555-1234 "
+        }
+      },
+      "expected": {
+        "candidate_id": "a",
+        "phone": "408-555-1234"
+      }
+    },
+    {
+      "name": "null phone patch",
+      "input": {
+        "row": {
+          "candidate_id": "a"
+        },
+        "patch": {
+          "phone": null
+        }
+      },
+      "expected": {
+        "candidate_id": "a",
+        "phone": ""
+      }
+    }
+  ]
+}

@@ -114,9 +114,8 @@ import {
   SCORE_BAND_EXCELLENT,
   SCORE_BAND_GOOD,
   SCORE_BAND_STRONG,
-  isOutreachEligibleScore,
 } from "@/lib/match-score";
-import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
+import { API_BASE, api, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion, canEditQuestionType } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
@@ -128,97 +127,56 @@ import {
   mostCommon,
   readNdjson,
 } from "@/lib/contact-lookup";
+import {
+  AUTO_LAUNCH_DEFAULT_COUNT,
+  AUTO_LAUNCH_MAX_COUNT,
+  LAUNCH_ENRICH_GROUP_CONCURRENCY,
+  LAUNCH_ENRICH_GROUP_SIZE,
+  QUALIFIED_TARGET_COUNT,
+  addStreamCandidate,
+  applyContactOverrides,
+  applyStreamPatch,
+  buildEnrichRequest,
+  buildSaveCandidatePayload,
+  chooseSelectionPool,
+  clampLaunchCount,
+  computeAutoLaunchSelection as computeAutoLaunchSelectionRule,
+  computeHardFilterSkips,
+  countQualified,
+  deduplicateCandidatesUI,
+  dncDroppedIds,
+  dropStreamCandidate,
+  foundProfilesStatus,
+  getCandidateCurrentCompanies,
+  getCandidateDisplayName,
+  getCandidateExclusionReason,
+  getCandidateLaunchEmail,
+  getCandidateLaunchPhone,
+  interpretEnrichAnswer,
+  isDetailFailedPatch,
+  isLaunchableNow,
+  isValidLaunchEmail,
+  isValidLaunchPhone,
+  launchedSetsFromResponse,
+  mapStageToStatus,
+  mergeContactOverrides,
+  mergeSourceStatus,
+  patchStreamCandidates,
+  resolveLinkedInUrl,
+  selectCandidatesMissingContact,
+  selectSaveCandidates,
+  splitReadyNeedsContact,
+  stagePortal,
+  streamCandidateId,
+  withClientConflictFlag as withClientConflictFlagRule,
+} from "@/lib/launch-rules";
 
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
-const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const PLACEHOLDER_LAUNCH_EMAILS = new Set([
-  "your-email@example.com",
-  "email@example.com",
-  "example@example.com",
-  "test@example.com",
-  "candidate@example.com",
-  "noreply@example.com",
-]);
 
-function isValidLaunchEmail(value: string | null | undefined): boolean {
-  const email = String(value || "").trim().toLowerCase();
-  if (!email || !LAUNCH_EMAIL_RE.test(email)) return false;
-  if (PLACEHOLDER_LAUNCH_EMAILS.has(email)) return false;
-  if (email.endsWith("@example.com")) return false;
-  if (email.endsWith("@noemail.pair.ai")) return false;
-  // JobDiva auto-generates Auto_<id>@jobdiva.com for candidates with no real
-  // email — dead addresses the backend blanks (engagement.py _is_placeholder_email).
-  // Treat them as no-email here too so the launch gate matches the backend: a
-  // synthetic-email-only candidate then routes to enrichment / manual entry
-  // instead of slipping into the payload and failing the whole batch with a 400.
-  if (email.endsWith("@jobdiva.com")) return false;
-  return true;
-}
-
-function launchPhoneDigits(value: string | null | undefined): string {
-  return String(value || "").replace(/\D/g, "");
-}
-
-function isValidLaunchPhone(value: string | null | undefined): boolean {
-  return launchPhoneDigits(value).length >= 7;
-}
-
-// Defensive phone guard for streamed patches: the backend already makes
-// CandidatesDetail/hydration phone patches upgrade-only (mobile-preferred), so
-// here we only block the obvious downgrade — replacing a valid number with an
-// empty/invalid one. Mobile-vs-home is decided server-side (slot/type known).
-function betterPhoneUI(current: string | null | undefined, incoming: string | null | undefined): string {
-  const cur = String(current || "").trim();
-  const inc = String(incoming || "").trim();
-  if (!inc) return cur;
-  if (normalizePhone(inc) === null && normalizePhone(cur) !== null) return cur;
-  return inc;
-}
-
-function getCandidateLaunchEmail(candidate: any): string {
-  return String(
-    candidate?.email ||
-    candidate?.workEmail ||
-    candidate?.personalEmail ||
-    candidate?.enhanced_info?.email ||
-    candidate?.enhanced_info?.workEmail ||
-    candidate?.enhanced_info?.personalEmail ||
-    candidate?.data?.email ||
-    candidate?.data?.workEmail ||
-    candidate?.data?.personalEmail ||
-    candidate?.data?.enhanced_info?.email ||
-    candidate?.data?.enhanced_info?.workEmail ||
-    candidate?.data?.enhanced_info?.personalEmail ||
-    candidate?.data?.zoominfo_contact_enrichment?.workEmail ||
-    candidate?.data?.zoominfo_contact_enrichment?.personalEmail ||
-    ""
-  ).trim().toLowerCase();
-}
-
-// The phone PAIR calls: the candidate's personal number only. Work lines
-// (workPhone, or a phone an earlier lookup saved from one) are never used, so
-// such a candidate is enriched at launch to find their own number.
-function getCandidateLaunchPhone(candidate: any): string {
-  const enrich = candidate?.data?.zoominfo_contact_enrichment || {};
-  const digits = (value: any) => String(value || "").replace(/\D/g, "");
-  const savedWork = digits(enrich.workPhone);
-  const savedMobile = digits(enrich.mobilePhone);
-  const isSavedWorkNumber = (value: any) =>
-    !!savedWork && digits(value) === savedWork && digits(value) !== savedMobile;
-  const options = [
-    candidate?.phone,
-    candidate?.mobilePhone,
-    candidate?.enhanced_info?.phone,
-    candidate?.enhanced_info?.mobilePhone,
-    candidate?.data?.phone,
-    candidate?.data?.mobilePhone,
-    candidate?.data?.enhanced_info?.phone,
-    candidate?.data?.enhanced_info?.mobilePhone,
-    enrich.mobilePhone,
-  ];
-  return String(options.find(value => String(value || "").trim() && !isSavedWorkNumber(value)) || "").trim();
-}
+// Contact validity, the launch email/phone getters and the streamed-phone
+// guard (betterPhoneUI) live in lib/launch-rules.ts, shared with the
+// server-side launch runner (services/launch_sessions/rules.py).
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -563,210 +521,8 @@ const diffSnapshots = (before: StepSnapshot = {}, after: StepSnapshot = {}) => {
 const rubricKeyFor = (category: string, baseValue: string): string =>
   `${category}|${(baseValue || "").trim()}`;
 
-const getCandidateDisplayName = (candidate: {
-  name?: string;
-  firstName?: string;
-  lastName?: string;
-  title?: string;
-  source?: string;
-}) => {
-  const normalize = (value?: string) => {
-    const cleaned = (value || "").replace(/\s+/g, " ").trim();
-    if (!cleaned) return "";
-    const lowered = cleaned.toLowerCase();
-    if (["linkedin candidate", "professional candidate", "unknown candidate", "unknown"].includes(lowered)) {
-      return "";
-    }
-    return cleaned;
-  };
-
-  const fullName = normalize(candidate.name);
-  if (fullName) return fullName;
-
-  const composed = normalize([candidate.firstName, candidate.lastName].filter(Boolean).join(" "));
-  if (composed) return composed;
-
-  const title = normalize(candidate.title);
-  if (title) return title;
-
-  return candidate.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate";
-};
-
-// Extracted UI dedupe logic using email OR phone
-// Client-side cross-source de-dup. POLICY: a JobDiva row is never the dropped
-// side of a collision — when the same person appears from JobDiva and another
-// source we MERGE the best info into one surviving row and keep JobDiva's
-// identity (so it stays Launch-PAIR-actionable). Matches only on STRONG
-// identity (real email / phone+name / LinkedIn URL) so two different people
-// sharing a common name+city are never falsely merged.
-const isPlaceholderEmailUI = (e?: string) => {
-  const n = String(e || "").trim().toLowerCase();
-  if (!n || !n.includes("@")) return true;
-  const domain = n.split("@").pop() || "";
-  if (domain === "jobdiva.com") return true;
-  if (n.endsWith("@noemail.pair.ai")) return true;
-  return false;
-};
-const candIsJobDivaUI = (c: any) => {
-  const s = String(c?.source || "").toLowerCase();
-  if (s.startsWith("jobdiva")) return true;
-  const srcs = Array.isArray(c?.sources) ? c.sources : [];
-  if (srcs.some((x: any) => String(x || "").toLowerCase().startsWith("jobdiva"))) return true;
-  return Boolean(String(c?.jobdiva_candidate_id || c?.jobdiva_id || c?.data?.jobdiva_candidate_id || "").trim());
-};
-const deduplicateCandidatesUI = (candidatesList: any[]) => {
-  const normalizeEmail = (e?: string) => String(e || "").trim().toLowerCase();
-  const normalizePhoneValue = (p?: string) => {
-    const digits = String(p || "").replace(/\D/g, "");
-    if (digits.length < 7) return "";
-    // A shared/placeholder line (e.g. 000-000-0000, 555-555-5555) must not
-    // collapse a whole agency's candidates into one row.
-    if (new Set(digits.split("")).size < 4) return "";
-    return digits.slice(-10);
-  };
-  const getName = (c: any) => {
-    const f = String(c.firstName || "").toLowerCase().trim();
-    const l = String(c.lastName || "").toLowerCase().trim();
-    const full = `${f} ${l}`.trim();
-    return full || String(c.name || "").toLowerCase().trim();
-  };
-  const getEmail = (c: any) => {
-    const e = normalizeEmail(c.email || c.data?.email || c.enhanced_info?.email);
-    return e && !isPlaceholderEmailUI(e) ? e : "";
-  };
-  const getPhone = (c: any) => normalizePhoneValue(c.phone || c.data?.phone || c.enhanced_info?.phone);
-  const getLinkedin = (c: any) => {
-    const u = String(c.profile_url || c.data?.urls?.linkedin || c.linkedin_url || "").trim().toLowerCase();
-    return u.includes("linkedin.com") ? u.split("?")[0].replace(/\/+$/, "") : "";
-  };
-
-  const keysOf = (c: any): string[] => {
-    const keys: string[] = [];
-    const email = getEmail(c);
-    if (email) keys.push(`email:${email}`);
-    const phone = getPhone(c);
-    const name = getName(c);
-    if (phone && name && name.includes(" ")) keys.push(`phone-name:${phone}|${name}`);
-    const li = getLinkedin(c);
-    if (li) keys.push(`linkedin:${li}`);
-    return keys;
-  };
-
-  const mergeBestOf = (dst: any, src: any) => {
-    const srcList = (c: any) => {
-      const out: string[] = [];
-      if (Array.isArray(c.sources)) out.push(...c.sources.filter(Boolean).map(String));
-      if (c.source) out.push(String(c.source));
-      return out;
-    };
-    const merged = Array.from(new Set([...srcList(dst), ...srcList(src)]));
-    if (merged.length) dst.sources = merged;
-    for (const f of ["phone", "location", "city", "state", "title", "headline",
-      "resume_id", "profile_url", "linkedin_url", "image_url", "experience_years",
-      "jobdiva_candidate_id", "jobdiva_id"]) {
-      if (!dst[f] && src[f]) dst[f] = src[f];
-    }
-    // No-contact flag is sticky-true across merges: if EITHER row of the same
-    // person is flagged, the survivor stays flagged (dropping the flag here
-    // would silently re-enable actions on a blocked candidate).
-    if (src.no_contact === true && dst.no_contact !== true) {
-      dst.no_contact = true;
-      dst.no_contact_reason = src.no_contact_reason;
-      dst.no_contact_company = src.no_contact_company;
-    }
-    // Hiring-client conflict is sticky-true for the same reason: one source
-    // may carry the employment history that another lacks, and the merged row
-    // must keep the block.
-    if (src.client_conflict === true && dst.client_conflict !== true) {
-      dst.client_conflict = true;
-      dst.client_conflict_reason = src.client_conflict_reason;
-      dst.client_conflict_company = src.client_conflict_company;
-      dst.client_conflict_relation = src.client_conflict_relation;
-    }
-    const dEmail = String(dst.email || "");
-    const sEmail = String(src.email || "");
-    if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmailUI(dEmail) && !isPlaceholderEmailUI(sEmail)))) {
-      dst.email = sEmail;
-    }
-    const badResume = (r: any) => { const s = String(r || ""); return !s.trim() || s.includes("Resume content unavailable"); };
-    const dR = String(dst.resume_text || "");
-    const sR = String(src.resume_text || "");
-    if (sR && !badResume(sR) && (badResume(dR) || sR.length > dR.length)) dst.resume_text = src.resume_text;
-    return dst;
-  };
-
-  const getPrio = (s?: string) => {
-    const l = String(s || "").toLowerCase();
-    if (l.includes("applicant")) return 1;
-    if (l.includes("talentsearch")) return 2;
-    return 3;
-  };
-
-  let uniqueResults: any[] = [];
-
-  for (const cand of candidatesList) {
-    const cKeys = keysOf(cand);
-    if (cKeys.length === 0) {
-      uniqueResults.push(cand);
-      continue;
-    }
-
-    // Find ALL existing rows that share a strong identity key with cand.
-    const matchIndices: number[] = [];
-    for (let i = 0; i < uniqueResults.length; i++) {
-      const eKeys = keysOf(uniqueResults[i]);
-      if (cKeys.some(k => eKeys.includes(k))) matchIndices.push(i);
-    }
-
-    if (matchIndices.length === 0) {
-      uniqueResults.push(cand);
-      continue;
-    }
-
-    // Same person across rows: pick ONE survivor, then fold everyone else's
-    // best info into it. JobDiva-bearing record always wins the survivor slot
-    // (never dropped); otherwise prefer has-both-contacts, then source
-    // priority, then match_score.
-    const competitors = [cand, ...matchIndices.map(i => uniqueResults[i])];
-    let winner = competitors[0];
-    for (let i = 1; i < competitors.length; i++) {
-      const comp = competitors[i];
-      const wJd = candIsJobDivaUI(winner);
-      const cJd = candIsJobDivaUI(comp);
-      if (cJd !== wJd) { if (cJd) winner = comp; continue; }
-      const wBoth = Boolean(getEmail(winner)) && Boolean(getPhone(winner));
-      const cBoth = Boolean(getEmail(comp)) && Boolean(getPhone(comp));
-      if (cBoth !== wBoth) { if (cBoth) winner = comp; continue; }
-      const wPrio = getPrio(winner.source);
-      const cPrio = getPrio(comp.source);
-      if (cPrio !== wPrio) { if (cPrio < wPrio) winner = comp; continue; }
-      if (Number(comp.match_score || 0) > Number(winner.match_score || 0)) winner = comp;
-    }
-
-    // Clone the survivor so we never mutate an object still held in React state,
-    // then absorb best-of from every other competitor.
-    const survivor = { ...winner };
-    for (const comp of competitors) {
-      if (comp !== winner) mergeBestOf(survivor, comp);
-    }
-
-    uniqueResults = uniqueResults.filter((_, idx) => !matchIndices.includes(idx));
-    uniqueResults.push(survivor);
-  }
-  return uniqueResults;
-};
-
-const extractLinkedInFromText = (text?: string | null): string => {
-  const raw = String(text || "");
-  if (!raw) return "";
-  const m = raw.match(/https?:\/\/(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9\-_%]+/i);
-  return m ? m[0] : "";
-};
-
-const looksLikeLinkedInProfile = (url?: string | null): boolean => {
-  const u = String(url || "").trim().toLowerCase();
-  return u.includes("linkedin.com/in/");
-};
+// getCandidateDisplayName, the cross-source de-dup (deduplicateCandidatesUI)
+// and LinkedIn URL resolution live in lib/launch-rules.ts.
 
 /** Returns the persisted screening level, or "L0.5" when nothing is stored.
  *  L0.5 is the new recommended default (previously L1.5).
@@ -1194,8 +950,8 @@ function NewJobPageContent() {
   // LAUNCH_ENRICH_GROUP_CONCURRENCY calls at a time: 20 candidates in flight.
   // Each call streams its results as they come (a deep search can take
   // minutes), so small groups keep one slow lookup from holding up many.
-  const LAUNCH_ENRICH_GROUP_SIZE = 5;
-  const LAUNCH_ENRICH_GROUP_CONCURRENCY = 4;
+  // (Both constants live in lib/launch-rules.ts, shared with the server runner.)
+
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
@@ -1214,11 +970,8 @@ function NewJobPageContent() {
   // footer field; it defaults to AUTO_LAUNCH_DEFAULT_COUNT and is clamped to
   // AUTO_LAUNCH_MAX_COUNT so a typo can never translate into unbounded
   // outreach in one click.
-  const AUTO_LAUNCH_DEFAULT_COUNT = 250;
-  const AUTO_LAUNCH_MAX_COUNT = 1000;
   const [launchCount, setLaunchCount] = useState<number>(AUTO_LAUNCH_DEFAULT_COUNT);
   const [launchCountInput, setLaunchCountInput] = useState<string>(String(AUTO_LAUNCH_DEFAULT_COUNT));
-  const clampLaunchCount = (n: number) => Math.min(AUTO_LAUNCH_MAX_COUNT, Math.max(1, Math.floor(n)));
   // "No outreach for less than 60%": the Source & Launch floor. Mirrors the
   // backend's SCORING_OUTREACH_MIN_SCORE / lib/match-score OUTREACH_MIN_SCORE.
   const AUTO_LAUNCH_MIN_SCORE = OUTREACH_MIN_SCORE;
@@ -1268,9 +1021,9 @@ function NewJobPageContent() {
   const [booleanAttempts, setBooleanAttempts] = useState<{ query: string; label: string }[]>([]);
   const MAX_BOOLEAN_ATTEMPTS = 4;
   // "Qualified" for the boolean-relaxation loop = clears the outreach floor
-  // (60%, the Good band) — the same bar Source & Launch uses.
-  const QUALIFIED_SCORE_THRESHOLD = OUTREACH_MIN_SCORE;
-  const QUALIFIED_TARGET_COUNT = 50;
+  // (60%, the Good band) — the same bar Source & Launch uses
+  // (QUALIFIED_TARGET_COUNT / countQualified in lib/launch-rules.ts).
+
   const [candidates, setCandidates] = useState<any[]>([]);
   // Live mirror of `candidates` for async flows that finish after an await
   // (e.g. Search & Launch reads the freshest pool right after the search
@@ -1550,181 +1303,12 @@ function NewJobPageContent() {
     return Number.isFinite(score) ? score : 0;
   };
 
-  // Launch-PAIR skip policy: the ONLY reason to skip a selected candidate is
-  // that they CURRENTLY work at the hiring client company — we don't poach from
-  // the client. Everyone else launches, regardless of match score, location, or
-  // how little we could extract about them. ("Not enough info" is no longer a
-  // failing criterion — a thin/empty profile is launchable, not skipped.)
-  //
-  // Normalize a company name for comparison: lowercase, strip punctuation and
-  // common legal/filler suffixes so "Bank of America, N.A." ~ "Bank of America".
-  const normalizeCompanyName = (s: any): string =>
-    String(s || "")
-      .toLowerCase()
-      .replace(/[.,]/g, " ")
-      .replace(/\b(inc|llc|ltd|corp|corporation|co|company|plc|gmbh|na|pvt|private|limited|technologies|technology|solutions|consulting|services|group|holdings)\b/g, " ")
-      .replace(/[^a-z0-9 ]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  // Best-effort CURRENT company from a LinkedIn-style headline ("Engineer at
-  // Meta | ex-Amazon" → "Meta"). Unipile/Exa search rows carry the employer
-  // only in headline text. Uses the LAST "at X"/"@ X" occurrence (current
-  // employer is named last in "Ex-Google | Engineer at Stripe").
-  const extractCompanyFromHeadline = (headline: any): string => {
-    const text = String(headline || "").trim();
-    if (!text || text.length > 300) return "";
-    const matches = [...text.matchAll(/(?:\s+at\s+|\s+@\s*)([^|,;•·(–—]+)/gi)];
-    if (!matches.length) return "";
-    let company = String(matches[matches.length - 1][1] || "").trim();
-    company = company.replace(/^the\s+/i, "").replace(/[\s.!\-–—]+$/g, "");
-    if (!company || company.split(/\s+/).length > 6) return "";
-    return company;
-  };
-
-  // Every signal of the candidate's CURRENT employer (present role only).
-  // Past employers must NOT count — we only skip people who literally work
-  // at the client today. Mirrors the backend collector
-  // (apps/api/services/company_match.py) across all source shapes: flat
-  // fields, current company_experience entries, Exa deep-search
-  // exa_recent_companies, and the headline parse.
-  const getCandidateCurrentCompanies = (c: any): string[] => {
-    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
-    const data = c?.data || {};
-    const out: string[] = [];
-    for (const direct of [
-      c?.current_company, ei?.current_company, data?.current_company,
-      c?.company, c?.company_name, ei?.company,
-    ]) {
-      if (direct && String(direct).trim()) out.push(String(direct).trim());
-    }
-    const expLists = [
-      (Array.isArray(c?.company_experience) && c.company_experience) ||
-        (Array.isArray(ei?.company_experience) && ei.company_experience) ||
-        (Array.isArray(data?.company_experience) && data.company_experience) || [],
-      (Array.isArray(c?.exa_recent_companies) && c.exa_recent_companies) ||
-        (Array.isArray(data?.exa_recent_companies) && data.exa_recent_companies) || [],
-    ];
-    for (const exp of expLists) {
-      for (const e of exp) {
-        if (!e || typeof e !== "object") continue;
-        const endRaw = String(e.end_date ?? e.endDate ?? e.to ?? e.end ?? "").trim();
-        const isCurrent = e.is_current === true || e.current === true || !endRaw || /present|current/i.test(endRaw);
-        const comp = String(e.company || e.company_name || e.employer || e.name || "").trim();
-        if (isCurrent && comp) out.push(comp);
-      }
-    }
-    for (const headline of [c?.headline, c?.title, data?.headline, data?.title]) {
-      const parsed = extractCompanyFromHeadline(headline);
-      if (parsed) out.push(parsed);
-    }
-    return [...new Set(out)];
-  };
-
+  // Launch-PAIR skip policy (getCandidateExclusionReason: offer status /
+  // placed / Pyramid employee) and the current-employer signals live in
+  // lib/launch-rules.ts, shared with the server-side launch runner.
   // Back-compat single-value accessor (first current-company signal).
   const getCandidateCurrentCompany = (c: any): string =>
     getCandidateCurrentCompanies(c)[0] || "";
-
-  const isEmployedByClient = (c: any): boolean => {
-    const client = normalizeCompanyName(jobData?.customer_name || jobData?.customer || "");
-    // "external" is the placeholder for non-JobDiva reqs — never a real client.
-    if (!client || client === "external") return false;
-    for (const raw of getCandidateCurrentCompanies(c)) {
-      const cand = normalizeCompanyName(raw);
-      if (!cand) continue;
-      if (cand === client) return true;
-      // Substring match only when the shorter name is specific enough (>= 4 chars)
-      // to avoid false hits on generic tokens left after normalization.
-      const shorter = cand.length <= client.length ? cand : client;
-      if (shorter.length >= 4 && (cand.includes(client) || client.includes(cand))) return true;
-    }
-    return false;
-  };
-
-  const getCandidateExclusionReason = (c: any): string => {
-    if (!c) return "";
-    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
-    const data = c?.data || c;
-
-    const offerStatus = String(c?.offer_status || data?.offer_status || "");
-    if (offerStatus.toLowerCase().includes("offer accepted")) return "Offer Accepted";
-    if (offerStatus.toLowerCase().includes("offer extended")) return "Offer Extended";
-
-    const actionTypes = c?.action_types || data?.action_types || [];
-    if (Array.isArray(actionTypes)) {
-      for (const at of actionTypes) {
-        const atLow = String(at).toLowerCase();
-        if (atLow.includes("offer accepted") || ["placed", "hired"].includes(atLow)) return "Offer Accepted";
-        if (atLow.includes("offer extended")) return "Offer Extended";
-      }
-    }
-
-    if (
-      c?.available === false ||
-      data?.available === false ||
-      String(c?.available).toLowerCase() === "false" ||
-      String(data?.available).toLowerCase() === "false"
-    ) {
-      return "Current Employee (Pyramid / Unavailable)";
-    }
-
-    const quals = data?.qualifications || c?.qualifications || ei?.qualifications || c?.data?.qualifications || [];
-    if (Array.isArray(quals)) {
-      for (const q of quals) {
-        if (!q || typeof q !== "object") continue;
-        // Check both camelCase (from some sources) and UPPERCASE (from BI endpoint)
-        const qVal = `${q.qualificationValue || ''} ${q.QUALVALUE || ''} ${q.value || ''} ${q.name || ''} ${q.QUALNAME || ''}`.toLowerCase();
-        if (qVal.includes("current employee")) return "Current Employee (Pyramid)";
-        if (qVal.includes("offer extended") || qVal.includes("offer - extended")) return "Offer Extended";
-        if (qVal.includes("offer accepted") || qVal.includes("offer - accepted") || ["placed", "hired"].includes(qVal)) {
-          return "Offer Accepted";
-        }
-      }
-    }
-
-    // JobDiva API: status=1 means Current Employee, status=2 means Past Employee
-    const numStatus = c?.status ?? data?.status;
-    if (numStatus === 1 || numStatus === "1") return "Current Employee (Pyramid)";
-
-    const statusStrs = [
-      String(c?.employee_status || ""),
-      String(data?.employee_status || ""),
-      String(c?.available || ""),
-      String(data?.available || ""),
-      String(c?.availability_status || ""),
-      String(data?.availability_status || ""),
-    ];
-    for (const st of statusStrs) {
-      if (!st) continue;
-      const stLower = st.toLowerCase();
-      if (stLower.includes("offer extended") || stLower.includes("offer - extended")) return "Offer Extended";
-      if (
-        stLower.includes("offer accepted") ||
-        stLower.includes("offer - accepted") ||
-        ["placed", "hired"].includes(stLower)
-      ) {
-        return "Offer Accepted";
-      }
-      if (stLower.includes("current employee")) return "Current Employee (Pyramid)";
-    }
-
-    for (const raw of getCandidateCurrentCompanies(c)) {
-      const currComp = normalizeCompanyName(raw);
-      if (currComp && currComp.includes("pyramid")) {
-        return "Current Employee (Pyramid)";
-      }
-    }
-
-    // NOTE: "employed by the hiring client" is deliberately NOT returned here.
-    // This helper also drives row VISIBILITY (see the sortedCandidates filter),
-    // and hiding those rows meant a recruiter never saw that the person works
-    // at the client — they simply vanished from the list. They now stay
-    // visible, greyed out behind the backend-stamped `client_conflict` flag,
-    // and are filtered out of the save/launch paths separately, exactly as
-    // `no_contact` already is.
-
-    return "";
-  };
 
   // One classification shared by the visible-table filter and the
   // all-hidden empty state, so the two can never drift on what hides a row.
@@ -1746,18 +1330,8 @@ function NewJobPageContent() {
   // backend rule (current employer only — it does not do the "no current
   // employer on file, fall back to the most recent one" step), so it can only
   // under-flag, never over-flag.
-  const withClientConflictFlag = <T extends Record<string, unknown>>(c: T): T => {
-    if (!c || c.client_conflict !== undefined) return c;
-    if (!isEmployedByClient(c)) return c;
-    return {
-      ...c,
-      client_conflict: true,
-      client_conflict_relation: "current",
-      client_conflict_reason: `Current employer is the hiring client (${
-        jobData?.customer_name || jobData?.customer || "client"
-      })`,
-    };
-  };
+  const withClientConflictFlag = <T extends Record<string, unknown>>(c: T): T =>
+    withClientConflictFlagRule(c, jobData);
 
   const sortedCandidates = useMemo(() => {
     const sourcePriority = (c: any) => {
@@ -2021,21 +1595,11 @@ function NewJobPageContent() {
       const res = await authFetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
       if (!res.ok) return;
       const json = await res.json();
-      const keys = new Set<string>();
-      const ids = new Set<string>();
-      for (const item of json?.launched ?? []) {
-        if (item?.candidate_id) {
-          keys.add(`${item.source ?? ''}:${item.candidate_id}`);
-          ids.add(String(item.candidate_id));
-        }
-        // A launched Exa/LinkedIn person now has a JobDiva profile, and the
-        // JobDiva pools return them under that profile id with a JobDiva-*
-        // label. Knowing the id hides that copy as "launched" too, instead of
-        // offering a second launch that would save a JobDiva-labelled twin row.
-        if (item?.jobdiva_candidate_id) {
-          ids.add(String(item.jobdiva_candidate_id));
-        }
-      }
+      // A launched Exa/LinkedIn person now has a JobDiva profile, and the
+      // JobDiva pools return them under that profile id with a JobDiva-*
+      // label. Knowing the id hides that copy as "launched" too, instead of
+      // offering a second launch that would save a JobDiva-labelled twin row.
+      const { keys, ids } = launchedSetsFromResponse(json?.launched);
       setLaunchedCandidateKeys(keys);
       setLaunchedCandidateIds(ids);
     } catch (err) {
@@ -6311,9 +5875,6 @@ function NewJobPageContent() {
     return { query, label };
   };
 
-  const countQualified = (list: any[]) =>
-    list.filter(c => (c.match_score || 0) >= QUALIFIED_SCORE_THRESHOLD).length;
-
   function summarizeTopTerms(values: string[], limit = 10) {
     const counts = new Map<string, number>();
     values
@@ -6557,34 +6118,6 @@ function NewJobPageContent() {
       ...(typeof overrides?.samplePerSource === "number" ? { sample_per_source: overrides.samplePerSource } : {}),
     };
 
-    const mapStageToStatus = (stage: string) => {
-      const raw = String(stage || "").toLowerCase();
-      // Exa deep-search messages have their own informative shape
-      // ("warming up", "running (N seeds)", "done — X enriched, Y new",
-      // "skipped: <reason>") — pass them through unchanged so the
-      // recruiter can see Pass B progress in the status bar instead of
-      // collapsing it into a generic "Searching at Exa portal..." line.
-      if (raw.includes("exa deep-search")) {
-        return stage;
-      }
-      if (raw.includes("jobdiva applicants")) {
-        return "Searching at JobDiva portal (Applicants)...";
-      }
-      if (raw.includes("jobdiva talent")) {
-        return "Searching at JobDiva portal (Talent Search)...";
-      }
-      if (raw.includes("linkedin")) {
-        return "Searching at LinkedIn portal...";
-      }
-      if (raw.includes("exa")) {
-        return "Searching at Exa portal...";
-      }
-      if (raw.includes("dice")) {
-        return "Searching at Dice portal...";
-      }
-      return stage;
-    };
-
     const controller = new AbortController();
     searchAbortRef.current = controller;
     let response: Response;
@@ -6646,19 +6179,19 @@ function NewJobPageContent() {
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
+            // Keep in sync with applyStreamEvent (lib/launch-rules.ts) and its
+            // Python port (services/launch_sessions/rules.py): the server-side
+            // launch runner applies the same events through that reducer, and
+            // lib/launch-rules.test.ts fails if the handled event types differ.
             if (event.type === "candidate") {
-              const id = String(event.data.candidate_id || event.data.id || "");
+              const id = streamCandidateId(event.data);
               if (id && seenIds.has(id)) continue;
               if (id) seenIds.add(id);
               runList.push(event.data);
-              setCandidates(prev => deduplicateCandidatesUI([...prev, event.data]));
+              setCandidates(prev => addStreamCandidate(prev, event.data));
 
-              const foundCount = runList.length;
-              if (foundCount === 1) {
-                setSearchStatus(`Found 1 profile from ${activePortal}. Matching resumes against the rubric...`);
-              } else if (foundCount % 5 === 0) {
-                setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
-              }
+              const foundStatus = foundProfilesStatus(runList.length, activePortal);
+              if (foundStatus !== null) setSearchStatus(foundStatus);
             } else if (event.type === "candidate_detail") {
               // Two flavors share this event:
               //   1. Background CandidatesDetail hydration patches that fill
@@ -6682,11 +6215,9 @@ function NewJobPageContent() {
                 if (process.env.NODE_ENV !== "production") {
                   console.debug(`[Step-5] dropped candidate ${targetId} reason=${drop_reason}`);
                 }
-                runList = runList.filter(r => String(r.candidate_id || r.id || "") !== targetId);
+                runList = runList.filter(r => streamCandidateId(r) !== targetId);
                 seenIds.delete(targetId);
-                setCandidates(prev => prev.filter(c => (
-                  String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") !== targetId
-                )));
+                setCandidates(prev => dropStreamCandidate(prev, targetId));
                 continue;
               }
 
@@ -6697,41 +6228,24 @@ function NewJobPageContent() {
               // Detail-lookup failures (JobDiva 429 / no resume) are kept and
               // scored from the JobAgent skills; track them for one summary toast
               // when the run completes.
-              if (
-                (patch as any).detail_failed === true ||
-                ["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))
-              ) {
+              if (isDetailFailedPatch(patch)) {
                 detailFailedIdsRef.current.add(targetId);
               }
-              // Merge a patch into a candidate row, guarding phone against a
-              // downgrade (an incoming patch must never replace a valid number
-              // with an empty/invalid one).
-              const applyPatch = (c: any) => {
-                const merged = { ...c, ...patch };
-                if (Object.prototype.hasOwnProperty.call(patch, "phone")) {
-                  merged.phone = betterPhoneUI(c.phone, (patch as any).phone);
-                }
-                return merged;
-              };
-              // Update local runList copy used elsewhere in this run.
+              // Merge the patch ({...row, ...patch}, phone guarded against a
+              // downgrade by betterPhoneUI) into the local runList copy used
+              // elsewhere in this run, then into the table rows.
               for (let i = 0; i < runList.length; i++) {
-                if (String(runList[i].candidate_id || runList[i].id || "") === targetId) {
-                  runList[i] = applyPatch(runList[i]);
+                if (streamCandidateId(runList[i]) === targetId) {
+                  runList[i] = applyStreamPatch(runList[i], patch);
                   break;
                 }
               }
-              setCandidates(prev => deduplicateCandidatesUI(prev.map(c => (
-                String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") === targetId
-                  ? applyPatch(c)
-                  : c
-              ))));
+              setCandidates(prev => patchStreamCandidates(prev, targetId, patch));
             } else if (event.type === "stage") {
               const rawStage = String(event.data || "");
               const mapped = mapStageToStatus(rawStage);
-              if (mapped.toLowerCase().includes("portal")) {
-                const portalPart = mapped.replace(/^Searching at\s*/i, "").replace(/\.\.\.$/, "").trim();
-                if (portalPart) activePortal = portalPart;
-              }
+              const portalPart = stagePortal(mapped);
+              if (portalPart) activePortal = portalPart;
               setSearchStatus(mapped);
             } else if (event.type === "summary") {
               setSearchStatus(`Found ${runList.length} profiles. Finalizing shortlist and quality scoring...`);
@@ -6750,14 +6264,10 @@ function NewJobPageContent() {
               const status = event.data || {};
               const src = String(status.source || "");
               if (src) {
-                setSourceStatuses(prev => {
-                  // "ok" is sticky within a run: a later tranche or relaxation
-                  // pass that finds nothing (or fails) must not repaint a
-                  // bucket that already has rows as broken.
-                  const cur = prev[src];
-                  if (cur?.status === "ok" && status.status !== "ok") return prev;
-                  return { ...prev, [src]: status };
-                });
+                // "ok" is sticky within a run: a later tranche or relaxation
+                // pass that finds nothing (or fails) must not repaint a
+                // bucket that already has rows as broken.
+                setSourceStatuses(prev => mergeSourceStatus(prev, status));
                 if (status.criteria_unconfigured) {
                   setJobdivaCriteriaUnconfigured(true);
                 }
@@ -7083,73 +6593,43 @@ function NewJobPageContent() {
   const computeAutoLaunchSelection = (
     pool: any[],
     limit: number = launchCount,
-  ): { ids: string[]; eligibleTotal: number; belowFloor: number; unscored: number } => {
-    const idOf = (c: any) =>
-      String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-    const eligible: { id: string; score: number }[] = [];
-    const seen = new Set<string>();
-    let belowFloor = 0;
-    let unscored = 0;
-    for (const c of pool) {
-      const id = idOf(c);
-      if (!id || seen.has(id)) continue;
-      if (getCandidateExclusionReason(c)) continue;
-      if (c?.no_contact === true) continue;
-      const launchedKey = `${c?.source ?? ""}:${id}`;
-      if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
-      seen.add(id);
-      const score = typeof c?.match_score === "number" ? c.match_score : null;
-      if (score === null) {
-        unscored += 1;
-        continue;
-      }
-      if (!isOutreachEligibleScore(score)) {
-        belowFloor += 1;
-        continue;
-      }
-      eligible.push({ id, score });
-    }
-    const capped = [...eligible]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, clampLaunchCount(limit));
-    return {
-      ids: capped.map((e) => e.id),
-      eligibleTotal: eligible.length,
-      belowFloor,
-      unscored,
-    };
-  };
+  ): { ids: string[]; eligibleTotal: number; belowFloor: number; unscored: number } =>
+    computeAutoLaunchSelectionRule(pool, {
+      launchedKeys: launchedCandidateKeys,
+      launchedIds: launchedCandidateIds,
+      limit,
+    });
 
   // QA bypass (see qaQuickLaunchCount): best N of the rows on screen, by
   // score (unscored last), no search, no floor. Same arm-and-launch path as
   // Source & Launch so enrichment / DNC / missing-contact handling is real.
+  // T1 of the launch timings ("Added → Launch click" / "Launch click →
+  // Launch", routers/launch_timing.py). Fire-and-forget: the server keeps the
+  // first click only, and a failed stamp must never hold up the launch.
+  const recordLaunchClick = () => {
+    const jobRef = String(jobdivaId || numericJobId || "");
+    if (!jobRef) return;
+    api.jobs.launchClicked(jobRef).catch(() => {});
+  };
+
   const handleQaQuickLaunch = () => {
     if (!IS_QA_ENV) return;
     if (isSearching || isEnrichingContacts || launchProgress.open || isViewOnly) return;
-    const idOf = (c: Record<string, unknown>) =>
-      String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-    const seen = new Set<string>();
-    const eligible: { id: string; score: number }[] = [];
-    for (const c of candidatesRef.current) {
-      const id = idOf(c);
-      if (!id || seen.has(id)) continue;
-      if (getCandidateExclusionReason(c)) continue;
-      if (c?.no_contact === true) continue;
-      const launchedKey = `${c?.source ?? ""}:${id}`;
-      if (launchedCandidateKeys.has(launchedKey) || launchedCandidateIds.has(id)) continue;
-      seen.add(id);
-      eligible.push({ id, score: typeof c?.match_score === "number" ? c.match_score : -1 });
-    }
-    const ids = eligible
-      .sort((a, b) => b.score - a.score)
-      .slice(0, qaQuickLaunchCount)
-      .map((e) => e.id);
+    // minScore null = no floor, unscored rows last (lib/launch-rules.ts).
+    const { ids } = computeAutoLaunchSelectionRule(candidatesRef.current, {
+      launchedKeys: launchedCandidateKeys,
+      launchedIds: launchedCandidateIds,
+      limit: qaQuickLaunchCount,
+      minScore: null,
+    });
     if (ids.length === 0) {
       showToast("QA quick launch: no launchable rows on screen. Run Search first.", "info");
       return;
     }
+    recordLaunchClick();
     trackEvent("job_wizard_step5_qa_quick_launch", {
       step: 5,
+      job_ref: String(jobdivaId || numericJobId || ""),
       requested: qaQuickLaunchCount,
       selected_count: ids.length,
       pool_size: candidatesRef.current.length,
@@ -7182,9 +6662,11 @@ function NewJobPageContent() {
     }
     const launchRemainingOnly = searchPhase === "complete" && candidatesRef.current.length > 0;
     setIsSourceAndLaunchRunning(true);
+    recordLaunchClick();
     try {
       trackEvent("job_wizard_step5_source_and_launch_started", {
         step: 5,
+        job_ref: String(jobdivaId || numericJobId || ""),
         mode: launchRemainingOnly ? "launch_remaining" : "full_search",
         candidates_on_screen: candidatesRef.current.length,
         min_score: AUTO_LAUNCH_MIN_SCORE,
@@ -7198,8 +6680,9 @@ function NewJobPageContent() {
         // computing the auto-launch selection.
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      const pool =
-        candidatesRef.current.length >= results.length ? candidatesRef.current : results;
+      // The table, or the raw per-attempt rows when de-dup / drops made the
+      // table shorter (chooseSelectionPool in lib/launch-rules.ts says why).
+      const pool = chooseSelectionPool(candidatesRef.current, results);
       const { ids, eligibleTotal, belowFloor, unscored } = computeAutoLaunchSelection(pool, launchCount);
       trackEvent("job_wizard_step5_auto_launch_selection", {
         step: 5,
@@ -7911,118 +7394,23 @@ function NewJobPageContent() {
     const launchIds = launchIdsOverride ?? selectedCandidates;
     if (launchIds.size === 0) return { success: false, savedCount: 0 };
 
-    const effective = contactOverrides
-      ? candidates.map(c => {
-        const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
-        const override = contactOverrides[id];
-        return override
-          ? {
-            ...c,
-            phone: override.phone || c.phone,
-            email: override.email || c.email,
-          }
-          : c;
-      })
-      : candidates;
+    // Lookup / recruiter-entered contacts replace the row's own: override.x || c.x.
+    const effective = applyContactOverrides(candidates, contactOverrides);
 
     if (contactOverrides) {
       setCandidates(effective);
     }
 
-    // Final DNC safety net: drop any selected candidate whose normalized
-    // phone is on the DNC list, even if React state hasn't yet flushed
-    // the auto-deselect from handleLaunchPairClick. The backend repeats
-    // this check at /candidates/save — defense in depth.
-    const candidatesPayload = effective
-      // Tolerate raw vs String() ids: normal launches pass raw selection ids,
-      // the Retry path passes the String()-normalized ids from failedCandidates.
-      .filter(c => {
-        const cid = c.candidate_id || c.jobdiva_candidate_id || c.id;
-        return launchIds.has(cid) || launchIds.has(String(cid));
-      })
-      // Launch-PAIR skip safety net: only candidates who currently work at the
-      // hiring client company are withheld from /candidates/save (even via the
-      // second MissingContactsModal pass). Low score / thin profile / location
-      // are NOT skip reasons — everyone else stays launchable.
-      .filter(c => !getCandidateExclusionReason(c))
-      // No-contact company rows are display-only: unselectable in the table,
-      // but re-filtered here so no code path (second MissingContactsModal
-      // pass included) can ever persist one. Backend re-checks at
-      // /candidates/save — defense in depth. NOTE: deliberately NOT part of
-      // getCandidateExclusionReason — that helper also drives row VISIBILITY,
-      // and no-contact rows must stay visible (greyed out).
-      .filter(c => c.no_contact !== true)
-      // Same treatment for the hiring-client conflict: the row stays visible
-      // and greyed out in the table, but must never be persisted or launched.
-      // Backend re-checks at the launch gate — defense in depth.
-      .filter(c => withClientConflictFlag(c).client_conflict !== true)
-      .filter(c => {
-        if (dncPhones.size === 0) return true;
-        const np = normalizePhone(c.phone);
-        return !(np && dncPhones.has(np));
-      })
-      .map(c => {
-        const displayName = getCandidateDisplayName(c);
-        // Send the SAME contact the launch gate used to mark this candidate
-        // launchable. getCandidateLaunchEmail/Phone read nested fields
-        // (workEmail/personalEmail/enhanced_info.*/data.*/zoominfo_contact_enrichment.*);
-        // sending only top-level c.email/c.phone dropped nested-only contact to
-        // null, which the backend then rejected — failing the whole batch with a
-        // 400. Guard with the same validity checks so we never persist a
-        // synthetic/placeholder address.
-        const launchEmail = getCandidateLaunchEmail(c);
-        const launchPhone = getCandidateLaunchPhone(c);
-        let skillList: any[] = [];
-        if (Array.isArray(c.skills)) {
-          skillList = c.skills;
-        } else if (typeof c.skills === 'string' && c.skills.trim()) {
-          try {
-            const parsed = JSON.parse(c.skills);
-            skillList = Array.isArray(parsed) ? parsed : [c.skills];
-          } catch (e) {
-            skillList = [c.skills];
-          }
-        }
-        return {
-          candidate_id: String(c.candidate_id || c.jobdiva_candidate_id || c.id || "unknown"),
-          name: displayName || "Unnamed Candidate",
-          email: isValidLaunchEmail(launchEmail) ? launchEmail : null,
-          phone: isValidLaunchPhone(launchPhone) ? launchPhone : null,
-          skills: skillList,
-          experience_years: c.yearsExtracted || c.experience_years || 0,
-          source: c.source || "JobDiva-Applicants",
-          // Label-independent JobDiva provenance. The JobDiva pool emitters stamp
-          // this with the row's OWN JobDiva id; the backend trusts it only when it
-          // equals candidate_id, so Launch PAIR keeps attaching to the existing
-          // profile even if a source label is ever renamed (a renamed label used
-          // to turn JobDiva people into "unknown" people that got re-created).
-          jobdiva_candidate_id: c.jobdiva_candidate_id ? String(c.jobdiva_candidate_id) : null,
-          headline: c.title || c.headline || "",
-          location: c.location || "",
-          profile_url: c.profile_url || null,
-          image_url: c.image_url || null,
-          resume_text: c.resume_text || c.resumeText || "",
-          resume_id: String(c.resumeId || c.resume_id || ""),
-          is_selected: true,
-          education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
-          certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
-          company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
-          urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-          // Send null (not 0) when unscored so the backend re-scores at save
-          // instead of locking a placeholder 0% into the rank list.
-          match_score: typeof c.match_score === 'number' ? c.match_score : null,
-          detail_failed: !!c.detail_failed,
-          matched_skills: Array.isArray(c.matched_skills) ? c.matched_skills : [],
-          missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
-          match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
-          explainability: Array.isArray(c.explainability) ? c.explainability : [],
-          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null,
-          // Full LinkedIn profile captured at sourcing (experience with
-          // descriptions, education, skills, summary ...). Launch PAIR builds the
-          // JobDiva résumé from it for people JobDiva does not have yet.
-          linkedin_profile: (c.linkedin_profile && typeof c.linkedin_profile === 'object' && !Array.isArray(c.linkedin_profile)) ? c.linkedin_profile : null
-        };
-      });
+    // Which selected rows are persisted (launch-id match, no exclusion reason,
+    // not no_contact, not a hiring-client conflict, final DNC safety net on the
+    // phone — the backend repeats these at /candidates/save) and the
+    // /candidates/save row for each: lib/launch-rules.ts, shared with the
+    // server-side launch runner.
+    const candidatesPayload = selectSaveCandidates(effective, {
+      launchIds,
+      job: jobData,
+      dncPhones,
+    }).map(buildSaveCandidatePayload);
 
     if (candidatesPayload.length === 0) {
       return { success: false, savedCount: 0 };
@@ -8655,16 +8043,8 @@ function NewJobPageContent() {
     // are NOT skip reasons. Compute the skip set once and thread it through the
     // flow below WITHOUT touching the table selection — they are simply excluded
     // from the launch payload and reported on the completion screen.
-    const hardFilterSkipIds = new Set<string>();
-    const hardFilterSkippedNames: string[] = [];
-    for (const c of candidates) {
-      const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-      if (!id || !selectedCandidates.has(id)) continue;
-      if (getCandidateExclusionReason(c)) {
-        hardFilterSkipIds.add(id);
-        hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
-      }
-    }
+    const { ids: hardFilterSkipIds, names: hardFilterSkippedNames } =
+      computeHardFilterSkips(candidates, selectedCandidates);
 
     trackEvent("job_wizard_step5_launch_pair_clicked", {
       step: 5,
@@ -8686,14 +8066,11 @@ function NewJobPageContent() {
       // never exercised them.) With Override OFF, QA behaves like production.
       const qaReview = IS_QA_ENV && qaOverrideEnabled;
 
-      const candidatesMissingContact = candidates.filter(c => {
-        const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
-        if (!selectedCandidates.has(id)) return false;
-        if (hardFilterSkipIds.has(String(id || "").trim())) return false;
-        const phone = getCandidateLaunchPhone(c);
-        const email = getCandidateLaunchEmail(c);
-        return !isValidLaunchPhone(phone) || !isValidLaunchEmail(email);
-      });
+      const candidatesMissingContact = selectCandidatesMissingContact(
+        candidates,
+        selectedCandidates,
+        hardFilterSkipIds,
+      );
 
       // Open the progress modal upfront so the recruiter sees enrichment
       // streaming. runLaunchPair will flip phase to "launching" and fill in
@@ -8757,25 +8134,15 @@ function NewJobPageContent() {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id) continue;
 
-        const linkedinUrlCandidates = [
-          c.profile_url,
-          c.linkedin_url,
-          c.urls?.linkedin,
-          c.urls?.linkedin_url,
-          c.data?.urls?.linkedin,
-          c.data?.urls?.linkedin_url,
-          extractLinkedInFromText(c.resume_text || c.resumeText || c.data?.resume_text),
-        ].map((v: any) => String(v || "").trim()).filter(Boolean);
-
-        const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
+        // profile_url / linkedin_url / urls.* / data.urls.* or a linkedin.com/in/
+        // link in the résumé — the first that looks like a profile.
+        const linkedinUrl = resolveLinkedInUrl(c);
 
         // Is the candidate ALREADY reachable on their existing contact? PAIR
         // launches on phone OR email, so a candidate who already has one is
         // launchable even if enrichment adds nothing new — count them as
         // "already reachable", never as a "missing LinkedIn"/"no contact" miss.
-        const launchableNow =
-          isValidLaunchPhone(getCandidateLaunchPhone(c)) ||
-          isValidLaunchEmail(getCandidateLaunchEmail(c));
+        const launchableNow = isLaunchableNow(c);
 
         if (!linkedinUrl) {
           if (launchableNow) {
@@ -8789,45 +8156,39 @@ function NewJobPageContent() {
         toLookUp.push({ c, id, linkedinUrl, launchableNow });
       }
 
+      // How an answer is read (found contact → override that REPLACES the
+      // row's own, already reachable, not eligible, no contact, failed) is
+      // interpretEnrichAnswer in lib/launch-rules.ts; this tallies it.
       const applyEnrichResult = (item: EnrichItem, enriched: EnrichAnswer) => {
-        if (!enriched || enriched.status === "error") {
+        const answer = interpretEnrichAnswer(enriched, item.launchableNow);
+        if (answer.outcome === "failed") {
           enrichFailedCount += 1;
           bumpEnrich("enrichFailed");
           return;
         }
-        if (enriched.status === "success") lookedUpIds.add(item.id);
-        const kipplo = String(enriched?.lookup?.kipplo || "");
-        if (isKipploIssue(kipplo)) {
-          kipploIssues[kipplo] = (kipploIssues[kipplo] || 0) + 1;
+        if (answer.lookedUp) lookedUpIds.add(item.id);
+        if (isKipploIssue(answer.kipplo)) {
+          kipploIssues[answer.kipplo] = (kipploIssues[answer.kipplo] || 0) + 1;
         }
-        // `phone` is the candidate's personal number (never a work line).
-        const nextPhone = enriched?.phone || enriched?.mobilePhone || "";
-        const nextEmail = enriched?.email || "";
-        if (nextPhone || nextEmail) {
-          contactOverrides[item.id] = {
-            phone: nextPhone || undefined,
-            email: nextEmail || undefined,
-          };
+        if (answer.outcome === "succeeded" && answer.override) {
+          contactOverrides[item.id] = answer.override;
           enrichedCount += 1;
           foundBy[item.id] = {};
-          if (nextPhone) {
-            const by = String(enriched?.phone_provider || "other");
+          if (answer.phoneProvider !== undefined) {
+            const by = answer.phoneProvider;
             phoneFoundBy[by] = (phoneFoundBy[by] || 0) + 1;
             foundBy[item.id].phone = by;
           }
-          if (nextEmail) {
-            const by = String(enriched?.email_provider || "other");
+          if (answer.emailProvider !== undefined) {
+            const by = answer.emailProvider;
             emailFoundBy[by] = (emailFoundBy[by] || 0) + 1;
             foundBy[item.id].email = by;
           }
           bumpEnrich("enrichSucceeded");
-        } else if (item.launchableNow) {
-          // Enrichment found nothing new, but the candidate already has a
-          // usable phone or email — still launchable, not a miss.
+        } else if (answer.outcome === "already_reachable") {
           bumpEnrich("enrichAlreadyReachable");
         } else {
-          // "skipped" = held back by the spend policy (source / score floor).
-          if (enriched?.status === "skipped") notEligibleCount += 1;
+          if (answer.outcome === "not_eligible") notEligibleCount += 1;
           else noContactFoundCount += 1;
           bumpEnrich("enrichNoContact");
         }
@@ -8864,16 +8225,10 @@ function NewJobPageContent() {
       };
 
       const enrichJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
-      const enrichRequest = (item: EnrichItem) => ({
-        candidate_id: item.id,
-        jobdiva_id: enrichJobdivaId,
-        source: item.c.source || undefined,
-        linkedin_url: item.linkedinUrl,
-        // Held to the spend policy server-side: LinkedIn/JobDiva sources at or
-        // above the score floor only (a skip returns no contact).
-        trigger: "launch",
-        match_score: typeof item.c.match_score === "number" ? item.c.match_score : undefined,
-      });
+      // Held to the spend policy server-side: LinkedIn/JobDiva sources at or
+      // above the score floor only (a skip returns no contact).
+      const enrichRequest = (item: EnrichItem) =>
+        buildEnrichRequest(item.c, item.id, item.linkedinUrl, enrichJobdivaId);
 
       const enrichOne = async (item: EnrichItem) => {
         try {
@@ -9063,98 +8418,32 @@ function NewJobPageContent() {
       // results may now have one via ZoomInfo, and that phone may match the
       // DNC list. Auto-deselect any matches and surface a toast so the user
       // sees why the count dropped before the POST fires.
-      const dncDropped = new Set<string>();
-      if (dncPhones.size > 0) {
-        for (const c of candidates) {
-          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-          if (!id || !selectedCandidates.has(id)) continue;
-          const overridePhone = contactOverrides[id]?.phone;
-          const phoneToCheck = overridePhone || c.phone;
-          const np = normalizePhone(phoneToCheck);
-          if (np && dncPhones.has(np)) {
-            dncDropped.add(id);
-          }
-        }
-        if (dncDropped.size > 0) {
-          setSelectedCandidates(prev => {
-            const next = new Set(prev);
-            for (const id of dncDropped) next.delete(id);
-            return next;
-          });
-          showToast(
-            `${dncDropped.size} candidate${dncDropped.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
-            "info",
-          );
-        }
+      const dncDropped = dncDroppedIds(candidates, selectedCandidates, contactOverrides, dncPhones);
+      if (dncDropped.size > 0) {
+        setSelectedCandidates(prev => {
+          const next = new Set(prev);
+          for (const id of dncDropped) next.delete(id);
+          return next;
+        });
+        showToast(
+          `${dncDropped.size} candidate${dncDropped.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
+          "info",
+        );
       }
 
       // Partition selected candidates into Ready (has a usable phone OR a real
       // email) and Needs-info (missing both). Ready candidates launch
       // immediately; the Needs-info group opens MissingContactsModal so the
       // recruiter can fill in details and launch them in a second pass.
-      const readyIds = new Set<string>();
-      const needsInfo: MissingContactCandidate[] = [];
+      // A channel counts only if valid AND not shared with another selected
+      // row (phone by all digits, email lower-cased); EITHER channel is enough.
       const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
-      const emailToCandidateIds = new Map<string, string[]>();
-      const phoneToCandidateIds = new Map<string, string[]>();
-      for (const c of candidates) {
-        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id || !selectedCandidates.has(id) || dncDropped.has(id) || hardFilterSkipIds.has(id)) continue;
-        const overrideEmail = contactOverrides[id]?.email;
-        const overridePhone = contactOverrides[id]?.phone;
-        const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
-        const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
-        if (isValidLaunchEmail(effectiveEmail)) {
-          const ids = emailToCandidateIds.get(effectiveEmail) || [];
-          ids.push(id);
-          emailToCandidateIds.set(effectiveEmail, ids);
-        }
-        if (isValidLaunchPhone(effectivePhone)) {
-          const normalizedPhone = launchPhoneDigits(effectivePhone);
-          const ids = phoneToCandidateIds.get(normalizedPhone) || [];
-          ids.push(id);
-          phoneToCandidateIds.set(normalizedPhone, ids);
-        }
-      }
-      const duplicateEmailIds = new Set<string>();
-      const duplicatePhoneIds = new Set<string>();
-      for (const ids of emailToCandidateIds.values()) {
-        if (ids.length < 2) continue;
-        for (const id of ids) duplicateEmailIds.add(id);
-      }
-      for (const ids of phoneToCandidateIds.values()) {
-        if (ids.length < 2) continue;
-        for (const id of ids) duplicatePhoneIds.add(id);
-      }
-      for (const c of candidates) {
-        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id || !selectedCandidates.has(id) || dncDropped.has(id) || hardFilterSkipIds.has(id)) continue;
-        const overridePhone = contactOverrides[id]?.phone;
-        const overrideEmail = contactOverrides[id]?.email;
-        const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
-        const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
-        const phoneOK = isValidLaunchPhone(effectivePhone) && !duplicatePhoneIds.has(id);
-        const emailOK = isValidLaunchEmail(effectiveEmail) && !duplicateEmailIds.has(id);
-        // PAIR can reach a candidate by phone OR email, so EITHER one is enough
-        // to launch. A candidate with just a phone, or just an email, is
-        // launchable; only those missing both get routed to the contact modal.
-        if (phoneOK || emailOK) {
-          readyIds.add(id);
-        } else {
-          needsInfo.push({
-            candidate_id: id,
-            name: getCandidateDisplayName(c) || c.name || "Unnamed",
-            headline: c.title || c.headline || "",
-            location: c.location || "",
-            source: c.source || "",
-            jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
-            needsPhone: !phoneOK,
-            needsEmail: !emailOK,
-            currentPhone: effectivePhone || "",
-            currentEmail: effectiveEmail || "",
-          });
-        }
-      }
+      const { readyIds, needsInfo, duplicateEmailIds, duplicatePhoneIds } = splitReadyNeedsContact(candidates, {
+        selectedIds: selectedCandidates,
+        skipIds: new Set<string>([...dncDropped, ...hardFilterSkipIds]),
+        contactOverrides,
+        jobdivaId: launchJobdivaId,
+      });
 
       if (duplicateEmailIds.size > 0) {
         showToast(
@@ -9227,15 +8516,8 @@ function NewJobPageContent() {
     newContacts: Record<string, { phone?: string; email?: string }>,
   ) => {
     setMissingContactsOpen(false);
-    const mergedOverrides: Record<string, { phone?: string; email?: string }> = {
-      ...pendingLaunchOverrides,
-    };
-    for (const [id, vals] of Object.entries(newContacts)) {
-      mergedOverrides[id] = {
-        phone: vals.phone || pendingLaunchOverrides[id]?.phone,
-        email: vals.email || pendingLaunchOverrides[id]?.email,
-      };
-    }
+    // A field left empty keeps the lookup's value (vals.x || pending[id]?.x).
+    const mergedOverrides = mergeContactOverrides(pendingLaunchOverrides, newContacts);
     const launchIds = new Set<string>(Object.keys(newContacts));
     await runLaunchPair(mergedOverrides, launchIds, { skipRedirect: false });
     setReadyLaunchedPendingRedirect(false);
