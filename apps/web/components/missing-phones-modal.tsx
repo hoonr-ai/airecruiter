@@ -195,15 +195,13 @@ export function MissingPhonesModal({
           <Button
             variant="outline"
             onClick={() => {
+              // Ids and counts only — no names or usernames to New Relic
+              // (the recruiter is identified by setNrUser's hash).
               logStep("pair_launch_skipped_missing_phones", "info", {
-                username,
                 job_id: jobId,
                 job_diva_id: jobDivaId,
-                skipped_candidates: candidates.map((c) => ({
-                  candidate_id: c.candidate_id,
-                  name: c.name,
-                  jobdiva_id: c.jobdiva_id,
-                })),
+                skipped_count: candidates.length,
+                skipped_candidate_ids: candidates.map((c) => c.candidate_id).join(","),
               });
               onClose();
             }}

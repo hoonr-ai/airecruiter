@@ -536,17 +536,15 @@ export function MissingContactsModal({
           <Button
             variant="outline"
             onClick={() => {
+              // Ids and counts only — no names or usernames to New Relic
+              // (the recruiter is identified by setNrUser's hash).
               logStep("pair_launch_skipped_missing_contacts", "info", {
-                username,
                 job_id: jobId,
                 job_diva_id: jobDivaId,
-                skipped_candidates: candidates.map((c) => ({
-                  candidate_id: c.candidate_id,
-                  name: c.name,
-                  jobdiva_id: c.jobdiva_id,
-                  needsPhone: c.needsPhone,
-                  needsEmail: c.needsEmail,
-                })),
+                skipped_count: candidates.length,
+                needs_phone_count: candidates.filter((c) => c.needsPhone).length,
+                needs_email_count: candidates.filter((c) => c.needsEmail).length,
+                skipped_candidate_ids: candidates.map((c) => c.candidate_id).join(","),
               });
               onClose();
             }}

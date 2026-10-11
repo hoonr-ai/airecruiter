@@ -1,25 +1,16 @@
 "use client";
 
 import * as amplitude from "@amplitude/analytics-browser";
+import { nrBridgeProps, sanitizeEventProps, shouldBridgeToNr } from "@/lib/analytics-props";
+import { nrPageAction } from "@/lib/newrelic";
 
 type EventProps = Record<string, unknown>;
 
 const AMPLITUDE_API_KEY = process.env.NEXT_PUBLIC_AMPLITUDE_API_KEY;
 let initialized = false;
 
-function sanitize(props?: EventProps): EventProps {
-  if (!props) return {};
-  const out: EventProps = {};
-  for (const [key, value] of Object.entries(props)) {
-    if (value === null || value === undefined) continue;
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      out[key] = value;
-      continue;
-    }
-    out[key] = String(value);
-  }
-  return out;
-}
+// Objects become JSON (≤ 1000 chars), not "[object Object]" — see analytics-props.ts.
+const sanitize = sanitizeEventProps;
 
 export function initAnalytics() {
   if (initialized || typeof window === "undefined" || !AMPLITUDE_API_KEY) return;
@@ -45,6 +36,15 @@ export function identifyUser(userId?: string | null, userProperties?: EventProps
 }
 
 export function trackEvent(eventType: string, props?: EventProps, userId?: string | null) {
+  // Allowlisted product events also become New Relic PageActions (PII-filtered
+  // there); independent of the Amplitude key, and never allowed to throw.
+  if (shouldBridgeToNr(eventType)) {
+    try {
+      nrPageAction(eventType, nrBridgeProps(props));
+    } catch {
+      // telemetry must never break the caller
+    }
+  }
   initAnalytics();
   if (!initialized) return;
   if (userId) {
