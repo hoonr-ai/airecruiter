@@ -111,6 +111,17 @@ JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP = max(0, int(os.getenv("JOBDIVA_PROVISION
 # Grep / alert marker for a create the provisioner refused because the person
 # would have landed in JobDiva as a blank profile (no usable name, nothing else).
 JOBDIVA_BLANK_PROFILE_REFUSED = "JOBDIVA_BLANK_PROFILE_REFUSED"
+
+
+def jobdiva_provisioning_enabled() -> bool:
+    """JOBDIVA_PROVISIONING_ENABLED kill switch (default true), read at call
+    time. false = no launch path creates or links JobDiva candidates/
+    applications (the inline per-batch provisioning, the launch-session
+    stage, /engage/re-provision): a local end-to-end launch must never
+    write JobDiva."""
+    return os.getenv("JOBDIVA_PROVISIONING_ENABLED", "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 _NR_RESPONSE_BODY_LIMIT = 16000
 
 
@@ -2611,6 +2622,13 @@ async def _provision_batch_to_jobdiva(
     }
     if not candidate_ids:
         return results
+    if not jobdiva_provisioning_enabled():
+        logger.warning(
+            "[%s] JOBDIVA_PROVISIONING_ENABLED=false: %d candidate(s) not provisioned to JobDiva",
+            label, len(candidate_ids),
+        )
+        results["skipped"] = len(candidate_ids)
+        return results
     # LinkedIn re-reads left for this batch (see _provisioning_resume).
     refetch_budget = [JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP]
 
@@ -3073,6 +3091,14 @@ async def provision_sent_candidates(job_id: str, candidate_ids: Sequence[str]) -
         "failed": 0, "duplicate_suspected": 0, "blank_profile_refused": 0,
     }
     if not ids or not job_id:
+        return out
+    if not jobdiva_provisioning_enabled():
+        # Kill switch: nothing claimed (a later run with it on still takes them).
+        logger.warning(
+            "launch provisioning disabled (JOBDIVA_PROVISIONING_ENABLED=false) job=%s n=%d", job_id, len(ids),
+        )
+        out["not_claimed"] = len(ids)
+        out["skipped"] = len(ids)
         return out
     numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(str(job_id))
     keys = _job_key_list((str(job_id), numeric_job_id or "", ref_job_id or ""))
@@ -4961,6 +4987,10 @@ async def _run_one_batch(
         dnc_blocked = set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
         real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
         sendable_ids = real_ids
+        # Reported on the internal channel only (the wire format is pinned):
+        # a launch session must see these as excluded, or it re-plans them
+        # every pass and ends "made no progress".
+        res_out["dnc_blocked_ids"] = [c for c in batch if c in dnc_blocked]
 
         # Per-candidate contact gate. _send_bulk_interview_core's payload
         # validation 400s the ENTIRE batch when any single resume has no
@@ -5208,6 +5238,7 @@ async def run_launch(
     totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0, "employer_unverified": 0}
     all_skipped: List[str] = []
     all_excluded: List[Dict[str, str]] = []
+    all_dnc_blocked: List[str] = []
     all_employer_unverified: List[Dict[str, str]] = []
     failed_candidate_ids: List[str] = []
     all_sent_ids: List[str] = []
@@ -5306,6 +5337,7 @@ async def run_launch(
                 continue
             all_skipped.extend(r["skipped"])
             all_excluded.extend(r["excluded_records"])
+            all_dnc_blocked.extend(str(c) for c in (r.get("dnc_blocked_ids") or []))
             totals["excluded"] += r["excluded_count"]
             if status == "aborted":
                 abort_result = r
@@ -5334,7 +5366,7 @@ async def run_launch(
                         "excluded_ids": [
                             str(e.get("candidate_id")) for e in (r.get("excluded_records") or [])
                             if isinstance(e, dict) and e.get("candidate_id")
-                        ],
+                        ] + [str(c) for c in (r.get("dnc_blocked_ids") or [])],
                         "bulk_id": r.get("bulk_id"),
                     },
                 }
@@ -5390,7 +5422,7 @@ async def run_launch(
             "excluded_ids": [
                 str(e.get("candidate_id")) for e in all_excluded
                 if isinstance(e, dict) and e.get("candidate_id")
-            ],
+            ] + all_dnc_blocked,
             "failed_ids": list(failed_candidate_ids),
             "not_run_ids": not_run_ids,
             "stopped": stopped,

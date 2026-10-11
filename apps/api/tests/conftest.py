@@ -60,6 +60,14 @@ def _no_real_kipplo_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _jobdiva_provisioning_default_on(monkeypatch):
+    """JOBDIVA_PROVISIONING_ENABLED is the local-run kill switch (a local
+    end-to-end launch must never write JobDiva), so apps/api/.env may set it
+    false. The suite tests the default (on); kill-switch tests set it."""
+    monkeypatch.delenv("JOBDIVA_PROVISIONING_ENABLED", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _contact_chain_with_every_provider(monkeypatch):
     """Most contact-chain tests cover the mechanics of every provider, so they
     run with all four listed and without the Exa deep search. Production asks
