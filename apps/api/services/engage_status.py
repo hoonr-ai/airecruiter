@@ -36,6 +36,26 @@ COMPLETED_STATUSES = ("completed", "complete")
 # Hard-filter values that let a bare "completed" read as Pass.
 HF_PASS_VALUES = ("", "pass", "passed", "not_hard_filter")
 
+# Launch bookkeeping stamps on sourced_candidates.data.engage_status. All read
+# Pending: the candidate has not started an interview.
+#   queued      claimed by a server launch session (data.engage_session_id),
+#               not yet posted to Pairbot. Legacy launch paths treat it as
+#               already sent, so they never post a row a session owns.
+#               data.engage_status_before_claim keeps the status it replaced
+#               ('' or 'failed'); releasing the claim restores it.
+#   sending     taken by the send claim every launch path runs right before
+#               its Pairbot POST; only the claimant posts it. Released to
+#               'failed' (or a session's 'queued') if Pairbot never answers.
+#   processing  Pairbot accepted the bulk (202); creation still running.
+#   sent / initiated  the interview exists.
+LAUNCH_QUEUED_STATUS = "queued"
+LAUNCH_SENDING_STATUS = "sending"
+LAUNCH_IN_FLIGHT_STATUSES = ("queued", "processing", "sending")
+LAUNCH_PENDING_STATUSES = ("queued", "processing", "sending", "sent", "initiated")
+# engage_status values a launch may (re)claim — and only while the row has no
+# interview id and no data.engage_block_reason.
+LAUNCH_CLAIMABLE_STATUSES = ("", "failed")
+
 
 def format_engage_status(
     engage_status: Optional[str],
@@ -45,6 +65,8 @@ def format_engage_status(
     if not engage_status:
         return "Pending"
     s = engage_status.lower()
+    if s in LAUNCH_PENDING_STATUSES:
+        return "Pending"
     if s in PASS_STATUSES:
         return "Pass"
     if s in FAIL_STATUSES:
