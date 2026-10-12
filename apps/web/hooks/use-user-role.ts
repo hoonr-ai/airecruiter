@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useMsal } from "@azure/msal-react";
 import { api, getActiveUserEmail } from "@/lib/api";
+import { clearPersistedRole, readPersistedRole, writePersistedRole } from "@/lib/role-cache";
 
 export type UserRole = "admin" | "team_lead" | "recruiter";
 
@@ -19,6 +20,8 @@ export interface UserRoleInfo {
   orgRoleLabel: string | null;
   /** Someone reports to them — the server gives them analytics scoped to everyone beneath. */
   managesPeople: boolean;
+  /** True until the role is known: from the server, or from the last visit's
+   *  answer (lib/role-cache.ts) while this load re-checks it. */
   isLoading: boolean;
 }
 
@@ -44,8 +47,22 @@ const DEFAULT_ROLE: RoleData = {
   managesPeople: false,
 };
 
+// Answers from the server during this page load. A role only in
+// `persistedRole` (last visit's) is shown at once but still re-checked.
 const roleCache: Record<string, RoleData> = {};
 const inflightRequests: Record<string, Promise<RoleData | null>> = {};
+
+function browserStorage(): Storage | null {
+  try {
+    return typeof window !== "undefined" ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistedRole(email: string): RoleData | null {
+  return email ? readPersistedRole<RoleData>(browserStorage(), email, Date.now()) : null;
+}
 
 export function clearUserRoleCache(email?: string) {
   if (email) {
@@ -55,6 +72,7 @@ export function clearUserRoleCache(email?: string) {
     for (const key of Object.keys(roleCache)) delete roleCache[key];
     for (const key of Object.keys(inflightRequests)) delete inflightRequests[key];
   }
+  clearPersistedRole(browserStorage());
 }
 
 async function fetchRoleForEmail(email: string): Promise<RoleData | null> {
@@ -74,6 +92,7 @@ async function fetchRoleForEmail(email: string): Promise<RoleData | null> {
         managesPeople: data.manages_people === true,
       };
       roleCache[email] = resolved;
+      writePersistedRole(browserStorage(), email, resolved, Date.now());
       return resolved;
     }
   } catch (e) {
@@ -89,14 +108,11 @@ export function useUserRole(): UserRoleInfo {
   const email = accounts[0]?.username || getActiveUserEmail() || "";
 
   const [roleInfo, setRoleInfo] = useState<RoleData>(() => {
-    if (email && roleCache[email]) {
-      return roleCache[email];
-    }
-    return DEFAULT_ROLE;
+    return (email && (roleCache[email] || persistedRole(email))) || DEFAULT_ROLE;
   });
 
   const [isLoading, setIsLoading] = useState<boolean>(() => {
-    return !email || !roleCache[email];
+    return !email || !(roleCache[email] || persistedRole(email));
   });
 
   useEffect(() => {
@@ -111,8 +127,18 @@ export function useUserRole(): UserRoleInfo {
       return;
     }
 
+    // Last visit's role: show it now, and let the server's answer below
+    // replace it (stale-while-revalidate). Without one, wait for the server
+    // rather than show the recruiter view first.
+    const remembered = persistedRole(email);
+    if (remembered) {
+      setRoleInfo(remembered);
+      setIsLoading(false);
+    } else {
+      setIsLoading(true);
+    }
+
     let isMounted = true;
-    setIsLoading(true);
 
     if (!inflightRequests[email]) {
       inflightRequests[email] = fetchRoleForEmail(email);

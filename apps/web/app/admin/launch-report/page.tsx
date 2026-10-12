@@ -78,10 +78,19 @@ interface LaunchReportRow {
   added_to_click_minutes?: number | null;
   click_to_launch_minutes?: number | null;
   /**
-   * Step 5 ("Source") time. null = not tracked (a job worked before the
-   * tracking existed, or the read failed) — shown as "—", never as 0.
+   * Active time per wizard step (services/job_step_time.py), summed over
+   * every visit and recruiter, and Steps 1–5 together. null = not tracked (a
+   * job worked before the tracking existed — Step 5 09/23/2026, Steps 1–4
+   * 10/12/2026 — or the read failed) — shown as "—", never as 0. Steps 1–4
+   * and the total are optional so a page served ahead of the backend that
+   * sends them renders "—" too.
    */
+  step1_active_minutes?: number | null;
+  step2_active_minutes?: number | null;
+  step3_active_minutes?: number | null;
+  step4_active_minutes?: number | null;
   step5_active_minutes: number | null;
+  posting_active_minutes?: number | null;
   step5_to_launch_minutes: number | null;
   pending: number;
   in_progress: number;
@@ -197,6 +206,15 @@ type ColumnGroup = { title: string; columns: Column[]; showInfo?: boolean };
 
 const num = (value: number) => (value ? value.toLocaleString() : "0");
 
+// The job wizard's steps (app/jobs/new/page.tsx STEP_LABELS).
+const POSTING_STEPS = [
+  { step: 1, name: "Intake", field: "step1_active_minutes" },
+  { step: 2, name: "Publish", field: "step2_active_minutes" },
+  { step: 3, name: "Rubric", field: "step3_active_minutes" },
+  { step: 4, name: "Filters", field: "step4_active_minutes" },
+  { step: 5, name: "Source", field: "step5_active_minutes" },
+] as const satisfies ReadonlyArray<{ step: number; name: string; field: keyof LaunchReportRow }>;
+
 const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Job",
@@ -248,6 +266,30 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "sourced", label: "Sourced", numeric: true, text: (r) => num(r.total_candidates_sourced) },
     ],
   },
+  // Measured by the job wizard itself (services/job_step_time.py): time the
+  // step was open AND in use, all visits and recruiters. A job worked before
+  // that existed has no data and shows "—", not 0m.
+  {
+    title: "Job Posting Time",
+    columns: [
+      ...POSTING_STEPS.map(
+        ({ step, name, field }): Column => ({
+          key: `step${step}_active`,
+          label: `Step ${step} ${name}`,
+          numeric: true,
+          hint: `Time recruiters spent working on Step ${step} (${name}): tab open and in use, all visits and recruiters`,
+          text: (r) => formatDuration(r[field] ?? null),
+        }),
+      ),
+      {
+        key: "posting_active",
+        label: "Total Posting Time",
+        numeric: true,
+        hint: "Steps 1–5 together: active time across the whole job wizard",
+        text: (r) => formatDuration(r.posting_active_minutes ?? null),
+      },
+    ],
+  },
   {
     title: "Launch",
     columns: [
@@ -296,17 +338,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
         hint: "First interview created in PAIR Bot (PAIR Launch) − first Launch PAIR click: how long PAIR took to launch after the click",
         text: (r) => formatDuration(r.click_to_launch_minutes),
       },
-      // Measured by the job wizard itself (services/job_step_time.py), so a
-      // job worked before that existed has no data and shows "—", not 0m.
-      {
-        key: "step5_active",
-        label: "Step 5 Active Time",
-        numeric: true,
-        hint: "Time recruiters spent working on Step 5 (Source) — tab open and in use, all visits and recruiters",
-        text: (r) => formatDuration(r.step5_active_minutes),
-      },
       // Ends at the PAIR Launch column's instant: both use the first
-      // SUCCESSFUL launch.
+      // SUCCESSFUL launch. Step 5's active time is in Job Posting Time.
       {
         key: "step5_to_launch",
         label: "Step 5 → Launch",
@@ -847,9 +880,10 @@ export default function LaunchReportPage() {
         rather than the next. Each row shows the job&apos;s current rank-list numbers — one per launched candidate, over
         the whole life of the job — so Sourced, Launched and the interview status columns match the job&apos;s Rankings
         page, and the interview status and feedback columns count launched candidates only. Interview status, channel,
-        phase and response columns are read live from PAIR Bot. The Step 5 time columns only cover jobs worked since
-        that tracking began, and Launch Clicked, Added → Click and Click → Launch only jobs launched since the Launch
-        PAIR click was recorded; older jobs show a dash. A report that includes today refreshes itself every 2
+        phase and response columns are read live from PAIR Bot. Job Posting Time is the time recruiters actively
+        worked each wizard step (tab open and in use); Step 5 is tracked since 09/23/2026 and Steps 1–4 since
+        10/12/2026. Launch Clicked, Added → Click and Click → Launch only cover jobs launched since the Launch PAIR
+        click was recorded. Older jobs show a dash. A report that includes today refreshes itself every 2
         minutes while this tab is open. Date ranges are limited to {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
 

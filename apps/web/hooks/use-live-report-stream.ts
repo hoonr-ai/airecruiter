@@ -134,7 +134,10 @@ export function useLiveReportStream({
       }
 
       setIsConnected(true);
-      retryCountRef.current = 0;
+      // The backoff is NOT reset here: when PAIR Bot's stream is down the API
+      // still answers 200, sends one {"type":"error"} event and closes, and
+      // resetting on the 200 reconnected every 1-2s for as long as the
+      // outage lasted. It resets on the first real event below.
       resetWatchdog();
 
       const reader = response.body.getReader();
@@ -162,6 +165,7 @@ export function useLiveReportStream({
           const interviewId = payload.interview_id ?? payload.interviewId;
           const eventType = payload.event_type ?? payload.type;
           if (interviewId && eventType && eventType !== "connected") {
+            retryCountRef.current = 0;
             eventCallbackRef.current?.({
               interviewId: Number(interviewId),
               type: eventType,

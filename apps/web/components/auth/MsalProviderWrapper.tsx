@@ -16,11 +16,15 @@ export function MsalProviderWrapper({ children }: { children: ReactNode }) {
             // and ID-token claims, and console output can reach telemetry.
             if (response) {
                 console.log("SSO: redirect sign-in completed");
+                if (response.account) msalInstance.setActiveAccount(response.account);
             } else {
                 console.log("SSO: No redirect response (user already logged in or first visit)");
                 const accounts = msalInstance.getAllAccounts();
                 if (accounts.length > 0) {
                     console.log(`SSO: ${accounts.length} cached account(s) found`);
+                    // One account for every token lookup (lib/api.ts), not
+                    // whichever getAllAccounts() happens to list first.
+                    if (!msalInstance.getActiveAccount()) msalInstance.setActiveAccount(accounts[0]);
                 }
             }
             setIsInitialized(true);

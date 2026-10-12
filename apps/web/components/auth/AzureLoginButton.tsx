@@ -2,13 +2,16 @@
 
 import { useMsal } from "@azure/msal-react";
 import { LogOut } from "lucide-react";
-import { useUserRole } from "@/hooks/use-user-role";
+import { clearUserRoleCache, useUserRole } from "@/hooks/use-user-role";
 
 export function AzureLoginButton() {
     const { instance, accounts } = useMsal();
-    const { role, isAdmin } = useUserRole();
+    const { role, isAdmin, isLoading } = useUserRole();
 
     const handleLogout = () => {
+        // The remembered role belongs to this person; the next one to sign in
+        // on this browser must not see it.
+        clearUserRoleCache();
         instance.logoutRedirect({
             postLogoutRedirectUri: window.location.origin,
         }).catch((e) => {
@@ -29,9 +32,14 @@ export function AzureLoginButton() {
                 <div className="flex flex-col overflow-hidden">
                     <div className="flex items-center gap-1.5">
                         <span className="text-sm font-semibold truncate">{accounts[0].name}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase font-bold ${isAdmin ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-200 text-slate-600'}`}>
-                            {role}
-                        </span>
+                        {isLoading ? (
+                            // Unknown until /auth/me answers: no "recruiter" guess.
+                            <span className="h-4 w-14 rounded bg-slate-200 animate-pulse" aria-label="Loading role" />
+                        ) : (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase font-bold ${isAdmin ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-200 text-slate-600'}`}>
+                                {role}
+                            </span>
+                        )}
                     </div>
                     <span className="text-xs text-slate-500 truncate">{accounts[0].username}</span>
                 </div>

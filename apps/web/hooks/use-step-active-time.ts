@@ -6,7 +6,7 @@ import { ApiError, api } from "@/lib/api";
 import { SAMPLE_MS, createStepTimeSession, type SendOutcome } from "@/lib/step-time";
 
 // Reports how long a recruiter actively works a wizard step, for the reports'
-// "Step 5 Active Time" and "Step 5 → Launch" (apps/api/services/job_step_time.py),
+// per-step Active Time and "Step 5 → Launch" (apps/api/services/job_step_time.py),
 // to POST /api/v1/jobs/{job}/step-time. The rules live in lib/step-time.ts
 // (what counts as active, when to send, what a failed send does), where they
 // are unit-tested. This hook only wires browser events, a timer and the API
