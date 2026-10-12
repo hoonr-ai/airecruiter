@@ -1,5 +1,5 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Seven types today:
+existing email notifications. Eight types today:
 
 - candidate_passed (create_candidate_passed_notifications): a candidate's
   interview result. Independent of the pass-email trigger in
@@ -73,6 +73,19 @@ existing email notifications. Seven types today:
   recruiter_assigned (_job_level_duplicate_in_last_minute): re-running a
   tweaked search later and getting 0 again is a fresh, separately-worth-
   notifying result.
+
+- daily_digest (create_daily_digest_notifications): the one type NOT fired
+  from a request/webhook — main.py schedules it once a day (19:00
+  Asia/Kolkata; see that function's docstring for why that IST time, not a
+  US one, is what's configured). One row per recruiter with at least one
+  unread candidate_passed notification, summarizing how many and across how
+  many jobs. Spans every job a recipient has unread Pass notifications on,
+  so unlike every other type here it has no single job to attach to —
+  jobdiva_id is NULL (a schema change from every earlier type, which only
+  ever had candidate_id go NULL; see routers/notifications.py's schema
+  init). Dedup is a daily-scale version of _job_level_duplicate_in_last_minute
+  (_recipient_already_digested_recently, by recipient_email alone since
+  there's no jobdiva_id to key on).
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -808,3 +821,119 @@ async def create_zero_match_notification(*, job_id: str, searcher_email: str) ->
         await asyncio.to_thread(_create_zero_match_notification_sync, job_id, searcher_email)
     except Exception as e:  # noqa: BLE001 - must never raise into the search stream
         logger.error("create_zero_match_notification_failed job=%s: %s", job_id, e, exc_info=True)
+
+
+# Daily digest is a scheduled job (main.py), not a per-request trigger, so
+# it has no single job/jobdiva_id to dedupe against the way the other
+# job-level types do — the check below looks up by recipient_email alone,
+# over a window wide enough to survive the job running a little early/late
+# without re-firing for what's really the same morning, but short enough
+# that the next genuine day's digest isn't blocked.
+_DIGEST_DEDUP_WINDOW_HOURS = 20
+
+
+def _recipient_already_digested_recently(cur, recipient_email: str) -> bool:
+    """True if `recipient_email` already got a daily_digest notification
+    within the last _DIGEST_DEDUP_WINDOW_HOURS. Same check-then-insert
+    shape as _job_level_duplicate_in_last_minute — not a Postgres-enforced
+    UNIQUE-index guarantee (a time-window dedup key can't be one — see that
+    function's docstring for why), just sized for "once a day" instead of
+    "once a minute": the scheduled job that calls this runs once daily, so
+    the realistic race here is the job firing twice close together (e.g. a
+    restart near the boundary), not concurrent requests.
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM notifications
+        WHERE recipient_email = %s AND type = 'daily_digest'
+          AND created_at >= now() - (%s * INTERVAL '1 hour')
+        LIMIT 1
+        """,
+        (recipient_email, _DIGEST_DEDUP_WINDOW_HOURS),
+    )
+    return cur.fetchone() is not None
+
+
+def _digest_title(passed_count: int, job_count: int) -> str:
+    """A friendly, honest summary line — phrasing varies by count/job
+    spread rather than one rigid template, but always states the two
+    numbers a recruiter actually needs: how many, across how many jobs."""
+    where = "for this job" if job_count <= 1 else f"across {job_count} jobs"
+    if passed_count == 1:
+        return f"Good morning! 1 candidate passed their interview {where} and is waiting on your review."
+    return f"Good morning! {passed_count} candidates passed their interviews {where} — ready whenever you are."
+
+
+def _create_daily_digest_notifications_sync() -> None:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Every recipient with at least one unread, uncleared
+            # candidate_passed notification right now — HAVING COUNT(*) > 0
+            # is redundant with the WHERE clause here (GROUP BY only ever
+            # produces rows with >= 1 match) but documents the intent: a
+            # recipient with nothing unread is never considered, let alone
+            # digested with "0 candidates."
+            cur.execute(
+                """
+                SELECT recipient_email, COUNT(*) AS passed_count,
+                       COUNT(DISTINCT jobdiva_id) AS job_count
+                FROM notifications
+                WHERE type = 'candidate_passed' AND read_at IS NULL AND cleared_at IS NULL
+                GROUP BY recipient_email
+                HAVING COUNT(*) > 0
+                """
+            )
+            rows = cur.fetchall()
+
+            sent = 0
+            for row in rows:
+                recipient = row["recipient_email"]
+                if _recipient_already_digested_recently(cur, recipient):
+                    continue
+                title = _digest_title(row["passed_count"], row["job_count"])
+                if _insert_notification(
+                    cur,
+                    notification_type="daily_digest",
+                    recipient_email=recipient,
+                    job_id=None,
+                    jobdiva_id=None,
+                    candidate_id=None,
+                    title=title,
+                    body=None,
+                    score=None,
+                ):
+                    sent += 1
+            conn.commit()
+            if sent:
+                logger.info("notification_created type=daily_digest recipients=%d", sent)
+    finally:
+        conn.close()
+
+
+async def create_daily_digest_notifications() -> None:
+    """Scheduled once-a-day summary — main.py registers this at 19:00
+    Asia/Kolkata. India has no DST, so that fixed IST time lands reliably
+    at either 9:30am EDT or 8:30am EST depending on the time of year (see
+    the PR description's timezone math) — close to when a US-based
+    recruiter starts their day, without this code needing to track the US
+    DST transition dates itself.
+
+    For every recruiter with at least one unread candidate_passed
+    notification, fires one daily_digest row summarizing how many and
+    across how many jobs. Scoped to candidate_passed specifically, not
+    every unread type: "N candidates passed and are awaiting your review"
+    is the one summary a recruiter can act on at a glance — submitted/
+    rejected/job-level types don't have the same "something is waiting on
+    me" shape.
+
+    Job-level in form only — jobdiva_id is NULL, since a digest spans every
+    job a recipient has unread Pass notifications on, not one (see
+    routers/notifications.py's schema init for the nullable-jobdiva_id
+    migration this required). All failures are caught and logged here,
+    never raised back into the scheduler loop.
+    """
+    try:
+        await asyncio.to_thread(_create_daily_digest_notifications_sync)
+    except Exception as e:  # noqa: BLE001 - must never crash the scheduler loop
+        logger.error("create_daily_digest_notifications_failed: %s", e, exc_info=True)
