@@ -1,6 +1,7 @@
 "use client";
 
-import { Bell, CheckCheck } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Bell, CheckCheck, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -23,20 +24,41 @@ function formatRelativeTime(iso: string): string {
 }
 
 function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id: number) => void }) {
+  const router = useRouter();
   const isUnread = !item.read_at;
+  // Both present on every notification created after the NOT NULL schema
+  // tightening; still guarded in case an older row predates it.
+  const reportHref =
+    item.jobdiva_id && item.candidate_id
+      ? `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`
+      : null;
+
+  const handleRowClick = () => {
+    if (isUnread) onRead(item.id);
+    if (reportHref) router.push(reportHref);
+  };
+
   return (
     <Card
-      onClick={() => isUnread && onRead(item.id)}
+      onClick={handleRowClick}
       className={cn(
-        "flex-row items-center gap-4 px-5 py-4 cursor-pointer transition-colors",
-        isUnread ? "bg-primary/5 border-primary/20" : "bg-white"
+        "flex-row items-center gap-4 px-5 py-4 transition-colors",
+        isUnread ? "bg-primary/5 border-primary/20" : "bg-white",
+        reportHref && "hover:border-primary/40 cursor-pointer"
       )}
     >
       <div className="flex-1 min-w-0">
         <p className={cn("text-sm", isUnread ? "font-semibold text-slate-900" : "font-medium text-slate-600")}>
           {item.title}
         </p>
-        {item.body && <p className="text-xs text-slate-500 mt-0.5">{item.body}</p>}
+        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+          {item.body && <p className="text-xs text-slate-500">{item.body}</p>}
+          {item.jobdiva_id && (
+            <span className="text-xs text-slate-400 font-mono bg-slate-100 rounded px-1.5 py-0.5">
+              {item.jobdiva_id}
+            </span>
+          )}
+        </div>
         <p className="text-xs text-slate-400 mt-1">{formatRelativeTime(item.created_at)}</p>
       </div>
       {item.score !== null && <ScoreBadge score={item.score} />}
@@ -46,7 +68,7 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
 }
 
 export default function NotificationsPage() {
-  const { notifications, unreadCount, markRead, markAllRead } = useNotificationsStream();
+  const { notifications, unreadCount, isLoading, hasLoadError, markRead, markAllRead } = useNotificationsStream();
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -68,7 +90,16 @@ export default function NotificationsPage() {
         )}
       </div>
 
-      {notifications.length === 0 ? (
+      {hasLoadError && (
+        <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 mb-4">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          Couldn&apos;t refresh notifications — showing the last loaded data.
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
+      ) : notifications.length === 0 ? (
         <div className="text-center text-sm text-slate-400 py-16">
           No notifications yet. You&apos;ll see candidates land here as soon as they pass an interview.
         </div>

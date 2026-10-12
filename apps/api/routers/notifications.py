@@ -357,7 +357,23 @@ async def _unregister_subscriber(email: str, queue: "asyncio.Queue") -> None:
             queues.discard(queue)
             if not queues:
                 del _subscribers[email]
-                _last_seen_id.pop(email, None)
+                # Deliberately NOT popping _last_seen_id[email] here. Doing so
+                # used to make the cursor forget where it left off the moment
+                # a user's last tab disconnected (closing a tab, a brief
+                # network blip, navigating away and back): the next
+                # subscription treated the email as brand new and reseeded
+                # the cursor from _max_id_sync() — the CURRENT max id — which
+                # silently skips any notification created in the gap between
+                # disconnect and reconnect. The truth-up refresh() on
+                # (re)connect only covers rows that already existed by the
+                # time that fetch ran, not ones inserted afterward, so this
+                # produced real missed notifications in QA. Leaving the
+                # cursor in place means a reconnect for an already-seen email
+                # resumes exactly where it left off. Entries live for this
+                # worker's lifetime (bounded by the recruiter count), and
+                # _subscribers itself still drops the now-empty set so the
+                # broadcaster loop has nothing to iterate for this email
+                # until it reconnects.
 
 
 @router.get("/stream")

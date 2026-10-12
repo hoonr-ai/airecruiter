@@ -7,6 +7,13 @@ interface NotificationsContextType {
   notifications: NotificationItem[];
   unreadCount: number;
   isConnected: boolean;
+  // True until the first list() fetch settles (success or failure). The page
+  // uses this to tell "still loading" apart from "confirmed empty" — without
+  // it, the empty initial [] state renders "No notifications yet" for a beat
+  // on every load, and indefinitely if that first fetch fails and the error
+  // goes unnoticed.
+  isLoading: boolean;
+  hasLoadError: boolean;
   refresh: () => void;
   markRead: (id: number) => void;
   markAllRead: () => void;
@@ -23,6 +30,8 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [hasLoadError, setHasLoadError] = useState<boolean>(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const isManuallyClosedRef = useRef<boolean>(false);
@@ -40,8 +49,15 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       const data = await api.notifications.list({ limit: 50 });
       setNotifications(data.notifications);
       setUnreadCount(data.unread_count);
+      setHasLoadError(false);
     } catch (err) {
       console.error("Failed to fetch notifications:", err);
+      // Deliberately leave `notifications` as-is on failure (don't clear it
+      // to []) — a transient error reconciling a reconnect should never make
+      // already-loaded rows disappear from the screen.
+      setHasLoadError(true);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
   refreshRef.current = refresh;
@@ -239,7 +255,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   return (
     <NotificationsContext.Provider
-      value={{ notifications, unreadCount, isConnected, refresh, markRead, markAllRead }}
+      value={{ notifications, unreadCount, isConnected, isLoading, hasLoadError, refresh, markRead, markAllRead }}
     >
       {children}
     </NotificationsContext.Provider>
