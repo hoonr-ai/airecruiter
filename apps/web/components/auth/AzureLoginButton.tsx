@@ -3,15 +3,17 @@
 import { useMsal } from "@azure/msal-react";
 import { LogOut } from "lucide-react";
 import { clearUserRoleCache, useUserRole } from "@/hooks/use-user-role";
+import { clearCachedNotifications } from "@/lib/notifications-cache";
 
 export function AzureLoginButton() {
     const { instance, accounts } = useMsal();
     const { role, isAdmin, isLoading } = useUserRole();
 
     const handleLogout = () => {
-        // The remembered role belongs to this person; the next one to sign in
-        // on this browser must not see it.
+        // The remembered role and notification feed both belong to this
+        // person; the next one to sign in on this browser must not see them.
         clearUserRoleCache();
+        clearCachedNotifications(typeof window !== "undefined" ? window.localStorage : null);
         instance.logoutRedirect({
             postLogoutRedirectUri: window.location.origin,
         }).catch((e) => {

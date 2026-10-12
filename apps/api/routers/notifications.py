@@ -84,6 +84,13 @@ def init_notifications_schema_sync() -> None:
                     );
                     """
                 )
+                # Added after the initial CREATE TABLE shipped — ALTER (not
+                # folded into the CREATE above) so it actually lands on a
+                # table a prior deploy already created, which IF NOT EXISTS
+                # on CREATE TABLE would otherwise silently skip.
+                cur.execute(
+                    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS cleared_at TIMESTAMPTZ;"
+                )
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created
@@ -132,7 +139,7 @@ def _row_to_item(row) -> NotificationItem:
 
 def _unread_count_for(cur, email: str) -> int:
     cur.execute(
-        "SELECT COUNT(*) FROM notifications WHERE recipient_email = %s AND read_at IS NULL",
+        "SELECT COUNT(*) FROM notifications WHERE recipient_email = %s AND read_at IS NULL AND cleared_at IS NULL",
         (email,),
     )
     return cur.fetchone()[0]
@@ -143,7 +150,7 @@ def _list_notifications_sync(
 ) -> NotificationListResponse:
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            conditions = ["recipient_email = %s"]
+            conditions = ["recipient_email = %s", "cleared_at IS NULL"]
             params: list = [email]
             if unread_only:
                 conditions.append("read_at IS NULL")
@@ -210,14 +217,27 @@ def _mark_all_notifications_read_sync(email: str) -> None:
 
 
 def _clear_notifications_sync(email: str) -> None:
-    """Hard-delete every notification for this recipient. Safe to delete
-    outright (rather than a soft-delete/hide flag): each row is a one-time
-    "this candidate passed" event — the unique index already prevents a
-    second row for the same candidate/job/recipient, so there's nothing a
-    deleted row would need to be reconciled against later."""
+    """Soft-delete (stamp cleared_at) rather than hard-delete, and clears
+    the recipient's ENTIRE inbox, not just whatever page the client has
+    fetched — same scope as mark-all-read.
+
+    Hard-deleting was the original approach, but it's backwards from what
+    made it look safe: the unique index on (recipient_email, candidate_id,
+    jobdiva_id, type) only blocks a second row WHILE THE FIRST ONE STILL
+    EXISTS. Delete it, and `reconcile_missed_pass_notifications` — which
+    re-scans every Pass candidate in its lookback window on every run,
+    independent of whether a notification already fired — finds no existing
+    row to conflict with and happily inserts a new one, silently reviving a
+    notification the user just cleared. Stamping cleared_at instead leaves
+    the row in place (so the unique index keeps doing its job) and only
+    changes what list/unread-count choose to show.
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM notifications WHERE recipient_email = %s", (email,))
+            cur.execute(
+                "UPDATE notifications SET cleared_at = now() WHERE recipient_email = %s AND cleared_at IS NULL",
+                (email,),
+            )
             conn.commit()
 
 
@@ -331,7 +351,7 @@ def _poll_new_notifications_sync(last_seen: Dict[str, int]) -> Dict[str, List[di
                     SELECT id, type, job_id, jobdiva_id, candidate_id, title, body,
                            score, metadata, read_at, created_at
                     FROM notifications
-                    WHERE recipient_email = %s AND id > %s
+                    WHERE recipient_email = %s AND id > %s AND cleared_at IS NULL
                     ORDER BY id ASC
                     LIMIT 50
                     """,

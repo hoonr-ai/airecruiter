@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
@@ -84,6 +86,7 @@ export default function NotificationsPage() {
     unreadCount,
     isLoading,
     hasLoadError,
+    clearError,
     notificationPermission,
     requestNotificationPermission,
     refresh,
@@ -91,6 +94,12 @@ export default function NotificationsPage() {
     markAllRead,
     clearAll,
   } = useNotificationsStream();
+  const [confirmingClear, setConfirmingClear] = useState(false);
+
+  const handleConfirmClear = () => {
+    setConfirmingClear(false);
+    clearAll();
+  };
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -112,13 +121,36 @@ export default function NotificationsPage() {
             </Button>
           )}
           {notifications.length > 0 && (
-            <Button variant="outline" size="sm" onClick={clearAll} aria-label="Clear all notifications">
+            <Button variant="outline" size="sm" onClick={() => setConfirmingClear(true)} aria-label="Clear notifications">
               <Trash2 className="h-4 w-4 mr-1.5" />
               Clear notifications
             </Button>
           )}
         </div>
       </div>
+
+      <Dialog open={confirmingClear} onOpenChange={setConfirmingClear}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Clear notifications</DialogTitle>
+            <DialogDescription>
+              This removes every notification in your feed, read and unread. It can&apos;t be undone from here.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setConfirmingClear(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmClear}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              Clear notifications
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {notificationPermission === "default" && (
         <div className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 mb-4">
@@ -152,6 +184,18 @@ export default function NotificationsPage() {
             Couldn&apos;t refresh notifications — showing the last loaded data.
           </span>
           <Button variant="ghost" size="sm" className="h-7 text-amber-700 hover:text-amber-900" onClick={refresh}>
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {clearError && (
+        <div className="flex items-center justify-between gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 mb-4" role="status">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            Couldn&apos;t clear notifications — nothing was removed.
+          </span>
+          <Button variant="ghost" size="sm" className="h-7 text-red-700 hover:text-red-900" onClick={clearAll}>
             Retry
           </Button>
         </div>
