@@ -1,17 +1,36 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
+import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
 import { cn } from "@/lib/utils";
+
+function emptyFilterMessage(filter: NotificationFilter): string {
+  switch (filter) {
+    case "unread":
+      return "No unread notifications.";
+    case "jobs":
+      return "No PAIR job notifications.";
+    case "candidates":
+      return "No candidate notifications.";
+    default:
+      // Unreachable today — the tabs only render when there's at least one
+      // notification, so "all" can never be the empty-filtered branch. Kept
+      // as a real fallback rather than nothing, so this stays correct if
+      // that invariant ever changes.
+      return "No notifications match this filter.";
+  }
+}
 
 function formatRelativeTime(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -139,14 +158,52 @@ export default function NotificationsPage() {
     clearAll,
   } = useNotificationsStream();
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [filter, setFilter] = useState<NotificationFilter>("all");
+  const hasNotifications = notifications.length > 0;
 
   const handleConfirmClear = () => {
     setConfirmingClear(false);
     clearAll();
   };
 
+  // Keeps a just-toggled row visible on the Unread tab instead of it
+  // vanishing out from under the cursor the instant markRead fires (PR
+  // review follow-up) — without this, there's no way to notice the row
+  // disappeared, let alone click "mark unread" to undo it. Reset on any
+  // filter change, so switching tabs and back re-applies the filter
+  // normally rather than pinning items forever. Adjusted during render
+  // (React's documented pattern for "reset state when a value changes")
+  // rather than in a useEffect, which would render once with the stale
+  // set before the effect ran and cleared it.
+  const [stickyIds, setStickyIds] = useState<Set<number>>(new Set());
+  const [stickyFilter, setStickyFilter] = useState(filter);
+  if (filter !== stickyFilter) {
+    setStickyFilter(filter);
+    setStickyIds(new Set());
+  }
+
+  const handleRead = useCallback(
+    (id: number) => {
+      setStickyIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+      markRead(id);
+    },
+    [markRead]
+  );
+  const handleUnread = useCallback(
+    (id: number) => {
+      setStickyIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+      markUnread(id);
+    },
+    [markUnread]
+  );
+
+  const filteredNotifications = useMemo(
+    () => notifications.filter((item) => matchesNotificationFilter(item, filter) || stickyIds.has(item.id)),
+    [notifications, filter, stickyIds]
+  );
+
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="max-w-3xl mx-auto h-[calc(100vh-180px)] flex flex-col">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
           <Bell className="h-5 w-5 text-slate-500" />
@@ -164,7 +221,7 @@ export default function NotificationsPage() {
               Mark all read
             </Button>
           )}
-          {notifications.length > 0 && (
+          {hasNotifications && (
             <Button variant="outline" size="sm" onClick={() => setConfirmingClear(true)} aria-label="Clear notifications">
               <Trash2 className="h-4 w-4 mr-1.5" />
               Clear notifications
@@ -245,19 +302,38 @@ export default function NotificationsPage() {
         </div>
       )}
 
-      {notifications.length > 0 ? (
+      {hasNotifications && (
+        <Tabs value={filter} onValueChange={(v) => setFilter(v as NotificationFilter)} className="mb-4 shrink-0">
+          <TabsList>
+            {NOTIFICATION_FILTERS.map((f) => (
+              <TabsTrigger key={f.value} value={f.value}>
+                {f.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      )}
+
+      {hasNotifications ? (
         // Checked before isLoading on purpose: a reload seeds this list from
         // the local cache instantly (see notifications-context.tsx), and
         // that cached content should render right away rather than being
         // hidden behind a loading message while refresh() confirms it in
         // the background.
-        <ScrollArea className="h-[calc(100vh-180px)]">
-          <div className="space-y-3 pr-2">
-            {notifications.map((item) => (
-              <NotificationRow key={item.id} item={item} onRead={markRead} onUnread={markUnread} />
-            ))}
-          </div>
-        </ScrollArea>
+        filteredNotifications.length > 0 ? (
+          // flex-1 (not a fixed height) so this fills whatever the header/
+          // banners/tabs above it leave over inside the outer flex column —
+          // no magic-number height to keep in sync as those grow or shrink.
+          <ScrollArea className="flex-1 min-h-0">
+            <div className="space-y-3 pr-2">
+              {filteredNotifications.map((item) => (
+                <NotificationRow key={item.id} item={item} onRead={handleRead} onUnread={handleUnread} />
+              ))}
+            </div>
+          </ScrollArea>
+        ) : (
+          <div className="text-center text-sm text-slate-400 py-16">{emptyFilterMessage(filter)}</div>
+        )
       ) : isLoading ? (
         <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
       ) : (
