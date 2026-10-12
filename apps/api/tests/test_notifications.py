@@ -42,6 +42,11 @@
   /candidates/search when a full search's summary reports 0 candidates.
   The only type with a single specific recipient (the searching recruiter)
   rather than a job's whole recruiter_emails list.
+- create_daily_digest_notifications: the scheduled (not request-triggered)
+  morning summary — one row per recipient with unread candidate_passed
+  notifications, counting how many and across how many jobs. jobdiva_id is
+  NULL (a digest spans every job), dedup is a daily-scale
+  _job_level_duplicate_in_last_minute analog keyed on recipient_email alone.
 """
 import asyncio
 import json
@@ -63,6 +68,9 @@ from services.notifications_service import (
     create_pair_inactive_notification,
     create_recruiter_assigned_notifications,
     create_zero_match_notification,
+    create_daily_digest_notifications,
+    _digest_title,
+    _recipient_already_digested_recently,
     reconcile_missed_pass_notifications,
 )
 
@@ -725,6 +733,173 @@ def test_create_zero_match_notification_swallows_db_errors(monkeypatch):
     monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
 
     asyncio.run(create_zero_match_notification(job_id="J1", searcher_email="a@x.com"))  # no exception = pass
+
+
+# --- create_daily_digest_notifications ---------------------------------------
+
+class _FakeAcquiredLock:
+    """Stands in for core.advisory_lock.AdvisoryLock as though this worker
+    won the cross-worker race — lets the digest tests exercise
+    _create_daily_digest_notifications_sync without AdvisoryLock.try_acquire
+    opening a real DB connection (core/db.py's get_session_db_connection,
+    which conftest.py's _block_real_db_connections fixture doesn't reach,
+    since that only patches core.db.get_db_connection)."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def try_acquire(self):
+        return True
+
+    async def release(self):
+        pass
+
+
+class _FakeContestedLock:
+    """Stands in for AdvisoryLock as though another worker already holds it."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def try_acquire(self):
+        return False
+
+    async def release(self):
+        pass
+
+
+def test_digest_title_singular_candidate_one_job():
+    title = _digest_title(passed_count=1, job_count=1)
+    assert "1 candidate passed their interview" in title
+    assert "for this job" in title
+    assert "and is waiting on your review" in title
+    assert "candidates" not in title
+
+
+def test_digest_title_plural_candidates_multiple_jobs():
+    title = _digest_title(passed_count=14, job_count=3)
+    assert "14 candidates passed their interviews" in title
+    assert "across 3 jobs" in title
+    assert "and are waiting on your review" in title
+
+
+def test_digest_title_plural_candidates_one_job():
+    title = _digest_title(passed_count=5, job_count=1)
+    assert "5 candidates passed their interviews" in title
+    assert "for this job" in title
+    assert "and are waiting on your review" in title
+
+
+def test_recipient_already_digested_recently_true_when_row_found():
+    cur = FakeCursor(fetchone_results=[{"1": 1}])
+    assert _recipient_already_digested_recently(cur, "a@x.com") is True
+    sql, params = cur.executed[0]
+    assert "type = 'daily_digest'" in sql
+    assert params[0] == "a@x.com"
+
+
+def test_recipient_already_digested_recently_false_when_no_row():
+    cur = FakeCursor(fetchone_results=[None])
+    assert _recipient_already_digested_recently(cur, "a@x.com") is False
+
+
+def test_create_daily_digest_notifications_one_row_per_recipient_with_unread_passed(monkeypatch):
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
+    group_by_rows = [
+        {"recipient_email": "a@x.com", "passed_count": 14, "job_count": 3},
+        {"recipient_email": "b@x.com", "passed_count": 1, "job_count": 1},
+    ]
+    # fetchall: the GROUP BY query. fetchone, per recipient in order: the
+    # dedup pre-check (None = not digested recently), then the insert's own
+    # RETURNING id.
+    cur = FakeCursor(
+        fetchall_results=[group_by_rows],
+        fetchone_results=[None, {"id": 1}, None, {"id": 2}],
+    )
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_daily_digest_notifications())
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 2
+    for sql, params in insert_calls:
+        assert params[1] == "daily_digest"
+        assert params[3] is None  # jobdiva_id
+        assert params[4] is None  # candidate_id
+    titles = [params[5] for _, params in insert_calls]
+    assert any("14 candidates" in t and "across 3 jobs" in t for t in titles)
+    assert any("1 candidate passed" in t and "for this job" in t for t in titles)
+    assert conn.committed is True
+
+
+def test_create_daily_digest_notifications_counts_rows_missing_both_job_ids(monkeypatch):
+    """PR review follow-up: COUNT(DISTINCT jobdiva_id) alone ignores NULLs,
+    so a recipient whose passed rows all lack jobdiva_id would wrongly get
+    job_count=0. COALESCE(jobdiva_id, job_id) in the real query covers
+    this; this test pins the aggregation's own row shape rather than the
+    SQL text, since the GROUP BY/COALESCE happens in Postgres, not here —
+    _digest_title just needs to see a sane job_count out of that row."""
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
+    group_by_rows = [{"recipient_email": "a@x.com", "passed_count": 3, "job_count": 1}]
+    cur = FakeCursor(fetchall_results=[group_by_rows], fetchone_results=[None, {"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_daily_digest_notifications())
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    assert "for this job" in insert_calls[0][1][5]  # job_count=1 renders singular, not "across 0 jobs"
+
+
+def test_create_daily_digest_notifications_skips_recipient_already_digested(monkeypatch):
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
+    group_by_rows = [{"recipient_email": "a@x.com", "passed_count": 2, "job_count": 1}]
+    cur = FakeCursor(
+        fetchall_results=[group_by_rows],
+        fetchone_results=[{"id": 99}],  # dedup pre-check: already digested recently
+    )
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_daily_digest_notifications())
+
+    assert not any("INSERT INTO notifications" in c[0] for c in cur.executed)
+
+
+def test_create_daily_digest_notifications_noop_when_nobody_has_unread_passed(monkeypatch):
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
+    cur = FakeCursor(fetchall_results=[[]])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_daily_digest_notifications())
+
+    assert not any("INSERT INTO notifications" in c[0] for c in cur.executed)
+    assert conn.committed is True  # still commits the (no-op) transaction cleanly
+
+
+def test_create_daily_digest_notifications_swallows_db_errors(monkeypatch):
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
+    def _boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
+
+    asyncio.run(create_daily_digest_notifications())  # no exception raised = pass
+
+
+def test_create_daily_digest_notifications_skips_entirely_when_another_worker_holds_the_lock(monkeypatch):
+    """PR review follow-up: every uvicorn worker's own APScheduler fires
+    this at the same cron tick; a worker that loses the advisory-lock race
+    must not touch the DB at all, let alone insert."""
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeContestedLock)
+
+    def _fail():
+        raise AssertionError("must not touch the DB when another worker holds the lock")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_daily_digest_notifications())  # no exception raised = pass
 
 
 # --- recipient scoping on the read/mark-read sync helpers -------------------

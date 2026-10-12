@@ -110,6 +110,20 @@ def init_notifications_schema_sync() -> None:
                 col = cur.fetchone()
                 if col and col[0] == "NO":
                     cur.execute("ALTER TABLE notifications ALTER COLUMN candidate_id DROP NOT NULL;")
+                # jobdiva_id shipped NOT NULL too (every type until
+                # daily_digest spanned exactly one job). A digest summarizes
+                # across every job a recruiter has unread Pass notifications
+                # on, so it has no single job to attach to — same
+                # guarded-ALTER pattern as candidate_id above.
+                cur.execute(
+                    """
+                    SELECT is_nullable FROM information_schema.columns
+                    WHERE table_name = 'notifications' AND column_name = 'jobdiva_id'
+                    """
+                )
+                col = cur.fetchone()
+                if col and col[0] == "NO":
+                    cur.execute("ALTER TABLE notifications ALTER COLUMN jobdiva_id DROP NOT NULL;")
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created
@@ -204,6 +218,19 @@ def init_notifications_schema_sync() -> None:
                     CREATE INDEX IF NOT EXISTS idx_notifications_zero_match_warning_recent
                         ON notifications (recipient_email, jobdiva_id, created_at)
                         WHERE type = 'zero_match_warning';
+                    """
+                )
+                # daily_digest has no jobdiva_id (it spans every job a
+                # recipient has unread Pass notifications on), so its
+                # "already sent one today" pre-insert check
+                # (_recipient_already_digested_recently in
+                # services/notifications_service.py) looks up by
+                # recipient_email alone — this backs that lookup.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_notifications_daily_digest_recent
+                        ON notifications (recipient_email, created_at)
+                        WHERE type = 'daily_digest';
                     """
                 )
                 conn.commit()
