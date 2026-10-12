@@ -55,4 +55,13 @@ describe("matchesNotificationFilter", () => {
       assert.notEqual(inJobs, inCandidates);
     }
   });
+
+  it("treats an undefined candidate_id (pre-field local cache entry) as job-level, not neither", () => {
+    // The type says string | null, but a notification cached before this
+    // field existed could have it as undefined at runtime — == null must
+    // still route it to "jobs" so the split stays exhaustive.
+    const legacyCached = { read_at: null, candidate_id: undefined as unknown as null };
+    assert.equal(matchesNotificationFilter(legacyCached, "jobs"), true);
+    assert.equal(matchesNotificationFilter(legacyCached, "candidates"), false);
+  });
 });

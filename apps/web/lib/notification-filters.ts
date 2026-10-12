@@ -29,9 +29,14 @@ export function matchesNotificationFilter(
     case "unread":
       return !item.read_at;
     case "jobs":
-      return item.candidate_id === null;
+      // Loose equality deliberately: a notification seeded from an older
+      // local cache (lib/notifications-cache.ts) written before this field
+      // existed could have candidate_id as undefined at runtime even though
+      // the type says string | null — == null catches both, so jobs/
+      // candidates stay exhaustive and mutually exclusive regardless.
+      return item.candidate_id == null;
     case "candidates":
-      return item.candidate_id !== null;
+      return item.candidate_id != null;
     default:
       return true;
   }
