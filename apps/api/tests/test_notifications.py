@@ -20,10 +20,12 @@
 - create_pair_launched_notification / create_pair_inactive_notification: the
   job-level (candidate_id=NULL) companions to the existing PAIR-launched and
   PAIR-inactive emails, run independently of whether that email send
-  succeeds. Each has its own dedicated partial-index conflict clause (a
-  per-minute dedup for launches, an "at most one active" dedup for
-  inactivity) rather than sharing the candidate-level one, which a NULL
-  candidate_id would bypass entirely.
+  succeeds. pair_inactive dedupes via its own dedicated partial-index
+  conflict clause ("at most one active" per job/recipient); pair_launched
+  dedupes via a pre-insert existence check instead
+  (_pair_launched_duplicate_in_last_minute) rather than an index-backed
+  ON CONFLICT, since a per-minute window isn't something Postgres will
+  index.
 """
 import asyncio
 import json
@@ -35,6 +37,7 @@ from fastapi import HTTPException
 from services.notifications_service import (
     _parse_recruiter_emails,
     _insert_notification,
+    _pair_launched_duplicate_in_last_minute,
     _CONFLICT_CANDIDATE_PASSED,
     _CONFLICT_PAIR_LAUNCHED,
     _CONFLICT_PAIR_INACTIVE,
@@ -152,9 +155,12 @@ def test_insert_notification_returns_false_on_conflict():
 
 
 def test_insert_notification_job_level_types_use_their_own_conflict_clause():
-    """pair_launched/pair_inactive pass candidate_id=None and their own
-    dedicated partial-index conflict clause (not the candidate-level one,
-    which would never dedupe a NULL candidate_id against another NULL)."""
+    """pair_launched/pair_inactive pass candidate_id=None. pair_inactive uses
+    its own dedicated partial-index conflict clause (not the candidate-level
+    one, which would never dedupe a NULL candidate_id against another NULL);
+    pair_launched has no conflict clause at all (bare INSERT) since its
+    dedup is an application-level pre-insert check instead, done by its
+    caller before this function is ever reached."""
     cur = FakeCursor(fetchone_results=[{"id": 1}])
     inserted = _insert_notification(
         cur,
@@ -170,7 +176,7 @@ def test_insert_notification_job_level_types_use_their_own_conflict_clause():
     )
     assert inserted is True
     sql, params = cur.executed[0]
-    assert "date_trunc('minute', created_at)" in sql
+    assert "ON CONFLICT" not in sql
     assert params[0] == "a@x.com"
     assert params[1] == "pair_launched"
     assert params[4] is None  # candidate_id position
@@ -285,10 +291,27 @@ def test_reconcile_backfills_new_recipient_for_already_notified_candidate(monkey
     assert insert_calls[0][1][0] == "new-recruiter@x.com"
 
 
+# --- _pair_launched_duplicate_in_last_minute --------------------------------
+
+def test_pair_launched_duplicate_in_last_minute_true_when_row_found():
+    cur = FakeCursor(fetchone_results=[{"1": 1}])
+    assert _pair_launched_duplicate_in_last_minute(cur, "a@x.com", "26-14907") is True
+    sql, params = cur.executed[0]
+    assert "INTERVAL '1 minute'" in sql
+    assert params == ("a@x.com", "26-14907")
+
+
+def test_pair_launched_duplicate_in_last_minute_false_when_no_row():
+    cur = FakeCursor(fetchone_results=[None])
+    assert _pair_launched_duplicate_in_last_minute(cur, "a@x.com", "26-14907") is False
+
+
 # --- create_pair_launched_notification / create_pair_inactive_notification --
 
 def test_create_pair_launched_notification_inserts_one_row_per_recruiter_with_null_candidate(monkeypatch):
-    cur = FakeCursor(fetchone_results=[{"id": 1}, {"id": 2}])
+    # fetchone order per recipient: the duplicate pre-check (None = no
+    # duplicate found), then the INSERT's own RETURNING id.
+    cur = FakeCursor(fetchone_results=[None, {"id": 1}, None, {"id": 2}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
 
@@ -311,7 +334,7 @@ def test_create_pair_launched_notification_inserts_one_row_per_recruiter_with_nu
 
 
 def test_create_pair_launched_notification_singular_candidate_count(monkeypatch):
-    cur = FakeCursor(fetchone_results=[{"id": 1}])
+    cur = FakeCursor(fetchone_results=[None, {"id": 1}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
 
@@ -320,7 +343,8 @@ def test_create_pair_launched_notification_singular_candidate_count(monkeypatch)
         candidate_count=1, recruiter_emails=["a@x.com"],
     ))
 
-    title = cur.executed[0][1][5]
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    title = insert_calls[0][1][5]
     assert "1 candidate" in title and "1 candidates" not in title
 
 

@@ -20,12 +20,17 @@ existing email notifications. Three types today:
   them. Mirror core/email.py's notify_pair_launched / notify_pair_inactive,
   fired from the same call sites, but run INDEPENDENTLY of whether that
   email send succeeds — a transient email-provider failure shouldn't also
-  silently cost the in-app notification. Each has its own dedicated partial
-  unique index instead (see routers/notifications.py's schema init and the
-  _CONFLICT_* constants below), because the two events have different
-  "worth a fresh notification" semantics: a relaunch is always new and
-  notable, while an inactivity transition should show at most one active
-  notification until the user clears it.
+  silently cost the in-app notification. pair_inactive dedupes via a
+  dedicated partial unique index (see routers/notifications.py's schema init
+  and _CONFLICT_PAIR_INACTIVE below); pair_launched dedupes via a plain
+  pre-insert existence check instead (see
+  _pair_launched_duplicate_in_last_minute below) rather than an index,
+  because its natural dedup key involves a time window, and Postgres can't
+  index that in a way it will accept (see that function's docstring for
+  why). The two events have different "worth a fresh notification"
+  semantics: a relaunch is always new and notable, while an inactivity
+  transition should show at most one active notification until the user
+  clears it.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -58,20 +63,20 @@ logger = logging.getLogger(__name__)
 
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
 _CONFLICT_CANDIDATE_PASSED = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
-# Job-level dedup, each matching the partial unique index of the same name in
-# routers/notifications.py's init_notifications_schema_sync — the column/
-# expression list and WHERE clause must match an existing index exactly for
-# Postgres to accept it as the ON CONFLICT arbiter. Both are fully static
-# (no runtime values spliced in), so this is as safe to embed as the rest of
-# the query string.
+# Job-level dedup, matching the partial unique index of the same name in
+# routers/notifications.py's init_notifications_schema_sync — the column
+# list and WHERE clause must match an existing index exactly for Postgres to
+# accept it as the ON CONFLICT arbiter. Fully static (no runtime values
+# spliced in), so this is as safe to embed as the rest of the query string.
 _CONFLICT_PAIR_INACTIVE = (
     "ON CONFLICT (recipient_email, jobdiva_id) "
     "WHERE type = 'pair_inactive' AND cleared_at IS NULL DO NOTHING"
 )
-_CONFLICT_PAIR_LAUNCHED = (
-    "ON CONFLICT (recipient_email, jobdiva_id, date_trunc('minute', created_at)) "
-    "WHERE type = 'pair_launched' DO NOTHING"
-)
+# pair_launched has NO index-backed ON CONFLICT (see
+# _pair_launched_duplicate_in_last_minute below for why) — this constant
+# exists only so _insert_notification's call sites all take the same kind of
+# argument; the clause itself is empty (bare INSERT, no ON CONFLICT at all).
+_CONFLICT_PAIR_LAUNCHED = ""
 
 
 def _parse_recruiter_emails(val: Any) -> List[str]:
@@ -336,6 +341,42 @@ async def reconcile_missed_pass_notifications() -> None:
         logger.error("reconcile_missed_pass_notifications_failed: %s", e, exc_info=True)
 
 
+def _pair_launched_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_id: str) -> bool:
+    """True if this recipient already has a pair_launched row for this job
+    within the last minute.
+
+    This used to be a DB-level partial unique index on
+    date_trunc('minute', created_at) — removed: Postgres only allows
+    IMMUTABLE expressions in an index, and date_trunc(text, timestamptz) is
+    STABLE (its result depends on the session timezone), so that CREATE
+    INDEX failed on every boot. Every statement in init_notifications_schema
+    runs in one transaction that commits once at the end, so that one
+    failure rolled back the WHOLE schema-init pass each time — silently
+    preventing this feature from ever working: create_pair_launched_notification's
+    INSERT referenced an index that had never actually been created, which
+    fails outright, caught and swallowed by that function's own top-level
+    try/except (the candidate still got the separate PAIR-launched EMAIL,
+    which doesn't go through this table at all — that's why only the email
+    ever arrived).
+
+    This existence check + insert is a two-step race (two truly concurrent
+    calls could both pass it), but that was already the accepted trade-off
+    here per the original design ("a client retry or racing workers
+    handling what's really one launch") — a rare duplicate row is a far
+    smaller problem than the notification never being created at all.
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM notifications
+        WHERE recipient_email = %s AND jobdiva_id = %s AND type = 'pair_launched'
+          AND created_at >= now() - INTERVAL '1 minute'
+        LIMIT 1
+        """,
+        (recipient_email, jobdiva_id),
+    )
+    return cur.fetchone() is not None
+
+
 def _create_pair_launched_notification_sync(
     job_id: str, jobdiva_id: str, job_title: str, candidate_count: int, recipients: List[str]
 ) -> None:
@@ -346,6 +387,8 @@ def _create_pair_launched_notification_sync(
     try:
         with conn.cursor() as cur:
             for recipient in recipients:
+                if _pair_launched_duplicate_in_last_minute(cur, recipient, jobdiva_id):
+                    continue
                 _insert_notification(
                     cur,
                     notification_type="pair_launched",
@@ -378,11 +421,11 @@ async def create_pair_launched_notification(
     email send succeeded, it's a separate channel).
 
     Job-level — candidate_id is NULL, since a launch is a batch event with a
-    candidate COUNT, never a single candidate. Dedup is the
-    uniq_notifications_pair_launched_per_minute partial index (see
-    routers/notifications.py): a relaunch is a new, separately-worth-
-    notifying event, so only same-recipient/job/minute duplicates — a retry
-    or racing workers handling what's really one launch — are collapsed.
+    candidate COUNT, never a single candidate. Dedup is an application-level
+    pre-insert existence check (_pair_launched_duplicate_in_last_minute),
+    not an index: a relaunch is a new, separately-worth-notifying event, so
+    only same-recipient/job/minute duplicates — a retry or racing workers
+    handling what's really one launch — are collapsed.
     """
     try:
         if not job_id or not jobdiva_id or not recruiter_emails:

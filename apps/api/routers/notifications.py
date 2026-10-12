@@ -149,19 +149,29 @@ def init_notifications_schema_sync() -> None:
                         WHERE type = 'pair_inactive' AND cleared_at IS NULL;
                     """
                 )
-                # pair_launched: a relaunch IS a new, separately-worth-
-                # notifying event (unlike pair_inactive, there's no "active
-                # period" to collapse into), so this only dedupes
-                # same-recipient/job/minute duplicates — concurrent uvicorn
-                # workers or a client retry hitting the launch endpoint twice
-                # for what's really one launch — without silencing a genuine
-                # second launch minutes or hours later.
+                # pair_launched's same-minute dedup used to be a unique index
+                # on date_trunc('minute', created_at) — DROPPED: Postgres
+                # classifies date_trunc(text, timestamptz) as STABLE, not
+                # IMMUTABLE (its result depends on the session timezone), and
+                # refuses to build an index on a non-immutable expression.
+                # That CREATE INDEX statement therefore failed on every boot
+                # since it shipped, which — because every statement in this
+                # function runs in ONE transaction that only commits once at
+                # the end — rolled back the ENTIRE schema-init pass each
+                # time, silently discarding every other change in this
+                # function too. Confirmed in QA: candidates kept getting the
+                # PAIR-launched EMAIL (a separate, unaffected code path) but
+                # never the in-app notification, because
+                # create_pair_launched_notification's INSERT ... ON CONFLICT
+                # referenced an index that had never actually been created,
+                # which fails outright (not silently) — caught by that
+                # function's own top-level try/except and logged, never
+                # surfaced. Dedup for this type is now a plain pre-insert
+                # existence check instead (see
+                # services/notifications_service.py) — no index-expression
+                # immutability to get wrong a second time.
                 cur.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_pair_launched_per_minute
-                        ON notifications (recipient_email, jobdiva_id, date_trunc('minute', created_at))
-                        WHERE type = 'pair_launched';
-                    """
+                    "DROP INDEX IF EXISTS uniq_notifications_pair_launched_per_minute;"
                 )
                 conn.commit()
     except Exception as e:  # noqa: BLE001 - schema init must never crash boot
