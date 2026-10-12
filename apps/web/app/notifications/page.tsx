@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, CheckCheck, AlertCircle, BellRing, BellOff } from "lucide-react";
+import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
@@ -84,12 +86,20 @@ export default function NotificationsPage() {
     unreadCount,
     isLoading,
     hasLoadError,
+    clearError,
     notificationPermission,
     requestNotificationPermission,
     refresh,
     markRead,
     markAllRead,
+    clearAll,
   } = useNotificationsStream();
+  const [confirmingClear, setConfirmingClear] = useState(false);
+
+  const handleConfirmClear = () => {
+    setConfirmingClear(false);
+    clearAll();
+  };
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -103,13 +113,44 @@ export default function NotificationsPage() {
             </span>
           )}
         </div>
-        {unreadCount > 0 && (
-          <Button variant="outline" size="sm" onClick={markAllRead}>
-            <CheckCheck className="h-4 w-4 mr-1.5" />
-            Mark all read
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {unreadCount > 0 && (
+            <Button variant="outline" size="sm" onClick={markAllRead}>
+              <CheckCheck className="h-4 w-4 mr-1.5" />
+              Mark all read
+            </Button>
+          )}
+          {notifications.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => setConfirmingClear(true)} aria-label="Clear notifications">
+              <Trash2 className="h-4 w-4 mr-1.5" />
+              Clear notifications
+            </Button>
+          )}
+        </div>
       </div>
+
+      <Dialog open={confirmingClear} onOpenChange={setConfirmingClear}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Clear notifications</DialogTitle>
+            <DialogDescription>
+              This removes every notification in your feed, read and unread. It can&apos;t be undone from here.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setConfirmingClear(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmClear}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              Clear notifications
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {notificationPermission === "default" && (
         <div className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 mb-4">
@@ -148,13 +189,24 @@ export default function NotificationsPage() {
         </div>
       )}
 
-      {isLoading ? (
-        <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
-      ) : notifications.length === 0 ? (
-        <div className="text-center text-sm text-slate-400 py-16">
-          No notifications yet. You&apos;ll see candidates land here as soon as they pass an interview.
+      {clearError && (
+        <div className="flex items-center justify-between gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 mb-4" role="status">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            Couldn&apos;t clear notifications — nothing was removed.
+          </span>
+          <Button variant="ghost" size="sm" className="h-7 text-red-700 hover:text-red-900" onClick={clearAll}>
+            Retry
+          </Button>
         </div>
-      ) : (
+      )}
+
+      {notifications.length > 0 ? (
+        // Checked before isLoading on purpose: a reload seeds this list from
+        // the local cache instantly (see notifications-context.tsx), and
+        // that cached content should render right away rather than being
+        // hidden behind a loading message while refresh() confirms it in
+        // the background.
         <ScrollArea className="h-[calc(100vh-180px)]">
           <div className="space-y-3 pr-2">
             {notifications.map((item) => (
@@ -162,6 +214,12 @@ export default function NotificationsPage() {
             ))}
           </div>
         </ScrollArea>
+      ) : isLoading ? (
+        <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
+      ) : (
+        <div className="text-center text-sm text-slate-400 py-16">
+          No notifications yet. You&apos;ll see candidates land here as soon as they pass an interview.
+        </div>
       )}
     </div>
   );

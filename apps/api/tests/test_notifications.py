@@ -23,6 +23,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from fastapi import HTTPException
 
 from services.notifications_service import (
     _parse_recruiter_emails,
@@ -395,3 +396,57 @@ def test_prune_stale_cursors_only_removes_old_and_disconnected_entries():
     finally:
         for e in (old_disconnected, recent_disconnected, old_but_connected):
             _clear_subscriber_state(notif, e)
+
+
+# --- clear: scoped delete ----------------------------------------------------
+
+def test_clear_notifications_soft_deletes_scoped_to_caller_email(monkeypatch):
+    """Regression test: clearing must stamp cleared_at rather than DELETE the
+    row outright. A hard delete would let the unique index's own ON CONFLICT
+    DO NOTHING guard stop protecting that (recipient, candidate, job, type)
+    combo, so reconcile_missed_pass_notifications — which re-scans every Pass
+    candidate in its lookback window regardless of whether it already
+    notified — could silently re-insert and un-clear it."""
+    from routers.notifications import _clear_notifications_sync
+
+    cur = FakeCursor()
+    conn = FakeConn(cur)
+    monkeypatch.setattr("routers.notifications.get_db_connection", lambda: conn)
+
+    _clear_notifications_sync("me@x.com")
+
+    update_sql, params = cur.executed[0]
+    assert "DELETE" not in update_sql.upper()
+    assert "UPDATE notifications" in update_sql
+    assert "cleared_at = now()" in update_sql
+    assert "recipient_email = %s" in update_sql
+    assert params == ("me@x.com",)
+    assert conn.committed is True
+
+
+def test_clear_notifications_endpoint_requires_authentication():
+    """401 path: no email on the resolved user."""
+    from routers.notifications import clear_notifications
+
+    class _FakeUser:
+        email = ""
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(clear_notifications(user=_FakeUser()))
+    assert exc_info.value.status_code == 401
+
+
+def test_list_and_unread_count_exclude_cleared_notifications(monkeypatch):
+    from routers.notifications import _list_notifications_sync, _get_unread_count_sync
+
+    list_cur = FakeCursor(fetchall_results=[[]], fetchone_results=[(0,)])
+    monkeypatch.setattr("routers.notifications.get_db_connection", lambda: FakeConn(list_cur))
+    _list_notifications_sync("me@x.com", 50, None, False)
+    select_sql = list_cur.executed[0][0]
+    assert "cleared_at IS NULL" in select_sql
+
+    count_cur = FakeCursor(fetchone_results=[(0,)])
+    monkeypatch.setattr("routers.notifications.get_db_connection", lambda: FakeConn(count_cur))
+    _get_unread_count_sync("me@x.com")
+    count_sql = count_cur.executed[0][0]
+    assert "cleared_at IS NULL" in count_sql

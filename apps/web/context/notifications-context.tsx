@@ -2,13 +2,14 @@
 
 import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { api, authFetch, type NotificationItem } from "@/lib/api";
+import { api, authFetch, getActiveUserEmail, type NotificationItem } from "@/lib/api";
 import {
   type BrowserNotificationPermission,
   normalizePermissionState,
   notificationClickPath,
   shouldShowBrowserPopup,
 } from "@/lib/browser-notifications";
+import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotifications } from "@/lib/notifications-cache";
 
 export type { BrowserNotificationPermission };
 
@@ -16,6 +17,11 @@ function currentNotificationPermission(): BrowserNotificationPermission {
   if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
   return Notification.permission;
 }
+
+// Debounce between a notifications/unreadCount change and the cache write it
+// triggers — an active SSE session can update state several times in quick
+// succession, and there's no reason to hit localStorage on every single one.
+const CACHE_WRITE_DEBOUNCE_MS = 500;
 
 interface NotificationsContextType {
   notifications: NotificationItem[];
@@ -28,6 +34,10 @@ interface NotificationsContextType {
   // goes unnoticed.
   isLoading: boolean;
   hasLoadError: boolean;
+  // True after clearAll's optimistic update failed to persist server-side —
+  // the page surfaces this so the user knows "Clear" didn't actually stick,
+  // rather than it failing silently.
+  clearError: boolean;
   // Mirrors the browser's own Notification.permission — there is no separate
   // app-level opt-in flag, since the permission itself already persists
   // per-origin in the browser.
@@ -36,6 +46,7 @@ interface NotificationsContextType {
   refresh: () => void;
   markRead: (id: number) => void;
   markAllRead: () => void;
+  clearAll: () => void;
 }
 
 const NotificationsContext = createContext<NotificationsContextType | undefined>(undefined);
@@ -47,13 +58,20 @@ const NotificationsContext = createContext<NotificationsContextType | undefined>
 // page left the sidebar badge stale until its next reconnect.
 export function NotificationsProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
+  // These three all start at the value the SERVER would render ([], 0,
+  // "unsupported" — there is no window/localStorage/Notification API during
+  // SSR) and are only ever populated from a browser API inside an effect,
+  // i.e. strictly AFTER the first client render. Reading window/localStorage
+  // in a useState lazy initializer instead would make that first client
+  // render disagree with the server-rendered markup and trigger a React
+  // hydration mismatch.
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [hasLoadError, setHasLoadError] = useState<boolean>(false);
-  const [notificationPermission, setNotificationPermission] =
-    useState<BrowserNotificationPermission>(currentNotificationPermission);
+  const [clearError, setClearError] = useState<boolean>(false);
+  const [notificationPermission, setNotificationPermission] = useState<BrowserNotificationPermission>("unsupported");
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const isManuallyClosedRef = useRef<boolean>(false);
@@ -63,12 +81,15 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const refreshRef = useRef<() => void>(() => {});
   const connectStreamRef = useRef<() => void>(() => {});
+  const cacheWriteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // Highest notification id this tab has ever rendered, from either the
   // REST list() or an SSE push. Sent back to the server as ?since_id= on
   // (re)connect: the server's own cursor is in-memory and per-worker, so a
   // reconnect landing on a different worker would otherwise reseed from
   // "now" and silently skip anything created in the gap — this client-side
-  // watermark is authoritative regardless of which worker answers.
+  // watermark is authoritative regardless of which worker answers. Also
+  // seeded from the local cache on mount (below), so a reload doesn't
+  // needlessly re-announce history the cache already had.
   const lastSeenIdRef = useRef<number>(0);
   // Every id this tab has already applied a side effect for (unread bump +
   // desktop popup) — checked and updated OUTSIDE the setNotifications
@@ -97,12 +118,15 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       .catch((err) => console.error("Failed to request notification permission:", err));
   }, []);
 
-  // Keep notificationPermission in sync with a change made outside the app
-  // (the browser's own site settings) — without this, revoking or granting
-  // access there leaves the page showing a stale Enable/blocked banner until
-  // the next full reload. Not all browsers support querying this permission
-  // (Safari's support is recent/partial), so this is best-effort.
+  // Resolve the REAL permission after mount, not during the initial render
+  // (see the useState above) — and then keep it in sync with a change made
+  // outside the app (the browser's own site settings), via the Permissions
+  // API where supported (Safari's support is recent/partial, hence
+  // best-effort: Notification.permission itself, read synchronously below,
+  // is universally supported and already correct even where the live-sync
+  // part isn't).
   useEffect(() => {
+    setNotificationPermission(currentNotificationPermission());
     if (typeof navigator === "undefined" || !navigator.permissions?.query) return;
     let status: PermissionStatus | null = null;
     let cancelled = false;
@@ -177,9 +201,59 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, []);
   refreshRef.current = refresh;
 
+  // Seed from the local cache right after mount — never during the initial
+  // render (see the notifications/unreadCount useState above) — then kick
+  // off the real truth-up fetch, which overwrites this the moment it
+  // succeeds. A cache hit means the page shows last-known content instantly
+  // instead of "Loading…"; a miss (first-ever visit, cleared storage) just
+  // falls through to the normal loading state.
   useEffect(() => {
+    const email = getActiveUserEmail();
+    if (email) {
+      const cached = readCachedNotifications(window.localStorage, email, Date.now());
+      if (cached) {
+        setNotifications(cached.notifications);
+        setUnreadCount(cached.unreadCount);
+        for (const n of cached.notifications) {
+          if (n.id > lastSeenIdRef.current) lastSeenIdRef.current = n.id;
+          notifiedIdsRef.current.add(n.id);
+        }
+      }
+    }
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced cache write: an active SSE session can change `notifications`
+  // several times in quick succession, and there's no reason to hit
+  // localStorage on every single one. unreadCount isn't in the deps list —
+  // every path that changes it (refresh/SSE/markRead/markAllRead/clearAll)
+  // changes `notifications` in the same action, and the cache derives its
+  // own unread count from the list anyway (see lib/notifications-cache.ts),
+  // so caching it separately would just be another way for it to drift.
+  useEffect(() => {
+    if (cacheWriteTimeoutRef.current) clearTimeout(cacheWriteTimeoutRef.current);
+    cacheWriteTimeoutRef.current = setTimeout(() => {
+      const email = getActiveUserEmail();
+      if (!email) return;
+      writeCachedNotifications(window.localStorage, email, notifications, Date.now());
+    }, CACHE_WRITE_DEBOUNCE_MS);
+    return () => {
+      if (cacheWriteTimeoutRef.current) clearTimeout(cacheWriteTimeoutRef.current);
+    };
+  }, [notifications]);
+
+  // Cross-tab reconciliation: the `storage` event fires in every OTHER tab
+  // on this origin when one tab writes the cache (never in the tab that
+  // wrote it), so this can't loop. Rather than trying to merge two tabs'
+  // local caches — there's no reliable way to tell which is newer — just
+  // re-ask the server, which both tabs end up agreeing with.
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === NOTIFICATIONS_CACHE_KEY) refreshRef.current();
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   const resetWatchdog = useCallback(() => {
@@ -375,6 +449,27 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Explicit, user-initiated removal — the only thing that makes a
+  // notification go away. Read ones are never auto-hidden or expired on
+  // their own; they stay in the list (and in this tab's local cache, so a
+  // reload keeps showing them) until this runs.
+  const clearAll = useCallback(async () => {
+    setClearError(false);
+    setNotifications([]);
+    setUnreadCount(0);
+    try {
+      await api.notifications.clear();
+    } catch (err) {
+      console.error("Failed to clear notifications:", err);
+      // Optimistic clear didn't stick server-side: surface it (clearError)
+      // rather than just logging, and pull back whatever's really there —
+      // leaving the UI showing "cleared" when the server still has the old
+      // list would just reappear confusingly on the next reload anyway.
+      setClearError(true);
+      refreshRef.current();
+    }
+  }, []);
+
   return (
     <NotificationsContext.Provider
       value={{
@@ -383,11 +478,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         isConnected,
         isLoading,
         hasLoadError,
+        clearError,
         notificationPermission,
         requestNotificationPermission,
         refresh,
         markRead,
         markAllRead,
+        clearAll,
       }}
     >
       {children}
