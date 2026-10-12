@@ -43,6 +43,7 @@ from routers._helpers import (
 from core.auth import get_current_user, get_user_scope_emails, parse_recruiter_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
 from services.launched_candidates import LAUNCHED_COUNT_BY_JOB_SQL, fetch_launched_candidates, interview_id_of
+from services.notifications_service import create_recruiter_assigned_notifications
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1080,12 +1081,52 @@ def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> Non
         draft_data.recruiter_emails = current
 
 
+def _fetch_old_recruiter_emails_for_diff_sync(job_id: str) -> Optional[List[str]]:
+    """Minimal, failure-tolerant lookup for _notify_newly_added_recruiters'
+    before-vs-after diff — just recruiter_emails, not the full
+    _get_job_draft_sync payload (SELECT *, every field JSON-parsed) that
+    neither wizard save endpoint otherwise needs for this.
+
+    Returns [] when the job genuinely doesn't exist yet (a brand-new job
+    legitimately has no prior recruiters — every entry in the new list is
+    "newly added"), or None when the lookup itself failed (DB hiccup, pool
+    exhaustion). The caller (_notify_newly_added_recruiters) must treat
+    those two differently: [] still runs the diff, None means the old state
+    is unknown and the diff is skipped entirely — notifying someone who may
+    already have been a recruiter on this job, just because this lookup
+    happened to fail, would be a false positive worse than silently missing
+    a real notification this one time.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT recruiter_emails FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                    (job_id, job_id),
+                )
+                row = cur.fetchone()
+    except Exception as e:  # noqa: BLE001 - must never crash the save for a best-effort notification
+        logger.error(f"Failed to fetch old recruiter_emails for recruiter-assigned diff, job={job_id}: {e}")
+        return None
+
+    if not row or not row[0]:
+        return []
+    raw = row[0]
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
 def _notify_newly_added_recruiters(
     background_tasks: BackgroundTasks,
     job_id: str,
     jobdiva_id: str,
     job_title: str,
-    old_recruiter_emails: Any,
+    old_recruiter_emails: Optional[List[str]],
     new_recruiter_emails: Any,
     acting_user_email: str,
 ) -> None:
@@ -1100,7 +1141,15 @@ def _notify_newly_added_recruiters(
     they're technically "new" (e.g. _ensure_user_in_recruiter_emails just
     auto-added them, or they included themselves while creating their own
     job) — nobody needs to be told they assigned themselves.
+
+    old_recruiter_emails is None when _fetch_old_recruiter_emails_for_diff_sync
+    couldn't determine the prior state (see its docstring) — that's "unknown,"
+    not "empty," so the diff is skipped entirely rather than risk a false
+    "newly added" notification.
     """
+    if old_recruiter_emails is None:
+        return
+
     def _clean(emails: Any) -> set:
         if not isinstance(emails, list):
             return set()
@@ -1111,7 +1160,6 @@ def _notify_newly_added_recruiters(
     if not newly_added:
         return
 
-    from services.notifications_service import create_recruiter_assigned_notifications
     background_tasks.add_task(
         create_recruiter_assigned_notifications,
         job_id=str(job_id),
@@ -1131,14 +1179,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     # Fetched before _ensure_user_in_recruiter_emails mutates draft_data
     # below, so the "added as co-recruiter" diff (after the write commits,
     # see _notify_newly_added_recruiters) compares against the list as it
-    # stood before this save, not after. A cheap extra SELECT —
-    # _verify_job_access_by_id above already runs this same lookup
-    # internally but doesn't surface it to its caller.
-    old_job_draft = _get_job_draft_sync(job_id)
-    old_recruiter_emails = (
-        (old_job_draft.get("data") or {}).get("recruiter_emails")
-        if old_job_draft.get("status") == "success" else []
-    )
+    # stood before this save, not after. asyncio.to_thread since this is a
+    # blocking psycopg2 call inside an async def handler.
+    old_recruiter_emails = await asyncio.to_thread(_fetch_old_recruiter_emails_for_diff_sync, job_id)
     _ensure_user_in_recruiter_emails(draft_data, user)
     # Runs after the response — i.e. only when the save succeeded and the row
     # exists. First writer wins (services/job_attribution.py).
@@ -1146,7 +1189,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     try:
         import json
         import psycopg2.extras
-
+        
         # SWAPPED IDENTIFIERS:
         # db_job_id (PK) = Numeric ID (31920032, or negative for External jobs)
         # jobdiva_id = Reference String (26-06182, or EXT-N for External jobs)
@@ -1287,7 +1330,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     ))
                     logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
                 conn.commit()
-
+        
         _notify_newly_added_recruiters(
             background_tasks, db_job_id, ref_code,
             draft_data.enhanced_title or draft_data.title,
@@ -1458,16 +1501,12 @@ async def save_job_to_monitored_jobs_only(
     _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
     # See save_job_draft's identical comment: fetched before
     # _ensure_user_in_recruiter_emails mutates draft_data below.
-    old_job_draft = _get_job_draft_sync(job_id)
-    old_recruiter_emails = (
-        (old_job_draft.get("data") or {}).get("recruiter_emails")
-        if old_job_draft.get("status") == "success" else []
-    )
+    old_recruiter_emails = await asyncio.to_thread(_fetch_old_recruiter_emails_for_diff_sync, job_id)
     _ensure_user_in_recruiter_emails(draft_data, user)
     background_tasks.add_task(stamp_job_posted_by, job_id, user.email)
     try:
         import json
-
+        
         # 1. Resolve to Numeric PK if Reference ID was provided
         # job_id could be '26-06182' (ref) or '31920032' (numeric pk)
         numeric_id = job_id
@@ -1600,7 +1639,7 @@ async def save_job_to_monitored_jobs_only(
         conn.commit()
         cursor.close()
         conn.close()
-
+        
         _notify_newly_added_recruiters(
             background_tasks, numeric_id, ref_id,
             draft_data.enhanced_title or draft_data.title,

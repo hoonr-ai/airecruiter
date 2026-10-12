@@ -1,5 +1,5 @@
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from core.auth import UserIdentity
 from core.email import notify_internal_submission_to_manager
@@ -117,6 +117,15 @@ class _FakeConnection:
         self.closed = True
 
 
+def _queued_kwargs(background_tasks: BackgroundTasks, func) -> list:
+    """save_candidate_feedback queues the candidate_submitted/rejected
+    notification via background_tasks.add_task rather than awaiting it
+    (PR review follow-up — keeps the response fast; the notification
+    helpers already swallow their own errors). Pulls out the kwargs of
+    every queued call to `func` without actually running it."""
+    return [t.kwargs for t in background_tasks.tasks if t.func is func]
+
+
 @pytest.mark.anyio
 async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     from routers import candidates as cand_module
@@ -154,13 +163,6 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     monkeypatch.setattr("core.email.notify_internal_submission_to_manager", fake_notify_manager)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
 
-    notif_calls = []
-    async def fake_notify_submitted(**kwargs):
-        notif_calls.append(kwargs)
-    monkeypatch.setattr(
-        "services.notifications_service.create_candidate_submitted_notifications", fake_notify_submitted
-    )
-
     user = UserIdentity(
         email="ronak.jain@celsiortech.com",
         role="recruiter"
@@ -173,10 +175,12 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
         recruiter_notes="Test notes for candidate review."
     )
 
+    background_tasks = BackgroundTasks()
     res = await cand_module.save_candidate_feedback(
         job_id_or_ref="26-12137",
         candidate_id="55148489",
         request=request,
+        background_tasks=background_tasks,
         user=user
     )
 
@@ -197,6 +201,7 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     # The manager email links the same JobDiva profile the panel/rank list open.
     assert email_calls[0]["jobdiva_candidate_id"] == "21562841721070"
 
+    notif_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications)
     assert len(notif_calls) == 1
     assert notif_calls[0]["job_id"] == "33087136"
     assert notif_calls[0]["candidate_id"] == "21562841721070"
@@ -225,13 +230,6 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
 
-    notif_calls = []
-    async def fake_notify_submitted(**kwargs):
-        notif_calls.append(kwargs)
-    monkeypatch.setattr(
-        "services.notifications_service.create_candidate_submitted_notifications", fake_notify_submitted
-    )
-
     user = UserIdentity(
         email="recruiter@pyramidci.com",
         role="recruiter"
@@ -242,10 +240,12 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
         submission_type="external"
     )
 
+    background_tasks = BackgroundTasks()
     res = await cand_module.save_candidate_feedback(
         job_id_or_ref="26-12137",
         candidate_id="55148489",
         request=request,
+        background_tasks=background_tasks,
         user=user
     )
 
@@ -255,6 +255,7 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR External Submission"
 
+    notif_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications)
     assert len(notif_calls) == 1
     assert notif_calls[0]["job_id"] == "33087136"
     assert notif_calls[0]["candidate_id"] == "21562841721070"
@@ -283,19 +284,6 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 0})
 
-    def _fail_if_called(**_kwargs):
-        raise AssertionError("candidate_submitted notification must not fire on Reject")
-    monkeypatch.setattr(
-        "services.notifications_service.create_candidate_submitted_notifications", _fail_if_called
-    )
-
-    rejected_calls = []
-    async def fake_notify_rejected(**kwargs):
-        rejected_calls.append(kwargs)
-    monkeypatch.setattr(
-        "services.notifications_service.create_candidate_rejected_notifications", fake_notify_rejected
-    )
-
     user = UserIdentity(
         email="recruiter@pyramidci.com",
         role="recruiter"
@@ -306,10 +294,12 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
         reason="Skills do not meet requirements"
     )
 
+    background_tasks = BackgroundTasks()
     res = await cand_module.save_candidate_feedback(
         job_id_or_ref="26-12137",
         candidate_id="55148489",
         request=request,
+        background_tasks=background_tasks,
         user=user
     )
 
@@ -318,6 +308,10 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
 
+    # candidate_submitted must not fire on Reject.
+    assert _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications) == []
+
+    rejected_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_rejected_notifications)
     assert len(rejected_calls) == 1
     assert rejected_calls[0]["job_id"] == "33087136"
     assert rejected_calls[0]["candidate_id"] == "21562841721070"
@@ -360,6 +354,7 @@ async def test_save_candidate_feedback_db_error_raises_500(monkeypatch):
             job_id_or_ref="26-12137",
             candidate_id="55148489",
             request=request,
+            background_tasks=BackgroundTasks(),
             user=user
         )
 
@@ -391,13 +386,6 @@ async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypa
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
 
-    notif_calls = []
-    async def fake_notify_submitted(**kwargs):
-        notif_calls.append(kwargs)
-    monkeypatch.setattr(
-        "services.notifications_service.create_candidate_submitted_notifications", fake_notify_submitted
-    )
-
     user = UserIdentity(
         email="recruiter@pyramidci.com",
         role="recruiter"
@@ -409,10 +397,12 @@ async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypa
     )
 
     # Calling with JobDiva numeric candidate_id string (from report page)
+    background_tasks = BackgroundTasks()
     res = await cand_module.save_candidate_feedback(
         job_id_or_ref="32163479",
         candidate_id="21574563071254",
         request=request,
+        background_tasks=background_tasks,
         user=user
     )
 
@@ -425,6 +415,7 @@ async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypa
     assert jobdiva_calls[0]["job_id"] == "32163479"
     assert jobdiva_calls[0]["action"] == "PAIR External Submission"
 
+    notif_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications)
     assert len(notif_calls) == 1
     assert notif_calls[0]["job_id"] == "32163479"
     assert notif_calls[0]["candidate_id"] == "21574563071254"
