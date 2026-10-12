@@ -1,7 +1,18 @@
 "use client";
 
 import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import { api, authFetch, type NotificationItem } from "@/lib/api";
+
+// "unsupported" covers SSR (no `window`) and browsers without the Notification
+// API (e.g. some mobile browsers) — treated like "denied" by the UI, just
+// without ever offering the opt-in control.
+export type BrowserNotificationPermission = NotificationPermission | "unsupported";
+
+function currentNotificationPermission(): BrowserNotificationPermission {
+  if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
+  return Notification.permission;
+}
 
 interface NotificationsContextType {
   notifications: NotificationItem[];
@@ -14,6 +25,11 @@ interface NotificationsContextType {
   // goes unnoticed.
   isLoading: boolean;
   hasLoadError: boolean;
+  // Mirrors the browser's own Notification.permission — there is no separate
+  // app-level opt-in flag, since the permission itself already persists
+  // per-origin in the browser.
+  notificationPermission: BrowserNotificationPermission;
+  requestNotificationPermission: () => void;
   refresh: () => void;
   markRead: (id: number) => void;
   markAllRead: () => void;
@@ -27,11 +43,14 @@ const NotificationsContext = createContext<NotificationsContextType | undefined>
 // kept two disconnected copies of the unread count, so "Mark all read" on the
 // page left the sidebar badge stale until its next reconnect.
 export function NotificationsProvider({ children }: { children: ReactNode }) {
+  const router = useRouter();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [hasLoadError, setHasLoadError] = useState<boolean>(false);
+  const [notificationPermission, setNotificationPermission] =
+    useState<BrowserNotificationPermission>(currentNotificationPermission);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const isManuallyClosedRef = useRef<boolean>(false);
@@ -48,6 +67,49 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // "now" and silently skip anything created in the gap — this client-side
   // watermark is authoritative regardless of which worker answers.
   const lastSeenIdRef = useRef<number>(0);
+
+  // Browsers require a user gesture (or at least discourage auto-prompting
+  // without one) before Notification.requestPermission() — calling it
+  // unprompted on mount would also just be bad UX. The page surfaces its own
+  // opt-in control and calls this in response to a click.
+  const requestNotificationPermission = useCallback(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    Notification.requestPermission()
+      .then(setNotificationPermission)
+      .catch((err) => console.error("Failed to request notification permission:", err));
+  }, []);
+
+  // Native OS-level popup for a new notification, as a companion to the
+  // in-app badge/feed — only when permission is granted AND the tab isn't
+  // the one currently in front (if it is, the in-app feed already surfaced
+  // it; a second popup would just be noise). `tag` de-dupes at the OS level
+  // if this somehow fires twice for the same id.
+  const showBrowserNotification = useCallback(
+    (item: NotificationItem) => {
+      if (typeof window === "undefined" || !("Notification" in window)) return;
+      if (Notification.permission !== "granted") return;
+      if (document.visibilityState === "visible") return;
+      try {
+        const popup = new Notification(item.title, {
+          body: item.body ?? undefined,
+          tag: `pair-notification-${item.id}`,
+          icon: "/favicon.ico",
+        });
+        popup.onclick = () => {
+          window.focus();
+          if (item.jobdiva_id && item.candidate_id) {
+            router.push(
+              `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`
+            );
+          }
+          popup.close();
+        };
+      } catch (err) {
+        console.error("Failed to show browser notification:", err);
+      }
+    },
+    [router]
+  );
 
   // Truth-up fetch: initial load, and re-sync after any reconnect so nothing
   // dropped between a lost connection and the next one is lost for good.
@@ -155,6 +217,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
             const alreadyKnown = prev.some((n) => n.id === item.id);
             if (!alreadyKnown && !item.read_at) {
               setUnreadCount((count) => count + 1);
+              showBrowserNotification(item);
             }
             return [item, ...prev.filter((n) => n.id !== item.id)];
           });
@@ -203,7 +266,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         connectStreamRef.current();
       }, delay);
     }
-  }, [resetWatchdog]);
+  }, [resetWatchdog, showBrowserNotification]);
 
   connectStreamRef.current = connectStream;
 
@@ -266,7 +329,18 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   return (
     <NotificationsContext.Provider
-      value={{ notifications, unreadCount, isConnected, isLoading, hasLoadError, refresh, markRead, markAllRead }}
+      value={{
+        notifications,
+        unreadCount,
+        isConnected,
+        isLoading,
+        hasLoadError,
+        notificationPermission,
+        requestNotificationPermission,
+        refresh,
+        markRead,
+        markAllRead,
+      }}
     >
       {children}
     </NotificationsContext.Provider>
