@@ -226,7 +226,9 @@ def test_run_launch_events_carry_internal_per_candidate_outcome(monkeypatch):
     by_idx = {e["index"]: e["_internal"] for e in events if e["type"] == "batch"}
     assert by_idx[0] == {
         "status": "completed", "candidate_ids": ["c-0"], "sent_ids": ["c-0"], "no_interview_ids": [],
-        "failed_ids": [], "skipped_ids": [], "excluded_ids": [], "bulk_id": "b0",
+        # c-1 is on the Do-Not-Contact list: dropped before the send and reported
+        # (internal channel only) so a launch session doesn't re-plan it forever.
+        "failed_ids": [], "skipped_ids": [], "excluded_ids": ["c-1"], "bulk_id": "b0",
     }
     assert by_idx[1]["status"] == "failed" and by_idx[1]["failed_ids"] == ["c-2"]
     assert by_idx[1]["excluded_ids"] == ["c-3"]  # dropped pre-send by the contact gate
@@ -236,6 +238,7 @@ def test_run_launch_events_carry_internal_per_candidate_outcome(monkeypatch):
     done = events[-1]["_internal"]
     assert done["sent_ids"] == ["c-0", "c-4"] and done["no_interview_ids"] == ["c-5"]
     assert done["failed_ids"] == ["c-2"] and done["not_run_ids"] == [] and done["stopped"] is False
+    assert "c-1" in done["excluded_ids"]
     # Stripping `_internal` gives exactly the wire events.
     wire = [json.loads(c[len("data: "):]) for c in GOLDEN["mixed"]["chunks"]]
     assert [eng._strip_internal(e) for e in events] == wire

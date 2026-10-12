@@ -249,3 +249,25 @@ Levers, cheapest first: `NEW_RELIC_LOG_FORWARD_LEVEL=WARNING` (or `OFF`) on QA; 
 `span_events.max_samples_stored`; `NEW_RELIC_PROPAGATE_TO_THREAD=off`; `NEW_RELIC_ENABLED=false` on QA.
 Logs forwarded at INFO can include candidate names (emails and long digit runs are masked, names are not): another
 reason to keep PROD at WARNING.
+
+---
+
+## 7. Dashboard and alerts (as code)
+
+Both live in New Relic **and** in this repo; the repo copy is the source of truth.
+
+| Asset | In New Relic | Definition |
+|---|---|---|
+| Dashboard **PAIR Ops** (pages: API, Launch pipeline, Browser, Logs & ingest; variables `api_app` / `web_app` switch QA / PROD / local) | guid `NzU5NDQ1M3xWSVp8REFTSEJPQVJEfGRhOjEzMjkyMjg3` | `docs/observability/newrelic/pair-ops-dashboard.json` (a NerdGraph `DashboardInput`) |
+| Alert policy **PAIR (QA + PROD)** (id 8176568), 9 NRQL conditions | Alerts → Alert policies | `docs/observability/newrelic/pair-alerts.json` |
+
+Conditions: API error rate (warn 2 % / critical 5 %, 15 min), non-streaming p95 latency (5 s / 10 s), API stopped
+reporting (loss of signal 20 min), scheduler stopped (AutoSync silent 45 min), launch session failed, launch pipeline
+stage failures, JobDiva 5xx, JobDiva profile invariant, web JavaScript errors. All facet by `appName`, so QA and PROD
+alert separately; an app that has never reported (PROD before its key is set) cannot fire.
+
+**Notifications are not wired yet.** Attach the policy to a destination in New Relic: Alerts → Workflows → Add workflow
+→ filter "Policy = PAIR (QA + PROD)" → email or Slack channel.
+
+To recreate or edit from the files: NerdGraph `dashboardCreate` / `dashboardUpdate(guid, dashboard)` with the JSON as
+`dashboard`, and `alertsPolicyCreate` + `alertsNrqlConditionStaticCreate` per condition (account 7594453).

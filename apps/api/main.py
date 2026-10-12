@@ -261,6 +261,10 @@ async def lifespan(app: FastAPI):
             from services import job_rubric_db as _jrd
             await _jrd.init_rubric_schema()
 
+        async def _launch_sessions_init():
+            from services.launch_sessions import schema as _ls_schema
+            await _ls_schema.init_launch_sessions_schema()
+
         # sourced_candidates + candidate_enhanced_info. 15s: the initial CREATE
         # INDEX on candidate_enhanced_info can take longer.
         steps.append(("sourced_candidates_schema_init", _scs_init, 15))
@@ -268,6 +272,10 @@ async def lifespan(app: FastAPI):
         steps.append(("dnc_schema_init", _dnc_init, 10))
         # job_skills / job_education `source` column (Recruiter vs PAIR chip).
         steps.append(("rubric_schema_init", _rubric_init, 10))
+        # launch_sessions + rows / events / stream (backend-driven Source &
+        # Launch; docs/launch-sessions.md). New tables only: no ALTER on a
+        # hot table.
+        steps.append(("launch_sessions_schema_init", _launch_sessions_init, 10))
 
         ok = True
         for name, fn, timeout in steps:
@@ -295,6 +303,44 @@ async def lifespan(app: FastAPI):
             )
         except Exception as e:  # noqa: BLE001
             logger.error(f"jobdiva_bi_sync_schedule_failed: {e}; continuing")
+
+    # 4a. Launch sessions (services/launch_sessions/runner.py). Every worker
+    # ticks; a tick only CLAIMS (DB-leased, global cap under an advisory
+    # lock) and runs each claim as a tracked core.tasks.spawn task, never
+    # inside the scheduler job. Housekeeping (expiry, retention, the by-job
+    # re-check of unconfirmed rows) runs in one worker per cycle. An empty
+    # tick drops its New Relic transaction.
+    try:
+        from services.launch_sessions import config as _ls_cfg
+        from services.launch_sessions.runner import get_runner as _get_launch_runner
+
+        _launch_runner = _get_launch_runner()
+        scheduler.add_job(
+            background_transaction("scheduler/launch_session_tick")(_launch_runner.tick),
+            "interval",
+            seconds=_ls_cfg.tick_s(),
+            id="launch_session_tick",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        scheduler.add_job(
+            background_transaction("scheduler/launch_session_housekeeping")(_launch_runner.housekeep),
+            "interval",
+            seconds=_ls_cfg.housekeeping_s(),
+            id="launch_session_housekeeping",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+        # One immediate tick: adopt the sessions a deploy or a worker recycle
+        # left behind (their leases expire within PAIR_LAUNCH_LEASE_S).
+        asyncio.create_task(_launch_runner.tick())
+    except Exception as e:  # noqa: BLE001 - never block boot
+        logger.error(f"launch_session_scheduler_failed: {e}; continuing")
 
     # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
     # has a 30s TTL, but the live query can spike to 20-30s during
@@ -457,6 +503,7 @@ launch_report_router = _safe_import("launch_report")
 recruiter_analytics_router = _safe_import("recruiter_analytics")
 job_step_time_router = _safe_import("job_step_time")
 launch_timing_router = _safe_import("launch_timing")
+launch_sessions_router = _safe_import("launch_sessions")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
 org_hierarchy_router = _safe_import("org_hierarchy")
@@ -512,6 +559,7 @@ _mount(launch_report_router, "launch_report")
 _mount(recruiter_analytics_router, "recruiter_analytics")
 _mount(job_step_time_router, "job_step_time")
 _mount(launch_timing_router, "launch_timing")
+_mount(launch_sessions_router, "launch_sessions")
 _mount(teams_router, "teams")
 _mount(org_hierarchy_router, "org_hierarchy")
 _mount(cross_submissions_router, "cross_submissions")

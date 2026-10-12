@@ -1,0 +1,840 @@
+{
+  "name": "PAIR Ops",
+  "description": "PAIR API + web health, the launch pipeline (Added → Launch click, Launch click → Launch) and ingest. Source of truth: docs/observability/newrelic/pair-ops-dashboard.json.",
+  "permissions": "PUBLIC_READ_WRITE",
+  "variables": [
+    {
+      "name": "api_app",
+      "title": "API",
+      "type": "ENUM",
+      "isMultiSelection": false,
+      "replacementStrategy": "STRING",
+      "items": [
+        {
+          "title": "QA",
+          "value": "PAIR API (QA)"
+        },
+        {
+          "title": "PROD",
+          "value": "PAIR API (PROD)"
+        },
+        {
+          "title": "local",
+          "value": "PAIR API (local)"
+        }
+      ],
+      "defaultValues": [
+        {
+          "value": {
+            "string": "PAIR API (QA)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "web_app",
+      "title": "Web",
+      "type": "ENUM",
+      "isMultiSelection": false,
+      "replacementStrategy": "STRING",
+      "items": [
+        {
+          "title": "QA",
+          "value": "PAIR Web (QA)"
+        },
+        {
+          "title": "PROD",
+          "value": "PAIR Web (PROD)"
+        },
+        {
+          "title": "local",
+          "value": "PAIR Web (local)"
+        }
+      ],
+      "defaultValues": [
+        {
+          "value": {
+            "string": "PAIR Web (QA)"
+          }
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "API",
+      "widgets": [
+        {
+          "title": "Throughput (rpm)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 4,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT rate(count(*), 1 minute) FROM Transaction WHERE appName = {{api_app}} AND transactionType = 'Web' TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Error rate (unexpected errors)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 5,
+            "row": 1,
+            "width": 4,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT percentage(count(*), WHERE error IS true) FROM Transaction WHERE appName = {{api_app}} AND transactionType = 'Web' TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Latency p50 / p95 (s)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 9,
+            "row": 1,
+            "width": 4,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT percentile(duration, 50, 95) FROM Transaction WHERE appName = {{api_app}} AND transactionType = 'Web' AND name NOT LIKE '%search_jobdiva_candidates%' AND name NOT LIKE '%launch%' AND name NOT LIKE '%stream%' AND name NOT LIKE '%enrich%' TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "Excludes the long-lived streaming endpoints (search, launch, enrich, streams)."
+        },
+        {
+          "title": "Slowest routes",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 8,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*), average(duration), percentile(duration, 95), average(databaseDuration), average(databaseCallCount) FROM Transaction WHERE appName = {{api_app}} AND transactionType = 'Web' FACET name LIMIT 25"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Unexpected errors",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 9,
+            "row": 4,
+            "width": 4,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM TransactionError WHERE appName = {{api_app}} AND error.expected IS NOT true FACET error.class, transactionName LIMIT 20"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Background jobs (count = heartbeat, per worker)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 8,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*), percentile(duration, 95), max(duration) FROM Transaction WHERE appName = {{api_app}} AND transactionType = 'Other' FACET name LIMIT 30"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "JobDiva latency (ms, by endpoint)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 7,
+            "row": 8,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT average(newrelic.timeslice.value) FROM Metric WHERE appName = {{api_app}} AND metricTimesliceName LIKE 'Custom/JobDiva/%/ms' FACET metricTimesliceName TIMESERIES LIMIT 10"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "JobDiva errors / slow calls",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 1,
+            "row": 12,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM JobDivaAPI WHERE appName = {{api_app}} FACET endpoint, status_code TIMESERIES LIMIT 10"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "JobDiva BI limiter",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 7,
+            "row": 12,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM JobDivaBiLimiter WHERE appName = {{api_app}} FACET outcome TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Launch pipeline",
+      "widgets": [
+        {
+          "title": "Added → Launch click (median hours)",
+          "visualization": {
+            "id": "viz.billboard"
+          },
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 3,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT median(added_to_click_s) / 3600 AS 'hours' FROM PairLaunchTiming WHERE appName = {{api_app}} AND relaunch IS NOT true SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "T1 - T0: job added to PAIR until the recruiter's first Source & Launch click. Relaunches excluded."
+        },
+        {
+          "title": "Launch click → Launch (median minutes)",
+          "visualization": {
+            "id": "viz.billboard"
+          },
+          "layout": {
+            "column": 4,
+            "row": 1,
+            "width": 3,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT median(click_to_launch_s) / 60 AS 'minutes' FROM PairLaunchTiming WHERE appName = {{api_app}} SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "T2 - T1: click until the first interview is created in Pairbot (sourcing + screening + launch)."
+        },
+        {
+          "title": "Launch sessions finished",
+          "visualization": {
+            "id": "viz.pie"
+          },
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 3,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM PairLaunchTiming WHERE appName = {{api_app}} FACET status SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Click → Launch p50 / p90 (min)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 10,
+            "row": 1,
+            "width": 3,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT percentile(click_to_launch_s / 60, 50, 90) FROM PairLaunchTiming WHERE appName = {{api_app}} TIMESERIES 1 day SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Where the time goes (median seconds per stage)",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT median(sourcing_s) AS 'sourcing', median(selection_s) AS 'selection', median(enrichment_s) AS 'enrichment', median(human_wait_s) AS 'waiting on recruiter', median(saving_s) AS 'saving', median(pairbot_s) AS 'pairbot creation' FROM PairLaunchTiming WHERE appName = {{api_app}} SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Session stage transitions",
+          "visualization": {
+            "id": "viz.area"
+          },
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM PairLaunchSession WHERE appName = {{api_app}} FACET stage, status TIMESERIES LIMIT 20"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Stage duration p50 / p95 (s)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 8,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT percentile(ms_in_stage / 1000, 50, 95), count(*) FROM PairLaunchSession WHERE appName = {{api_app}} FACET stage LIMIT 20"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Resumed / retried sessions",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 7,
+            "row": 8,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT uniqueCount(session_id) FROM PairLaunchSession WHERE appName = {{api_app}} AND (attempt > 0 OR claims > 1) FACET stage TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "Sessions picked up again after a crash, deploy, worker recycle or a failed stage."
+        },
+        {
+          "title": "Pipeline stages p50 / p95 (ms)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 12,
+            "width": 8,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT percentile(ms, 50, 95), count(*), percentage(count(*), WHERE ok IS false) AS 'failed %' FROM PipelineStage WHERE appName = {{api_app}} FACET stage LIMIT 40"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Failed pipeline stages",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 9,
+            "row": 12,
+            "width": 4,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM PipelineStage WHERE appName = {{api_app}} AND ok IS false FACET stage TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Browser",
+      "widgets": [
+        {
+          "title": "Page views & load p95 (s)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*), percentile(duration, 95) FROM PageView WHERE appName = {{web_app}} TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Route changes (SPA)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*), percentile(duration, 95) FROM BrowserInteraction WHERE appName = {{web_app}} FACET targetUrl LIMIT 15"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "JavaScript errors",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM JavaScriptError WHERE appName = {{web_app}} FACET errorMessage LIMIT 15"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Failed API calls from the browser (5xx / network)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM AjaxRequest WHERE appName = {{web_app}} AND (httpResponseCode >= 500 OR httpResponseCode = 0) FACET requestUrl LIMIT 15"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "API latency seen by the browser (p95 ms)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 8,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT percentile(timeToLoadEventStart * 1000, 95), count(*) FROM AjaxRequest WHERE appName = {{web_app}} FACET requestUrl LIMIT 20"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Step 5 / launch actions",
+          "visualization": {
+            "id": "viz.area"
+          },
+          "layout": {
+            "column": 7,
+            "row": 8,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM PageAction WHERE appName = {{web_app}} AND (actionName LIKE 'job_wizard_step5_%' OR actionName LIKE 'launch_%' OR actionName LIKE 'pair_launch_%') FACET actionName TIMESERIES LIMIT 15"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Frontend warnings / errors (logger)",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 1,
+            "row": 12,
+            "width": 12,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM PageAction WHERE appName = {{web_app}} AND actionName = 'FrontendLog' FACET status, msg LIMIT 20"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Logs & ingest",
+      "widgets": [
+        {
+          "title": "API log lines by level",
+          "visualization": {
+            "id": "viz.area"
+          },
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM Log WHERE entity.name = {{api_app}} FACET level TIMESERIES"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Top error / critical log messages",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM Log WHERE entity.name = {{api_app}} AND level IN ('ERROR', 'CRITICAL') FACET message LIMIT 20"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "PAIR ingest by event type (GB, last day)",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT bytecountestimate() / 1e9 FROM Transaction, TransactionError, Span, Log, PipelineStage, JobDivaAPI, JobDivaBiLimiter, PairLaunchSession, PairLaunchTiming WHERE appName = {{api_app}} OR entity.name = {{api_app}} FACET eventType() SINCE 1 day ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "Estimate. The account free tier is 100 GB/month across Pairbot, Hoonr and PAIR."
+        },
+        {
+          "title": "Account ingest by product (GB/day)",
+          "visualization": {
+            "id": "viz.area"
+          },
+          "layout": {
+            "column": 7,
+            "row": 5,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT sum(GigabytesIngested) FROM NrConsumption WHERE productLine = 'DataPlatform' FACET usageMetric SINCE 30 days ago TIMESERIES 1 day"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
