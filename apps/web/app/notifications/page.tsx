@@ -92,26 +92,23 @@ function NotificationRow({
         title={isUnread ? "Mark as read" : "Mark as unread"}
       />
       <div className="flex-1 min-w-0">
+        {/* Title + JobDiva id on one line (body is dropped: for
+            candidate_passed it was always just "Score: X/100", now shown
+            as a single "X/100" badge instead — showing both was redundant
+            and cost a 3rd line). */}
         <p
           className={cn(
             "text-sm line-clamp-2",
             isUnread ? "font-semibold text-slate-900" : "font-medium text-slate-600"
           )}
-          title={item.title}
+          title={item.jobdiva_id ? `${item.title} · ${item.jobdiva_id}` : item.title}
         >
           {item.title}
+          {item.jobdiva_id && <span className="text-slate-400 font-normal"> · {item.jobdiva_id}</span>}
         </p>
-        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-          {item.body && <p className="text-xs text-slate-500">{item.body}</p>}
-          {item.jobdiva_id && (
-            <span className="text-xs text-slate-400 font-mono bg-slate-100 rounded px-1.5 py-0.5">
-              {item.jobdiva_id}
-            </span>
-          )}
-        </div>
         <p className="text-xs text-slate-400 mt-1">{formatRelativeTime(item.created_at)}</p>
       </div>
-      {item.score !== null && <ScoreBadge score={item.score} />}
+      {item.score !== null && <ScoreBadge score={item.score} className="shrink-0" />}
     </Card>
   );
 }
