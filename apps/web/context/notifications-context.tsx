@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { api, authFetch, type NotificationItem } from "@/lib/api";
+import { api, authFetch, getActiveUserEmail, type NotificationItem } from "@/lib/api";
 import {
   type BrowserNotificationPermission,
   normalizePermissionState,
@@ -15,6 +15,46 @@ export type { BrowserNotificationPermission };
 function currentNotificationPermission(): BrowserNotificationPermission {
   if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
   return Notification.permission;
+}
+
+// Local cache so a page reload shows the last-known notifications instantly
+// instead of a blank list while the REST truth-up fetch is still in flight —
+// and, if that fetch fails, instead of staying blank entirely. This is a
+// resilience cache only: a successful refresh() always overwrites it, and it
+// is never the source of truth for unread counts the server itself tracks.
+// Scoped per user (not just per browser) since a shared machine could log
+// different people into the same browser profile.
+const CACHE_VERSION = "v1";
+
+function cacheKey(email: string): string {
+  return `pair_notifications_cache_${CACHE_VERSION}_${email}`;
+}
+
+interface CachedNotifications {
+  notifications: NotificationItem[];
+  unread_count: number;
+}
+
+function readCachedNotifications(email: string): CachedNotifications | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const raw = window.localStorage.getItem(cacheKey(email));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed?.notifications)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedNotifications(email: string, notifications: NotificationItem[], unreadCount: number): void {
+  try {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(cacheKey(email), JSON.stringify({ notifications, unread_count: unreadCount }));
+  } catch {
+    // Best-effort — storage can be full or blocked (private browsing, quota).
+  }
 }
 
 interface NotificationsContextType {
@@ -36,6 +76,7 @@ interface NotificationsContextType {
   refresh: () => void;
   markRead: (id: number) => void;
   markAllRead: () => void;
+  clearAll: () => void;
 }
 
 const NotificationsContext = createContext<NotificationsContextType | undefined>(undefined);
@@ -47,8 +88,11 @@ const NotificationsContext = createContext<NotificationsContextType | undefined>
 // page left the sidebar badge stale until its next reconnect.
 export function NotificationsProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [unreadCount, setUnreadCount] = useState<number>(0);
+  // Read once, synchronously, on first render — the lazy useState initializer
+  // guarantees this runs exactly once regardless of re-renders.
+  const [initialCache] = useState(() => readCachedNotifications(getActiveUserEmail() ?? "anonymous"));
+  const [notifications, setNotifications] = useState<NotificationItem[]>(() => initialCache?.notifications ?? []);
+  const [unreadCount, setUnreadCount] = useState<number>(() => initialCache?.unread_count ?? 0);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [hasLoadError, setHasLoadError] = useState<boolean>(false);
@@ -69,14 +113,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // reconnect landing on a different worker would otherwise reseed from
   // "now" and silently skip anything created in the gap — this client-side
   // watermark is authoritative regardless of which worker answers.
-  const lastSeenIdRef = useRef<number>(0);
+  const lastSeenIdRef = useRef<number>(initialCache?.notifications.reduce((max, n) => Math.max(max, n.id), 0) ?? 0);
   // Every id this tab has already applied a side effect for (unread bump +
   // desktop popup) — checked and updated OUTSIDE the setNotifications
   // updater (see handleRawSSEChunk below). React may invoke a state updater
   // more than once for the same update (StrictMode, concurrent features), so
   // an updater must stay pure; a side effect that ran from inside one could
-  // silently fire twice.
-  const notifiedIdsRef = useRef<Set<number>>(new Set());
+  // silently fire twice. Seeded from the cache too: those ids were already
+  // accounted for in the cached unread_count, so an SSE redelivery of one
+  // must not bump the count again.
+  const notifiedIdsRef = useRef<Set<number>>(new Set(initialCache?.notifications.map((n) => n.id) ?? []));
   // The App Router instance is stable in practice, but showBrowserNotification
   // is created once and lives for the lifetime of the SSE connection (the
   // mounting effect has a deliberately empty deps array) — reading `router`
@@ -375,6 +421,29 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Explicit, user-initiated removal — the only thing that makes a
+  // notification go away. Read ones are never auto-hidden or expired on
+  // their own; they stay in the list (and in this tab's local cache, so a
+  // reload keeps showing them) until this runs.
+  const clearAll = useCallback(async () => {
+    setNotifications([]);
+    setUnreadCount(0);
+    try {
+      await api.notifications.clear();
+    } catch (err) {
+      console.error("Failed to clear notifications:", err);
+      refreshRef.current();
+    }
+  }, []);
+
+  // Single place that writes the resilience cache (see readCachedNotifications
+  // above) — covers every path that changes `notifications`/`unreadCount`
+  // (refresh, SSE pushes, markRead/markAllRead/clearAll) without each of them
+  // needing to compute and write the post-update value themselves.
+  useEffect(() => {
+    writeCachedNotifications(getActiveUserEmail() ?? "anonymous", notifications, unreadCount);
+  }, [notifications, unreadCount]);
+
   return (
     <NotificationsContext.Provider
       value={{
@@ -388,6 +457,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         refresh,
         markRead,
         markAllRead,
+        clearAll,
       }}
     >
       {children}

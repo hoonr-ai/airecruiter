@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Bell, CheckCheck, AlertCircle, BellRing, BellOff } from "lucide-react";
+import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -89,6 +89,7 @@ export default function NotificationsPage() {
     refresh,
     markRead,
     markAllRead,
+    clearAll,
   } = useNotificationsStream();
 
   return (
@@ -103,12 +104,20 @@ export default function NotificationsPage() {
             </span>
           )}
         </div>
-        {unreadCount > 0 && (
-          <Button variant="outline" size="sm" onClick={markAllRead}>
-            <CheckCheck className="h-4 w-4 mr-1.5" />
-            Mark all read
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {unreadCount > 0 && (
+            <Button variant="outline" size="sm" onClick={markAllRead}>
+              <CheckCheck className="h-4 w-4 mr-1.5" />
+              Mark all read
+            </Button>
+          )}
+          {notifications.length > 0 && (
+            <Button variant="outline" size="sm" onClick={clearAll} aria-label="Clear all notifications">
+              <Trash2 className="h-4 w-4 mr-1.5" />
+              Clear notifications
+            </Button>
+          )}
+        </div>
       </div>
 
       {notificationPermission === "default" && (
@@ -148,13 +157,12 @@ export default function NotificationsPage() {
         </div>
       )}
 
-      {isLoading ? (
-        <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
-      ) : notifications.length === 0 ? (
-        <div className="text-center text-sm text-slate-400 py-16">
-          No notifications yet. You&apos;ll see candidates land here as soon as they pass an interview.
-        </div>
-      ) : (
+      {notifications.length > 0 ? (
+        // Checked before isLoading on purpose: a reload seeds this list from
+        // the local cache instantly (see notifications-context.tsx), and
+        // that cached content should render right away rather than being
+        // hidden behind a loading message while refresh() confirms it in
+        // the background.
         <ScrollArea className="h-[calc(100vh-180px)]">
           <div className="space-y-3 pr-2">
             {notifications.map((item) => (
@@ -162,6 +170,12 @@ export default function NotificationsPage() {
             ))}
           </div>
         </ScrollArea>
+      ) : isLoading ? (
+        <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
+      ) : (
+        <div className="text-center text-sm text-slate-400 py-16">
+          No notifications yet. You&apos;ll see candidates land here as soon as they pass an interview.
+        </div>
       )}
     </div>
   );

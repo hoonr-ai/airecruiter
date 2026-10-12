@@ -395,3 +395,21 @@ def test_prune_stale_cursors_only_removes_old_and_disconnected_entries():
     finally:
         for e in (old_disconnected, recent_disconnected, old_but_connected):
             _clear_subscriber_state(notif, e)
+
+
+# --- clear: scoped delete ----------------------------------------------------
+
+def test_clear_notifications_scopes_delete_to_caller_email(monkeypatch):
+    from routers.notifications import _clear_notifications_sync
+
+    cur = FakeCursor()
+    conn = FakeConn(cur)
+    monkeypatch.setattr("routers.notifications.get_db_connection", lambda: conn)
+
+    _clear_notifications_sync("me@x.com")
+
+    delete_sql, params = cur.executed[0]
+    assert "DELETE FROM notifications" in delete_sql
+    assert "recipient_email = %s" in delete_sql
+    assert params == ("me@x.com",)
+    assert conn.committed is True

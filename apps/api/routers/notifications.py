@@ -209,6 +209,18 @@ def _mark_all_notifications_read_sync(email: str) -> None:
             conn.commit()
 
 
+def _clear_notifications_sync(email: str) -> None:
+    """Hard-delete every notification for this recipient. Safe to delete
+    outright (rather than a soft-delete/hide flag): each row is a one-time
+    "this candidate passed" event — the unique index already prevents a
+    second row for the same candidate/job/recipient, so there's nothing a
+    deleted row would need to be reconciled against later."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM notifications WHERE recipient_email = %s", (email,))
+            conn.commit()
+
+
 @router.get("", response_model=NotificationListResponse)
 async def list_notifications(
     limit: int = Query(50, ge=1, le=200),
@@ -248,6 +260,15 @@ async def mark_all_notifications_read(user: UserIdentity = Depends(get_current_u
     if not email:
         raise HTTPException(status_code=401, detail="Authentication required")
     await asyncio.to_thread(_mark_all_notifications_read_sync, email)
+    return {"success": True}
+
+
+@router.post("/clear")
+async def clear_notifications(user: UserIdentity = Depends(get_current_user)):
+    email = (user.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    await asyncio.to_thread(_clear_notifications_sync, email)
     return {"success": True}
 
 
