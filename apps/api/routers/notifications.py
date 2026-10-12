@@ -197,6 +197,15 @@ def init_notifications_schema_sync() -> None:
                         WHERE type = 'recruiter_assigned';
                     """
                 )
+                # Same purpose again, for zero_match_warning's identical
+                # pre-insert existence check.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_notifications_zero_match_warning_recent
+                        ON notifications (recipient_email, jobdiva_id, created_at)
+                        WHERE type = 'zero_match_warning';
+                    """
+                )
                 conn.commit()
     except Exception as e:  # noqa: BLE001 - schema init must never crash boot
         logger.error(f"init_notifications_schema failed: {e}")
