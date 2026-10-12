@@ -21,6 +21,7 @@ from services.jobdiva import jobdiva_service
 from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_AGG_SQL
 from services.job_attribution import SCHEMA_STATEMENTS as ATTRIBUTION_SCHEMA_STATEMENTS, stamp_job_posted_by
 from services.job_step_time import SCHEMA_STATEMENTS as STEP_TIME_SCHEMA_STATEMENTS
+from services.recruiter_activity import SCHEMA_STATEMENTS as RECRUITER_ACTIVITY_SCHEMA_STATEMENTS
 from services.launch_timing import SCHEMA_STATEMENTS as LAUNCH_TIMING_SCHEMA_STATEMENTS
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
@@ -251,6 +252,9 @@ def _ensure_monitored_jobs_schema() -> None:
             # Active time recruiters spend on a wizard step (Step 5 for the
             # reports); see services/job_step_time.py.
             *STEP_TIME_SCHEMA_STATEMENTS,
+            # Recruiter activity: actions + active time per surface
+            # (services/recruiter_activity.py).
+            *RECRUITER_ACTIVITY_SCHEMA_STATEMENTS,
             # Launch timings (services/launch_timing.py): pair_added_at (T0,
             # DEFAULT now(), so every INSERT site below and elsewhere stamps
             # it without naming it), first_launch_clicked_at (T1) and

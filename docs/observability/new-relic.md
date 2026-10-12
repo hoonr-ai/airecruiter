@@ -44,6 +44,8 @@ Browser apps: `accountID = trustKey = 7594453`, `agentID = applicationID`, brows
 | `PipelineStage` | `core/pipeline_trace.span` | `run_id`, `job_id`, `stage`, `ms`, `ok`, `started_at_ms`, stage counters (`batch_idx`, `n`, `scope`, `source`...). A launch session adopts its id as `run_id`. |
 | `PairLaunchSession` | launch-session runner (every stage transition) | `session_id`, `job_id`, `stage`, `status`, `ms_in_stage`, `attempt`, counts |
 | `PairLaunchTiming` | `services/launch_timing.record_timing_event` (session completed) | `job_id`, `session_id`, `trigger`, `mode`, `status`, `attempt`, `added_to_click_s`, `click_to_launch_s`, `machine_s`, `click_to_first_dial_s`, `sourcing_s`, `selection_s`, `enrichment_s`, `human_wait_s`, `saving_s`, `pairbot_s`, `launch_total_s`, counts |
+| `RecruiterAction` | `services/recruiter_activity.record_action` — server-side at the endpoint (search, launch click, launch-session review / needs-contact / retry / cancel, Submit / Reject / Unreachable) and for browser-only actions sent via `POST /api/v1/activity/actions` | `recruiter` (sha256(email)[:12], the browser's NR user id), `action`, `source` (`server` / `client`), `job_id`, numeric / enum attrs only |
+| `RecruiterActiveTime` | `services/recruiter_activity.record_active_time` (each ~2-min flush of a surface's active time; the wizard's step time is mirrored as `wizard_step_N`) | `recruiter`, `surface`, `active_ms`, `job_id` |
 | `JobDivaAPI` | JobDiva hook (errors / slow only) | `endpoint` (path), `method`, `status_code`, `elapsed_ms`, `response_size_bytes`, `error_kind` (≤ 80 chars, dropped if it holds `@` or a 7+ digit run) |
 | `JobDivaBiLimiter` | `services/jobdiva_rate_limit` | `outcome` (`granted` / `slot_timeout` / `http_429` / `counters`), `label`, `priority`, `bi_wait_ms`, `bi_cooldown_ms`, `bi_429_total`. (`JobDivaBILimiter` with a capital I is retired: event types are case-sensitive.) |
 | `PairBackendStep`, `BackendError`, `BackendMessage` | `core.newrelic.log_step` / `capture_exception` / `record_message` | `PairBackendStep` was `BackendStep`, which collided with Pairbot's event of the same name. |
@@ -184,6 +186,12 @@ FROM Metric SELECT count(newrelic.timeslice.value) WHERE appName = 'PAIR API (PR
 FROM JobDivaAPI SELECT count(*), max(elapsed_ms) WHERE env = 'prod' FACET endpoint, status_code, error_kind SINCE 1 day ago
 FROM JobDivaBiLimiter SELECT count(*) WHERE env = 'prod' FACET outcome, priority SINCE 1 day ago
 FROM JobDivaBiLimiter SELECT latest(bi_429_total), latest(bi_wait_ms) WHERE outcome = 'counters' FACET priority, host
+```
+
+**Recruiter activity** (dashboard: `docs/observability/newrelic/pair-recruiter-dashboard.json`; a recruiter's NR id is on Recruiter Analytics → Activity)
+```sql
+FROM RecruiterActiveTime SELECT sum(active_ms) / 3.6e6 AS 'hours' WHERE env = 'prod' FACET recruiter, surface SINCE 7 days ago
+FROM RecruiterAction SELECT count(*) WHERE env = 'prod' FACET action SINCE 7 days ago
 ```
 
 **Launch timings and sessions**

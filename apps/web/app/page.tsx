@@ -23,6 +23,8 @@ import {
 } from "@/components/ui/dialog";
 import { Users } from "lucide-react";
 import { API_BASE, authFetch } from "@/lib/api";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 
 interface Job {
   id: string;
@@ -105,6 +107,8 @@ const matchesSearch = (job: Job, query: string): boolean =>
 
 export default function DashboardPage() {
   const router = useRouter();
+  // Recruiter activity: time on the Jobs dashboard.
+  useActiveTime({ surface: "jobs_dashboard" });
   const [searchQuery, setSearchQuery] = useState("");
   const [sortField, setSortField] = useState<keyof Job>("createdAt");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -925,6 +929,7 @@ export default function DashboardPage() {
                     }
                   );
                   if (response.ok) {
+                    recordActivity("job_archived", { jobRef: jobToArchive.jobdiva_id || jobToArchive.id });
                     setToast({ message: "Job archived successfully", type: "success" });
                     // Remove the archived job from the list
                     setAllJobs(prev => prev.filter(j => j.id !== jobToArchive.id));
@@ -998,6 +1003,7 @@ export default function DashboardPage() {
                     }
                   );
                   if (response.ok) {
+                    recordActivity("outreach_stopped", { jobRef: jobToStop.jobdiva_id || jobToStop.id });
                     setToast({ message: "Job activity stopped", type: "success" });
                     setAllJobs(prev => prev.map(j => j.id === jobToStop.id ? { ...j, pairStatus: 'Inactive' } : j));
                     setFilteredJobs(prev => prev.map(j => j.id === jobToStop.id ? { ...j, pairStatus: 'Inactive' } : j));
@@ -1072,6 +1078,7 @@ export default function DashboardPage() {
                     }
                   );
                   if (response.ok) {
+                    recordActivity("job_new_version", { jobRef: ref });
                     const data = await response.json();
                     const newRef = data?.new_job_id;
                     if (newRef) {
@@ -1149,6 +1156,7 @@ export default function DashboardPage() {
                     }
                   );
                   if (response.ok) {
+                    recordActivity("job_unarchived", { jobRef: jobToUnarchive.jobdiva_id || jobToUnarchive.id });
                     setToast({ message: "Job unarchived successfully", type: "success" });
                     fetchJobs();
                   } else {

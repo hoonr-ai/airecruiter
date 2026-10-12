@@ -27,6 +27,8 @@
 // the tab is visible and never on top of a request already in flight, and
 // keeps the current rows on screen while it does.
 
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
@@ -504,6 +506,7 @@ function StatTile({ label, value, hint }: { label: string; value: string; hint?:
 export default function LaunchReportPage() {
   const { isAdmin, isTeamLead, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
+  useActiveTime({ surface: "launch_report", enabled: canView });
 
   // Today's Eastern date: the latest selectable date and what "Live" is
   // measured against. Re-derived on every request and every live check, not
@@ -650,6 +653,7 @@ export default function LaunchReportPage() {
     const label = isMultiDay ? `${data.start_date} to ${data.end_date}` : data.report_date;
     link.download = `Pair Bulk Launch Report - ${label}.csv`;
     link.click();
+    recordActivity("report_exported", { attrs: { report: "launch_report", rows: data.jobs.length } });
     URL.revokeObjectURL(url);
   }, [data, flatColumns, isMultiDay]);
 

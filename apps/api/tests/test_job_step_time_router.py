@@ -251,8 +251,8 @@ def test_happy_path_records_under_the_canonical_job_id(allow_access):
         assert _post("26-29267", step=5, active_ms=45_000) == {"status": "success"}
 
     # Resolved by either identifier the page may hold.
-    sql, params = cur.execute.call_args_list[-1].args
-    assert "monitored_jobs" in sql and params == ("26-29267", "26-29267")
+    sql, params = [c.args for c in cur.execute.call_args_list if "monitored_jobs" in c.args[0]][-1]
+    assert params == ("26-29267", "26-29267")
     # Keyed by the canonical monitored_jobs.job_id (as text), the email
     # normalised the way the reports' by_user keys are.
     record.assert_called_once_with(conn, "31920032", 5, "priya.recruiter@example.com", 45_000)
@@ -339,6 +339,13 @@ def pg():
                 "CREATE TEMP TABLE engage_interview_audit (candidate_id TEXT, jobdiva_id TEXT, "
                 "interview_id TEXT, created_at TIMESTAMP) ON COMMIT DROP"
             )
+            # The step time is mirrored into the recruiter-activity view.
+            from services import recruiter_activity
+
+            for stmt in recruiter_activity.SCHEMA_STATEMENTS:
+                if stmt.startswith("CREATE TABLE"):
+                    cur.execute(stmt.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE IF NOT EXISTS")
+                                + " ON COMMIT DROP")
         yield conn
     finally:
         conn.rollback()
@@ -380,6 +387,10 @@ def test_reports_accumulate_on_the_canonical_row(pg):
         ("-4", 5, "admin@example.com", 5_000),
         ("31920032", 5, "admin@example.com", 75_000),
     ]
+    # …and the same time, per day, in the recruiter-activity view.
+    with pg.cursor() as cur:
+        cur.execute("SELECT surface, job_key, SUM(active_ms) FROM recruiter_active_time GROUP BY 1, 2 ORDER BY 2")
+        assert cur.fetchall() == [("wizard_step_5", "-4", 5_000), ("wizard_step_5", "31920032", 75_000)]
 
     got = jst.fetch_step_metrics(pg, [("31920032", "26-29267")])
     assert got["31920032"]["active_ms"] == 75_000

@@ -36,6 +36,8 @@ import { cn } from "@/lib/utils";
 import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 interface TranscriptionItem {
   question: string;
   answer: string;
@@ -155,6 +157,14 @@ export default function CandidateEvaluationReportPage() {
   const [data, setData] = useState<EvaluationReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Recruiter activity: reading one candidate's evaluation report.
+  useActiveTime({ surface: "candidate_detail", jobRef: String(jobId ?? "") });
+  useEffect(() => {
+    if (candidateId) {
+      recordActivity("candidate_opened", { jobRef: String(jobId ?? ""), candidateId, attrs: { view: "report" } });
+    }
+  }, [jobId, candidateId]);
 
   useEffect(() => {
     async function fetchReport() {

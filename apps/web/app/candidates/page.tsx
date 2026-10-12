@@ -1,5 +1,6 @@
 "use client";
 
+import { useActiveTime } from "@/hooks/use-active-time";
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
@@ -470,6 +471,7 @@ const getRecruiterEmailsArray = (emails: string | string[] | null | undefined): 
 
 export default function GlobalCandidatesPage() {
   const CANDIDATE_PAGE_SIZE = 50;
+  useActiveTime({ surface: "candidates" });
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [totalCount, setTotalCount] = useState(0);

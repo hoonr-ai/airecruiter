@@ -18,6 +18,9 @@
 // scope, launched or not. Every timestamp is
 // Eastern "MM/DD/YYYY HH:MM:SS" with the zone stated once in the header.
 
+import { RecruiterActivityPanel } from "@/components/RecruiterActivityPanel";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
@@ -715,6 +718,7 @@ function RecruiterJobs({
 export default function RecruiterAnalyticsPage() {
   const { isAdmin, isTeamLead, teamName, orgRoleLabel, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
+  useActiveTime({ surface: "recruiter_analytics", enabled: canView });
 
   const [data, setData] = useState<RecruiterAnalyticsData | null>(null);
   // true until the first answer, so the table shows skeletons rather than
@@ -877,6 +881,7 @@ export default function RecruiterAnalyticsPage() {
     if (scopeName) parts.push(scopeName);
     link.download = `${parts.join(" - ")}.csv`;
     link.click();
+    recordActivity("report_exported", { attrs: { report: "recruiter_analytics", rows: visibleRecruiters.length } });
     URL.revokeObjectURL(url);
   };
 
@@ -1405,6 +1410,13 @@ export default function RecruiterAnalyticsPage() {
           </dd>
         </div>
       </dl>
+
+      <RecruiterActivityPanel
+        range={range}
+        teamId={isAdmin ? activeTeamId : null}
+        enabled={!isRoleLoading && canView}
+        today={todayEastern()}
+      />
     </div>
   );
 }

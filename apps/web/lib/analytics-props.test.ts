@@ -9,6 +9,7 @@ describe("shouldBridgeToNr", () => {
       "job_wizard_step5_launch_pair_clicked",
       "job_wizard_step5_candidate_search_finished",
       "job_wizard_step5_boolean_edit_saved",
+      "recruiter_recording_played",
       "launch_session_stage",
       "pair_launch_finished",
       "job_wizard_step_completed",

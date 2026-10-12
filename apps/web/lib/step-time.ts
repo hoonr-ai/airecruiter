@@ -154,6 +154,10 @@ export type StepTimeSessionOptions = {
   visible: boolean;
   send: StepTimeSender;
   idleMs?: number;
+  /** Send the 0 ms ENTRY report at start (default true). The wizard needs it
+   *  (it stamps first_entered_at); surfaces that only sum time
+   *  (hooks/use-active-time.ts) skip it — one request fewer per page view. */
+  entry?: boolean;
 };
 
 /**
@@ -173,6 +177,7 @@ export function createStepTimeSession({
   visible,
   send,
   idleMs = IDLE_MS,
+  entry = true,
 }: StepTimeSessionOptions): StepTimeSession {
   const tracker = createActiveTimeTracker({ now, idleMs, visible });
   tracker.activity(now);
@@ -184,7 +189,7 @@ export function createStepTimeSession({
   // Any report the server takes creates the row, so the first "sent" settles
   // it, and so does a "drop" (the server would refuse it again). Until then,
   // failures back the retry off.
-  let entrySettled = false;
+  let entrySettled = !entry;
   let entryFailures = 0;
 
   const dispatch = (activeMs: number, keepalive: boolean) => {
@@ -240,7 +245,7 @@ export function createStepTimeSession({
     dispatch(tracker.take(), keepalive);
   };
 
-  dispatch(0, false);
+  if (entry) dispatch(0, false);
 
   return {
     activity(at) {

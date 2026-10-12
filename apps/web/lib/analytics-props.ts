@@ -10,7 +10,9 @@ type EventProps = Record<string, unknown>;
 // Product events worth having next to the APM traces. Deliberately not the
 // per-keystroke / per-field ones: the agent already records clicks, page
 // views and AJAX on its own.
-export const NR_BRIDGE_PREFIXES = ["job_wizard_step5_", "launch_", "pair_launch_"] as const;
+// recruiter_*: the recruiter-activity actions (lib/activity.ts), one per
+// action, batched to the API separately.
+export const NR_BRIDGE_PREFIXES = ["job_wizard_step5_", "launch_", "pair_launch_", "recruiter_"] as const;
 export const NR_BRIDGE_EVENTS: ReadonlySet<string> = new Set(["job_wizard_step_completed"]);
 // Prefix matches that fire per keystroke: the on-blur
 // job_wizard_step5_boolean_edit_saved already records the final edit.

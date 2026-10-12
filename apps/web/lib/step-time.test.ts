@@ -471,3 +471,16 @@ describe("step-time session", () => {
     assert.equal(calls[2].ms, FLUSH_MS);
   });
 });
+
+describe("entry: false", () => it("sends nothing at start and only real time later", () => {
+  const sent: number[] = [];
+  const session = createStepTimeSession({
+    now: 0, visible: true, entry: false,
+    send: async (ms) => { sent.push(ms); return "sent"; },
+  });
+  assert.deepEqual(sent, []);
+  session.tick(SAMPLE_MS);
+  assert.deepEqual(sent, []);                  // no time yet worth a request, no entry ping
+  session.end(30_000);
+  assert.deepEqual(sent, [30_000]);
+}));

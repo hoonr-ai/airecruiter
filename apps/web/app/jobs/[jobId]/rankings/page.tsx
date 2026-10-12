@@ -69,6 +69,8 @@ import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -1825,7 +1827,18 @@ export default function CandidateRankingsPage() {
   const openDetails = (candidate: Candidate) => {
     setSelectedCandidate(candidate);
     setDetailsModalOpen(true);
+    recordActivity("candidate_opened", {
+      jobRef: String(jobId ?? ""),
+      candidateId: String(candidate.candidate_id || candidate.id),
+      attrs: { view: "details" },
+    });
   };
+
+  // Recruiter activity: time on the rank list vs. reviewing one candidate
+  // (details / activity log, recordings included). One surface at a time.
+  const reviewingCandidate = detailsModalOpen || isActivityLogModalOpen;
+  useActiveTime({ surface: "rankings", jobRef: String(jobId ?? ""), enabled: !reviewingCandidate });
+  useActiveTime({ surface: "candidate_detail", jobRef: String(jobId ?? ""), enabled: reviewingCandidate });
 
   const isInitialLoading = isLoading && !job && candidates.length === 0;
   const isRefreshing = isLoading && !isInitialLoading;
@@ -2686,6 +2699,11 @@ export default function CandidateRankingsPage() {
                                   name: candidate.name,
                                 });
                                 setIsActivityLogModalOpen(true);
+                                recordActivity("candidate_opened", {
+                                  jobRef: String(jobId ?? ""),
+                                  candidateId: String(candidate.candidate_id || candidate.id),
+                                  attrs: { view: "activity_log" },
+                                });
                               }}
                               className="text-[12px] text-indigo-600 hover:bg-indigo-50 px-2 py-0.5 rounded-md inline-flex items-center justify-center gap-1 mt-1 font-bold border border-indigo-100 shadow-sm transition-colors"
                               title="View user activity history"
