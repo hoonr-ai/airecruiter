@@ -26,7 +26,15 @@ function formatRelativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id: number) => void }) {
+function NotificationRow({
+  item,
+  onRead,
+  onUnread,
+}: {
+  item: NotificationItem;
+  onRead: (id: number) => void;
+  onUnread: (id: number) => void;
+}) {
   const router = useRouter();
   const isUnread = !item.read_at;
   // Candidate-level notifications (candidate_passed) go to that candidate's
@@ -51,6 +59,17 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
     }
   };
 
+  // A separate, explicit toggle — independent of the row's own click-to-
+  // navigate behavior (stopPropagation keeps this from also firing that).
+  // Lets a notification be marked read without leaving the page, and marked
+  // back unread (e.g. "I'll deal with this later"), which the implicit
+  // mark-on-click behavior alone can't do.
+  const handleToggleRead = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isUnread) onRead(item.id);
+    else onUnread(item.id);
+  };
+
   return (
     <Card
       onClick={handleRowClick}
@@ -63,28 +82,43 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
         isUnread ? "bg-primary/5 border-primary/20" : "bg-white"
       )}
     >
+      <button
+        onClick={handleToggleRead}
+        className={cn(
+          "group shrink-0 -m-2 p-2 rounded-full transition-colors",
+          "focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+        )}
+        aria-label={isUnread ? "Mark as read" : "Mark as unread"}
+        title={isUnread ? "Mark as read" : "Mark as unread"}
+      >
+        <span
+          className={cn(
+            "block h-3.5 w-3.5 rounded-full border-2 transition-colors",
+            isUnread ? "bg-primary border-primary" : "bg-transparent border-slate-300 group-hover:border-primary"
+          )}
+        />
+      </button>
       <div className="flex-1 min-w-0">
+        {/* Title + JobDiva id on one line. item.body is never rendered here:
+            candidate_passed is the only type that ever sets it (always
+            "Score: X/100", now shown as the "X/100" badge instead — showing
+            both was redundant and cost a 3rd line); pair_launched and
+            pair_inactive never set body at all (see
+            services/notifications_service.py — their title alone carries
+            the full message), so there's nothing of theirs being hidden. */}
         <p
           className={cn(
             "text-sm line-clamp-2",
             isUnread ? "font-semibold text-slate-900" : "font-medium text-slate-600"
           )}
-          title={item.title}
+          title={item.jobdiva_id ? `${item.title} · ${item.jobdiva_id}` : item.title}
         >
           {item.title}
+          {item.jobdiva_id && <span className="text-slate-400 font-normal"> · {item.jobdiva_id}</span>}
         </p>
-        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-          {item.body && <p className="text-xs text-slate-500">{item.body}</p>}
-          {item.jobdiva_id && (
-            <span className="text-xs text-slate-400 font-mono bg-slate-100 rounded px-1.5 py-0.5">
-              {item.jobdiva_id}
-            </span>
-          )}
-        </div>
         <p className="text-xs text-slate-400 mt-1">{formatRelativeTime(item.created_at)}</p>
       </div>
-      {item.score !== null && <ScoreBadge score={item.score} />}
-      {isUnread && <span className="h-2 w-2 rounded-full bg-primary shrink-0" aria-label="unread" />}
+      {item.score !== null && <ScoreBadge score={item.score} className="shrink-0" />}
     </Card>
   );
 }
@@ -100,6 +134,7 @@ export default function NotificationsPage() {
     requestNotificationPermission,
     refresh,
     markRead,
+    markUnread,
     markAllRead,
     clearAll,
   } = useNotificationsStream();
@@ -219,7 +254,7 @@ export default function NotificationsPage() {
         <ScrollArea className="h-[calc(100vh-180px)]">
           <div className="space-y-3 pr-2">
             {notifications.map((item) => (
-              <NotificationRow key={item.id} item={item} onRead={markRead} />
+              <NotificationRow key={item.id} item={item} onRead={markRead} onUnread={markUnread} />
             ))}
           </div>
         </ScrollArea>

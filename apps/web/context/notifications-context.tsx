@@ -45,6 +45,7 @@ interface NotificationsContextType {
   requestNotificationPermission: () => void;
   refresh: () => void;
   markRead: (id: number) => void;
+  markUnread: (id: number) => void;
   markAllRead: () => void;
   clearAll: () => void;
 }
@@ -91,6 +92,17 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // seeded from the local cache on mount (below), so a reload doesn't
   // needlessly re-announce history the cache already had.
   const lastSeenIdRef = useRef<number>(0);
+  // Mirrors `notifications` after every render, so markRead/markUnread can
+  // decide "is this a no-op?" by reading a plain snapshot instead of doing
+  // that check inside the setNotifications updater itself — a functional
+  // updater can run more than once for the same update (React StrictMode,
+  // concurrent rendering), and a side effect assigned to a variable from
+  // inside one (the old pattern here) could then read a stale value if the
+  // updater's first invocation hadn't "happened" yet when it was checked.
+  const notificationsRef = useRef<NotificationItem[]>([]);
+  useEffect(() => {
+    notificationsRef.current = notifications;
+  }, [notifications]);
   // Every id this tab has already applied a side effect for (unread bump +
   // desktop popup) — checked and updated OUTSIDE the setNotifications
   // updater (see handleRawSSEChunk below). React may invoke a state updater
@@ -416,23 +428,33 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const markRead = useCallback(async (id: number) => {
-    // Functional update, with no `notifications` in the dependency array:
-    // keeps this callback's identity stable across every notification
-    // change instead of changing on every single update.
-    let alreadyRead = false;
+    // Decided from the ref snapshot BEFORE touching state (see
+    // notificationsRef above) rather than inside the setNotifications
+    // updater — keeps the updater itself pure and the no-op check exact.
+    const current = notificationsRef.current.find((n) => n.id === id);
+    if (!current || current.read_at) return;
     setNotifications((prev) =>
-      prev.map((n) => {
-        if (n.id !== id) return n;
-        if (n.read_at) alreadyRead = true;
-        return n.read_at ? n : { ...n, read_at: new Date().toISOString() };
-      })
+      prev.map((n) => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n))
     );
-    if (alreadyRead) return;
     setUnreadCount((prev) => Math.max(0, prev - 1));
     try {
       await api.notifications.markRead(id);
     } catch (err) {
       console.error("Failed to mark notification read:", err);
+      refreshRef.current();
+    }
+  }, []);
+
+  const markUnread = useCallback(async (id: number) => {
+    // Mirrors markRead above.
+    const current = notificationsRef.current.find((n) => n.id === id);
+    if (!current || !current.read_at) return;
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read_at: null } : n)));
+    setUnreadCount((prev) => prev + 1);
+    try {
+      await api.notifications.markUnread(id);
+    } catch (err) {
+      console.error("Failed to mark notification unread:", err);
       refreshRef.current();
     }
   }, []);
@@ -483,6 +505,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         requestNotificationPermission,
         refresh,
         markRead,
+        markUnread,
         markAllRead,
         clearAll,
       }}

@@ -149,17 +149,39 @@ def init_notifications_schema_sync() -> None:
                         WHERE type = 'pair_inactive' AND cleared_at IS NULL;
                     """
                 )
-                # pair_launched: a relaunch IS a new, separately-worth-
-                # notifying event (unlike pair_inactive, there's no "active
-                # period" to collapse into), so this only dedupes
-                # same-recipient/job/minute duplicates — concurrent uvicorn
-                # workers or a client retry hitting the launch endpoint twice
-                # for what's really one launch — without silencing a genuine
-                # second launch minutes or hours later.
+                # pair_launched's same-minute dedup used to be a unique index
+                # on date_trunc('minute', created_at) — DROPPED: Postgres
+                # classifies date_trunc(text, timestamptz) as STABLE, not
+                # IMMUTABLE (its result depends on the session timezone), and
+                # refuses to build an index on a non-immutable expression.
+                # That CREATE INDEX statement therefore failed on every boot
+                # since it shipped, which — because every statement in this
+                # function runs in ONE transaction that only commits once at
+                # the end — rolled back the ENTIRE schema-init pass each
+                # time, silently discarding every other change in this
+                # function too. Confirmed in QA: candidates kept getting the
+                # PAIR-launched EMAIL (a separate, unaffected code path) but
+                # never the in-app notification, because
+                # create_pair_launched_notification's INSERT ... ON CONFLICT
+                # referenced an index that had never actually been created,
+                # which fails outright (not silently) — caught by that
+                # function's own top-level try/except and logged, never
+                # surfaced. Dedup for this type is now a plain pre-insert
+                # existence check instead (see
+                # services/notifications_service.py) — no index-expression
+                # immutability to get wrong a second time.
+                cur.execute(
+                    "DROP INDEX IF EXISTS uniq_notifications_pair_launched_per_minute;"
+                )
+                # Not a dedup guarantee (that's the pre-insert check in
+                # notifications_service.py) — just makes that check's own
+                # lookup (recipient_email, jobdiva_id, type='pair_launched',
+                # created_at >= ...) an index scan instead of a sequential
+                # scan, since it now runs once per recipient on every launch.
                 cur.execute(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_pair_launched_per_minute
-                        ON notifications (recipient_email, jobdiva_id, date_trunc('minute', created_at))
+                    CREATE INDEX IF NOT EXISTS idx_notifications_pair_launched_recent
+                        ON notifications (recipient_email, jobdiva_id, created_at)
                         WHERE type = 'pair_launched';
                     """
                 )
@@ -253,6 +275,23 @@ def _mark_notification_read_sync(notification_id: int, email: str) -> bool:
     return updated is not None
 
 
+def _mark_notification_unread_sync(notification_id: int, email: str) -> bool:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE notifications
+                SET read_at = NULL
+                WHERE id = %s AND recipient_email = %s AND read_at IS NOT NULL
+                RETURNING id
+                """,
+                (notification_id, email),
+            )
+            updated = cur.fetchone()
+            conn.commit()
+    return updated is not None
+
+
 def _mark_all_notifications_read_sync(email: str) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -320,6 +359,17 @@ async def mark_notification_read(notification_id: int, user: UserIdentity = Depe
     if not email:
         raise HTTPException(status_code=401, detail="Authentication required")
     updated = await asyncio.to_thread(_mark_notification_read_sync, notification_id, email)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"success": True}
+
+
+@router.post("/{notification_id}/unread")
+async def mark_notification_unread(notification_id: int, user: UserIdentity = Depends(get_current_user)):
+    email = (user.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    updated = await asyncio.to_thread(_mark_notification_unread_sync, notification_id, email)
     if not updated:
         raise HTTPException(status_code=404, detail="Notification not found")
     return {"success": True}
