@@ -31,6 +31,7 @@ elsewhere (e.g. the monitored_jobs_cache_warmer's 25s interval poll).
 import asyncio
 import json
 import logging
+import time
 from typing import Dict, List, Optional, Set
 
 import psycopg2.extras
@@ -47,6 +48,18 @@ router = APIRouter(tags=["Notifications"])
 
 _STREAM_POLL_SECONDS = 3.5
 _STREAM_QUEUE_MAXSIZE = 200
+# How long a retained-but-disconnected cursor stays valid before a reconnect
+# reseeds from the current max instead of resuming — bounds how much history
+# a long-absent client would otherwise have replayed at it (see
+# _register_subscriber). 1 hour comfortably covers a tab switch, a dropped
+# wifi connection, or a short break; a client gone longer than that gets the
+# cheaper "start from now" behavior instead of catching up from scratch (its
+# own list() truth-up fetch already has everything it missed).
+_CURSOR_MAX_RETENTION_SECONDS = 3600
+# Separately, prune bookkeeping for emails that are both stale AND not
+# currently connected, so _last_seen_id/_last_seen_cursor_at don't grow
+# unbounded over a worker's lifetime.
+_CURSOR_PRUNE_AFTER_SECONDS = 86400
 
 
 def init_notifications_schema_sync() -> None:
@@ -243,6 +256,11 @@ async def mark_all_notifications_read(user: UserIdentity = Depends(get_current_u
 # ---------------------------------------------------------------------------
 _subscribers: Dict[str, Set["asyncio.Queue"]] = {}
 _last_seen_id: Dict[str, int] = {}
+# Monotonic timestamp of the last time _last_seen_id[email] was genuinely
+# advanced (a reseed-to-now or a real delivery) — NOT touched by a reconnect
+# that merely resumes an existing cursor. Backs the staleness check in
+# _register_subscriber and the pruning pass in _broadcaster_loop.
+_last_seen_cursor_at: Dict[str, float] = {}
 _broadcaster_task: Optional[asyncio.Task] = None
 
 # Lazily constructed on first use, INSIDE an async function. asyncio.Lock()
@@ -304,12 +322,27 @@ def _poll_new_notifications_sync(last_seen: Dict[str, int]) -> Dict[str, List[di
     return out
 
 
+def _prune_stale_cursors() -> None:
+    """Drop bookkeeping for emails that are both disconnected and old enough
+    that nothing will ever resume from them — keeps _last_seen_id /
+    _last_seen_cursor_at from growing for the life of the worker."""
+    now = time.monotonic()
+    stale = [
+        e for e, at in _last_seen_cursor_at.items()
+        if e not in _subscribers and (now - at) > _CURSOR_PRUNE_AFTER_SECONDS
+    ]
+    for e in stale:
+        _last_seen_id.pop(e, None)
+        _last_seen_cursor_at.pop(e, None)
+
+
 async def _broadcaster_loop() -> None:
     while True:
         await asyncio.sleep(_STREAM_POLL_SECONDS)
         async with _get_subscribers_lock():
             emails = [e for e, qs in _subscribers.items() if qs]
         if not emails:
+            _prune_stale_cursors()
             continue
         snapshot = {e: _last_seen_id.get(e, 0) for e in emails}
         try:
@@ -319,6 +352,7 @@ async def _broadcaster_loop() -> None:
             continue
         for email, rows in rows_by_email.items():
             _last_seen_id[email] = max(_last_seen_id.get(email, 0), max(r["id"] for r in rows))
+            _last_seen_cursor_at[email] = time.monotonic()
             async with _get_subscribers_lock():
                 queues = list(_subscribers.get(email, ()))
             for row in rows:
@@ -328,6 +362,7 @@ async def _broadcaster_loop() -> None:
                         q.put_nowait(item)
                     except asyncio.QueueFull:
                         logger.warning("notifications_stream_queue_full email=%s", email)
+        _prune_stale_cursors()
 
 
 async def _ensure_broadcaster_running() -> None:
@@ -337,16 +372,44 @@ async def _ensure_broadcaster_running() -> None:
             _broadcaster_task = asyncio.create_task(_broadcaster_loop())
 
 
-async def _register_subscriber(email: str, queue: "asyncio.Queue") -> None:
+async def _register_subscriber(
+    email: str, queue: "asyncio.Queue", since_id: Optional[int] = None
+) -> None:
+    """Pick the cursor this subscriber (and the shared per-email broadcaster
+    cursor) should resume from, in priority order:
+
+    1. The client's own `since_id` (its highest-rendered notification id) —
+       authoritative, standard SSE Last-Event-ID-style resume, and the only
+       option that's correct across a reconnect landing on a DIFFERENT
+       worker (the in-memory cursors below are per-process).
+    2. A retained cursor from this email's last subscriber on THIS worker,
+       if it's still fresh (< _CURSOR_MAX_RETENTION_SECONDS old) — resumes a
+       short reconnect gap without a round trip.
+    3. Otherwise, reseed from the current max id ("start from now"): a
+       missing or stale cursor isn't worth catching up from scratch when the
+       client's own list() truth-up fetch already has that history.
+    """
     async with _get_subscribers_lock():
         is_new_email = email not in _subscribers
         _subscribers.setdefault(email, set()).add(queue)
-    if is_new_email:
-        # Seed from "now" so a fresh subscriber doesn't replay old history —
-        # anything before this point was already delivered by the client's
-        # own truth-up list() fetch on mount/reconnect.
-        max_id = await asyncio.to_thread(_max_id_sync, email)
-        _last_seen_id.setdefault(email, max_id)
+
+    if since_id is not None:
+        _last_seen_id[email] = max(0, since_id)
+    elif is_new_email:
+        retained = _last_seen_id.get(email)
+        retained_at = _last_seen_cursor_at.get(email)
+        is_fresh = retained_at is not None and (time.monotonic() - retained_at) <= _CURSOR_MAX_RETENTION_SECONDS
+        if retained is None or not is_fresh:
+            max_id = await asyncio.to_thread(_max_id_sync, email)
+            _last_seen_id[email] = max_id
+            _last_seen_cursor_at[email] = time.monotonic()
+    # else: not a new email and no since_id — another tab's cursor for this
+    # email is already live; nothing to seed.
+
+    # Always ensure the broadcaster is running, even when the cursor logic
+    # above took an early path (e.g. the very first subscriber on this
+    # worker reconnecting with a cached since_id) — it must not depend on
+    # having gone through the "new email, no since_id" branch above.
     await _ensure_broadcaster_running()
 
 
@@ -357,18 +420,29 @@ async def _unregister_subscriber(email: str, queue: "asyncio.Queue") -> None:
             queues.discard(queue)
             if not queues:
                 del _subscribers[email]
-                _last_seen_id.pop(email, None)
+                # _last_seen_id[email] is deliberately kept (not popped): a
+                # reconnect within _CURSOR_MAX_RETENTION_SECONDS resumes from
+                # it instead of skipping whatever arrived while disconnected
+                # (the bug this fixed — see _register_subscriber for the
+                # staleness bound and _prune_stale_cursors for eventual
+                # cleanup).
 
 
 @router.get("/stream")
-async def stream_notifications(request: Request, user: UserIdentity = Depends(get_current_user)):
+async def stream_notifications(
+    request: Request,
+    since_id: Optional[int] = Query(
+        None, ge=0, description="Resume after this notification id (the client's own high-water mark)"
+    ),
+    user: UserIdentity = Depends(get_current_user),
+):
     email = (user.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     async def event_generator():
         queue: "asyncio.Queue" = asyncio.Queue(maxsize=_STREAM_QUEUE_MAXSIZE)
-        await _register_subscriber(email, queue)
+        await _register_subscriber(email, queue, since_id=since_id)
         try:
             yield b": connected\n\n"
             while True:
