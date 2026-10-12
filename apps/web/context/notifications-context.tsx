@@ -10,6 +10,7 @@ import {
   shouldShowBrowserPopup,
 } from "@/lib/browser-notifications";
 import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotifications } from "@/lib/notifications-cache";
+import { playNotificationChime, unlockNotificationSound } from "@/lib/notification-sound";
 
 export type { BrowserNotificationPermission };
 
@@ -125,6 +126,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // opt-in control and calls this in response to a click.
   const requestNotificationPermission = useCallback(() => {
     if (typeof window === "undefined" || !("Notification" in window)) return;
+    // This click is the one real user gesture in the whole desktop-
+    // notification flow — resume the shared chime AudioContext here while
+    // it's still on the gesture stack, so the later async chime (triggered
+    // by an SSE push, not a click) can actually play under strict browser
+    // autoplay policies.
+    unlockNotificationSound();
     Notification.requestPermission()
       .then(setNotificationPermission)
       .catch((err) => console.error("Failed to request notification permission:", err));
@@ -181,6 +188,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         routerRef.current.push(notificationClickPath(item));
         popup.close();
       };
+      // Tied to the popup actually being shown, not to every incoming
+      // notification — playNotificationChime checks the mute preference
+      // itself, so there's nothing to gate here beyond "a popup fired."
+      playNotificationChime();
     } catch (err) {
       console.error("Failed to show browser notification:", err);
     }
