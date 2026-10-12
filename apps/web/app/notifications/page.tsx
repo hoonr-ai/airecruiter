@@ -1,16 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
+import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
 import { cn } from "@/lib/utils";
 
 function formatRelativeTime(iso: string): string {
@@ -139,11 +141,17 @@ export default function NotificationsPage() {
     clearAll,
   } = useNotificationsStream();
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [filter, setFilter] = useState<NotificationFilter>("all");
 
   const handleConfirmClear = () => {
     setConfirmingClear(false);
     clearAll();
   };
+
+  const filteredNotifications = useMemo(
+    () => notifications.filter((item) => matchesNotificationFilter(item, filter)),
+    [notifications, filter]
+  );
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -245,19 +253,39 @@ export default function NotificationsPage() {
         </div>
       )}
 
+      {notifications.length > 0 && (
+        <Tabs value={filter} onValueChange={(v) => setFilter(v as NotificationFilter)} className="mb-4">
+          <TabsList>
+            {NOTIFICATION_FILTERS.map((f) => (
+              <TabsTrigger key={f.value} value={f.value}>
+                {f.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      )}
+
       {notifications.length > 0 ? (
         // Checked before isLoading on purpose: a reload seeds this list from
         // the local cache instantly (see notifications-context.tsx), and
         // that cached content should render right away rather than being
         // hidden behind a loading message while refresh() confirms it in
         // the background.
-        <ScrollArea className="h-[calc(100vh-180px)]">
-          <div className="space-y-3 pr-2">
-            {notifications.map((item) => (
-              <NotificationRow key={item.id} item={item} onRead={markRead} onUnread={markUnread} />
-            ))}
+        filteredNotifications.length > 0 ? (
+          <ScrollArea className="h-[calc(100vh-220px)]">
+            <div className="space-y-3 pr-2">
+              {filteredNotifications.map((item) => (
+                <NotificationRow key={item.id} item={item} onRead={markRead} onUnread={markUnread} />
+              ))}
+            </div>
+          </ScrollArea>
+        ) : (
+          <div className="text-center text-sm text-slate-400 py-16">
+            {filter === "unread" && "No unread notifications."}
+            {filter === "jobs" && "No PAIR job notifications."}
+            {filter === "candidates" && "No candidate notifications."}
           </div>
-        </ScrollArea>
+        )
       ) : isLoading ? (
         <div className="text-center text-sm text-slate-400 py-16">Loading notifications…</div>
       ) : (
