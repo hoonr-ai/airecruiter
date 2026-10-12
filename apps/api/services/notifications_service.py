@@ -36,14 +36,17 @@ existing email notifications. Seven types today:
   email send succeeds — a transient email-provider failure shouldn't also
   silently cost the in-app notification. pair_inactive dedupes via a
   dedicated partial unique index (see routers/notifications.py's schema init
-  and _CONFLICT_PAIR_INACTIVE below); pair_launched dedupes via a plain
-  pre-insert existence check instead (see
-  _job_level_duplicate_in_last_minute below) rather than an index, because
-  its natural dedup key involves a time window, and Postgres can't index
-  that in a way it will accept (see that function's docstring for why). The
-  two events have different "worth a fresh notification" semantics: a
-  relaunch is always new and notable, while an inactivity transition should
-  show at most one active notification until the user clears it.
+  and _CONFLICT_PAIR_INACTIVE below) — a real dedup GUARANTEE, enforced by
+  Postgres itself; pair_launched dedupes via a plain pre-insert existence
+  check instead (see _job_level_duplicate_in_last_minute below), because
+  its natural dedup key involves a time window, and Postgres can't build a
+  UNIQUE index on that in a way it will accept (see that function's
+  docstring for why) — this is a check-then-insert race, not a guarantee,
+  though a plain (non-unique) index still backs the check's own lookup for
+  performance (see routers/notifications.py). The two events have
+  different "worth a fresh notification" semantics: a relaunch is always
+  new and notable, while an inactivity transition should show at most one
+  active notification until the user clears it.
 
 - recruiter_assigned (create_recruiter_assigned_notifications): fired from
   routers/jobs.py's save_job_draft / save_job_to_monitored_jobs_only
@@ -182,17 +185,7 @@ def _insert_notification(
 
 
 def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
-    cur.execute(
-        """
-        SELECT job_id, title, enhanced_title, recruiter_emails, jobdiva_id
-        FROM monitored_jobs
-        WHERE job_id = %s OR jobdiva_id = %s
-        ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
-        LIMIT 1
-        """,
-        (job_id, job_id),
-    )
-    job_row = cur.fetchone()
+    job_row = _fetch_job_sync(cur, job_id)
 
     cur.execute(
         """
@@ -590,10 +583,12 @@ async def create_pair_launched_notification(
 
     Job-level — candidate_id is NULL, since a launch is a batch event with a
     candidate COUNT, never a single candidate. Dedup is an application-level
-    pre-insert existence check (_job_level_duplicate_in_last_minute), not an
-    index: a relaunch is a new, separately-worth-notifying event, so only
-    same-recipient/job/minute duplicates — a retry or racing workers
-    handling what's really one launch — are collapsed.
+    pre-insert existence check (_job_level_duplicate_in_last_minute), not a
+    Postgres-enforced UNIQUE-index guarantee (a plain, non-unique index
+    still backs the check's own lookup for performance — see
+    routers/notifications.py): a relaunch is a new, separately-worth-
+    notifying event, so only same-recipient/job/minute duplicates — a retry
+    or racing workers handling what's really one launch — are collapsed.
     """
     try:
         if not job_id or not jobdiva_id or not recruiter_emails:
@@ -709,9 +704,11 @@ async def create_recruiter_assigned_notifications(
 
     Job-level — candidate_id is NULL, same as pair_launched/pair_inactive.
     Dedup is the same application-level pre-insert existence check
-    pair_launched uses (_job_level_duplicate_in_last_minute), not an index:
-    the wizard autosaves frequently, so this guards against a rapid
-    double-save re-notifying for what's really one edit, while still
+    pair_launched uses (_job_level_duplicate_in_last_minute) — not a
+    Postgres-enforced UNIQUE-index guarantee, though a plain index still
+    backs the check's own lookup for performance: the wizard autosaves
+    frequently, so this guards against a rapid double-save re-notifying for
+    what's really one edit, while still
     letting a genuine later remove-then-re-add notify again.
     """
     try:
@@ -728,12 +725,14 @@ async def create_recruiter_assigned_notifications(
 
 
 def _fetch_job_sync(cur, job_id: str):
-    """Job-only counterpart to _fetch_job_and_candidate — for notification
-    types with no candidate involved at all (zero_match_warning's "a search
-    found nobody" has no candidate_id by definition)."""
+    """The job half of _fetch_job_and_candidate, standalone — for
+    notification types with no candidate involved at all
+    (zero_match_warning's "a search found nobody" has no candidate_id by
+    definition). _fetch_job_and_candidate itself calls this rather than
+    duplicating the query."""
     cur.execute(
         """
-        SELECT job_id, title, enhanced_title, jobdiva_id
+        SELECT job_id, title, enhanced_title, recruiter_emails, jobdiva_id
         FROM monitored_jobs
         WHERE job_id = %s OR jobdiva_id = %s
         ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
@@ -795,9 +794,12 @@ async def create_zero_match_notification(*, job_id: str, searcher_email: str) ->
 
     Job-level — candidate_id is NULL, same as pair_launched/pair_inactive/
     recruiter_assigned. Dedup is the same _job_level_duplicate_in_last_minute
-    same-minute collapse pair_launched/recruiter_assigned use, not an
-    index: a recruiter tweaking criteria and re-running a search 5 minutes
-    later and getting 0 again is a fresh, separately-worth-notifying
+    same-minute collapse pair_launched/recruiter_assigned use — not a
+    Postgres-enforced UNIQUE-index guarantee, though a plain index
+    (idx_notifications_zero_match_warning_recent, see
+    routers/notifications.py) still backs the check's own lookup for
+    performance: a recruiter tweaking criteria and re-running a search 5
+    minutes later and getting 0 again is a fresh, separately-worth-notifying
     result, not a duplicate of the first.
     """
     try:
