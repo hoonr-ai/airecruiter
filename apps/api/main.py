@@ -23,6 +23,7 @@ from core import (
     JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS
 )
 from core.email import notify_pair_launched, notify_job_posting, notify_pair_inactive
+from services.notifications_service import create_pair_inactive_notification
 
 PAIR_INACTIVE_STATUSES = os.getenv("PAIR_INACTIVE_STATUSES", "closed,filled,cancelled,canceled,expired,ignored,declined").lower().split(",")
 
@@ -847,7 +848,7 @@ async def _fire_pair_inactive_notification(job_id: str):
                SET pair_inactive_notified_at = NOW()
              WHERE job_id = %s
                AND pair_inactive_notified_at IS NULL
-            RETURNING recruiter_emails, jobdiva_id
+            RETURNING recruiter_emails, jobdiva_id, title, enhanced_title
             """,
             (job_id,),
         )
@@ -889,6 +890,19 @@ async def _fire_pair_inactive_notification(job_id: str):
                 conn.commit()
             except Exception:
                 pass
+
+        # In-app companion — independent of whether the email above
+        # succeeded or the claim just got released for retry (it's a
+        # separate channel; see services/notifications_service.py). Safe to
+        # run unconditionally, including on a later retry for the same
+        # inactive event: dedup is a DB-level partial index allowing at most
+        # one ACTIVE notification per recipient/job, not this call order.
+        await create_pair_inactive_notification(
+            job_id=job_id,
+            jobdiva_id=row["jobdiva_id"] or job_id,
+            job_title=row.get("enhanced_title") or row.get("title") or "",
+            recruiter_emails=recruiter_emails,
+        )
     except Exception as e:
         logger.error(f"❌ Failed to fire Inactive notification for {job_id}: {e}")
     finally:

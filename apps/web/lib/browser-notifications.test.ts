@@ -52,9 +52,13 @@ describe("notificationClickPath", () => {
     );
   });
 
-  it("falls back to the notifications page when either id is missing", () => {
+  it("links to the job's rankings page for job-level notifications (no candidate_id)", () => {
+    // pair_launched / pair_inactive: candidate_id is always null for these.
+    assert.equal(notificationClickPath({ jobdiva_id: "26-14907", candidate_id: null }), "/jobs/26-14907/rankings");
+  });
+
+  it("falls back to the notifications page when jobdiva_id itself is missing", () => {
     assert.equal(notificationClickPath({ jobdiva_id: null, candidate_id: "123" }), "/notifications");
-    assert.equal(notificationClickPath({ jobdiva_id: "26-14907", candidate_id: null }), "/notifications");
     assert.equal(notificationClickPath({ jobdiva_id: null, candidate_id: null }), "/notifications");
   });
 });
