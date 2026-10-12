@@ -19,10 +19,11 @@
   _prune_stale_cursors's bookkeeping cleanup.
 - create_pair_launched_notification / create_pair_inactive_notification: the
   job-level (candidate_id=NULL) companions to the existing PAIR-launched and
-  PAIR-inactive emails — one row per recruiter, no dedup of their own (a
-  relaunch / a fresh inactivity event is each worth notifying; see their
-  docstrings for why the unique index's NULL-candidate_id behavior makes
-  that safe).
+  PAIR-inactive emails, run independently of whether that email send
+  succeeds. Each has its own dedicated partial-index conflict clause (a
+  per-minute dedup for launches, an "at most one active" dedup for
+  inactivity) rather than sharing the candidate-level one, which a NULL
+  candidate_id would bypass entirely.
 """
 import asyncio
 import json
@@ -34,6 +35,9 @@ from fastapi import HTTPException
 from services.notifications_service import (
     _parse_recruiter_emails,
     _insert_notification,
+    _CONFLICT_CANDIDATE_PASSED,
+    _CONFLICT_PAIR_LAUNCHED,
+    _CONFLICT_PAIR_INACTIVE,
     create_candidate_passed_notifications,
     create_pair_launched_notification,
     create_pair_inactive_notification,
@@ -114,8 +118,16 @@ def test_parse_recruiter_emails_empty_and_none():
 def test_insert_notification_returns_true_when_row_inserted():
     cur = FakeCursor(fetchone_results=[{"id": 1}])
     inserted = _insert_notification(
-        cur, notification_type="candidate_passed", recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
-        candidate_id="C1", title="t", body=None, score=90.0,
+        cur,
+        notification_type="candidate_passed",
+        conflict_clause=_CONFLICT_CANDIDATE_PASSED,
+        recipient_email="a@x.com",
+        job_id="J1",
+        jobdiva_id="JD1",
+        candidate_id="C1",
+        title="t",
+        body=None,
+        score=90.0,
     )
     assert inserted is True
     sql, params = cur.executed[0]
@@ -125,27 +137,62 @@ def test_insert_notification_returns_true_when_row_inserted():
 def test_insert_notification_returns_false_on_conflict():
     cur = FakeCursor(fetchone_results=[None])
     inserted = _insert_notification(
-        cur, notification_type="candidate_passed", recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
-        candidate_id="C1", title="t", body=None, score=90.0,
+        cur,
+        notification_type="candidate_passed",
+        conflict_clause=_CONFLICT_CANDIDATE_PASSED,
+        recipient_email="a@x.com",
+        job_id="J1",
+        jobdiva_id="JD1",
+        candidate_id="C1",
+        title="t",
+        body=None,
+        score=90.0,
     )
     assert inserted is False
 
 
-def test_insert_notification_allows_null_candidate_id_for_job_level_types():
-    """Job-level types (pair_launched, pair_inactive) pass candidate_id=None.
-    A NULL never equals another NULL in the unique index, so this always
-    "inserts" (RETURNING a row) rather than deduping — intentional, see
-    _insert_notification's docstring."""
+def test_insert_notification_job_level_types_use_their_own_conflict_clause():
+    """pair_launched/pair_inactive pass candidate_id=None and their own
+    dedicated partial-index conflict clause (not the candidate-level one,
+    which would never dedupe a NULL candidate_id against another NULL)."""
     cur = FakeCursor(fetchone_results=[{"id": 1}])
     inserted = _insert_notification(
-        cur, notification_type="pair_launched", recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
-        candidate_id=None, title="t", body=None, score=None,
+        cur,
+        notification_type="pair_launched",
+        conflict_clause=_CONFLICT_PAIR_LAUNCHED,
+        recipient_email="a@x.com",
+        job_id="J1",
+        jobdiva_id="JD1",
+        candidate_id=None,
+        title="t",
+        body=None,
+        score=None,
     )
     assert inserted is True
     sql, params = cur.executed[0]
+    assert "date_trunc('minute', created_at)" in sql
     assert params[0] == "a@x.com"
     assert params[1] == "pair_launched"
     assert params[4] is None  # candidate_id position
+
+
+def test_insert_notification_pair_inactive_conflict_clause_scopes_to_active():
+    cur = FakeCursor(fetchone_results=[{"id": 1}])
+    _insert_notification(
+        cur,
+        notification_type="pair_inactive",
+        conflict_clause=_CONFLICT_PAIR_INACTIVE,
+        recipient_email="a@x.com",
+        job_id="J1",
+        jobdiva_id="JD1",
+        candidate_id=None,
+        title="t",
+        body=None,
+        score=None,
+    )
+    sql, params = cur.executed[0]
+    assert "cleared_at IS NULL" in sql
+    assert "type = 'pair_inactive'" in sql
 
 
 # --- create_candidate_passed_notifications: the Pass gate -------------------
@@ -290,6 +337,18 @@ def test_create_pair_launched_notification_noop_without_recruiters_or_jobdiva_id
     ))
 
 
+def test_create_pair_launched_notification_swallows_db_errors(monkeypatch):
+    """Must never raise into the launch flow — a DB hiccup here shouldn't
+    also take down the email send or the launch endpoint's response."""
+    def _boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
+
+    asyncio.run(create_pair_launched_notification(
+        job_id="J1", jobdiva_id="26-14907", job_title="X", candidate_count=3, recruiter_emails=["a@x.com"],
+    ))  # no exception raised = pass
+
+
 def test_create_pair_inactive_notification_inserts_per_recruiter_with_null_candidate(monkeypatch):
     cur = FakeCursor(fetchone_results=[{"id": 1}])
     conn = FakeConn(cur)
@@ -317,6 +376,18 @@ def test_create_pair_inactive_notification_noop_without_recruiters(monkeypatch):
     asyncio.run(create_pair_inactive_notification(
         job_id="J1", jobdiva_id="26-14907", job_title="X", recruiter_emails=[],
     ))
+
+
+def test_create_pair_inactive_notification_swallows_db_errors(monkeypatch):
+    """Must never raise into the poll cycle — a DB hiccup here shouldn't
+    also prevent the claim/email logic in main.py from completing."""
+    def _boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
+
+    asyncio.run(create_pair_inactive_notification(
+        job_id="J1", jobdiva_id="26-14907", job_title="X", recruiter_emails=["a@x.com"],
+    ))  # no exception raised = pass
 
 
 # --- recipient scoping on the read/mark-read sync helpers -------------------

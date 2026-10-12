@@ -1379,17 +1379,27 @@ async def _send_pair_launch_email(
         ai_desc       = row.get("ai_description") or ""
 
         # ── Email #1: PAIR Launch Confirmation ───────────────────────────────
-        await asyncio.to_thread(
-            notify_pair_launched,
-            jobdiva_id=jobdiva_id,
-            job_title=job_title,
-            customer_name=customer_name,
-            candidate_count=candidate_count,
-            recruiter_emails=clean_emails,
-            job_id=db_job_id,
-            app_base_url=app_base_url,
-            relaunch=relaunch,
-        )
+        # Isolated in its own try: a failure here must not also skip the
+        # in-app notification below — they're independent channels, and the
+        # in-app one no longer needs the email to have succeeded first (dedup
+        # is now a DB-level partial index, not call-order).
+        try:
+            await asyncio.to_thread(
+                notify_pair_launched,
+                jobdiva_id=jobdiva_id,
+                job_title=job_title,
+                customer_name=customer_name,
+                candidate_count=candidate_count,
+                recruiter_emails=clean_emails,
+                job_id=db_job_id,
+                app_base_url=app_base_url,
+                relaunch=relaunch,
+            )
+        except Exception as email_err:
+            logger.warning(
+                "📧 PAIR launch email failed for job %s (in-app notification still proceeds): %s",
+                db_job_id, email_err, exc_info=True,
+            )
 
         # In-app companion to Email #1 — same recipients, same trigger point,
         # job-level (see services/notifications_service.py).

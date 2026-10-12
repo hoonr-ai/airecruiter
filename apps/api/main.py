@@ -878,15 +878,6 @@ async def _fire_pair_inactive_notification(job_id: str):
                 recruiter_emails=recruiter_emails,
                 job_id=job_id,  # enables the live JobDiva deep-link
             )
-            # In-app companion — same recipients, same claimed trigger
-            # (see services/notifications_service.py for why this needs no
-            # dedup of its own).
-            await create_pair_inactive_notification(
-                job_id=job_id,
-                jobdiva_id=row["jobdiva_id"] or job_id,
-                job_title=row.get("enhanced_title") or row.get("title") or "",
-                recruiter_emails=recruiter_emails,
-            )
         except Exception as send_err:
             # Send failed after we claimed — release the marker so the next
             # poll cycle retries instead of silently losing the notification.
@@ -899,6 +890,19 @@ async def _fire_pair_inactive_notification(job_id: str):
                 conn.commit()
             except Exception:
                 pass
+
+        # In-app companion — independent of whether the email above
+        # succeeded or the claim just got released for retry (it's a
+        # separate channel; see services/notifications_service.py). Safe to
+        # run unconditionally, including on a later retry for the same
+        # inactive event: dedup is a DB-level partial index allowing at most
+        # one ACTIVE notification per recipient/job, not this call order.
+        await create_pair_inactive_notification(
+            job_id=job_id,
+            jobdiva_id=row["jobdiva_id"] or job_id,
+            job_title=row.get("enhanced_title") or row.get("title") or "",
+            recruiter_emails=recruiter_emails,
+        )
     except Exception as e:
         logger.error(f"❌ Failed to fire Inactive notification for {job_id}: {e}")
     finally:

@@ -42,7 +42,10 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
   };
 
   const handleRowKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" || e.key === " ") {
+    // Enter only — Space is the activation key for role="button", not
+    // role="link" (ARIA Authoring Practices), so handling it here would be
+    // non-standard for keyboard/AT users navigating this row as a link.
+    if (e.key === "Enter") {
       e.preventDefault();
       handleRowClick();
     }
@@ -61,7 +64,13 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
       )}
     >
       <div className="flex-1 min-w-0">
-        <p className={cn("text-sm", isUnread ? "font-semibold text-slate-900" : "font-medium text-slate-600")}>
+        <p
+          className={cn(
+            "text-sm line-clamp-2",
+            isUnread ? "font-semibold text-slate-900" : "font-medium text-slate-600"
+          )}
+          title={item.title}
+        >
           {item.title}
         </p>
         <div className="flex items-center gap-2 mt-0.5 flex-wrap">

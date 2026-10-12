@@ -16,19 +16,31 @@ existing email notifications. Three types today:
 - pair_launched / pair_inactive (create_pair_launched_notification /
   create_pair_inactive_notification): job-level events with no single
   candidate (a launch has a candidate COUNT; an inactivity transition has
-  none at all) — candidate_id is NULL. Mirror core/email.py's
-  notify_pair_launched / notify_pair_inactive, fired from the same call
-  sites. See _insert_notification's docstring for why a NULL candidate_id
-  means these intentionally do NOT dedupe against themselves the way
-  candidate_passed does: a relaunch or a fresh inactivity event is each
-  worth its own notification, and the real "exactly once" guarantee for
-  both already lives at their call sites (same as for the email).
+  none at all) — candidate_id is NULL, so the index above never applies to
+  them. Mirror core/email.py's notify_pair_launched / notify_pair_inactive,
+  fired from the same call sites, but run INDEPENDENTLY of whether that
+  email send succeeds — a transient email-provider failure shouldn't also
+  silently cost the in-app notification. Each has its own dedicated partial
+  unique index instead (see routers/notifications.py's schema init and the
+  _CONFLICT_* constants below), because the two events have different
+  "worth a fresh notification" semantics: a relaunch is always new and
+  notable, while an inactivity transition should show at most one active
+  notification until the user clears it.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
-`INSERT ... ON CONFLICT DO NOTHING RETURNING id` so concurrent webhook
-deliveries across uvicorn workers can't double-insert.
+`INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
+deliveries — webhook retries, racing uvicorn workers, or (for the job-level
+types) an independent in-app/email retry — can't double-insert.
+
+Every public function here does its DB work inside `asyncio.to_thread`:
+these are all `async def` so callers (the webhook handler, the launch flow,
+the inactivity poll cycle) can simply `await` them, but psycopg2 is
+synchronous — calling it directly from an `async def` body blocks the event
+loop for every other request on this worker for the duration of the
+round-trip(s).
 """
 from typing import Any, Dict, List, Optional
+import asyncio
 import json
 import logging
 
@@ -43,6 +55,23 @@ from services.engage_status import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
+_CONFLICT_CANDIDATE_PASSED = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
+# Job-level dedup, each matching the partial unique index of the same name in
+# routers/notifications.py's init_notifications_schema_sync — the column/
+# expression list and WHERE clause must match an existing index exactly for
+# Postgres to accept it as the ON CONFLICT arbiter. Both are fully static
+# (no runtime values spliced in), so this is as safe to embed as the rest of
+# the query string.
+_CONFLICT_PAIR_INACTIVE = (
+    "ON CONFLICT (recipient_email, jobdiva_id) "
+    "WHERE type = 'pair_inactive' AND cleared_at IS NULL DO NOTHING"
+)
+_CONFLICT_PAIR_LAUNCHED = (
+    "ON CONFLICT (recipient_email, jobdiva_id, date_trunc('minute', created_at)) "
+    "WHERE type = 'pair_launched' DO NOTHING"
+)
 
 
 def _parse_recruiter_emails(val: Any) -> List[str]:
@@ -73,6 +102,7 @@ def _insert_notification(
     cur,
     *,
     notification_type: str,
+    conflict_clause: str,
     recipient_email: str,
     job_id: Optional[str],
     jobdiva_id: Optional[str],
@@ -82,25 +112,23 @@ def _insert_notification(
     score: Optional[float],
 ) -> bool:
     """candidate_id is None for job-level event types (pair_launched,
-    pair_inactive — see create_pair_launched_notification /
-    create_pair_inactive_notification). The unique index on (recipient_email,
-    candidate_id, jobdiva_id, type) never finds two NULLs equal, so a NULL
-    candidate_id here always inserts rather than deduping — intentional: both
-    job-level events recur (relaunch, reactivate-then-go-inactive-again) and
-    are each worth their own notification, and the real "only one in flight"
-    guarantee for them lives at the caller (the launch-session claim / the
-    pair_inactive_notified_at atomic claim), not in this table."""
+    pair_inactive). Those pass their own type-specific `conflict_clause`
+    (the _CONFLICT_PAIR_* constants above) rather than the candidate-level
+    one, because the unique index behind the candidate-level clause keys on
+    candidate_id — and NULL never equals another NULL there, so it would
+    silently stop deduping at all for these two types."""
     cur.execute(
-        """
+        f"""
         INSERT INTO notifications
             (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING
+        {conflict_clause}
         RETURNING id
         """,
         (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score),
     )
-    return cur.fetchone() is not None
+    row = cur.fetchone()
+    return row is not None
 
 
 def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
@@ -127,6 +155,60 @@ def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
     )
     cand_row = cur.fetchone()
     return job_row, cand_row
+
+
+def _resolve_job_title(job_row: Dict[str, Any], job_id: str) -> str:
+    job_title = job_row.get("enhanced_title") or job_row.get("title")
+    if not job_title:
+        logger.debug("notification_missing_job_title job=%s", job_id)
+        return "this job"
+    return job_title
+
+
+def _create_candidate_passed_notifications_sync(job_id: str, candidate_id: str, score: Optional[float]) -> None:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id)
+            if not job_row or not cand_row:
+                return
+
+            recruiter_emails = _parse_recruiter_emails(job_row.get("recruiter_emails"))
+            if not recruiter_emails:
+                return
+
+            candidate_name = cand_row.get("name") or "A candidate"
+            job_title = _resolve_job_title(job_row, job_id)
+            title = f"{candidate_name} passed the interview for {job_title}"
+            body = f"Score: {score:.0f}/100" if score is not None else None
+            jobdiva_id = job_row.get("jobdiva_id") or job_id
+            if not job_row.get("jobdiva_id"):
+                logger.debug("notification_missing_jobdiva_id job=%s falling_back_to_job_id", job_id)
+            app_job_id = job_row.get("job_id") or job_id
+
+            any_inserted = False
+            for recipient in recruiter_emails:
+                if _insert_notification(
+                    cur,
+                    notification_type="candidate_passed",
+                    conflict_clause=_CONFLICT_CANDIDATE_PASSED,
+                    recipient_email=recipient,
+                    job_id=app_job_id,
+                    jobdiva_id=jobdiva_id,
+                    candidate_id=candidate_id,
+                    title=title,
+                    body=body,
+                    score=score,
+                ):
+                    any_inserted = True
+            conn.commit()
+            if any_inserted:
+                logger.info(
+                    "notification_created candidate=%s job=%s recipients=%d",
+                    candidate_id, jobdiva_id, len(recruiter_emails),
+                )
+    finally:
+        conn.close()
 
 
 async def create_candidate_passed_notifications(
@@ -157,46 +239,7 @@ async def create_candidate_passed_notifications(
         if format_engage_status(engage_status, score, hf_display) != "Pass":
             return
 
-        conn = get_db_connection()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id)
-                if not job_row or not cand_row:
-                    return
-
-                recruiter_emails = _parse_recruiter_emails(job_row.get("recruiter_emails"))
-                if not recruiter_emails:
-                    return
-
-                candidate_name = cand_row.get("name") or "A candidate"
-                job_title = job_row.get("enhanced_title") or job_row.get("title") or "this job"
-                title = f"{candidate_name} passed the interview for {job_title}"
-                body = f"Score: {score:.0f}/100" if score is not None else None
-                jobdiva_id = job_row.get("jobdiva_id") or job_id
-                app_job_id = job_row.get("job_id") or job_id
-
-                any_inserted = False
-                for recipient in recruiter_emails:
-                    if _insert_notification(
-                        cur,
-                        notification_type="candidate_passed",
-                        recipient_email=recipient,
-                        job_id=app_job_id,
-                        jobdiva_id=jobdiva_id,
-                        candidate_id=candidate_id,
-                        title=title,
-                        body=body,
-                        score=score,
-                    ):
-                        any_inserted = True
-                conn.commit()
-                if any_inserted:
-                    logger.info(
-                        "notification_created candidate=%s job=%s recipients=%d",
-                        candidate_id, jobdiva_id, len(recruiter_emails),
-                    )
-        finally:
-            conn.close()
+        await asyncio.to_thread(_create_candidate_passed_notifications_sync, job_id, candidate_id, score)
     except Exception as e:  # noqa: BLE001 - must never raise into the webhook handler
         logger.error(
             "create_candidate_passed_notifications_failed candidate=%s job=%s: %s",
@@ -212,6 +255,64 @@ RECONCILIATION_LOOKBACK_HOURS = 24
 # reconciliation tick scan/insert unboundedly; logged if hit so a real
 # backlog is visible instead of silently dropped.
 RECONCILIATION_MAX_ROWS = 1000
+
+
+def _reconcile_missed_pass_notifications_sync() -> None:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            status_sql = engage_display_sql("sc.data")
+            cur.execute(
+                f"""
+                SELECT sc.candidate_id, sc.name, sc.data,
+                       mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title,
+                       mj.recruiter_emails
+                FROM sourced_candidates sc
+                JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id
+                WHERE {status_sql} = 'Pass'
+                  AND sc.updated_at >= NOW() - (%s * INTERVAL '1 hour')
+                ORDER BY sc.updated_at DESC
+                LIMIT %s
+                """,
+                (RECONCILIATION_LOOKBACK_HOURS, RECONCILIATION_MAX_ROWS),
+            )
+            rows = cur.fetchall()
+            if len(rows) >= RECONCILIATION_MAX_ROWS:
+                logger.warning(
+                    "notifications_reconciliation hit RECONCILIATION_MAX_ROWS=%d; "
+                    "a backlog may exist beyond this run's window",
+                    RECONCILIATION_MAX_ROWS,
+                )
+
+            backfilled = 0
+            for row in rows:
+                recruiter_emails = _parse_recruiter_emails(row.get("recruiter_emails"))
+                if not recruiter_emails:
+                    continue
+                score = score_from_payload(row.get("data") or {})
+                candidate_name = row.get("name") or "A candidate"
+                job_title = _resolve_job_title(row, row.get("job_id") or "")
+                title = f"{candidate_name} passed the interview for {job_title}"
+                body = f"Score: {score:.0f}/100" if score is not None else None
+                for recipient in recruiter_emails:
+                    if _insert_notification(
+                        cur,
+                        notification_type="candidate_passed",
+                        conflict_clause=_CONFLICT_CANDIDATE_PASSED,
+                        recipient_email=recipient,
+                        job_id=row.get("job_id"),
+                        jobdiva_id=row.get("jobdiva_id"),
+                        candidate_id=row.get("candidate_id"),
+                        title=title,
+                        body=body,
+                        score=score,
+                    ):
+                        backfilled += 1
+            conn.commit()
+            if backfilled:
+                logger.info("notifications_reconciliation backfilled=%d", backfilled)
+    finally:
+        conn.close()
 
 
 async def reconcile_missed_pass_notifications() -> None:
@@ -230,62 +331,36 @@ async def reconcile_missed_pass_notifications() -> None:
     index-only no-op for rows already notified, so this stays cheap.
     """
     try:
-        conn = get_db_connection()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                status_sql = engage_display_sql("sc.data")
-                cur.execute(
-                    f"""
-                    SELECT sc.candidate_id, sc.name, sc.data,
-                           mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title,
-                           mj.recruiter_emails
-                    FROM sourced_candidates sc
-                    JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id
-                    WHERE {status_sql} = 'Pass'
-                      AND sc.updated_at >= NOW() - (%s * INTERVAL '1 hour')
-                    ORDER BY sc.updated_at DESC
-                    LIMIT %s
-                    """,
-                    (RECONCILIATION_LOOKBACK_HOURS, RECONCILIATION_MAX_ROWS),
-                )
-                rows = cur.fetchall()
-                if len(rows) >= RECONCILIATION_MAX_ROWS:
-                    logger.warning(
-                        "notifications_reconciliation hit RECONCILIATION_MAX_ROWS=%d; "
-                        "a backlog may exist beyond this run's window",
-                        RECONCILIATION_MAX_ROWS,
-                    )
-
-                backfilled = 0
-                for row in rows:
-                    recruiter_emails = _parse_recruiter_emails(row.get("recruiter_emails"))
-                    if not recruiter_emails:
-                        continue
-                    score = score_from_payload(row.get("data") or {})
-                    candidate_name = row.get("name") or "A candidate"
-                    job_title = row.get("enhanced_title") or row.get("title") or "this job"
-                    title = f"{candidate_name} passed the interview for {job_title}"
-                    body = f"Score: {score:.0f}/100" if score is not None else None
-                    for recipient in recruiter_emails:
-                        if _insert_notification(
-                            cur,
-                            notification_type="candidate_passed",
-                            recipient_email=recipient,
-                            job_id=row.get("job_id"),
-                            jobdiva_id=row.get("jobdiva_id"),
-                            candidate_id=row.get("candidate_id"),
-                            title=title,
-                            body=body,
-                            score=score,
-                        ):
-                            backfilled += 1
-                conn.commit()
-                if backfilled:
-                    logger.info("notifications_reconciliation backfilled=%d", backfilled)
-        finally:
-            conn.close()
+        await asyncio.to_thread(_reconcile_missed_pass_notifications_sync)
     except Exception as e:  # noqa: BLE001 - scheduler job must never crash the loop
         logger.error("reconcile_missed_pass_notifications_failed: %s", e, exc_info=True)
+
+
+def _create_pair_launched_notification_sync(
+    job_id: str, jobdiva_id: str, job_title: str, candidate_count: int, recipients: List[str]
+) -> None:
+    plural = "s" if candidate_count != 1 else ""
+    title = f"PAIR launched for {job_title or 'this job'} — {candidate_count} candidate{plural}"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            for recipient in recipients:
+                _insert_notification(
+                    cur,
+                    notification_type="pair_launched",
+                    conflict_clause=_CONFLICT_PAIR_LAUNCHED,
+                    recipient_email=recipient,
+                    job_id=job_id,
+                    jobdiva_id=jobdiva_id,
+                    candidate_id=None,
+                    title=title,
+                    body=None,
+                    score=None,
+                )
+            conn.commit()
+    finally:
+        conn.close()
 
 
 async def create_pair_launched_notification(
@@ -297,17 +372,17 @@ async def create_pair_launched_notification(
     recruiter_emails: List[str],
 ) -> None:
     """Fire in-app "PAIR launched" notifications for every recruiter on the
-    job, alongside the existing email (routers/engagement.py's
-    _send_pair_launch_email, which calls core.email.notify_pair_launched).
+    job, alongside (independently of) the existing email
+    (routers/engagement.py's _send_pair_launch_email, which calls
+    core.email.notify_pair_launched — call this regardless of whether that
+    email send succeeded, it's a separate channel).
 
     Job-level — candidate_id is NULL, since a launch is a batch event with a
-    candidate COUNT, never a single candidate (see the launch endpoints in
-    engagement.py: they only ever pass an int). No dedup here, matching the
-    email: a relaunch is a new, separately-worth-notifying event, and
-    _insert_notification's unique index never dedupes a NULL candidate_id
-    against another NULL, so every call inserts fresh rows. The "only one in
-    flight per actual launch" guarantee is the caller's launch-session claim
-    / in-memory flag — the same thing the email already relies on.
+    candidate COUNT, never a single candidate. Dedup is the
+    uniq_notifications_pair_launched_per_minute partial index (see
+    routers/notifications.py): a relaunch is a new, separately-worth-
+    notifying event, so only same-recipient/job/minute duplicates — a retry
+    or racing workers handling what's really one launch — are collapsed.
     """
     try:
         if not job_id or not jobdiva_id or not recruiter_emails:
@@ -315,30 +390,37 @@ async def create_pair_launched_notification(
         recipients = _parse_recruiter_emails(recruiter_emails)
         if not recipients:
             return
-
-        plural = "s" if candidate_count != 1 else ""
-        title = f"PAIR launched for {job_title or 'this job'} — {candidate_count} candidate{plural}"
-
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                for recipient in recipients:
-                    _insert_notification(
-                        cur,
-                        notification_type="pair_launched",
-                        recipient_email=recipient,
-                        job_id=job_id,
-                        jobdiva_id=jobdiva_id,
-                        candidate_id=None,
-                        title=title,
-                        body=None,
-                        score=None,
-                    )
-                conn.commit()
-        finally:
-            conn.close()
+        await asyncio.to_thread(
+            _create_pair_launched_notification_sync, job_id, jobdiva_id, job_title, candidate_count, recipients
+        )
     except Exception as e:  # noqa: BLE001 - must never raise into the launch flow
         logger.error("create_pair_launched_notification_failed job=%s: %s", job_id, e, exc_info=True)
+
+
+def _create_pair_inactive_notification_sync(
+    job_id: str, jobdiva_id: str, job_title: str, recipients: List[str]
+) -> None:
+    title = f"PAIR is now inactive for {job_title or 'this job'}"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            for recipient in recipients:
+                _insert_notification(
+                    cur,
+                    notification_type="pair_inactive",
+                    conflict_clause=_CONFLICT_PAIR_INACTIVE,
+                    recipient_email=recipient,
+                    job_id=job_id,
+                    jobdiva_id=jobdiva_id,
+                    candidate_id=None,
+                    title=title,
+                    body=None,
+                    score=None,
+                )
+            conn.commit()
+    finally:
+        conn.close()
 
 
 async def create_pair_inactive_notification(
@@ -348,18 +430,20 @@ async def create_pair_inactive_notification(
     job_title: str,
     recruiter_emails: List[str],
 ) -> None:
-    """Fire in-app "PAIR inactive" notifications, alongside the existing
-    email (main.py's _fire_pair_inactive_notification, which calls
-    core.email.notify_pair_inactive).
+    """Fire in-app "PAIR inactive" notifications, alongside (independently
+    of) the existing email (main.py's _fire_pair_inactive_notification,
+    which calls core.email.notify_pair_inactive — call this regardless of
+    whether that email send succeeded or the claim gets released for retry,
+    it's a separate channel).
 
-    Job-level, like create_pair_launched_notification, and for the same
-    reason: an inactivity transition has no candidate. Call this only from
-    the already-claimed branch of _fire_pair_inactive_notification — that
-    function's atomic `UPDATE monitored_jobs ... WHERE pair_inactive_notified_at
-    IS NULL RETURNING` is the real "exactly once per inactive event" guard
-    (identical to the one the email relies on); this function doesn't need
-    its own, and _insert_notification's NULL candidate_id means it wouldn't
-    provide one anyway.
+    Job-level, like create_pair_launched_notification, but a different dedup
+    shape: the uniq_notifications_pair_inactive_active partial index (see
+    routers/notifications.py) allows at most one ACTIVE (uncleared)
+    pair_inactive notification per recipient/job. That — not call-site
+    ordering — is what makes it safe to call this unconditionally even when
+    the email keeps failing and _fire_pair_inactive_notification's claim
+    gets released and retried: every retry's insert attempt for the same
+    still-active notification is a no-op.
     """
     try:
         if not job_id or not jobdiva_id or not recruiter_emails:
@@ -367,26 +451,6 @@ async def create_pair_inactive_notification(
         recipients = _parse_recruiter_emails(recruiter_emails)
         if not recipients:
             return
-
-        title = f"PAIR is now inactive for {job_title or 'this job'}"
-
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                for recipient in recipients:
-                    _insert_notification(
-                        cur,
-                        notification_type="pair_inactive",
-                        recipient_email=recipient,
-                        job_id=job_id,
-                        jobdiva_id=jobdiva_id,
-                        candidate_id=None,
-                        title=title,
-                        body=None,
-                        score=None,
-                    )
-                conn.commit()
-        finally:
-            conn.close()
+        await asyncio.to_thread(_create_pair_inactive_notification_sync, job_id, jobdiva_id, job_title, recipients)
     except Exception as e:  # noqa: BLE001 - must never raise into the poll cycle
         logger.error("create_pair_inactive_notification_failed job=%s: %s", job_id, e, exc_info=True)

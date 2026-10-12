@@ -95,12 +95,21 @@ def init_notifications_schema_sync() -> None:
                 # candidate-level then). pair_launched/pair_inactive are
                 # job-level — a launch has a candidate COUNT, not one
                 # candidate, and an inactivity transition has none at all —
-                # so candidate_id is NULL for those. DROP COLUMN ... NOT NULL
-                # is a no-op if it's already nullable (fresh installs from
-                # the CREATE TABLE above).
+                # so candidate_id is NULL for those. Checked against
+                # information_schema first: ALTER ... DROP NOT NULL takes a
+                # brief ACCESS EXCLUSIVE lock even when there's nothing to
+                # change, and every one of the 8 workers runs this at every
+                # boot — skip it once the column is already nullable instead
+                # of paying that lock on every single deploy.
                 cur.execute(
-                    "ALTER TABLE notifications ALTER COLUMN candidate_id DROP NOT NULL;"
+                    """
+                    SELECT is_nullable FROM information_schema.columns
+                    WHERE table_name = 'notifications' AND column_name = 'candidate_id'
+                    """
                 )
+                col = cur.fetchone()
+                if col and col[0] == "NO":
+                    cur.execute("ALTER TABLE notifications ALTER COLUMN candidate_id DROP NOT NULL;")
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created
@@ -120,6 +129,38 @@ def init_notifications_schema_sync() -> None:
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_recipient_candidate_job_type
                         ON notifications (recipient_email, candidate_id, jobdiva_id, type);
+                    """
+                )
+                # Job-level dedup (candidate_id is NULL for these two types, so
+                # the index above never applies to them — see
+                # services/notifications_service.py's _insert_notification).
+                #
+                # pair_inactive: "at most one ACTIVE notification per
+                # recipient/job" — cleared_at IS NULL scopes it to the current
+                # inactive period, so once the user clears it (or a future
+                # reactivate-then-go-inactive-again cycle starts fresh), a new
+                # one can be created. This is what makes it safe to fire the
+                # in-app call independently of the email's success/retry in
+                # main.py's _fire_pair_inactive_notification.
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_pair_inactive_active
+                        ON notifications (recipient_email, jobdiva_id)
+                        WHERE type = 'pair_inactive' AND cleared_at IS NULL;
+                    """
+                )
+                # pair_launched: a relaunch IS a new, separately-worth-
+                # notifying event (unlike pair_inactive, there's no "active
+                # period" to collapse into), so this only dedupes
+                # same-recipient/job/minute duplicates — concurrent uvicorn
+                # workers or a client retry hitting the launch endpoint twice
+                # for what's really one launch — without silencing a genuine
+                # second launch minutes or hours later.
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_pair_launched_per_minute
+                        ON notifications (recipient_email, jobdiva_id, date_trunc('minute', created_at))
+                        WHERE type = 'pair_launched';
                     """
                 )
                 conn.commit()
