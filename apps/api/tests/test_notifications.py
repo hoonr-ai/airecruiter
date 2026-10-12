@@ -38,6 +38,10 @@
   added. Job-level (candidate_id=NULL) like pair_launched, and shares its
   dedup shape (_job_level_duplicate_in_last_minute) for the same reason —
   frequent autosave calls need a race guard, not an "only ever once" index.
+- create_zero_match_notification: fired from routers/candidates.py's
+  /candidates/search when a full search's summary reports 0 candidates.
+  The only type with a single specific recipient (the searching recruiter)
+  rather than a job's whole recruiter_emails list.
 """
 import asyncio
 import json
@@ -58,6 +62,7 @@ from services.notifications_service import (
     create_pair_launched_notification,
     create_pair_inactive_notification,
     create_recruiter_assigned_notifications,
+    create_zero_match_notification,
     reconcile_missed_pass_notifications,
 )
 
@@ -659,6 +664,67 @@ def test_create_recruiter_assigned_notifications_swallows_db_errors(monkeypatch)
     asyncio.run(create_recruiter_assigned_notifications(
         job_id="J1", jobdiva_id="26-14907", job_title="X", assigned_emails=["a@x.com"],
     ))  # no exception raised = pass
+
+
+# --- create_zero_match_notification -------------------------------------------
+
+def test_create_zero_match_notification_notifies_only_the_searcher(monkeypatch):
+    job_row = {
+        "job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1",
+    }
+    # fetchone order: job lookup, duplicate pre-check (None = no duplicate), insert's RETURNING id.
+    cur = FakeCursor(fetchone_results=[job_row, None, {"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_zero_match_notification(job_id="J1", searcher_email="Searcher@X.com"))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    sql, params = insert_calls[0]
+    assert params[0] == "searcher@x.com"  # lowercased
+    assert params[1] == "zero_match_warning"
+    assert params[4] is None  # candidate_id — no candidate by definition
+    assert "Data Engineer" in params[5]
+    assert conn.committed is True
+
+
+def test_create_zero_match_notification_skips_recent_duplicate(monkeypatch):
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1"}
+    cur = FakeCursor(fetchone_results=[job_row, {"id": 99}])  # duplicate check finds a recent row
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_zero_match_notification(job_id="J1", searcher_email="a@x.com"))
+
+    assert not any("INSERT INTO notifications" in c[0] for c in cur.executed)
+
+
+def test_create_zero_match_notification_noop_when_job_not_found(monkeypatch):
+    cur = FakeCursor(fetchone_results=[None])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_zero_match_notification(job_id="J-missing", searcher_email="a@x.com"))
+
+    assert not any("INSERT INTO notifications" in c[0] for c in cur.executed)
+
+
+def test_create_zero_match_notification_noop_without_job_or_searcher(monkeypatch):
+    def _fail():
+        raise AssertionError("must not touch the DB without job_id/searcher_email")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_zero_match_notification(job_id="", searcher_email="a@x.com"))
+    asyncio.run(create_zero_match_notification(job_id="J1", searcher_email=""))
+
+
+def test_create_zero_match_notification_swallows_db_errors(monkeypatch):
+    def _boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
+
+    asyncio.run(create_zero_match_notification(job_id="J1", searcher_email="a@x.com"))  # no exception = pass
 
 
 # --- recipient scoping on the read/mark-read sync helpers -------------------

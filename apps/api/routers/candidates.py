@@ -39,7 +39,9 @@ from services.launched_candidates import count_launched_candidates
 from services.notifications_service import (
     create_candidate_submitted_notifications,
     create_candidate_rejected_notifications,
+    create_zero_match_notification,
 )
+from core.tasks import spawn as _spawn_task
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -1085,6 +1087,34 @@ def _record_recruiter_action(user: UserIdentity, action: str, job_ref: Any, **kw
         logger.debug(f"activity {action} not recorded: {exc}")
 
 
+def _maybe_notify_zero_match(
+    request: "CandidateSearchRequest", criteria: Any, summary_event: Dict[str, Any], user: UserIdentity
+) -> None:
+    """Fires create_zero_match_notification when a FULL search's terminal
+    "summary" event reports total_candidates == 0 — not for a "sample"
+    probe (the cheap pre-check the Step-5 UI runs before a recruiter
+    approves a full search), where an empty result is a much weaker/
+    noisier signal that would false-alarm on routine probes.
+
+    Called from stream_candidates() for every "summary" event (there's at
+    most one per search, the stream's terminal event) — fire-and-forget via
+    core.tasks.spawn so a slow/failed DB write can never stall or break the
+    NDJSON stream still being delivered to the client.
+    """
+    try:
+        if str(getattr(criteria, "search_mode", "full")).lower() != "full":
+            return
+        summary = ((summary_event.get("data") or {}).get("summary")) or {}
+        if summary.get("total_candidates") != 0:
+            return  # also skips a malformed/missing summary, not just a nonzero count
+        _spawn_task(
+            create_zero_match_notification(job_id=str(request.job_id), searcher_email=user.email),
+            name="zero_match_notification",
+        )
+    except Exception as exc:  # noqa: BLE001 - must never break the search stream
+        logger.debug(f"zero_match_warning not queued: {exc}")
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1121,6 +1151,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         async def stream_candidates():
             async with contextlib.aclosing(_search_event_stream(criteria)) as events:
                 async for event in events:
+                    if event.get("type") == "summary":
+                        _maybe_notify_zero_match(request, criteria, event, user)
                     try:
                         line = json.dumps(event) + "\n"
                     except Exception as e:  # noqa: BLE001 — e.g. a datetime/Decimal value

@@ -1,5 +1,5 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Six types today:
+existing email notifications. Seven types today:
 
 - candidate_passed (create_candidate_passed_notifications): a candidate's
   interview result. Independent of the pass-email trigger in
@@ -57,6 +57,19 @@ existing email notifications. Six types today:
   trigger needs a race guard, not an "only ever once" index — being
   removed and later re-added to the same job is a legitimately new,
   separately-worth-notifying event.
+
+- zero_match_warning (create_zero_match_notification): fired from
+  routers/candidates.py's /candidates/search endpoint when a FULL search's
+  (not a cheap "sample" probe's) summary event reports total_candidates ==
+  0. The ONLY type here with a single, specific recipient — the recruiter
+  who ran that search — rather than a job's whole recruiter_emails: a
+  search finishing empty is that recruiter's own signal to tweak
+  keywords/filters/rate bands, not something every co-recruiter on the job
+  needs to hear about. Job-level (candidate_id NULL — there is, by
+  definition, no candidate), same dedup shape as pair_launched/
+  recruiter_assigned (_job_level_duplicate_in_last_minute): re-running a
+  tweaked search later and getting 0 again is a fresh, separately-worth-
+  notifying result.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -712,3 +725,84 @@ async def create_recruiter_assigned_notifications(
         )
     except Exception as e:  # noqa: BLE001 - must never raise into the job-save endpoint
         logger.error("create_recruiter_assigned_notifications_failed job=%s: %s", job_id, e, exc_info=True)
+
+
+def _fetch_job_sync(cur, job_id: str):
+    """Job-only counterpart to _fetch_job_and_candidate — for notification
+    types with no candidate involved at all (zero_match_warning's "a search
+    found nobody" has no candidate_id by definition)."""
+    cur.execute(
+        """
+        SELECT job_id, title, enhanced_title, jobdiva_id
+        FROM monitored_jobs
+        WHERE job_id = %s OR jobdiva_id = %s
+        ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
+        LIMIT 1
+        """,
+        (job_id, job_id),
+    )
+    return cur.fetchone()
+
+
+def _create_zero_match_notification_sync(job_id: str, searcher_email: str) -> None:
+    recipient = (searcher_email or "").strip().lower()
+    if not recipient:
+        return
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            job_row = _fetch_job_sync(cur, job_id)
+            if not job_row:
+                return
+            jobdiva_id = job_row.get("jobdiva_id") or job_id
+            app_job_id = job_row.get("job_id") or job_id
+            job_title = _resolve_job_title(job_row, job_id)
+
+            if _job_level_duplicate_in_last_minute(cur, recipient, jobdiva_id, "zero_match_warning"):
+                return
+
+            title = f"Zero candidates matched your search for {job_title}"
+            inserted = _insert_notification(
+                cur,
+                notification_type="zero_match_warning",
+                recipient_email=recipient,
+                job_id=app_job_id,
+                jobdiva_id=jobdiva_id,
+                candidate_id=None,
+                title=title,
+                body=None,
+                score=None,
+            )
+            conn.commit()
+            if inserted:
+                logger.info("notification_created type=zero_match_warning job=%s recipient=%s", jobdiva_id, recipient)
+    finally:
+        conn.close()
+
+
+async def create_zero_match_notification(*, job_id: str, searcher_email: str) -> None:
+    """Fire an in-app "zero candidates matched" notification to the single
+    recruiter who ran the search — called from routers/candidates.py's
+    /candidates/search endpoint when a FULL search's summary event reports
+    total_candidates == 0.
+
+    Unlike every other type here, this one has a specific actor (the person
+    who clicked Search) rather than a job's whole recruiter_emails list —
+    the point is telling that one recruiter their own search came up empty
+    so they can tweak keywords/filters/rate bands, not broadcasting it to
+    co-recruiters who didn't run it.
+
+    Job-level — candidate_id is NULL, same as pair_launched/pair_inactive/
+    recruiter_assigned. Dedup is the same _job_level_duplicate_in_last_minute
+    same-minute collapse pair_launched/recruiter_assigned use, not an
+    index: a recruiter tweaking criteria and re-running a search 5 minutes
+    later and getting 0 again is a fresh, separately-worth-notifying
+    result, not a duplicate of the first.
+    """
+    try:
+        if not job_id or not searcher_email:
+            return
+        await asyncio.to_thread(_create_zero_match_notification_sync, job_id, searcher_email)
+    except Exception as e:  # noqa: BLE001 - must never raise into the search stream
+        logger.error("create_zero_match_notification_failed job=%s: %s", job_id, e, exc_info=True)
