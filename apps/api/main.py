@@ -246,6 +246,9 @@ async def lifespan(app: FastAPI):
         # JobDiva BI mirror behind the PAIR Dashboard.
         if jobdiva_bi_sync is not None:
             steps.append(("jobdiva_bi_schema_init", jobdiva_bi_sync.init_jobdiva_bi_schema, 10))
+        # In-app notifications table.
+        if notifications_router is not None and hasattr(notifications_router, "init_notifications_schema"):
+            steps.append(("notifications_schema_init", notifications_router.init_notifications_schema, 10))
 
         # Imported inside each step so a broken module fails only its step.
         async def _scs_init():
@@ -391,6 +394,23 @@ async def lifespan(app: FastAPI):
         id="monitored_jobs_cache_warmer",
         replace_existing=True,
     )
+
+    # Safety net for the webhook-triggered in-app notification (a crashed
+    # worker loses an asyncio.create_task before it completes, or a status
+    # changes outside the webhook path). Backfills anything the webhook path
+    # missed; dedup is the notifications table's own unique index, so this
+    # can never double-insert.
+    try:
+        from services.notifications_service import reconcile_missed_pass_notifications
+        scheduler.add_job(
+            reconcile_missed_pass_notifications,
+            "interval",
+            minutes=10,
+            id="notifications_reconciliation",
+            replace_existing=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"notifications_reconciliation_schedule_failed: {e}; continuing")
     # Prime cache once at startup so the first dashboard request after
     # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
     # failure is logged inside the warmer and never blocks boot. Stays
@@ -512,6 +532,7 @@ live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
 apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
+notifications_router = _safe_import("notifications")
 pairbot_webhook_router = _safe_import("pairbot_webhook")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
@@ -577,6 +598,7 @@ _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
 _mount(pairbot_webhook_router, "pairbot_webhook")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+_mount(notifications_router, "notifications", prefix="/api/v1/notifications")
 
 from core.auth import auth_router
 app.include_router(auth_router)
@@ -653,10 +675,23 @@ def load_monitored_jobs() -> Dict[str, Any]:
     """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
     return jobdiva_service.get_all_monitored_jobs()
 
+# The only fields the legacy "monitored jobs file" callers ever change.
+_LEGACY_SNAPSHOT_FIELDS = ("status", "customer_name", "title")
+
+
 def save_monitored_jobs(jobs_data: Dict[str, Any]):
-    """Save/Update monitored jobs in PostgreSQL via JobDivaService"""
+    """Write the legacy snapshot's status fields back to PostgreSQL.
+
+    ``jobs_data`` is a snapshot of EVERY job (load_monitored_jobs) taken
+    before the caller's own work. Writing whole rows back reverted every
+    column changed meanwhile — the dashboard counters (candidates_launched,
+    pair_submits, feedback_completed …), processing_status, recruiter_emails —
+    so only the status / customer / title the legacy callers maintain go back.
+    """
     for jid, details in jobs_data.get("jobs", {}).items():
-        jobdiva_service.monitor_job_locally(jid, details)
+        fields = {k: details.get(k) for k in _LEGACY_SNAPSHOT_FIELDS if k in (details or {})}
+        if fields:
+            jobdiva_service.monitor_job_locally(jid, fields)
 
 POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
 AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
@@ -774,9 +809,12 @@ async def _run_poll_cycle():
             logger.info(f"▶️ Job {job_id} reactivated ({current_status}). Clearing inactive-notified marker.")
             asyncio.create_task(_clear_pair_inactive_marker(job_id))
     
-    # Save updated data
-    jobs_data["last_sync"] = readable_ist_now()
-    save_monitored_jobs(jobs_data)
+    # No bulk write-back here. The status changes above were already written
+    # per job (monitor_job_locally(job_id, db_data)); re-saving the snapshot
+    # loaded at the START of the cycle wrote every column of every job back
+    # after the JobDiva round-trip, reverting whatever changed meanwhile — the
+    # dashboard counters (candidates_launched, pair_submits, feedback_completed,
+    # time_to_first_pass …), processing_status, recruiter_emails.
     
     if changes_detected:
         logger.info(f"📢 Status changes detected: {changes_detected}")

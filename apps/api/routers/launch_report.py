@@ -84,7 +84,7 @@ from services.feedback_metrics import (
 )
 from services.job_attribution import attribution_fields
 from services.job_step_time import STEP_SOURCE, fetch_step_metrics, posting_time_columns
-from services.launch_timing import first_launch_sql, timings_for_jobs
+from services.launch_timing import SUCCESSFUL_LAUNCH_AUDIT_SQL, first_launch_sql, timings_for_jobs
 from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
     normalize_channel,
@@ -447,21 +447,33 @@ def _fetch_jobs_launched_on(
     scope: Optional[Dict[str, Any]] = None,
     end_date: Optional[datetime.date] = None,
 ) -> List[Dict[str, Any]]:
-    """Jobs whose FIRST SUCCESSFUL launch (MIN of engage_interview_audit.created_at
-    over rows that got an interview id) falls between `start_date` and
-    `end_date` (inclusive) in Eastern time. A single day is just the range
-    where start_date == end_date.
+    """Jobs launched between `start_date` and `end_date` (inclusive, Eastern
+    time): their FIRST SUCCESSFUL launch (MIN of engage_interview_audit.created_at
+    over rows that got an interview id) falls in the range, OR at least one
+    PERSON was first launched for them in the range (a relaunch that reached
+    new people). A single day is just the range where start_date == end_date.
 
-    Keyed on true first launch rather than "any launch or audit activity that day" so a job appears
-    exactly once, on the day it went live, however long it keeps launching or receiving updates.
+    Each job appears once per report. ``first_launch_in_period`` tells the two
+    apart, and ``launched_in_period`` counts the people whose first interview
+    for the job (audit log, either job key) falls in the range — relaunch work
+    on day N+k shows on day N+k, while the row's lifetime numbers stay the
+    rank list's. A person launched twice counts on the day of their FIRST
+    interview only.
     """
     single_day_query = end_date is None
     if single_day_query:
         end_date = start_date
 
     mj_cond, mj_params = _mj_filter(scope, "mj")
-    launch_date_expr = _eastern_date_expr('l.first_launch_at')
-    launch_date_filter = f"{launch_date_expr} = %s" if single_day_query else f"{launch_date_expr} BETWEEN %s AND %s"
+
+    def in_range(col: str) -> Tuple[str, List[Any]]:
+        expr = _eastern_date_expr(col)
+        if single_day_query:
+            return f"{expr} = %s", [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date]
+        return f"{expr} BETWEEN %s AND %s", [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date, end_date]
+
+    launch_date_filter, launch_date_params = in_range("l.first_launch_at")
+    period_filter, period_params = in_range("pp.first_at")
     with conn.cursor() as cur:
         # NULL for an attribution column the startup ALTER has not added yet.
         optional = optional_monitored_jobs_columns(cur, "mj.")
@@ -483,7 +495,23 @@ def _fetch_jobs_launched_on(
             FROM monitored_jobs mj
             WHERE {mj_cond}
         ),
-        launches AS ({first_launch_sql("scoped")})
+        launches AS ({first_launch_sql("scoped")}),
+        -- Each person's FIRST interview for the job (either key), so a
+        -- relaunched person counts once, on the day they were first launched.
+        people AS (
+            SELECT s.job_id, a.candidate_id, MIN(a.created_at) AS first_at
+            FROM scoped s
+            JOIN engage_interview_audit a
+              ON a.jobdiva_id IN (NULLIF(s.jobdiva_id, ''), s.job_id::text)
+            WHERE {SUCCESSFUL_LAUNCH_AUDIT_SQL}
+            GROUP BY s.job_id, a.candidate_id
+        ),
+        period AS (
+            SELECT pp.job_id, COUNT(*) AS launched_in_period
+            FROM people pp
+            WHERE {period_filter}
+            GROUP BY pp.job_id
+        )
         SELECT
             mj.job_id,
             mj.jobdiva_id,
@@ -510,15 +538,16 @@ def _fetch_jobs_launched_on(
             -- recorded, which the page renders as a dash.
             {optional["pair_posted_by"]} AS pair_posted_by,
             {optional["pair_launched_by"]} AS pair_launched_by,
-            l.first_launch_at
+            l.first_launch_at,
+            COALESCE(p.launched_in_period, 0) AS launched_in_period,
+            ({launch_date_filter}) AS first_launch_in_period
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
-        WHERE {launch_date_filter}
+        LEFT JOIN period p ON p.job_id = l.job_id
+        WHERE ({launch_date_filter}) OR COALESCE(p.launched_in_period, 0) > 0
         ORDER BY l.first_launch_at ASC
     """
-    params = mj_params + [REPORT_DB_TIMEZONE, str(REPORT_TIMEZONE), start_date]
-    if not single_day_query:
-        params.append(end_date)
+    params = mj_params + period_params + launch_date_params + launch_date_params
     with conn.cursor() as cur:
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
@@ -1221,6 +1250,11 @@ def _build_row(
         "pair_launch_at": _edt(launch_at),
         # The rank list's "Candidates Launched": people, not interviews.
         "total_candidates_launched": total_launched,
+        # People whose FIRST interview for this job falls in the report's
+        # range (relaunch work shows on the day it happened), and whether the
+        # job itself first launched in the range (False = a relaunch-only row).
+        "candidates_launched_in_period": int(job.get("launched_in_period") or 0),
+        "first_launch_in_period": bool(job.get("first_launch_in_period", True)),
         # Time to Launch spans the whole pipeline: JobDiva posting → PAIR
         # launch. Anchored on posted_date (day granularity — JobDiva gives no
         # time of day) so it stays distinct from Turn Around Time below, which
@@ -1512,6 +1546,10 @@ async def get_launch_report(
                 "jobs": len(rows),
                 "candidates_sourced": sum(r["total_candidates_sourced"] for r in rows),
                 "candidates_launched": sum(r["total_candidates_launched"] for r in rows),
+                # Jobs that went live in the range (the rest are relaunches),
+                # and the people newly launched in the range across all rows.
+                "jobs_first_launched": sum(1 for r in rows if r["first_launch_in_period"]),
+                "candidates_launched_in_period": sum(r["candidates_launched_in_period"] for r in rows),
                 "outreach_detail_resolved": sum(r["outreach_detail_resolved"] for r in rows),
                 "outreach_detail_expected": sum(r["outreach_detail_expected"] for r in rows),
             },

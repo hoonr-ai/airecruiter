@@ -34,7 +34,8 @@ IST_OFFSET = datetime.timedelta(hours=5, minutes=30)
 _SCHEMA_SQL = """
 CREATE TEMP TABLE monitored_jobs (
     job_id TEXT PRIMARY KEY, jobdiva_id TEXT, enhanced_title TEXT, title TEXT, customer_name TEXT,
-    posted_date TEXT, created_at TEXT, pair_launched_at TIMESTAMP, outreach_stopped_at TIMESTAMP,
+    posted_date TEXT, created_at TEXT, pair_launched_at TIMESTAMP, first_launch_at TIMESTAMPTZ,
+    outreach_stopped_at TIMESTAMP,
     is_archived BOOLEAN DEFAULT FALSE, archive_reason TEXT, status TEXT,
     candidates_sourced INT, candidates_launched INT, jobdiva_total_subs INT, pair_external_subs INT,
     complete_submissions INT, pass_submissions INT, pair_submits INT,
@@ -268,7 +269,8 @@ def _seed(pg):
     _add_job(
         pg, NUM, jobdiva_id=REF, title="Data Engineer", customer_name="Acme",
         posted_date="Sep 20, 2026", created_at=_ist_text(TRUTH),
-        pair_launched_at="2026-09-22 10:00:00", status="OPEN",
+        # First save (attempt) 10:00; first interview (T2) 10:30.
+        pair_launched_at="2026-09-22 10:00:00", first_launch_at="2026-09-22 10:30:00+00", status="OPEN",
         candidates_sourced=12, candidates_launched=4, jobdiva_total_subs=4, pair_external_subs=1,
         pair_submits=2, recruiter_emails='["lead@x.com"]',
         pair_posted_by="Poster@X.com", pair_launched_by="launcher@x.com",
@@ -630,3 +632,52 @@ def test_missing_step_time_table_blanks_only_the_step5_columns(pg, monkeypatch, 
     assert data["submission_metrics"]["pair_internal_submits"] == 2
     assert data["launch_speed"]["launched_jobs"] == 1
     assert _statement_timeout(pg) == before
+
+
+# ---------------------------------------------------------------------------
+# Relaunch-safe launch metrics (2026-10-12)
+# ---------------------------------------------------------------------------
+
+
+def test_launched_means_the_first_successful_launch_and_attempts_are_separate(analytics, pg):
+    run, _ = analytics
+    # A job whose only attempt saved candidates but created no interview.
+    _add_job(pg, "31990009", jobdiva_id="26-00009", title="Failed attempt", created_at="2026-09-20 08:00:00",
+             pair_launched_at="2026-09-21 09:00:00", status="OPEN")
+    data = run()
+    speed = data["launch_speed"]
+    assert speed["launched_jobs"] == 1                 # only NUM has a first interview (T2)
+    assert speed["launch_attempted_jobs"] == 2         # NUM + the failed attempt
+    rows = {r["job_id"]: r for r in data["jobs_timeline"]}
+    assert rows[NUM]["first_launched_at"].startswith("2026-09-22T10:30:00")
+    assert rows[NUM]["curate_launched_at"].startswith("2026-09-22T10:00:00")   # the attempt, kept
+    assert rows[NUM]["posted_to_launch_days"] == 2.4   # Sep 20 00:00 → Sep 22 10:30
+    assert rows["31990009"]["first_launched_at"] is None
+    assert rows["31990009"]["posted_to_launch_days"] is None
+
+
+def test_funnel_counts_people_per_job_and_launched_only_for_that_job(analytics, pg):
+    run, _ = analytics
+    # c6: sourced on 26-00002 with no outcome yet, launched on ANOTHER job
+    # only; c7: launched on this job, its audit row under the other key.
+    _add_candidate(pg, "26-00002", "c6", {})
+    _add_candidate(pg, NUM, "c7", {})
+    with pg.cursor() as cur:
+        cur.execute("INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id) "
+                    "VALUES ('c6', '26-00003', 'iv-elsewhere'), ('c7', %s, 'iv-7')", (REF,))
+    by_status = run()["candidates_by_status"]
+    # c1 is stored under both keys of one job: one person, not two rows.
+    assert sum(by_status.values()) == 7               # c1, c2, c3, c7 (NUM) + c4, c6 + c5
+    assert by_status.get("launched", 0) == 1          # c7 only: c6's launch elsewhere is not this job's
+
+
+def test_weekly_launched_counts_a_relaunched_person_once(pg):
+    now = datetime.datetime.now(UTC).replace(tzinfo=None)
+    with pg.cursor() as cur:
+        for cid, iid, days_ago in (("p1", "iv-1", 1), ("p1", "iv-2", 0), ("p2", "iv-3", 0), ("p3", "", 0)):
+            cur.execute(
+                "INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, created_at) "
+                "VALUES (%s, %s, %s, %s)", (cid, REF, iid, now - datetime.timedelta(days=days_ago)),
+            )
+    trends = aa._compute_weekly_trends(pg, None, weeks=2)
+    assert sum(trends["candidates_launched"]) == 2     # p1 once (first interview), p2; p3 failed

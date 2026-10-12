@@ -924,3 +924,19 @@ def test_with_the_runner_off_nothing_is_claimed_and_housekeeping_expires_the_que
     monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
     store.advance(10 * 3600)
     assert run(runner.housekeep())["queue_expired"] == [] and store.sessions[f2["id"]]["status"] == "queued"
+
+
+def test_housekeeping_settles_parked_legacy_rows_throttled_runner_off_too(monkeypatch):
+    """Rows a launch outside a session left parked 'processing' are settled
+    by the housekeeping tick (with the runner off too — PROD runs the legacy
+    path), at most every PAIR_LEGACY_SETTLE_EVERY_S per worker."""
+    monkeypatch.setenv("PAIR_LAUNCH_RUNNER_ENABLED", "false")
+    monkeypatch.setenv("PAIR_LEGACY_SETTLE_EVERY_S", "600")
+    store, world, job, fields = full_search_world()
+    runner = Runner(store, world)
+    assert run(runner.housekeep())["legacy_settled"] == {"checked": 0}
+    assert "legacy_settled" not in run(runner.housekeep())        # throttled
+    assert getattr(world, "legacy_settles", 0) == 1
+    runner._legacy_settle_at -= 601
+    run(runner.housekeep())
+    assert world.legacy_settles == 2

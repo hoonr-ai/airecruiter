@@ -116,11 +116,17 @@ _JOB_COLUMNS: Tuple[str, ...] = (
     "pair_launched_by",
     "parent_job_id",
     "version",
+    # Range mode only (None in the all-time view): people whose FIRST
+    # interview for the job falls in the range, and whether the job itself
+    # first launched in the range (False = listed for a relaunch).
+    "launched_in_period",
+    "first_launch_in_period",
 )
 
 _RANGE_DESCRIPTION = (
     "Jobs launched in range: jobs whose first successful PAIR launch falls between "
-    "start_date 00:00 and end_date 24:00 US Eastern time."
+    "start_date 00:00 and end_date 24:00 US Eastern time, plus jobs first launched "
+    "earlier whose relaunch reached new people in the range."
 )
 _ALL_TIME_DESCRIPTION = "All jobs, launched or not."
 
@@ -334,16 +340,50 @@ def _fetch_job_rows(
     listed it, and a failed first attempt dated the job by that attempt.
     """
     mj_cond, mj_params = _mj_filter(scope, "mj")
-    # In placeholder order: the CTE's AT TIME ZONE (the audit column is a
-    # naive reading in the DB session zone), its scope, the job read's scope.
-    params: List[Any] = [REPORT_DB_TIMEZONE, *mj_params, *mj_params]
     launched_expr = "l.first_launch_at"
+    # In placeholder order: the launches CTE's AT TIME ZONE (the audit column
+    # is a naive reading in the DB session zone) and scope; in range mode the
+    # people CTE's zone and scope and the period bounds, then the
+    # first_launch_in_period column's bounds; the job read's scope; in range
+    # mode the WHERE's bounds.
+    params: List[Any] = [REPORT_DB_TIMEZONE, *mj_params]
+    range_ctes = ""
+    period_cols = "NULL::int, NULL::boolean"
+    period_join = ""
     range_cond = ""
     if date_range:
         lo, hi = _range_bounds_utc(*date_range)
         # timestamptz on both sides, so the comparison does not depend on the
-        # DB session's TimeZone setting.
-        range_cond = f" AND {launched_expr} >= %s AND {launched_expr} < %s"
+        # DB session's TimeZone setting. A job is in range when it FIRST
+        # launched in range, or a relaunch reached new people in range (each
+        # person counted on the day of their first interview for the job —
+        # the Launch Report's "Launched in Period").
+        in_range = f"{launched_expr} >= %s AND {launched_expr} < %s"
+        range_ctes = f""",
+            people AS (
+                SELECT mj.job_id AS job_id, a.candidate_id,
+                       MIN(a.created_at) AT TIME ZONE %s AS first_at
+                FROM monitored_jobs mj
+                JOIN engage_interview_audit a
+                  ON NULLIF(a.jobdiva_id, '') IS NOT NULL
+                 AND (a.jobdiva_id = NULLIF(mj.jobdiva_id, '') OR a.jobdiva_id = mj.job_id::text)
+                WHERE {mj_cond}
+                  AND COALESCE(NULLIF(a.interview_id, ''), '') <> ''
+                  AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''
+                GROUP BY mj.job_id, a.candidate_id
+            ),
+            period AS (
+                SELECT job_id, COUNT(*) AS n FROM people
+                WHERE first_at >= %s AND first_at < %s
+                GROUP BY job_id
+            )"""
+        params = [*params, REPORT_DB_TIMEZONE, *mj_params, lo, hi]
+        period_cols = f"COALESCE(p.n, 0), COALESCE(({in_range}), FALSE)"
+        params = [*params, lo, hi]
+        period_join = "\n            LEFT JOIN period p ON p.job_id = mj.job_id"
+        range_cond = f" AND (({in_range}) OR COALESCE(p.n, 0) > 0)"
+    params = [*params, *mj_params]
+    if date_range:
         params = [*params, lo, hi]
 
     with conn.cursor() as cur:
@@ -368,7 +408,7 @@ def _fetch_job_rows(
                   AND COALESCE(NULLIF(a.interview_id, ''), '') <> ''
                   AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''
                 GROUP BY mj.job_id
-            )
+            ){range_ctes}
             SELECT
                 mj.job_id::text,
                 mj.jobdiva_id::text,
@@ -386,9 +426,10 @@ def _fetch_job_rows(
                 {optional["pair_posted_by"]},
                 {optional["pair_launched_by"]},
                 mj.parent_job_id::text,
-                mj.version
+                mj.version,
+                {period_cols}
             FROM monitored_jobs mj
-            LEFT JOIN launches l ON l.job_id = mj.job_id
+            LEFT JOIN launches l ON l.job_id = mj.job_id{period_join}
             WHERE {mj_cond}{range_cond}
             ORDER BY {launched_expr} DESC NULLS LAST, mj.job_id::text
             """,
@@ -516,6 +557,11 @@ def _rows_to_jobs(
             **attribution_fields(rec["pair_posted_by"], rec["pair_launched_by"]),
             "version": _to_int(rec["version"], 1) or 1,
             "family": _family_key(rec["parent_job_id"], jobdiva_id, job_id),
+            # None in the all-time view (no period to count in).
+            "candidates_launched_in_period": (
+                None if rec.get("launched_in_period") is None else _to_int(rec["launched_in_period"])
+            ),
+            "first_launch_in_period": rec.get("first_launch_in_period"),
         })
     return jobs
 
@@ -525,7 +571,7 @@ def _pass_rate(passed: int, failed: int) -> Optional[float]:
     return round(passed / decided, 4) if decided else None
 
 
-def _aggregate(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _aggregate(jobs: List[Dict[str, Any]], range_mode: Optional[bool] = None) -> Dict[str, Any]:
     """Roll a DISTINCT list of jobs up into one block.
 
     Used for each recruiter's own jobs and, separately, for the whole
@@ -549,17 +595,29 @@ def _aggregate(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
     to_launch = [j["step5_to_launch_minutes"] for j in jobs if j.get("step5_to_launch_minutes") is not None]
     passed, failed = total("passed"), total("failed")
     archived = sum(1 for j in jobs if j["is_archived"])
+    if range_mode is None:
+        range_mode = any(j.get("first_launch_in_period") is not None for j in jobs)
 
     return {
         "jobs": {
             "assigned": len(jobs),
             "active": len(jobs) - archived,
             "archived": archived,
-            "launched": sum(1 for j in jobs if j["launched_at"]),
+            # Range mode: jobs that FIRST launched in the range (the rest are
+            # listed for a relaunch); all-time: every launched job.
+            "launched": (
+                sum(1 for j in jobs if j.get("first_launch_in_period"))
+                if range_mode else sum(1 for j in jobs if j["launched_at"])
+            ),
+            "relaunched": (
+                sum(1 for j in jobs if j.get("first_launch_in_period") is False) if range_mode else None
+            ),
         },
         "candidates": {
             "sourced": total("candidates_sourced"),
             "launched": total("candidates_launched"),
+            # People newly launched in the range (None in the all-time view).
+            "launched_in_period": total("candidates_launched_in_period") if range_mode else None,
         },
         "outcomes": {
             "passed": passed,
@@ -620,6 +678,8 @@ def _serialize_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "launched_by": job["launched_by"],
         "candidates_sourced": job["candidates_sourced"],
         "candidates_launched": job["candidates_launched"],
+        "candidates_launched_in_period": job.get("candidates_launched_in_period"),
+        "first_launch_in_period": job.get("first_launch_in_period"),
         "passed": job["passed"],
         "failed": job["failed"],
         "in_progress": job["in_progress"],
@@ -669,6 +729,7 @@ def _build_payload(
     step_time_available: bool = True,
     now: Optional[datetime.datetime] = None,
 ) -> Dict[str, Any]:
+    range_mode = date_range is not None
     for job in jobs:
         metrics = metrics_by_job.get(job["job_id"]) or empty_metrics()
         job.update({k: metrics.get(k, v) for k, v in empty_metrics().items()})
@@ -733,14 +794,14 @@ def _build_payload(
             # None = unknown: without the directory most real recruiters would
             # read as "no PAIR login" and the UI's hide toggle would drop them.
             "has_pair_account": True if email in accounts else (False if directory_available else None),
-            **_aggregate(their_jobs),
+            **_aggregate(their_jobs, range_mode),
             **_step5_active(actor_ms[email]),
             "job_ids": [j["job_id"] for j in their_jobs],
         })
     recruiters.sort(key=lambda r: (-r["jobs"]["launched"], r["email"]))
 
     unassigned = sum(1 for j in jobs if j["unassigned"])
-    totals = _aggregate(jobs)
+    totals = _aggregate(jobs, range_mode)
     # Everyone's time on the DISTINCT jobs, admins and people without a row
     # included — so it is not the sum of the recruiter rows either.
     totals.update(_step5_active(j["step5_active_ms"] for j in jobs))

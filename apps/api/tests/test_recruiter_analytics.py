@@ -325,13 +325,19 @@ def test_fetch_job_rows_passes_the_eastern_bounds():
     # The Launch Report's first SUCCESSFUL launch, not the pre-launch stamp.
     assert "engage_interview_audit" in sql and "pair_launched_at" not in sql
     assert "l.first_launch_at >= %s AND l.first_launch_at < %s" in sql
+    lo, hi = datetime.datetime(2026, 9, 21, 4, tzinfo=UTC), datetime.datetime(2026, 9, 22, 4, tzinfo=UTC)
     assert params == [
-        ra.REPORT_DB_TIMEZONE,  # the CTE's AT TIME ZONE
+        ra.REPORT_DB_TIMEZONE,  # the launches CTE's AT TIME ZONE
         ["j1"],  # the launches CTE's scope
+        ra.REPORT_DB_TIMEZONE,  # the people CTE's AT TIME ZONE
+        ["j1"],  # the people CTE's scope
+        lo, hi,  # the period CTE (people first launched in range)
+        lo, hi,  # the first_launch_in_period column
         ["j1"],  # the job read's scope
-        datetime.datetime(2026, 9, 21, 4, tzinfo=UTC),
-        datetime.datetime(2026, 9, 22, 4, tzinfo=UTC),
+        lo, hi,  # the WHERE: first launched in range …
     ]
+    # … OR reached new people in range (a relaunch).
+    assert "OR COALESCE(p.n, 0) > 0" in sql
     # A pair_posted_by / pair_launched_by column missing from pg_attribute is
     # selected as NULL rather than failing the statement.
     assert "NULL::text" in sql
@@ -376,6 +382,8 @@ def _row(job_id, emails, **kw):
         "pair_launched_by": kw.pop("pair_launched_by", None),
         "parent_job_id": kw.pop("parent_job_id", None),
         "version": kw.pop("version", 1),
+        "launched_in_period": kw.pop("launched_in_period", None),
+        "first_launch_in_period": kw.pop("first_launch_in_period", None),
     }
     assert not kw, kw
     return tuple(rec[c] for c in ra._JOB_COLUMNS)
@@ -418,11 +426,12 @@ def test_shared_job_is_credited_to_each_recruiter_but_counted_once_in_totals():
     rec = _by_email(p)
 
     assert set(rec) == {"alice@pyramid.com", "bob@pyramid.com"}
-    assert rec["alice@pyramid.com"]["jobs"] == {"assigned": 1, "active": 1, "archived": 0, "launched": 1}
+    assert rec["alice@pyramid.com"]["jobs"] == {"assigned": 1, "active": 1, "archived": 0, "launched": 1,
+                                                "relaunched": None}
     assert rec["alice@pyramid.com"]["outcomes"] == {"passed": 3, "failed": 1, "in_progress": 2}
     assert rec["alice@pyramid.com"]["pass_rate"] == 0.75
     assert rec["bob@pyramid.com"]["jobs"]["assigned"] == 2
-    assert rec["bob@pyramid.com"]["candidates"] == {"sourced": 15, "launched": 6}
+    assert rec["bob@pyramid.com"]["candidates"] == {"sourced": 15, "launched": 6, "launched_in_period": None}
     assert rec["bob@pyramid.com"]["job_ids"] == ["j1", "j2"]
 
     t = p["totals"]
@@ -797,7 +806,7 @@ def test_postgres_happy_path_launched_in_range(pg):
     assert [r["email"] for r in p["recruiters"]] == ["bob@pyramid.com", "alice@pyramid.com", "am@client.com"]
 
     alice = rec["alice@pyramid.com"]
-    assert alice["jobs"] == {"assigned": 2, "active": 2, "archived": 0, "launched": 2}
+    assert alice["jobs"] == {"assigned": 2, "active": 2, "archived": 0, "launched": 2, "relaunched": 0}
     assert alice["outcomes"] == {"passed": 3, "failed": 1, "in_progress": 0}  # c1 c3 + c4; c2
     assert alice["pass_rate"] == 0.75
     assert alice["feedback"] == {"total": 2, "submits": 2, "internal": 1, "external": 1,
@@ -818,8 +827,11 @@ def test_postgres_happy_path_launched_in_range(pg):
     assert rec["am@client.com"]["has_pair_account"] is False
 
     t = p["totals"]
-    assert t["jobs"] == {"assigned": 4, "active": 4, "archived": 0, "launched": 4, "unassigned": 1}
-    assert t["candidates"] == {"sourced": 12 + 4 + 6 + 1, "launched": 5 + 2 + 3}
+    assert t["jobs"] == {"assigned": 4, "active": 4, "archived": 0, "launched": 4, "relaunched": 0, "unassigned": 1}
+    assert t["candidates"]["sourced"] == 12 + 4 + 6 + 1 and t["candidates"]["launched"] == 5 + 2 + 3
+    # One person first launched in range per job (26-00002's later re-call
+    # of the same person changes nothing).
+    assert t["candidates"]["launched_in_period"] == 4
     assert t["outcomes"] == {"passed": 3, "failed": 2, "in_progress": 1}
     assert t["submittals"]["jobdiva_total"] == 5  # not 3 + 5 + 2 from the recruiter rows
     assert t["recruiters"] == 3
@@ -906,3 +918,21 @@ def test_postgres_team_with_no_jobs_is_empty_not_an_error(pg, monkeypatch):
     assert p["warnings"] == []
     assert p["recruiters"] == [] and p["jobs"] == []
     assert p["totals"]["jobs"]["assigned"] == 0 and p["totals"]["pass_rate"] is None
+
+
+def test_postgres_a_relaunch_reaching_new_people_lists_the_job_in_that_range(pg):
+    """26-00002 first launched 09-21 (Eastern); on 09-25 the same person was
+    called again (lists nothing) and, now, a NEW person launched: 09-25 lists
+    the job as a relaunch with 1 launched in period, not as a launch."""
+    day = (datetime.date(2026, 9, 25), datetime.date(2026, 9, 25))
+    before = ra._compute_recruiter_analytics_sync(None, None, day)
+    assert "26-00002" not in [j["job_id"] for j in before["jobs"]]
+    with pg.cursor() as cur:
+        _audit(cur, "26-00002", "2026-09-25 11:00:00", interview_id="iv-new", candidate_id="c-new")
+    ra.clear_recruiter_analytics_cache()
+    after = ra._compute_recruiter_analytics_sync(None, None, day)
+    job = [j for j in after["jobs"] if j["job_id"] == "31990002"][0]
+    assert job["first_launch_in_period"] is False and job["candidates_launched_in_period"] == 1
+    t = after["totals"]
+    assert t["jobs"]["launched"] == 0 and t["jobs"]["relaunched"] == 1
+    assert t["candidates"]["launched_in_period"] == 1

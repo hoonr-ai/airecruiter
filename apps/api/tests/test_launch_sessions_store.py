@@ -38,11 +38,12 @@ CREATE TABLE monitored_jobs (
   job_id TEXT PRIMARY KEY, jobdiva_id TEXT, recruiter_emails TEXT, outreach_stopped_at TIMESTAMPTZ,
   pair_added_at TIMESTAMPTZ, first_launch_at TIMESTAMPTZ, customer_name TEXT, created_at TEXT);
 CREATE TABLE sourced_candidates (
-  id SERIAL PRIMARY KEY, jobdiva_id TEXT, candidate_id TEXT, source TEXT, data JSONB,
+  id SERIAL PRIMARY KEY, jobdiva_id TEXT, candidate_id TEXT, source TEXT,
+  email TEXT, phone TEXT, profile_url TEXT, data JSONB,
   updated_at TIMESTAMP DEFAULT now(), UNIQUE (jobdiva_id, candidate_id, source));
 CREATE TABLE engage_interview_audit (
   id SERIAL PRIMARY KEY, candidate_id VARCHAR(255) NOT NULL, jobdiva_id VARCHAR(255),
-  interview_id VARCHAR(255), status VARCHAR(50));
+  interview_id VARCHAR(255), candidate_email VARCHAR(255), status VARCHAR(50));
 """
 
 
@@ -827,7 +828,7 @@ def test_pg_engage_facts_follow_the_d1_claims(pg, monkeypatch):
     assert eng.claim_candidates_for_session(keys, ["a", "b"], sid) == ["a", "b"]
     facts = pg.store.engage_rows(keys, ["a", "b"])
     assert facts["a"]["statuses"] == ["queued"] and facts["a"]["session_ids"] == [sid]
-    claimed, _ = eng._claim_rows_for_send(keys, ["a"], sid)
+    claimed, _, _ = eng._claim_rows_for_send(keys, ["a"], sid)
     assert claimed == ["a"] and pg.store.engage_rows(keys, ["a"])["a"]["statuses"] == ["sending"]
     # Pairbot provably never got it: the runner requeues it and D1 re-claims it.
     assert pg.store.requeue_engage_rows(keys, ["a"], sid) == ["a"]

@@ -456,9 +456,28 @@ class LaunchSessionRunner:
             result["rechecked"] = await self.recheck_unconfirmed()
         except Exception as exc:  # noqa: BLE001
             logger.warning("launch_session_recheck_failed: %s", exc)
+        if not result.get("skipped") and self._legacy_settle_due():
+            # Rows a launch OUTSIDE a session left parked 'processing' (no
+            # recorded outcome): settled against Pairbot's by-job record. The
+            # one worker that won this tick's housekeeping lock runs it; each
+            # row is claimed at most every 10 min fleet-wide.
+            try:
+                result["legacy_settled"] = await self.fx.settle_parked_legacy_rows()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("launch_session_legacy_settle_failed: %s", exc)
         if result.get("skipped") and not result.get("rechecked"):
             _ignore_transaction()
         return result
+
+    def _legacy_settle_due(self) -> bool:
+        """At most every PAIR_LEGACY_SETTLE_EVERY_S per worker (the sweep scans
+        sourced_candidates for parked rows; the per-row claim keeps it single)."""
+        now = time.monotonic()
+        last = getattr(self, "_legacy_settle_at", None)
+        if last is not None and now - last < cfg.legacy_settle_every_s():
+            return False
+        self._legacy_settle_at = now
+        return True
 
     async def recheck_unconfirmed(self, limit: int = 5) -> int:
         """By-job re-check of finished sessions' unconfirmed / unrecorded rows

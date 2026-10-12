@@ -439,10 +439,10 @@ def test_s7_rows_launched_by_another_path_meanwhile_are_already_launched():
     store.create_session(fields)
     original = world.claim_for_session
 
-    def racing_claim(job_keys, ids, session_id):
+    def racing_claim(job_keys, ids, session_id, duplicates=None):
         # A legacy launch posted c4 between S6 and our claim.
         world._record_sent(list(job_keys), {"c4": "iv-legacy"})
-        return original(job_keys, ids, session_id)
+        return original(job_keys, ids, session_id, duplicates=duplicates)
 
     world.claim_for_session = racing_claim
     s = run(drive(store, world, fields["id"]))
@@ -582,3 +582,41 @@ def test_s7b_a_failing_chunk_is_retried_then_counted_never_failing_the_session(m
     prov = s["counts"]["provision"]
     assert prov["failed"] == 2 and prov["errors"] == 1 and prov["success"] == 1
     assert calls["n"] == 3 + 1  # three tries of the first chunk, one of the second
+
+
+def test_s7_a_second_id_of_a_held_person_is_skipped_never_posted():
+    store, world, job, fields = full_search_world()
+    store.create_session(fields)
+    # The person gate (routers.engagement._person_gate) says c4 is another id
+    # of a person already launched for this job.
+    world.person_duplicates = {"c4": ("exa_other", "email")}
+    s = run(drive(store, world, fields["id"]))
+    c4 = store.cands[fields["id"]]["c4"]
+    assert (c4["state"], c4["reason"]) == ("skipped", "duplicate_person_this_job")
+    assert "c4" not in world.pairbot.post_count
+    assert s["counts"]["sent"] == 2
+
+
+def test_s7_a_row_is_reposted_at_most_max_reposts_times(monkeypatch):
+    """'missing' at by-job is judged by the echoed source_candidate_id only, so
+    an interview Pairbot filed under another id looks missing forever: after
+    PAIR_LAUNCH_MAX_REPOSTS re-posts the row is unconfirmed (parked and
+    re-checked by housekeeping), never posted again."""
+    monkeypatch.setenv("PAIR_LAUNCH_REPOST_AFTER_S", "600")
+    store = MemoryStore()
+    world = FakeWorld(store)
+    ctx, sid = _launching_ctx(store, world, posted_age_s={"once": 900, "again": 900})
+    store.sessions[sid]["checkpoint"]["s7"]["reposts"] = {"again": 1}
+    _script_reconcile(world, {"missing": ["once", "again"]})
+    run(launching.settle(ctx))
+    got = {cid: (c["state"], c["reason"]) for cid, c in store.cands[sid].items()}
+    assert got["once"] == ("saved", None)                       # first re-post allowed
+    assert got["again"] == ("unconfirmed", "unconfirmed")       # limit reached: never posted again
+    assert store.sessions[sid]["checkpoint"]["s7"]["reposts"] == {"again": 1, "once": 1}
+    monkeypatch.setenv("PAIR_LAUNCH_MAX_REPOSTS", "0")
+    store2 = MemoryStore()
+    world2 = FakeWorld(store2)
+    ctx2, sid2 = _launching_ctx(store2, world2, posted_age_s={"x": 900})
+    _script_reconcile(world2, {"missing": ["x"]})
+    run(launching.settle(ctx2))
+    assert store2.cands[sid2]["x"]["state"] == "unconfirmed"

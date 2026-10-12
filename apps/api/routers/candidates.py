@@ -1984,6 +1984,8 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
     "Already Launched" badge, preventing duplicate Launch PAIR clicks.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
+    from services import launch_person_keys as lpk
+
     try:
         conn = get_db_connection()
         try:
@@ -1994,9 +1996,15 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 row = cur.fetchone()
-                resolved_jobdiva_id = row[0] if row and row[0] else (row[1] if row else job_id_or_ref)
         finally:
             conn.close()
+        # Every key the job's rows may be stored under (the ref, the numeric
+        # job_id, and what the caller passed) — a launch stored under the
+        # other key used to be invisible here.
+        job_keys = list(dict.fromkeys(
+            str(k).strip() for k in ((row[0], row[1]) if row else ()) + (job_id_or_ref,)
+            if k is not None and str(k).strip()
+        ))
 
         conn = get_db_connection()
         try:
@@ -2007,22 +2015,45 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
                 # label. Without the id the Step-5 list cannot recognise that row
                 # as already launched and offers a second launch (a "twin" row).
                 cur.execute("""
-                    SELECT candidate_id, source, data->>'jobdiva_candidate_id'
+                    SELECT candidate_id, source, data->>'jobdiva_candidate_id',
+                           COALESCE(NULLIF(email, ''), data->>'email'),
+                           COALESCE(NULLIF(phone, ''), data->>'phone'),
+                           COALESCE(NULLIF(profile_url, ''), data->>'profile_url',
+                                    data->>'linkedin_url', data->'urls'->>'linkedin'),
+                           COALESCE(data->>'engage_status', ''),
+                           COALESCE(data->>'engage_interview_id', '')
                     FROM sourced_candidates
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                """, (str(resolved_jobdiva_id), str(job_id_or_ref)))
+                    WHERE jobdiva_id = ANY(%s)
+                """, (job_keys,))
                 rows = cur.fetchall()
+                cur.execute("""
+                    SELECT DISTINCT candidate_id, candidate_email
+                    FROM engage_interview_audit
+                    WHERE jobdiva_id = ANY(%s) AND COALESCE(interview_id, '') <> ''
+                """, (job_keys,))
+                audit_rows = cur.fetchall()
         finally:
             conn.close()
 
         launched = []
+        person_rows = []
         for r in rows:
             item = {"candidate_id": r[0], "source": r[1]}
             jd_id = str(r[2] or "").strip() if len(r) > 2 else ""
             if jd_id:
                 item["jobdiva_candidate_id"] = jd_id
             launched.append(item)
-        return {"status": "success", "launched": launched}
+            person_rows.append({
+                "candidate_id": r[0], "source": r[1], "email": r[3], "phone": r[4], "profile_url": r[5],
+                "data": {"jobdiva_candidate_id": jd_id}, "engage_status": r[6], "engage_interview_id": r[7],
+            })
+        for cid, email in audit_rows:
+            person_rows.append({"candidate_id": cid, "email": email, "engage_interview_id": "audit"})
+        # {person key: candidate_id} of everyone launched or in flight: Step 5
+        # treats another id of one of these people as already launched
+        # (apps/web/lib/launch-person-keys.ts), as the launch claim would.
+        return {"status": "success", "launched": launched,
+                "person_keys": lpk.launched_person_keys(person_rows)}
     except Exception as e:
         logger.error(f"Error fetching launched candidate keys for {job_id_or_ref}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

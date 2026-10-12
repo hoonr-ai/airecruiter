@@ -402,3 +402,23 @@ def test_pg_newest_decision_wins_across_rows(pg):
     row = {r["candidate_id"]: r for r in lc.fetch_launched_candidates(pg, [REF, NUM], include_feedback=True)}["c6"]
     assert row["feedback_type"] == "Submit"
     assert row["feedback_at"] == "2026-08-30T10:00:00+00:00"
+
+
+def test_pg_dashboard_count_by_job_equals_the_rankings_count(pg):
+    """monitored_jobs.candidates_launched (the startup backfill's grouped SQL)
+    is the SAME population as Rankings' "Candidates Launched": audit-only
+    launches count, a person under both keys counts once, a failed launch
+    does not, another job never leaks in — and a relaunched person is one."""
+    _seed(pg)
+    # A person whose NEWEST row lost its id (an older row under the other key
+    # still has one): not launched by JSONB alone, as in _LAUNCHED_CTE_SQL.
+    _sourced(pg, "c14", key=REF, data={"engage_interview_id": "i14"}, created="2026-08-27 08:00:00")
+    _sourced(pg, "c14", key=NUM, data={"engage_interview_id": ""}, created="2026-08-27 08:30:00")
+    with pg.cursor() as cur:
+        cur.execute("CREATE TEMP TABLE monitored_jobs (job_id TEXT PRIMARY KEY, jobdiva_id TEXT) ON COMMIT DROP")
+        cur.execute("INSERT INTO monitored_jobs VALUES (%s, %s), ('OTHER', ''), ('77', NULL)", (NUM, REF))
+        cur.execute(lc.LAUNCHED_COUNT_BY_JOB_SQL)
+        by_job = dict(cur.fetchall())
+    assert by_job[NUM] == lc.count_launched_candidates(pg, [REF, NUM]) == 7
+    assert by_job["OTHER"] == lc.count_launched_candidates(pg, ["OTHER"]) == 1
+    assert "77" not in by_job                     # no launches → no row (backfill COALESCEs to 0)
