@@ -12,10 +12,15 @@
   the last-tab-disconnect cursor-reset bug found in QA (a reconnect after the
   last tab for an email closed used to silently skip any notification
   created in the gap, because the cursor was wiped and re-seeded from the
-  current max id instead of resuming where it left off).
+  current max id instead of resuming where it left off); the staleness bound
+  that caps how much history a long-absent reconnect replays; the client-
+  supplied since_id resume path (authoritative, and the only one that's
+  correct across a reconnect landing on a different worker); and
+  _prune_stale_cursors's bookkeeping cleanup.
 """
 import asyncio
 import json
+from unittest.mock import Mock
 
 import pytest
 
@@ -250,46 +255,143 @@ def test_mark_notification_read_returns_false_for_someone_elses_notification(mon
     assert _mark_notification_read_sync(5, "someone-else@x.com") is False
 
 
-# --- SSE subscriber bookkeeping: the cursor-reset bug ------------------------
+# --- SSE subscriber bookkeeping: the cursor-reset bug + its follow-ups ------
+
+def _clear_subscriber_state(notif, email):
+    notif._subscribers.pop(email, None)
+    notif._last_seen_id.pop(email, None)
+    notif._last_seen_cursor_at.pop(email, None)
+
 
 def test_unregister_does_not_wipe_last_seen_id_for_reconnect(monkeypatch):
     """Regression test for the QA-found bug: a user's last tab disconnecting
     used to wipe the per-email cursor, so the next connection re-seeded from
     whatever the current max id was — silently skipping any notification
-    created while no tab was connected. The cursor must survive a
-    disconnect/reconnect cycle for the same email."""
+    created while no tab was connected. A reconnect within the staleness
+    window must resume from the retained cursor, with no second DB lookup."""
     import routers.notifications as notif
 
     email = "cursor-test@x.com"
-    notif._subscribers.pop(email, None)
-    notif._last_seen_id.pop(email, None)
-
-    # Never actually start the real polling loop in a unit test.
+    _clear_subscriber_state(notif, email)
     monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    max_id_sync = Mock(return_value=10)
+    monkeypatch.setattr(notif, "_max_id_sync", max_id_sync)
 
-    max_id_calls = iter([10, 99])  # 99 simulates a notification created while disconnected
-    monkeypatch.setattr(notif, "_max_id_sync", lambda e: next(max_id_calls))
+    try:
+        async def scenario():
+            queue1 = asyncio.Queue()
+            await notif._register_subscriber(email, queue1)
+            assert notif._last_seen_id[email] == 10
 
-    async def scenario():
-        queue1 = asyncio.Queue()
-        await notif._register_subscriber(email, queue1)
-        assert notif._last_seen_id[email] == 10
+            # Last (only) tab disconnects.
+            await notif._unregister_subscriber(email, queue1)
+            assert email not in notif._subscribers
+            # The fix: the cursor must still be there, unchanged.
+            assert notif._last_seen_id[email] == 10
 
-        # Last (only) tab disconnects.
-        await notif._unregister_subscriber(email, queue1)
-        assert email not in notif._subscribers
-        # The fix: the cursor must still be there, unchanged.
-        assert notif._last_seen_id[email] == 10
+            # Reconnect — must resume from 10 without hitting the DB again
+            # (the retained cursor is still fresh).
+            queue2 = asyncio.Queue()
+            await notif._register_subscriber(email, queue2)
+            assert notif._last_seen_id[email] == 10
 
-        # Reconnect — must resume from 10, not jump to the new max (99),
-        # which would skip anything inserted in the gap.
-        queue2 = asyncio.Queue()
-        await notif._register_subscriber(email, queue2)
-        assert notif._last_seen_id[email] == 10
+            await notif._unregister_subscriber(email, queue2)
 
-        await notif._unregister_subscriber(email, queue2)
+        asyncio.run(scenario())
+        assert max_id_sync.call_count == 1
+    finally:
+        _clear_subscriber_state(notif, email)
 
-    asyncio.run(scenario())
 
-    notif._subscribers.pop(email, None)
-    notif._last_seen_id.pop(email, None)
+def test_register_subscriber_reseeds_when_retained_cursor_is_stale(monkeypatch):
+    """A reconnect after longer than _CURSOR_MAX_RETENTION_SECONDS must NOT
+    replay the whole gap — it reseeds from the current max instead (the
+    client's own list() truth-up already covers that history)."""
+    import routers.notifications as notif
+
+    email = "stale-cursor@x.com"
+    _clear_subscriber_state(notif, email)
+    monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    max_id_sync = Mock(side_effect=[10, 99])
+    monkeypatch.setattr(notif, "_max_id_sync", max_id_sync)
+
+    try:
+        async def scenario():
+            queue1 = asyncio.Queue()
+            await notif._register_subscriber(email, queue1)
+            assert notif._last_seen_id[email] == 10
+            await notif._unregister_subscriber(email, queue1)
+
+            # Simulate a long absence: push the retained cursor's timestamp
+            # back past the retention window.
+            notif._last_seen_cursor_at[email] -= notif._CURSOR_MAX_RETENTION_SECONDS + 10
+
+            queue2 = asyncio.Queue()
+            await notif._register_subscriber(email, queue2)
+            assert notif._last_seen_id[email] == 99
+            await notif._unregister_subscriber(email, queue2)
+
+        asyncio.run(scenario())
+        assert max_id_sync.call_count == 2
+    finally:
+        _clear_subscriber_state(notif, email)
+
+
+def test_register_subscriber_honors_client_since_id(monkeypatch):
+    """The client's own since_id is authoritative and skips the DB lookup
+    entirely — it's also the only resume path that's correct when a
+    reconnect lands on a different worker than the one that holds the
+    in-memory cursor."""
+    import routers.notifications as notif
+
+    email = "since-id@x.com"
+    _clear_subscriber_state(notif, email)
+    monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    max_id_sync = Mock(return_value=999)
+    monkeypatch.setattr(notif, "_max_id_sync", max_id_sync)
+
+    try:
+        async def scenario():
+            queue = asyncio.Queue()
+            await notif._register_subscriber(email, queue, since_id=42)
+            assert notif._last_seen_id[email] == 42
+            await notif._unregister_subscriber(email, queue)
+
+        asyncio.run(scenario())
+        assert max_id_sync.call_count == 0
+    finally:
+        _clear_subscriber_state(notif, email)
+
+
+def test_prune_stale_cursors_only_removes_old_and_disconnected_entries():
+    import time
+
+    import routers.notifications as notif
+
+    old_disconnected = "old-disconnected@x.com"
+    recent_disconnected = "recent-disconnected@x.com"
+    old_but_connected = "old-connected@x.com"
+    for e in (old_disconnected, recent_disconnected, old_but_connected):
+        _clear_subscriber_state(notif, e)
+
+    try:
+        now = time.monotonic()
+        notif._last_seen_id[old_disconnected] = 1
+        notif._last_seen_cursor_at[old_disconnected] = now - notif._CURSOR_PRUNE_AFTER_SECONDS - 10
+
+        notif._last_seen_id[recent_disconnected] = 2
+        notif._last_seen_cursor_at[recent_disconnected] = now
+
+        notif._last_seen_id[old_but_connected] = 3
+        notif._last_seen_cursor_at[old_but_connected] = now - notif._CURSOR_PRUNE_AFTER_SECONDS - 10
+        notif._subscribers[old_but_connected] = {object()}  # still "connected"
+
+        notif._prune_stale_cursors()
+
+        assert old_disconnected not in notif._last_seen_id
+        assert old_disconnected not in notif._last_seen_cursor_at
+        assert recent_disconnected in notif._last_seen_id
+        assert old_but_connected in notif._last_seen_id
+    finally:
+        for e in (old_disconnected, recent_disconnected, old_but_connected):
+            _clear_subscriber_state(notif, e)

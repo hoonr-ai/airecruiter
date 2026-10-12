@@ -710,7 +710,11 @@ export const api = {
     unreadCount: () => req<{ unread_count: number }>(`/api/v1/notifications/unread-count`),
     markRead: (id: number) => req<{ success: boolean }>(`/api/v1/notifications/${id}/read`, { method: "POST" }),
     markAllRead: () => req<{ success: boolean }>(`/api/v1/notifications/mark-all-read`, { method: "POST" }),
-    streamUrl: () => `${API_BASE}/api/v1/notifications/stream`,
+    // sinceId resumes from the client's own high-water mark (standard SSE
+    // Last-Event-ID-style resume) — correct across a reconnect landing on a
+    // different API worker, unlike the server's in-memory per-worker cursor.
+    streamUrl: (sinceId?: number) =>
+      `${API_BASE}/api/v1/notifications/stream${sinceId ? `?since_id=${sinceId}` : ""}`,
   },
   launchSessions: launchSessionsApi,
 };

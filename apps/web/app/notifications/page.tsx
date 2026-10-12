@@ -38,13 +38,24 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
     if (reportHref) router.push(reportHref);
   };
 
+  const handleRowKeyDown = (e: React.KeyboardEvent) => {
+    if (!reportHref) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handleRowClick();
+    }
+  };
+
   return (
     <Card
       onClick={handleRowClick}
+      onKeyDown={handleRowKeyDown}
+      role={reportHref ? "link" : undefined}
+      tabIndex={reportHref ? 0 : undefined}
       className={cn(
         "flex-row items-center gap-4 px-5 py-4 transition-colors",
         isUnread ? "bg-primary/5 border-primary/20" : "bg-white",
-        reportHref && "hover:border-primary/40 cursor-pointer"
+        reportHref && "hover:border-primary/40 cursor-pointer focus-visible:outline-2 focus-visible:outline-primary"
       )}
     >
       <div className="flex-1 min-w-0">
@@ -68,7 +79,7 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
 }
 
 export default function NotificationsPage() {
-  const { notifications, unreadCount, isLoading, hasLoadError, markRead, markAllRead } = useNotificationsStream();
+  const { notifications, unreadCount, isLoading, hasLoadError, refresh, markRead, markAllRead } = useNotificationsStream();
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -91,9 +102,14 @@ export default function NotificationsPage() {
       </div>
 
       {hasLoadError && (
-        <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 mb-4">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          Couldn&apos;t refresh notifications — showing the last loaded data.
+        <div className="flex items-center justify-between gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 mb-4">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            Couldn&apos;t refresh notifications — showing the last loaded data.
+          </span>
+          <Button variant="ghost" size="sm" className="h-7 text-amber-700 hover:text-amber-900" onClick={refresh}>
+            Retry
+          </Button>
         </div>
       )}
 

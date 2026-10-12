@@ -41,6 +41,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const refreshRef = useRef<() => void>(() => {});
   const connectStreamRef = useRef<() => void>(() => {});
+  // Highest notification id this tab has ever rendered, from either the
+  // REST list() or an SSE push. Sent back to the server as ?since_id= on
+  // (re)connect: the server's own cursor is in-memory and per-worker, so a
+  // reconnect landing on a different worker would otherwise reseed from
+  // "now" and silently skip anything created in the gap — this client-side
+  // watermark is authoritative regardless of which worker answers.
+  const lastSeenIdRef = useRef<number>(0);
 
   // Truth-up fetch: initial load, and re-sync after any reconnect so nothing
   // dropped between a lost connection and the next one is lost for good.
@@ -50,6 +57,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setNotifications(data.notifications);
       setUnreadCount(data.unread_count);
       setHasLoadError(false);
+      for (const n of data.notifications) {
+        if (n.id > lastSeenIdRef.current) lastSeenIdRef.current = n.id;
+      }
     } catch (err) {
       console.error("Failed to fetch notifications:", err);
       // Deliberately leave `notifications` as-is on failure (don't clear it
@@ -99,7 +109,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     let isNonRetriable = false;
 
     try {
-      const response = await authFetch(api.notifications.streamUrl(), {
+      const response = await authFetch(api.notifications.streamUrl(lastSeenIdRef.current || undefined), {
         signal: abortController.signal,
         headers: { Accept: "text/event-stream" },
       });
@@ -137,6 +147,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
         try {
           const item: NotificationItem = JSON.parse(dataLines.join(""));
+          if (item.id > lastSeenIdRef.current) lastSeenIdRef.current = item.id;
           setNotifications((prev) => {
             // Only bump the unread count the first time we see this id — a
             // reconnect's truth-up refresh() may have already loaded it,
