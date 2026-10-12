@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Bell, CheckCheck, AlertCircle } from "lucide-react";
+import { Bell, CheckCheck, AlertCircle, BellRing, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -79,7 +79,17 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
 }
 
 export default function NotificationsPage() {
-  const { notifications, unreadCount, isLoading, hasLoadError, refresh, markRead, markAllRead } = useNotificationsStream();
+  const {
+    notifications,
+    unreadCount,
+    isLoading,
+    hasLoadError,
+    notificationPermission,
+    requestNotificationPermission,
+    refresh,
+    markRead,
+    markAllRead,
+  } = useNotificationsStream();
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -100,6 +110,31 @@ export default function NotificationsPage() {
           </Button>
         )}
       </div>
+
+      {notificationPermission === "default" && (
+        <div className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 mb-4">
+          <span className="flex items-center gap-2">
+            <BellRing className="h-4 w-4 shrink-0 text-slate-500" />
+            Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front.
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7"
+            onClick={requestNotificationPermission}
+            aria-label="Enable desktop notifications"
+          >
+            Enable
+          </Button>
+        </div>
+      )}
+
+      {notificationPermission === "denied" && (
+        <div className="flex items-center gap-2 text-xs text-slate-400 mb-4" role="status">
+          <BellOff className="h-3.5 w-3.5 shrink-0" />
+          Desktop alerts are blocked. Enable them in your browser&apos;s site settings to get them again.
+        </div>
+      )}
 
       {hasLoadError && (
         <div className="flex items-center justify-between gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 mb-4">
