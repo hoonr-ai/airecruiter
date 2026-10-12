@@ -1,0 +1,57 @@
+{
+  "function": "launchedSetsFromResponse",
+  "cases": [
+    {
+      "name": "keys, ids and twins",
+      "input": {
+        "items": [
+          {
+            "candidate_id": "a",
+            "source": "LinkedIn",
+            "jobdiva_candidate_id": "900"
+          },
+          {
+            "candidate_id": "b"
+          },
+          {
+            "candidate_id": 7,
+            "source": null
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": "901"
+          },
+          {
+            "candidate_id": 0,
+            "source": "X"
+          },
+          null
+        ]
+      },
+      "expected": {
+        "keys": [
+          ":7",
+          ":b",
+          "LinkedIn:a"
+        ],
+        "ids": [
+          "7",
+          "900",
+          "901",
+          "a",
+          "b"
+        ]
+      }
+    },
+    {
+      "name": "null items",
+      "input": {
+        "items": null
+      },
+      "expected": {
+        "keys": [],
+        "ids": []
+      }
+    }
+  ]
+}

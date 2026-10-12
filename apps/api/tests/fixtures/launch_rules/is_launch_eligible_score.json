@@ -1,0 +1,61 @@
+{
+  "function": "isLaunchEligibleScore",
+  "cases": [
+    {
+      "name": "60",
+      "input": {
+        "score": 60
+      },
+      "expected": true
+    },
+    {
+      "name": "59.99",
+      "input": {
+        "score": 59.99
+      },
+      "expected": false
+    },
+    {
+      "name": "string",
+      "input": {
+        "score": "75"
+      },
+      "expected": false
+    },
+    {
+      "name": "bool",
+      "input": {
+        "score": true
+      },
+      "expected": false
+    },
+    {
+      "name": "null",
+      "input": {
+        "score": null
+      },
+      "expected": false
+    },
+    {
+      "name": "100",
+      "input": {
+        "score": 100
+      },
+      "expected": true
+    },
+    {
+      "name": "huge",
+      "input": {
+        "score": 1e+308
+      },
+      "expected": true
+    },
+    {
+      "name": "zero",
+      "input": {
+        "score": 0
+      },
+      "expected": false
+    }
+  ]
+}

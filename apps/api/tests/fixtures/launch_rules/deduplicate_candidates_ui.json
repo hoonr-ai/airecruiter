@@ -1,0 +1,3926 @@
+{
+  "function": "deduplicateCandidatesUI",
+  "cases": [
+    {
+      "name": "jobdiva survives an email collision and absorbs best-of",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "li1",
+            "source": "LinkedIn",
+            "email": "jane@x.com",
+            "phone": "408-555-7777",
+            "match_score": 90,
+            "location": "Austin"
+          },
+          {
+            "candidate_id": "jd1",
+            "source": "JobDiva-Applicants",
+            "email": "JANE@x.com",
+            "match_score": 70
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "jd1",
+          "source": "JobDiva-Applicants",
+          "email": "JANE@x.com",
+          "match_score": 70,
+          "sources": [
+            "JobDiva-Applicants",
+            "LinkedIn"
+          ],
+          "phone": "408-555-7777",
+          "location": "Austin"
+        }
+      ]
+    },
+    {
+      "name": "phone+name needs a two-token name",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "source": "Exa",
+            "phone": "408-555-1234",
+            "firstName": "Jane",
+            "lastName": "Doe"
+          },
+          {
+            "candidate_id": "b",
+            "source": "LinkedIn",
+            "phone": "(408) 555-1234",
+            "name": "Jane Doe"
+          },
+          {
+            "candidate_id": "c",
+            "source": "LinkedIn",
+            "phone": "408-555-1234",
+            "name": "Jane"
+          },
+          {
+            "candidate_id": "d",
+            "source": "Dice",
+            "phone": "408-555-1234",
+            "name": "jane"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "b",
+          "source": "LinkedIn",
+          "phone": "(408) 555-1234",
+          "name": "Jane Doe",
+          "sources": [
+            "LinkedIn",
+            "Exa"
+          ]
+        },
+        {
+          "candidate_id": "c",
+          "source": "LinkedIn",
+          "phone": "408-555-1234",
+          "name": "Jane"
+        },
+        {
+          "candidate_id": "d",
+          "source": "Dice",
+          "phone": "408-555-1234",
+          "name": "jane"
+        }
+      ]
+    },
+    {
+      "name": "placeholder phones never collide",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "phone": "000-000-0000",
+            "name": "Jane Doe"
+          },
+          {
+            "candidate_id": "b",
+            "phone": "000-000-0000",
+            "name": "Jane Doe"
+          },
+          {
+            "candidate_id": "c",
+            "phone": "555-555-5555",
+            "name": "Jane Doe"
+          },
+          {
+            "candidate_id": "d",
+            "phone": "555-555-5555",
+            "name": "Jane Doe"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "a",
+          "phone": "000-000-0000",
+          "name": "Jane Doe"
+        },
+        {
+          "candidate_id": "b",
+          "phone": "000-000-0000",
+          "name": "Jane Doe"
+        },
+        {
+          "candidate_id": "c",
+          "phone": "555-555-5555",
+          "name": "Jane Doe"
+        },
+        {
+          "candidate_id": "d",
+          "phone": "555-555-5555",
+          "name": "Jane Doe"
+        }
+      ]
+    },
+    {
+      "name": "linkedin key ignores query, case and trailing slash",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "source": "LinkedIn",
+            "profile_url": "https://www.linkedin.com/in/Jane-Doe/?trk=x"
+          },
+          {
+            "candidate_id": "b",
+            "source": "Exa",
+            "linkedin_url": "https://www.linkedin.com/in/jane-doe//"
+          },
+          {
+            "candidate_id": "c",
+            "source": "Exa",
+            "data": {
+              "urls": {
+                "linkedin": "HTTPS://WWW.LINKEDIN.COM/in/jane-doe"
+              }
+            }
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "c",
+          "source": "Exa",
+          "data": {
+            "urls": {
+              "linkedin": "HTTPS://WWW.LINKEDIN.COM/in/jane-doe"
+            }
+          },
+          "sources": [
+            "Exa",
+            "LinkedIn"
+          ],
+          "profile_url": "https://www.linkedin.com/in/Jane-Doe/?trk=x",
+          "linkedin_url": "https://www.linkedin.com/in/jane-doe//"
+        }
+      ]
+    },
+    {
+      "name": "no_contact and client_conflict are sticky; missing loser fields drop",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "jd",
+            "source": "JobDiva-TalentSearch",
+            "email": "p@x.com",
+            "client_conflict_company": "Old"
+          },
+          {
+            "candidate_id": "li",
+            "source": "LinkedIn",
+            "email": "p@x.com",
+            "no_contact": true,
+            "no_contact_reason": "Kaiser",
+            "client_conflict": true,
+            "client_conflict_reason": "works at client"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "jd",
+          "source": "JobDiva-TalentSearch",
+          "email": "p@x.com",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn"
+          ],
+          "no_contact": true,
+          "no_contact_reason": "Kaiser",
+          "client_conflict": true,
+          "client_conflict_reason": "works at client"
+        }
+      ]
+    },
+    {
+      "name": "both contacts beat one; then source priority; then score",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "source": "Exa",
+            "email": "s@x.com",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "b",
+            "source": "Dice",
+            "email": "s@x.com",
+            "phone": "408-555-1212",
+            "match_score": 10
+          },
+          {
+            "candidate_id": "c",
+            "source": "LinkedIn",
+            "email": "t@x.com",
+            "match_score": 50
+          },
+          {
+            "candidate_id": "d",
+            "source": "JobDiva-Applicants-ish",
+            "jobdiva_id": "",
+            "email": "t@x.com",
+            "match_score": 40,
+            "sources": [
+              "applicant pool"
+            ]
+          },
+          {
+            "candidate_id": "e",
+            "source": "Exa",
+            "email": "u@x.com",
+            "match_score": "85"
+          },
+          {
+            "candidate_id": "f",
+            "source": "Exa",
+            "email": "u@x.com",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "g",
+            "source": "Exa",
+            "email": "v@x.com",
+            "match_score": "abc"
+          },
+          {
+            "candidate_id": "h",
+            "source": "Exa",
+            "email": "v@x.com",
+            "match_score": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "b",
+          "source": "Dice",
+          "email": "s@x.com",
+          "phone": "408-555-1212",
+          "match_score": 10,
+          "sources": [
+            "Dice",
+            "Exa"
+          ]
+        },
+        {
+          "candidate_id": "d",
+          "source": "JobDiva-Applicants-ish",
+          "jobdiva_id": "",
+          "email": "t@x.com",
+          "match_score": 40,
+          "sources": [
+            "applicant pool",
+            "JobDiva-Applicants-ish",
+            "LinkedIn"
+          ]
+        },
+        {
+          "candidate_id": "e",
+          "source": "Exa",
+          "email": "u@x.com",
+          "match_score": "85",
+          "sources": [
+            "Exa"
+          ]
+        },
+        {
+          "candidate_id": "h",
+          "source": "Exa",
+          "email": "v@x.com",
+          "match_score": 1,
+          "sources": [
+            "Exa"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "email upgrade over a placeholder and longer resume wins",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "jd",
+            "source": "JobDiva-Applicants",
+            "email": "Auto_9@jobdiva.com",
+            "phone": "408-555-3434",
+            "name": "Ann Lee",
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "li",
+            "source": "LinkedIn",
+            "email": "ann@x.com",
+            "phone": "408-555-3434",
+            "name": "Ann Lee",
+            "resume_text": "Ann Lee \u2014 engineer \ud83d\ude00 with ten years"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "jd",
+          "source": "JobDiva-Applicants",
+          "email": "ann@x.com",
+          "phone": "408-555-3434",
+          "name": "Ann Lee",
+          "resume_text": "Ann Lee \u2014 engineer \ud83d\ude00 with ten years",
+          "sources": [
+            "JobDiva-Applicants",
+            "LinkedIn"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "three-way transitive merge moves the survivor to the end",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "source": "Exa",
+            "email": "e1@x.com"
+          },
+          {
+            "candidate_id": "solo",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "b",
+            "source": "LinkedIn",
+            "phone": "408-555-9090",
+            "firstName": "Bo",
+            "lastName": "Li"
+          },
+          {
+            "candidate_id": "c",
+            "source": "Dice",
+            "email": "e1@x.com",
+            "phone": "408-555-9090",
+            "firstName": "Bo",
+            "lastName": "Li"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "solo",
+          "source": "Exa"
+        },
+        {
+          "candidate_id": "c",
+          "source": "Dice",
+          "email": "e1@x.com",
+          "phone": "408-555-9090",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "sources": [
+            "Dice",
+            "Exa",
+            "LinkedIn"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "survivor gaining a key does not re-scan in the same pass",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "b",
+            "source": "LinkedIn",
+            "phone": "408-555-6060",
+            "firstName": "Jane",
+            "lastName": "Doe"
+          },
+          {
+            "candidate_id": "a",
+            "source": "Exa",
+            "email": "e1@x.com",
+            "firstName": "Jane",
+            "lastName": "Doe"
+          },
+          {
+            "candidate_id": "c",
+            "source": "Exa",
+            "email": "e1@x.com",
+            "phone": "408-555-6060",
+            "name": "jane"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "b",
+          "source": "LinkedIn",
+          "phone": "408-555-6060",
+          "firstName": "Jane",
+          "lastName": "Doe"
+        },
+        {
+          "candidate_id": "c",
+          "source": "Exa",
+          "email": "e1@x.com",
+          "phone": "408-555-6060",
+          "name": "jane",
+          "sources": [
+            "Exa"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "nested email keys and sources merge",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "source": "Exa",
+            "data": {
+              "email": "n@x.com"
+            },
+            "sources": [
+              "Exa",
+              "",
+              0,
+              "Dice"
+            ]
+          },
+          {
+            "candidate_id": "b",
+            "source": "LinkedIn",
+            "enhanced_info": {
+              "email": "N@X.COM"
+            },
+            "sources": [
+              7
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "b",
+          "source": "LinkedIn",
+          "enhanced_info": {
+            "email": "N@X.COM"
+          },
+          "sources": [
+            "7",
+            "LinkedIn",
+            "Exa",
+            "Dice"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "empty and keyless",
+      "input": {
+        "candidates": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 1",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": null,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "LinkedIn",
+            "email": "a@x.com",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 75,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r3",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "email": "A@x.com",
+            "firstName": "",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "name": "bo",
+            "match_score": "70",
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "match_score": "70",
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Exa",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "lastName": "Doe",
+            "match_score": null,
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r8",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "408-555-1001",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl"
+          },
+          {
+            "candidate_id": "r9",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "phone": "",
+            "firstName": "Jane",
+            "name": "bo",
+            "match_score": null,
+            "resume_text": "Resume content unavailable"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r5",
+          "source": "Dice",
+          "email": "auto_1@jobdiva.com",
+          "phone": "000-000-0000",
+          "name": "bo",
+          "match_score": "70",
+          "resume_text": "a much longer resume text"
+        },
+        {
+          "candidate_id": "r6",
+          "source": "JobDiva-Applicants",
+          "email": "b@x.com",
+          "phone": "408-555-2002",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "match_score": "70",
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-Applicants",
+            "Exa"
+          ],
+          "no_contact": true
+        },
+        {
+          "candidate_id": "r8",
+          "source": "JobDiva-TalentSearch",
+          "email": "a@x.com",
+          "phone": "408-555-1001",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/bl",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn",
+            "Dice"
+          ],
+          "title": "Engineer",
+          "resume_text": "short"
+        },
+        {
+          "candidate_id": "r9",
+          "source": "Dice",
+          "email": "auto_1@jobdiva.com",
+          "phone": "",
+          "firstName": "Jane",
+          "name": "bo",
+          "match_score": null,
+          "resume_text": "Resume content unavailable"
+        }
+      ]
+    },
+    {
+      "name": "random set 2",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r1",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "LinkedIn",
+            "email": "",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 61,
+            "client_conflict": true,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Exa",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "phone": "4085551001",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r6",
+            "email": "A@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": null
+          },
+          {
+            "candidate_id": "r7",
+            "email": "A@x.com",
+            "phone": "",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 75,
+            "resume_text": "short",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-Applicants",
+          "email": "a@x.com",
+          "phone": "4085551001",
+          "firstName": "Jane",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 55,
+          "sources": [
+            "JobDiva-Applicants",
+            "LinkedIn",
+            "Exa",
+            "JobDiva-TalentSearch"
+          ],
+          "title": "Engineer",
+          "resume_text": "short",
+          "client_conflict": true
+        }
+      ]
+    },
+    {
+      "name": "random set 3",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "phone": "408-555-1001",
+            "firstName": "",
+            "lastName": "Doe",
+            "match_score": 90,
+            "no_contact": true,
+            "client_conflict": true,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-Applicants",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "match_score": null
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Dice",
+            "email": "A@x.com",
+            "phone": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Exa",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "Exa",
+          "phone": "408-555-1001",
+          "firstName": "",
+          "lastName": "Doe",
+          "match_score": 90,
+          "no_contact": true,
+          "client_conflict": true,
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-Applicants",
+          "phone": "000-000-0000",
+          "firstName": "Bo",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "match_score": null
+        },
+        {
+          "candidate_id": "r3",
+          "source": "Exa",
+          "email": "A@x.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 61,
+          "resume_text": "a much longer resume text",
+          "title": "Engineer",
+          "sources": [
+            "Exa",
+            "Dice"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 4",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "phone": "408-555-1001",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70",
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "email": "b@x.com",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r2",
+            "email": "b@x.com",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "client_conflict": true
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Exa",
+            "email": "",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "email": "a@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 75
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 60,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Doe",
+            "match_score": 90,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Exa",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "match_score": "70",
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r8",
+            "email": "a@x.com",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "resume_text": "a much longer resume text"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r5",
+          "source": "JobDiva-TalentSearch",
+          "email": "b@x.com",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 60,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "Dice"
+          ],
+          "client_conflict": true
+        },
+        {
+          "candidate_id": "r6",
+          "source": "JobDiva-TalentSearch",
+          "email": "a@x.com",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Doe",
+          "match_score": 90,
+          "title": "Engineer",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "Exa"
+          ],
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "resume_text": "a much longer resume text"
+        }
+      ]
+    },
+    {
+      "name": "random set 5",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r1",
+            "email": "a@x.com",
+            "phone": "",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Dice",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "resume_text": "short",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r1",
+          "email": "a@x.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 61,
+          "sources": [
+            "Dice"
+          ],
+          "title": "Engineer",
+          "resume_text": "short"
+        }
+      ]
+    },
+    {
+      "name": "random set 6",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "match_score": 61,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r2",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70",
+            "no_contact": true,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r3",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 75,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-Applicants",
+          "phone": "408-555-1001",
+          "firstName": "Jane",
+          "lastName": "Doe",
+          "match_score": 61,
+          "resume_text": "short"
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-TalentSearch",
+          "email": "A@x.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": null,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-TalentSearch"
+          ],
+          "title": "Engineer",
+          "no_contact": true
+        }
+      ]
+    },
+    {
+      "name": "random set 7",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "phone": "4085551001",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 60
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-Applicants",
+            "email": "",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "email": "A@x.com",
+            "phone": "",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r4",
+            "email": "a@x.com",
+            "phone": "408-555-2002",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": null
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "",
+            "lastName": "Doe",
+            "match_score": 55,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 61,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Dice",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61,
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r8",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r9",
+            "source": "Exa",
+            "email": "A@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r8",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "firstName": "Bo",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "title": "Engineer",
+          "sources": [
+            "Exa"
+          ]
+        },
+        {
+          "candidate_id": "r3",
+          "source": "JobDiva-TalentSearch",
+          "email": "A@x.com",
+          "phone": "408-555-2002",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90,
+          "no_contact": true,
+          "sources": [
+            "JobDiva-TalentSearch",
+            "JobDiva-Applicants",
+            "Exa",
+            "Dice"
+          ],
+          "title": "Engineer",
+          "resume_text": "a much longer resume text"
+        }
+      ]
+    },
+    {
+      "name": "random set 8",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "b@x.com",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 75
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Exa",
+            "email": "b@x.com",
+            "phone": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r3",
+            "email": "auto_1@jobdiva.com",
+            "phone": "",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r4",
+          "source": "JobDiva-TalentSearch",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": null,
+          "resume_text": "short",
+          "sources": [
+            "JobDiva-TalentSearch"
+          ],
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r5",
+          "source": "JobDiva-Applicants",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": "70",
+          "sources": [
+            "JobDiva-Applicants",
+            "Dice",
+            "Exa",
+            "LinkedIn"
+          ],
+          "resume_text": "a much longer resume text"
+        }
+      ]
+    },
+    {
+      "name": "random set 9",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Li",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 75
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Exa",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "LinkedIn",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "match_score": null,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r3",
+            "email": "",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Doe",
+            "match_score": 61,
+            "client_conflict": true,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Dice",
+            "email": "A@x.com",
+            "phone": "4085551001",
+            "name": "Jane Doe",
+            "no_contact": true,
+            "client_conflict": true,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Dice",
+            "email": "A@x.com",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-TalentSearch",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Li",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 75
+        },
+        {
+          "candidate_id": "r2",
+          "source": "LinkedIn",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-1001",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "match_score": null,
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r3",
+          "email": "",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Doe",
+          "match_score": 61,
+          "client_conflict": true,
+          "resume_text": "short"
+        },
+        {
+          "candidate_id": "r6",
+          "source": "JobDiva-Applicants",
+          "email": "b@x.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 55,
+          "sources": [
+            "JobDiva-Applicants",
+            "Exa",
+            "Dice",
+            "JobDiva-TalentSearch"
+          ],
+          "title": "Engineer",
+          "no_contact": true,
+          "client_conflict": true
+        }
+      ]
+    },
+    {
+      "name": "random set 10",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-TalentSearch",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "profile_url": "https://www.linkedin.com/in/jd/"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 90
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-TalentSearch",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "profile_url": "https://www.linkedin.com/in/jd/"
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-TalentSearch",
+          "email": "",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 90
+        }
+      ]
+    },
+    {
+      "name": "random set 11",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "name": "bo",
+            "match_score": 55,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-Applicants",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Li",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "client_conflict": true,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": null,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "LinkedIn",
+            "email": "a@x.com",
+            "phone": "",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60,
+            "client_conflict": true,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "match_score": 55,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "LinkedIn",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "match_score": 60,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 75,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r8",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "408-555-1001",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "no_contact": true
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "LinkedIn",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-1001",
+          "lastName": "Doe",
+          "name": "bo",
+          "match_score": 55,
+          "resume_text": "Resume content unavailable"
+        },
+        {
+          "candidate_id": "r6",
+          "source": "LinkedIn",
+          "phone": "408-555-1001",
+          "firstName": "Jane",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "match_score": 60,
+          "resume_text": "short",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r7",
+          "source": "Exa",
+          "email": "auto_1@jobdiva.com",
+          "firstName": "Bo",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 75,
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-Applicants",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Li",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90,
+          "client_conflict": true,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch",
+            "LinkedIn"
+          ],
+          "email": "a@x.com",
+          "title": "Engineer",
+          "no_contact": true
+        }
+      ]
+    },
+    {
+      "name": "random set 12",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 75
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "email": "b@x.com",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "match_score": 61,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r2",
+            "email": "b@x.com",
+            "phone": "",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r3",
+            "source": "LinkedIn",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Exa",
+            "email": "a@x.com",
+            "phone": "",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Exa",
+            "email": "",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 75,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "LinkedIn",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "resume_text": "short"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r3",
+          "source": "LinkedIn",
+          "email": "a@x.com",
+          "phone": "000-000-0000",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "LinkedIn",
+            "Exa"
+          ]
+        },
+        {
+          "candidate_id": "r0",
+          "source": "Dice",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 75,
+          "sources": [
+            "Dice",
+            "Exa",
+            "LinkedIn"
+          ],
+          "resume_text": "short"
+        }
+      ]
+    },
+    {
+      "name": "random set 13",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "email": "",
+            "phone": "",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "match_score": 75
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "phone": "",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 60,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "phone": "",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "email": "A@x.com",
+            "phone": "",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Dice",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": "70"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-Applicants",
+          "email": "",
+          "phone": "",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "name": "bo",
+          "match_score": 75
+        },
+        {
+          "candidate_id": "r1",
+          "source": "LinkedIn",
+          "phone": "",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 60,
+          "resume_text": "Resume content unavailable",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r2",
+          "source": "JobDiva-Applicants",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-1001",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 60,
+          "resume_text": "Resume content unavailable",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch"
+          ],
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r4",
+          "email": "A@x.com",
+          "phone": "",
+          "firstName": "Jane",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90,
+          "resume_text": "Resume content unavailable",
+          "sources": [
+            "Dice"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 14",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "LinkedIn",
+            "email": "a@x.com",
+            "firstName": "",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55,
+            "client_conflict": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r6",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": null
+          },
+          {
+            "candidate_id": "r7",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "match_score": 60
+          },
+          {
+            "candidate_id": "r8",
+            "source": "JobDiva-Applicants",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 75,
+            "no_contact": true,
+            "resume_text": "short"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-Applicants",
+          "email": "auto_1@jobdiva.com",
+          "phone": "4085551001",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "match_score": 90
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-Applicants",
+          "email": "b@x.com",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 90,
+          "sources": [
+            "JobDiva-Applicants",
+            "LinkedIn",
+            "JobDiva-TalentSearch"
+          ],
+          "client_conflict": true,
+          "resume_text": "a much longer resume text",
+          "phone": "000-000-0000"
+        },
+        {
+          "candidate_id": "r7",
+          "source": "JobDiva-TalentSearch",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "match_score": 60
+        },
+        {
+          "candidate_id": "r8",
+          "source": "JobDiva-Applicants",
+          "phone": "000-000-0000",
+          "firstName": "Bo",
+          "name": "Jane Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 75,
+          "no_contact": true,
+          "resume_text": "short",
+          "sources": [
+            "JobDiva-Applicants"
+          ],
+          "email": "auto_1@jobdiva.com"
+        }
+      ]
+    },
+    {
+      "name": "random set 15",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61,
+            "no_contact": true,
+            "client_conflict": true
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": "70",
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "LinkedIn",
+            "email": "auto_1@jobdiva.com",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": "70",
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "408-555-2002",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "LinkedIn",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r7",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r8",
+            "email": "",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 90,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r5",
+          "source": "JobDiva-Applicants",
+          "email": "a@x.com",
+          "phone": "408-555-2002",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 60,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-Applicants",
+            "Dice",
+            "LinkedIn"
+          ],
+          "no_contact": true,
+          "client_conflict": true
+        },
+        {
+          "candidate_id": "r7",
+          "source": "JobDiva-Applicants",
+          "email": "auto_1@jobdiva.com",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "no_contact": true,
+          "sources": [
+            "JobDiva-Applicants",
+            "LinkedIn",
+            "Exa"
+          ],
+          "resume_text": "a much longer resume text"
+        },
+        {
+          "candidate_id": "r8",
+          "email": "",
+          "phone": "000-000-0000",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 90,
+          "resume_text": "Resume content unavailable",
+          "title": "Engineer"
+        }
+      ]
+    },
+    {
+      "name": "random set 16",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "email": "b@x.com",
+            "phone": "000-000-0000",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "name": "Jane Doe",
+            "match_score": 60,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r2",
+            "email": "a@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55,
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r1",
+          "source": "Dice",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "firstName": "",
+          "name": "Jane Doe",
+          "match_score": 60,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "Dice",
+            "LinkedIn"
+          ],
+          "title": "Engineer",
+          "profile_url": "https://www.linkedin.com/in/jd/"
+        },
+        {
+          "candidate_id": "r3",
+          "source": "JobDiva-Applicants",
+          "email": "a@x.com",
+          "phone": "000-000-0000",
+          "firstName": "Bo",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 55,
+          "title": "Engineer",
+          "sources": [
+            "JobDiva-Applicants"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 17",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "b@x.com",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "client_conflict": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r1",
+            "email": "b@x.com",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "LinkedIn",
+            "email": "",
+            "phone": "408-555-1001",
+            "lastName": "Li",
+            "match_score": "70",
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 55,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "Dice",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r7",
+            "source": "JobDiva-Applicants",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 75,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r8",
+            "email": "b@x.com",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "bo",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r9",
+            "email": "a@x.com",
+            "phone": "408-555-1001",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r4",
+          "source": "LinkedIn",
+          "email": "",
+          "phone": "408-555-1001",
+          "lastName": "Li",
+          "match_score": "70",
+          "no_contact": true
+        },
+        {
+          "candidate_id": "r2",
+          "source": "JobDiva-TalentSearch",
+          "email": "b@x.com",
+          "phone": "408-555-2002",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 90,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "Dice",
+            "JobDiva-Applicants"
+          ],
+          "title": "Engineer",
+          "client_conflict": true,
+          "no_contact": true
+        },
+        {
+          "candidate_id": "r9",
+          "email": "a@x.com",
+          "phone": "408-555-1001",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 60,
+          "sources": [
+            "Dice"
+          ],
+          "resume_text": "a much longer resume text"
+        }
+      ]
+    },
+    {
+      "name": "random set 18",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "email": "",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "name": "bo",
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Dice",
+            "phone": "000-000-0000",
+            "lastName": "Li",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r3",
+            "source": "LinkedIn",
+            "email": "",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "email": "",
+            "phone": "",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "LinkedIn",
+            "email": "auto_1@jobdiva.com",
+            "phone": "",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r6",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60,
+            "no_contact": true,
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "email": "",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Li",
+          "profile_url": "https://linkedin.com/in/jd",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r1",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-1001",
+          "firstName": "Jane",
+          "name": "bo",
+          "resume_text": "a much longer resume text"
+        },
+        {
+          "candidate_id": "r2",
+          "source": "Dice",
+          "phone": "000-000-0000",
+          "lastName": "Li",
+          "match_score": 90
+        },
+        {
+          "candidate_id": "r4",
+          "email": "",
+          "phone": "000-000-0000",
+          "firstName": "",
+          "lastName": "Doe",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": "70",
+          "sources": [
+            "LinkedIn"
+          ],
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r7",
+          "source": "LinkedIn",
+          "email": "A@x.com",
+          "phone": "4085551001",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 60,
+          "no_contact": true,
+          "title": "Engineer",
+          "sources": [
+            "LinkedIn",
+            "Dice"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 19",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "b@x.com",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "match_score": 55,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-Applicants",
+            "email": "",
+            "phone": "408-555-2002",
+            "firstName": "Bo",
+            "match_score": 75,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "phone": "",
+            "firstName": "Jane",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 90
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "Dice",
+          "email": "b@x.com",
+          "phone": "408-555-1001",
+          "firstName": "Bo",
+          "lastName": "Doe",
+          "match_score": 55,
+          "resume_text": "Resume content unavailable",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-Applicants",
+          "email": "",
+          "phone": "408-555-2002",
+          "firstName": "Bo",
+          "match_score": 75,
+          "resume_text": "Resume content unavailable"
+        },
+        {
+          "candidate_id": "r2",
+          "source": "Exa",
+          "email": "auto_1@jobdiva.com",
+          "phone": "",
+          "firstName": "Jane",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 90
+        }
+      ]
+    },
+    {
+      "name": "random set 20",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-1001",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 90,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "email": "b@x.com",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70"
+          },
+          {
+            "candidate_id": "r3",
+            "email": "A@x.com",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 60,
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-TalentSearch",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "match_score": 90,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Exa",
+            "email": "b@x.com",
+            "phone": "",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 75,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r8",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r9",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "client_conflict": true
+          },
+          {
+            "candidate_id": "r10",
+            "source": "JobDiva-Applicants",
+            "email": "A@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": null,
+            "resume_text": "short",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r5",
+          "source": "JobDiva-Applicants",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "match_score": 90,
+          "resume_text": "a much longer resume text"
+        },
+        {
+          "candidate_id": "r8",
+          "source": "JobDiva-Applicants",
+          "email": "b@x.com",
+          "phone": "408-555-2002",
+          "firstName": "Bo",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": "70",
+          "no_contact": true
+        },
+        {
+          "candidate_id": "r2",
+          "source": "JobDiva-Applicants",
+          "email": "a@x.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": "70",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch",
+            "Exa"
+          ],
+          "title": "Engineer",
+          "no_contact": true,
+          "resume_text": "a much longer resume text",
+          "client_conflict": true
+        }
+      ]
+    },
+    {
+      "name": "random set 21",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-TalentSearch",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": null,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "email": "",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "bo",
+            "match_score": "70"
+          },
+          {
+            "candidate_id": "r3",
+            "email": "A@x.com",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70",
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Exa",
+            "phone": "408-555-1001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-TalentSearch",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r6",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": "70"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r1",
+          "source": "Dice",
+          "email": "",
+          "phone": "000-000-0000",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": 61
+        },
+        {
+          "candidate_id": "r2",
+          "source": "Exa",
+          "email": "auto_1@jobdiva.com",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "bo",
+          "match_score": "70"
+        },
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-TalentSearch",
+          "email": "b@x.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Doe",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": null,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-TalentSearch"
+          ],
+          "no_contact": true
+        },
+        {
+          "candidate_id": "r6",
+          "email": "A@x.com",
+          "phone": "408-555-2002",
+          "firstName": "Bo",
+          "name": "Jane Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": "70",
+          "sources": [
+            "Exa"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 22",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "lastName": "Li",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "email": "",
+            "phone": "4085551001",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "no_contact": true,
+            "client_conflict": true,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "lastName": "Li",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "firstName": "",
+            "lastName": "Li",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": "70",
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 75,
+            "no_contact": true,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r5",
+            "email": "A@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55,
+            "resume_text": "short"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r4",
+          "source": "Exa",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Doe",
+          "name": "Jane Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 75,
+          "no_contact": true,
+          "resume_text": "a much longer resume text",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r2",
+          "source": "JobDiva-TalentSearch",
+          "email": "a@x.com",
+          "phone": "4085551001",
+          "lastName": "Li",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 55,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn"
+          ],
+          "title": "Engineer",
+          "no_contact": true,
+          "client_conflict": true
+        }
+      ]
+    },
+    {
+      "name": "random set 23",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 60
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "email": "a@x.com",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Exa",
+            "phone": "408-555-2002",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "match_score": "70",
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "name": "Jane Doe",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r5",
+            "source": "LinkedIn",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "lastName": "Li",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 55,
+            "resume_text": "a much longer resume text"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r3",
+          "source": "Exa",
+          "phone": "408-555-2002",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "match_score": "70",
+          "resume_text": "a much longer resume text"
+        },
+        {
+          "candidate_id": "r4",
+          "source": "Exa",
+          "email": "auto_1@jobdiva.com",
+          "phone": "000-000-0000",
+          "name": "Jane Doe",
+          "match_score": 90,
+          "no_contact": true
+        },
+        {
+          "candidate_id": "r2",
+          "source": "JobDiva-TalentSearch",
+          "email": "A@x.com",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "name": "bo",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90,
+          "no_contact": true,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 24",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Dice",
+            "email": "a@x.com",
+            "phone": "4085551001",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-Applicants",
+            "email": "A@x.com",
+            "phone": "408-555-1001",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": null,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Exa",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": null,
+            "client_conflict": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Exa",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60
+          },
+          {
+            "candidate_id": "r6",
+            "source": "Exa",
+            "email": "A@x.com",
+            "firstName": "Jane",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "match_score": 90
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-TalentSearch",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "resume_text": "short",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "Exa"
+          ]
+        },
+        {
+          "candidate_id": "r3",
+          "source": "JobDiva-Applicants",
+          "email": "A@x.com",
+          "phone": "408-555-1001",
+          "name": "bo",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": null,
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch",
+            "Dice",
+            "Exa"
+          ],
+          "title": "Engineer",
+          "client_conflict": true
+        },
+        {
+          "candidate_id": "r7",
+          "source": "JobDiva-TalentSearch",
+          "email": "auto_1@jobdiva.com",
+          "firstName": "Bo",
+          "name": "Jane Doe",
+          "match_score": 90
+        }
+      ]
+    },
+    {
+      "name": "random set 25",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": "70"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Exa",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "name": "bo",
+            "match_score": 60,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "email": "A@x.com",
+            "firstName": "",
+            "profile_url": "https://linkedin.com/in/jd",
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "email": "b@x.com",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-TalentSearch",
+            "phone": "",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "match_score": 90,
+            "client_conflict": true,
+            "resume_text": "short"
+          },
+          {
+            "candidate_id": "r5",
+            "email": "",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "bo",
+            "client_conflict": true,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "Dice",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Exa",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r1",
+          "source": "Exa",
+          "phone": "408-555-1001",
+          "lastName": "Doe",
+          "name": "bo",
+          "match_score": 60,
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r2",
+          "email": "A@x.com",
+          "firstName": "",
+          "profile_url": "https://linkedin.com/in/jd",
+          "resume_text": "short",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r4",
+          "source": "JobDiva-TalentSearch",
+          "phone": "",
+          "firstName": "Bo",
+          "lastName": "Doe",
+          "match_score": 90,
+          "client_conflict": true,
+          "resume_text": "short"
+        },
+        {
+          "candidate_id": "r5",
+          "email": "",
+          "phone": "4085551001",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "bo",
+          "client_conflict": true,
+          "resume_text": "Resume content unavailable"
+        },
+        {
+          "candidate_id": "r3",
+          "source": "JobDiva-TalentSearch",
+          "email": "b@x.com",
+          "firstName": "Bo",
+          "name": "Jane Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90,
+          "resume_text": "a much longer resume text",
+          "title": "Engineer",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "Exa",
+            "Dice"
+          ],
+          "phone": "408-555-2002"
+        }
+      ]
+    },
+    {
+      "name": "random set 26",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "phone": "4085551001",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "000-000-0000",
+            "lastName": "Doe",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r2",
+            "source": "LinkedIn",
+            "email": "b@x.com",
+            "phone": "408-555-2002",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "r3",
+            "phone": "408-555-2002",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": "70",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "firstName": "Jane",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r5",
+            "phone": "",
+            "firstName": "",
+            "no_contact": true,
+            "client_conflict": true,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "Exa",
+            "email": "A@x.com",
+            "phone": "408-555-1001",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 90,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r7",
+            "source": "JobDiva-TalentSearch",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61,
+            "resume_text": "a much longer resume text",
+            "title": "Engineer"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "phone": "4085551001",
+          "name": "Jane Doe",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 90
+        },
+        {
+          "candidate_id": "r5",
+          "phone": "",
+          "firstName": "",
+          "no_contact": true,
+          "client_conflict": true,
+          "resume_text": "a much longer resume text",
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r7",
+          "source": "JobDiva-TalentSearch",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "firstName": "",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 61,
+          "resume_text": "a much longer resume text",
+          "title": "Engineer",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn",
+            "Exa",
+            "Dice"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "random set 27",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "phone": "408-555-1001",
+            "firstName": "",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 55,
+            "client_conflict": true,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-Applicants",
+            "phone": "408-555-1001",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Exa",
+            "email": "a@x.com",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "phone": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 60,
+            "no_contact": true,
+            "resume_text": "a much longer resume text"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r2",
+          "source": "Exa",
+          "email": "a@x.com",
+          "phone": "000-000-0000",
+          "firstName": "",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 55
+        },
+        {
+          "candidate_id": "r1",
+          "source": "JobDiva-Applicants",
+          "phone": "408-555-1001",
+          "firstName": "Bo",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": "70",
+          "resume_text": "a much longer resume text",
+          "sources": [
+            "JobDiva-Applicants",
+            "Exa",
+            "Dice"
+          ],
+          "title": "Engineer",
+          "client_conflict": true,
+          "no_contact": true,
+          "email": "auto_1@jobdiva.com"
+        }
+      ]
+    },
+    {
+      "name": "random set 28",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "408-555-1001",
+            "firstName": "",
+            "lastName": "Li",
+            "match_score": 90,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "email": "a@x.com",
+            "phone": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 61,
+            "resume_text": "short"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "JobDiva-Applicants",
+          "email": "a@x.com",
+          "phone": "408-555-1001",
+          "firstName": "",
+          "lastName": "Li",
+          "match_score": 90,
+          "title": "Engineer",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch"
+          ],
+          "profile_url": "https://linkedin.com/in/jd",
+          "resume_text": "short"
+        }
+      ]
+    },
+    {
+      "name": "random set 29",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "no_contact": true,
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r1",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "firstName": "",
+            "lastName": "Doe",
+            "name": "bo",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90,
+            "resume_text": "Resume content unavailable",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-Applicants",
+            "email": "b@x.com",
+            "phone": "4085551001",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 60,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": "70",
+            "resume_text": "Resume content unavailable"
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-Applicants",
+            "email": "a@x.com",
+            "phone": "",
+            "firstName": "Jane",
+            "name": "bo",
+            "match_score": 90,
+            "client_conflict": true,
+            "resume_text": "short",
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "Bo",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 90,
+            "client_conflict": true,
+            "title": "Engineer"
+          },
+          {
+            "candidate_id": "r6",
+            "email": "A@x.com",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 75
+          },
+          {
+            "candidate_id": "r7",
+            "source": "Exa",
+            "phone": "",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": 61,
+            "client_conflict": true,
+            "resume_text": "a much longer resume text"
+          },
+          {
+            "candidate_id": "r8",
+            "source": "JobDiva-Applicants",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "firstName": "",
+            "profile_url": "https://www.linkedin.com/in/jd/",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "r9",
+            "source": "LinkedIn",
+            "email": "A@x.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Doe",
+            "profile_url": "https://linkedin.com/in/jd"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r2",
+          "source": "JobDiva-Applicants",
+          "email": "b@x.com",
+          "phone": "4085551001",
+          "profile_url": "https://www.linkedin.com/in/jd/",
+          "match_score": 60,
+          "no_contact": true,
+          "sources": [
+            "JobDiva-Applicants",
+            "LinkedIn"
+          ],
+          "title": "Engineer"
+        },
+        {
+          "candidate_id": "r4",
+          "source": "JobDiva-Applicants",
+          "email": "a@x.com",
+          "phone": "408-555-2002",
+          "firstName": "Jane",
+          "name": "bo",
+          "match_score": 90,
+          "client_conflict": true,
+          "resume_text": "a much longer resume text",
+          "title": "Engineer",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch",
+            "Exa",
+            "LinkedIn"
+          ],
+          "profile_url": "https://linkedin.com/in/bl"
+        }
+      ]
+    },
+    {
+      "name": "random set 30",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "email": "auto_1@jobdiva.com",
+            "phone": "000-000-0000",
+            "firstName": "Bo",
+            "lastName": "Li",
+            "name": "bo",
+            "profile_url": "https://linkedin.com/in/jd",
+            "match_score": 55
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "email": "auto_1@jobdiva.com",
+            "phone": "408-555-2002",
+            "firstName": "",
+            "lastName": "Li",
+            "name": "Jane Doe",
+            "profile_url": "https://linkedin.com/in/bl",
+            "match_score": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "r0",
+          "source": "Exa",
+          "email": "auto_1@jobdiva.com",
+          "phone": "000-000-0000",
+          "firstName": "Bo",
+          "lastName": "Li",
+          "name": "bo",
+          "profile_url": "https://linkedin.com/in/jd",
+          "match_score": 55
+        },
+        {
+          "candidate_id": "r1",
+          "source": "Dice",
+          "email": "auto_1@jobdiva.com",
+          "phone": "408-555-2002",
+          "firstName": "",
+          "lastName": "Li",
+          "name": "Jane Doe",
+          "profile_url": "https://linkedin.com/in/bl",
+          "match_score": null
+        }
+      ]
+    }
+  ]
+}

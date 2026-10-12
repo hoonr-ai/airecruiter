@@ -1,0 +1,92 @@
+{
+  "function": "isEmployedByClient",
+  "cases": [
+    {
+      "name": "exact after normalisation",
+      "input": {
+        "candidate": {
+          "company": "Bank of America, N.A."
+        },
+        "job": {
+          "customer_name": "Bank of America"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "external is never a client",
+      "input": {
+        "candidate": {
+          "company": "External"
+        },
+        "job": {
+          "customer_name": "External"
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "short names need exact",
+      "input": {
+        "candidate": {
+          "company": "IBM India"
+        },
+        "job": {
+          "customer_name": "IBM"
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "substring of 4+ chars",
+      "input": {
+        "candidate": {
+          "headline": "Engineer at Acme Labs"
+        },
+        "job": {
+          "customer_name": "Acme"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "no job",
+      "input": {
+        "candidate": {
+          "company": "Acme"
+        },
+        "job": null
+      },
+      "expected": false
+    },
+    {
+      "name": "customer fallback field",
+      "input": {
+        "candidate": {
+          "company": "Globex"
+        },
+        "job": {
+          "customer": "Globex Corporation"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "past employer only",
+      "input": {
+        "candidate": {
+          "company_experience": [
+            {
+              "company": "Globex",
+              "end_date": "2019"
+            }
+          ]
+        },
+        "job": {
+          "customer_name": "Globex"
+        }
+      },
+      "expected": false
+    }
+  ]
+}

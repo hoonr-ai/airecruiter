@@ -1,9 +1,10 @@
 """Structured logging + request correlation for the API.
 
 Goals:
-  * One place to configure the stdlib logger so New Relic / Datadog /
-    OpenTelemetry can auto-instrument with zero code change later
-    (e.g. ``newrelic-admin run-program uvicorn main:app``).
+  * One place to configure the stdlib logger (New Relic attaches its
+    forwarding handler next to ours from ``core.newrelic.init()``; don't use
+    ``newrelic-admin run-program``, which starts the agent before
+    ``apps/api/.env`` is loaded).
   * JSON lines by default so log pipelines don't have to parse mixed
     text and so we can add fields (user_id, trace_id) without breaking
     downstream consumers.
@@ -19,6 +20,12 @@ Wire-up happens in ``apps/api/main.py``:
 
 Nothing else in the codebase needs to change — every
 ``logging.getLogger(__name__)`` caller inherits the new handlers.
+
+This module must never import ``newrelic``: the agent reads its environment
+defaults once, on first import, and ``core.newrelic.init()`` sets them after
+``configure_logging()`` has run. The New Relic log-forwarding handler is
+attached by ``core.newrelic`` (it reuses ``request_id_filter()`` and
+``warning_sampler()`` from here).
 """
 from __future__ import annotations
 
@@ -50,6 +57,11 @@ class _RequestIDFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.request_id = request_id_ctx.get()
         return True
+
+
+def request_id_filter() -> logging.Filter:
+    """A fresh request_id filter for handlers added outside this module."""
+    return _RequestIDFilter()
 
 
 class JSONFormatter(logging.Formatter):
@@ -198,6 +210,15 @@ class AmplitudeLogHandler(logging.Handler):
             return
 
 
+# The sampler configure_logging() installed; other handlers (New Relic) share
+# it so every handler makes the same keep/drop decision for a record.
+_WARNING_SAMPLER: Optional[RepeatedWarningSampler] = None
+
+
+def warning_sampler() -> Optional[RepeatedWarningSampler]:
+    return _WARNING_SAMPLER
+
+
 def configure_logging(
     level: str | None = None,
     fmt: str | None = None,
@@ -214,10 +235,12 @@ def configure_logging(
     for h in list(root.handlers):
         root.removeHandler(h)
 
+    global _WARNING_SAMPLER
     sampler = RepeatedWarningSampler(
         burst=int(os.getenv("LOG_WARNING_BURST", "5") or 5),
         window_s=float(os.getenv("LOG_WARNING_WINDOW_S", "60") or 60),
     )
+    _WARNING_SAMPLER = sampler
 
     handler = logging.StreamHandler(sys.stdout)
     handler.addFilter(_RequestIDFilter())
@@ -244,6 +267,28 @@ def configure_logging(
     for noisy in ("uvicorn.access", "httpx", "httpcore", "apscheduler.executors.default"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # The root handlers were just replaced: if the New Relic agent is already
+    # running in this process, put its forwarding handler back (with the new
+    # sampler). Looked up in sys.modules so this module never imports it.
+    nr = sys.modules.get("core.newrelic")
+    if nr is not None:
+        try:
+            nr.attach_log_forwarding()
+        except Exception:
+            pass
+
+
+def _tag_nr_transaction(**attrs: Any) -> None:
+    """Best-effort New Relic transaction attributes. core.newrelic is imported
+    lazily and only acts when the agent is on; telemetry never fails a request."""
+    try:
+        from core import newrelic as _nr
+
+        if _nr.is_enabled():
+            _nr.add_transaction_attributes(**attrs)
+    except Exception:
+        pass
+
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     """Generate or honor an ``X-Request-ID`` per request and propagate it.
@@ -256,9 +301,14 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         token = request_id_ctx.set(rid)
+        _tag_nr_transaction(request_id=rid[:64])
         try:
             response = await call_next(request)
             response.headers["X-Request-ID"] = rid
+            # Routing ran inside call_next and filled the shared scope.
+            job_id = (request.scope.get("path_params") or {}).get("job_id")
+            if job_id:
+                _tag_nr_transaction(job_id=str(job_id)[:64])
             return response
         finally:
             request_id_ctx.reset(token)

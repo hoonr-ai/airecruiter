@@ -5,6 +5,14 @@
 import { trackEvent } from "@/lib/analytics";
 import { msalInstance } from "@/lib/msal-config";
 import type { Snapshot } from "@/app/admin/live-report/types";
+import {
+  candidatesQueryString,
+  retryAfterMs,
+  type CandidatesQuery,
+  type CreateSessionBody,
+  type LaunchSessionRowsPage,
+  type LaunchSessionView,
+} from "@/lib/launch-session";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL!;
 
@@ -113,24 +121,21 @@ export function isNetworkFetchError(e: unknown): boolean {
   return e instanceof TypeError;
 }
 
+// Global fetch patch: auth headers on every PAIR API call, however it was made.
+// Headers-aware (lib/fetch-auth.ts): a Headers/tuple `init.headers` — e.g. from
+// the New Relic agent's fetch wrapper — keeps its Content-Type, and auth is
+// only added where absent (authFetch/req already set it, so no second token
+// acquisition for those).
+import { createAuthFetch } from "./fetch-auth";
+
 if (typeof window !== "undefined" && !(window as any).__apiFetchPatched) {
   (window as any).__apiFetchPatched = true;
   const originalFetch = window.fetch.bind(window);
-  window.fetch = async function (input: RequestInfo | URL, init: RequestInit = {}) {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as any)?.url;
-    if (url && (url.startsWith(API_BASE) || url.includes(API_BASE))) {
-      const authHeaders = await getAuthHeaders();
-      const existingHeaders = (init.headers || {}) as Record<string, string>;
-      init = {
-        ...init,
-        headers: {
-          ...authHeaders,
-          ...existingHeaders,
-        },
-      };
-    }
-    return originalFetch(input, init);
-  };
+  window.fetch = createAuthFetch(
+    originalFetch,
+    (url) => url.startsWith(API_BASE) || url.includes(API_BASE),
+    getAuthHeaders,
+  );
 }
 
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
@@ -365,6 +370,122 @@ function dashboardQuery(opts?: DashboardQuery & { postedFrom?: string | null; po
   return suffix ? `?${suffix}` : "";
 }
 
+// ---- Launch sessions (backend-driven Source & Launch) ------------------------
+// apps/api/routers/launch_sessions.py; the browser rules are in
+// lib/launch-session.ts and the polling in hooks/use-launch-session.ts.
+// Not `req`: every answer comes back as a value (status, parsed body,
+// Retry-After) instead of a throw — the caller decides on attach / retry /
+// legacy fallback — and polls don't emit an api_request_* event every 3 s.
+
+export type LaunchSessionResult<T> =
+  | { ok: true; status: number; data: T }
+  | { ok: false; status: number; body: unknown; retryAfterMs: number | null; network: boolean };
+
+// Every launch-session request has a deadline (token + response + body): the
+// poll loop awaits one request at a time, and nginx holds /api/ open for a day
+// (proxy_read_timeout 86400), so a black-holed connection (VPN / Wi-Fi drop)
+// or a stuck worker would otherwise freeze it. A timeout reads as a network
+// error — retried like one; every write is safe to resend (create replays by
+// its key, uploads upsert, confirm / cancel / start answer 409 on a replay,
+// child creates use server-derived keys).
+const LS_READ_TIMEOUT_MS = 20000;
+const LS_WRITE_TIMEOUT_MS = 60000;
+
+async function lsFetch<T>(
+  path: string,
+  init: { method?: string; body?: unknown; timeoutMs?: number } = {},
+): Promise<LaunchSessionResult<T>> {
+  const method = init.method || "GET";
+  const networkError: LaunchSessionResult<T> = { ok: false, status: 0, body: null, retryAfterMs: null, network: true };
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<LaunchSessionResult<T>>((resolve) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      resolve(networkError);
+    }, init.timeoutMs ?? (method === "GET" ? LS_READ_TIMEOUT_MS : LS_WRITE_TIMEOUT_MS));
+  });
+  const run = async (): Promise<LaunchSessionResult<T>> => {
+    let res: Response;
+    try {
+      res = await authFetch(`${API_BASE}${path}`, {
+        method,
+        headers: init.body !== undefined ? { "Content-Type": "application/json" } : {},
+        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+        signal: controller?.signal,
+      });
+    } catch {
+      return networkError;
+    }
+    let body: unknown = null;
+    try {
+      const text = await res.text();
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = text;
+      }
+    } catch {
+      // A dropped / aborted body read: an error answer's status still decides.
+      if (res.ok) return networkError;
+    }
+    if (res.ok) return { ok: true, status: res.status, data: body as T };
+    return {
+      ok: false,
+      status: res.status,
+      body,
+      retryAfterMs: retryAfterMs(res.headers.get("Retry-After")),
+      network: false,
+    };
+  };
+  try {
+    return await Promise.race([run(), deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const lsJob = (jobRef: string) => `/api/v1/jobs/${encodeURIComponent(jobRef)}/launch-sessions`;
+const lsSession = (id: string) => `/api/v1/launch-sessions/${encodeURIComponent(id)}`;
+type LsContacts = Record<string, { phone?: string; email?: string }>;
+
+export const launchSessionsApi = {
+  config: () => lsFetch<unknown>(`/api/v1/launch-sessions/config`),
+  create: (jobRef: string, body: CreateSessionBody) =>
+    lsFetch<{ session: LaunchSessionView }>(lsJob(jobRef), { method: "POST", body }),
+  listForJob: (jobRef: string, opts: { active?: boolean; needsContact?: boolean; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.active) qs.set("active", "true");
+    if (opts.needsContact) qs.set("needs_contact", "true");
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    const q = qs.toString();
+    return lsFetch<{ sessions: LaunchSessionView[] }>(`${lsJob(jobRef)}${q ? `?${q}` : ""}`);
+  },
+  get: (id: string) => lsFetch<{ session: LaunchSessionView }>(lsSession(id)),
+  candidates: (id: string, q: CandidatesQuery = {}) =>
+    lsFetch<LaunchSessionRowsPage>(`${lsSession(id)}/candidates${candidatesQueryString(q)}`),
+  addCandidates: (id: string, candidates: unknown[]) =>
+    lsFetch<{ added: number; total: number }>(`${lsSession(id)}/candidates`, { method: "POST", body: { candidates } }),
+  start: (id: string) => lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/start`, { method: "POST" }),
+  confirm: (id: string, body: { contacts: LsContacts; candidate_ids?: string[] }) =>
+    lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/confirm`, { method: "POST", body }),
+  needsContact: (
+    id: string,
+    body: { contacts: LsContacts; candidate_ids: string[]; skip_ids: string[]; idempotency_key?: string },
+  ) =>
+    lsFetch<{ session: LaunchSessionView | null; skipped: number }>(`${lsSession(id)}/needs-contact`, {
+      method: "POST",
+      body,
+    }),
+  retryFailed: (id: string, body: { candidate_ids?: string[]; idempotency_key?: string } = {}) =>
+    lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/retry-failed`, { method: "POST", body }),
+  cancel: (id: string, reason?: string) =>
+    lsFetch<{ session: LaunchSessionView }>(`${lsSession(id)}/cancel`, {
+      method: "POST",
+      body: reason ? { reason: reason.slice(0, 200) } : {},
+    }),
+};
+
 export const api = {
   jobs: {
     fetch: (body: { job_id: string }) =>
@@ -413,6 +534,15 @@ export const api = {
         method: "POST",
         body,
         keepalive: opts.keepalive,
+      }),
+    // Step 5 "Source & Launch PAIR" click — T1 of the launch timings
+    // (routers/launch_timing.py). The server keeps the first click only, so
+    // calling it on every click is safe. keepalive so a click that navigates
+    // away still lands.
+    launchClicked: (jobRef: string) =>
+      req<{ status?: string }>(`/api/v1/jobs/${encodeURIComponent(jobRef)}/launch-clicked`, {
+        method: "POST",
+        keepalive: true,
       }),
   },
   candidates: {
@@ -573,4 +703,5 @@ export const api = {
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
+  launchSessions: launchSessionsApi,
 };

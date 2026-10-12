@@ -1,0 +1,89 @@
+{
+  "function": "getCandidateDisplayName",
+  "cases": [
+    {
+      "name": "collapses whitespace",
+      "input": {
+        "candidate": {
+          "name": "  Jane   Doe "
+        }
+      },
+      "expected": "Jane Doe"
+    },
+    {
+      "name": "anonymous name falls to first+last",
+      "input": {
+        "candidate": {
+          "name": "LinkedIn Candidate",
+          "firstName": "Jane",
+          "lastName": "Doe"
+        }
+      },
+      "expected": "Jane Doe"
+    },
+    {
+      "name": "falls back to title",
+      "input": {
+        "candidate": {
+          "name": "unknown",
+          "title": "Senior Engineer"
+        }
+      },
+      "expected": "Senior Engineer"
+    },
+    {
+      "name": "linkedin profile",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn"
+        }
+      },
+      "expected": "LinkedIn profile"
+    },
+    {
+      "name": "unnamed",
+      "input": {
+        "candidate": {}
+      },
+      "expected": "Unnamed candidate"
+    },
+    {
+      "name": "first only",
+      "input": {
+        "candidate": {
+          "firstName": "Jane"
+        }
+      },
+      "expected": "Jane"
+    },
+    {
+      "name": "anonymous + last",
+      "input": {
+        "candidate": {
+          "name": "Unknown Candidate",
+          "lastName": "Doe"
+        }
+      },
+      "expected": "Doe"
+    },
+    {
+      "name": "unicode whitespace",
+      "input": {
+        "candidate": {
+          "name": "\u00a0Jane\u2003Doe"
+        }
+      },
+      "expected": "Jane Doe"
+    },
+    {
+      "name": "anonymous title",
+      "input": {
+        "candidate": {
+          "title": "Professional Candidate",
+          "source": "Exa"
+        }
+      },
+      "expected": "Unnamed candidate"
+    }
+  ]
+}

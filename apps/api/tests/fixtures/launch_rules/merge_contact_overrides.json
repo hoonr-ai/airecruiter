@@ -1,0 +1,481 @@
+{
+  "function": "mergeContactOverrides",
+  "cases": [
+    {
+      "name": "empty answers keep the lookup",
+      "input": {
+        "pending": {
+          "a": {
+            "phone": "1112223333",
+            "email": "e@x.com"
+          },
+          "z": {
+            "phone": "9"
+          }
+        },
+        "provided": {
+          "a": {
+            "phone": "",
+            "email": "new@x.com"
+          },
+          "b": {
+            "phone": "4445556666"
+          },
+          "c": {}
+        }
+      },
+      "expected": {
+        "a": {
+          "phone": "1112223333",
+          "email": "new@x.com"
+        },
+        "z": {
+          "phone": "9"
+        },
+        "b": {
+          "phone": "4445556666"
+        },
+        "c": {}
+      }
+    },
+    {
+      "name": "random set 1",
+      "input": {
+        "pending": {
+          "9001": {
+            "phone": "",
+            "email": "new@x.com"
+          },
+          "": {
+            "email": "Auto_1@jobdiva.com"
+          },
+          "r6": {
+            "phone": "408-555-0177",
+            "email": "shared@x.com"
+          }
+        },
+        "provided": {
+          "": {
+            "phone": "",
+            "email": "shared@x.com"
+          },
+          "r4": {
+            "phone": "(408) 555-0101",
+            "email": "Auto_1@jobdiva.com"
+          }
+        }
+      },
+      "expected": {
+        "9001": {
+          "phone": "",
+          "email": "new@x.com"
+        },
+        "": {
+          "email": "shared@x.com"
+        },
+        "r6": {
+          "phone": "408-555-0177",
+          "email": "shared@x.com"
+        },
+        "r4": {
+          "phone": "(408) 555-0101",
+          "email": "Auto_1@jobdiva.com"
+        }
+      }
+    },
+    {
+      "name": "random set 2",
+      "input": {
+        "pending": {
+          "r0": {},
+          "r2": {}
+        },
+        "provided": {
+          "3": {},
+          "r2": {
+            "email": "new@x.com"
+          }
+        }
+      },
+      "expected": {
+        "3": {},
+        "r0": {},
+        "r2": {
+          "email": "new@x.com"
+        }
+      }
+    },
+    {
+      "name": "random set 3",
+      "input": {
+        "pending": {
+          "r1": {
+            "phone": ""
+          }
+        },
+        "provided": {
+          "9003": {
+            "phone": "408-555-0177"
+          },
+          "r0": {
+            "email": "new@x.com"
+          }
+        }
+      },
+      "expected": {
+        "9003": {
+          "phone": "408-555-0177"
+        },
+        "r1": {
+          "phone": ""
+        },
+        "r0": {
+          "email": "new@x.com"
+        }
+      }
+    },
+    {
+      "name": "random set 4",
+      "input": {
+        "pending": {
+          "6": {
+            "email": "new@x.com"
+          },
+          "r0": {},
+          "r1": {},
+          "r5": {
+            "phone": "",
+            "email": ""
+          },
+          "i7": {}
+        },
+        "provided": {
+          "r1": {
+            "email": "shared@x.com"
+          }
+        }
+      },
+      "expected": {
+        "6": {
+          "email": "new@x.com"
+        },
+        "r0": {},
+        "r1": {
+          "email": "shared@x.com"
+        },
+        "r5": {
+          "phone": "",
+          "email": ""
+        },
+        "i7": {}
+      }
+    },
+    {
+      "name": "random set 5",
+      "input": {
+        "pending": {
+          "9004": {
+            "email": "new@x.com"
+          },
+          "": {
+            "phone": "12"
+          },
+          "r1": {}
+        },
+        "provided": {
+          "r0": {},
+          "r1": {
+            "email": "new@x.com"
+          },
+          "i2": {
+            "email": ""
+          },
+          "r5": {
+            "email": ""
+          }
+        }
+      },
+      "expected": {
+        "9004": {
+          "email": "new@x.com"
+        },
+        "": {
+          "phone": "12"
+        },
+        "r1": {
+          "email": "new@x.com"
+        },
+        "r0": {},
+        "i2": {},
+        "r5": {}
+      }
+    },
+    {
+      "name": "random set 6",
+      "input": {
+        "pending": {
+          "i0": {}
+        },
+        "provided": {
+          "9000": {}
+        }
+      },
+      "expected": {
+        "9000": {},
+        "i0": {}
+      }
+    },
+    {
+      "name": "random set 7",
+      "input": {
+        "pending": {
+          "r1": {},
+          "r6": {}
+        },
+        "provided": {
+          "3": {
+            "email": ""
+          },
+          "r1": {
+            "phone": "12",
+            "email": ""
+          },
+          "r2": {
+            "phone": "12"
+          }
+        }
+      },
+      "expected": {
+        "3": {},
+        "r1": {
+          "phone": "12"
+        },
+        "r6": {},
+        "r2": {
+          "phone": "12"
+        }
+      }
+    },
+    {
+      "name": "random set 8",
+      "input": {
+        "pending": {
+          "r1": {
+            "phone": "(408) 555-0101"
+          },
+          "r3": {
+            "phone": "408-555-0177",
+            "email": ""
+          }
+        },
+        "provided": {
+          "r0": {
+            "phone": "",
+            "email": "Auto_1@jobdiva.com"
+          }
+        }
+      },
+      "expected": {
+        "r1": {
+          "phone": "(408) 555-0101"
+        },
+        "r3": {
+          "phone": "408-555-0177",
+          "email": ""
+        },
+        "r0": {
+          "email": "Auto_1@jobdiva.com"
+        }
+      }
+    },
+    {
+      "name": "random set 9",
+      "input": {
+        "pending": {
+          "r1": {
+            "phone": "",
+            "email": "shared@x.com"
+          }
+        },
+        "provided": {
+          "2": {
+            "phone": "12",
+            "email": "new@x.com"
+          }
+        }
+      },
+      "expected": {
+        "2": {
+          "phone": "12",
+          "email": "new@x.com"
+        },
+        "r1": {
+          "phone": "",
+          "email": "shared@x.com"
+        }
+      }
+    },
+    {
+      "name": "random set 10",
+      "input": {
+        "pending": {
+          "": {},
+          "i2": {
+            "phone": "12",
+            "email": "new@x.com"
+          },
+          "r5": {
+            "phone": "(408) 555-0101",
+            "email": "shared@x.com"
+          }
+        },
+        "provided": {
+          "r1": {
+            "phone": "12"
+          },
+          "r3": {
+            "phone": "408-555-0177"
+          }
+        }
+      },
+      "expected": {
+        "": {},
+        "i2": {
+          "phone": "12",
+          "email": "new@x.com"
+        },
+        "r5": {
+          "phone": "(408) 555-0101",
+          "email": "shared@x.com"
+        },
+        "r1": {
+          "phone": "12"
+        },
+        "r3": {
+          "phone": "408-555-0177"
+        }
+      }
+    },
+    {
+      "name": "random set 11",
+      "input": {
+        "pending": {
+          "9002": {
+            "email": "shared@x.com"
+          },
+          "r1": {
+            "email": ""
+          },
+          "r3": {
+            "email": "new@x.com"
+          }
+        },
+        "provided": {
+          "": {
+            "phone": "(408) 555-0101"
+          }
+        }
+      },
+      "expected": {
+        "9002": {
+          "email": "shared@x.com"
+        },
+        "r1": {
+          "email": ""
+        },
+        "r3": {
+          "email": "new@x.com"
+        },
+        "": {
+          "phone": "(408) 555-0101"
+        }
+      }
+    },
+    {
+      "name": "random set 12",
+      "input": {
+        "pending": {
+          "r1": {
+            "phone": "12",
+            "email": "new@x.com"
+          }
+        },
+        "provided": {
+          "r0": {},
+          "r2": {
+            "email": ""
+          }
+        }
+      },
+      "expected": {
+        "r1": {
+          "phone": "12",
+          "email": "new@x.com"
+        },
+        "r0": {},
+        "r2": {}
+      }
+    },
+    {
+      "name": "random set 13",
+      "input": {
+        "pending": {},
+        "provided": {
+          "i0": {
+            "phone": "12"
+          },
+          "r1": {
+            "phone": "12",
+            "email": "Auto_1@jobdiva.com"
+          },
+          "r5": {}
+        }
+      },
+      "expected": {
+        "i0": {
+          "phone": "12"
+        },
+        "r1": {
+          "phone": "12",
+          "email": "Auto_1@jobdiva.com"
+        },
+        "r5": {}
+      }
+    },
+    {
+      "name": "random set 14",
+      "input": {
+        "pending": {
+          "9001": {
+            "phone": "(408) 555-0101"
+          }
+        },
+        "provided": {}
+      },
+      "expected": {
+        "9001": {
+          "phone": "(408) 555-0101"
+        }
+      }
+    },
+    {
+      "name": "random set 15",
+      "input": {
+        "pending": {},
+        "provided": {
+          "r6": {
+            "phone": "",
+            "email": ""
+          },
+          "r7": {
+            "email": ""
+          }
+        }
+      },
+      "expected": {
+        "r6": {},
+        "r7": {}
+      }
+    }
+  ]
+}

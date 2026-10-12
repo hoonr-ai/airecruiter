@@ -1,0 +1,161 @@
+{
+  "function": "isValidLaunchEmail",
+  "cases": [
+    {
+      "name": "valid",
+      "input": {
+        "value": "john@acme.com"
+      },
+      "expected": true
+    },
+    {
+      "name": "padded mixed case",
+      "input": {
+        "value": "  John@Acme.COM  "
+      },
+      "expected": true
+    },
+    {
+      "name": "empty",
+      "input": {
+        "value": ""
+      },
+      "expected": false
+    },
+    {
+      "name": "null",
+      "input": {
+        "value": null
+      },
+      "expected": false
+    },
+    {
+      "name": "no at",
+      "input": {
+        "value": "no-at-sign"
+      },
+      "expected": false
+    },
+    {
+      "name": "no dot domain",
+      "input": {
+        "value": "a@b"
+      },
+      "expected": false
+    },
+    {
+      "name": "short tld",
+      "input": {
+        "value": "a@b.c"
+      },
+      "expected": true
+    },
+    {
+      "name": "space inside",
+      "input": {
+        "value": "a b@c.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "placeholder",
+      "input": {
+        "value": "your-email@example.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "any example.com",
+      "input": {
+        "value": "x@example.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "noemail.pair.ai",
+      "input": {
+        "value": "x@noemail.pair.ai"
+      },
+      "expected": false
+    },
+    {
+      "name": "jobdiva synthetic",
+      "input": {
+        "value": "Auto_123@jobdiva.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "jobdiva upper",
+      "input": {
+        "value": "x@JOBDIVA.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "double at",
+      "input": {
+        "value": "a@@b.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "bom trimmed",
+      "input": {
+        "value": "\ufeffjohn@acme.com\ufeff"
+      },
+      "expected": true
+    },
+    {
+      "name": "trailing newline trimmed",
+      "input": {
+        "value": "john@acme.com\n"
+      },
+      "expected": true
+    },
+    {
+      "name": "nbsp inside",
+      "input": {
+        "value": "jo\u00a0hn@acme.com"
+      },
+      "expected": false
+    },
+    {
+      "name": "x1c is not JS whitespace",
+      "input": {
+        "value": "jo\u001chn@acme.com"
+      },
+      "expected": true
+    },
+    {
+      "name": "number",
+      "input": {
+        "value": 12345
+      },
+      "expected": false
+    },
+    {
+      "name": "boolean",
+      "input": {
+        "value": true
+      },
+      "expected": false
+    },
+    {
+      "name": "array value",
+      "input": {
+        "value": [
+          "a@b.com"
+        ]
+      },
+      "expected": true
+    },
+    {
+      "name": "unicode local part",
+      "input": {
+        "value": "j\u00f6hn@acme.com"
+      },
+      "expected": true
+    }
+  ]
+}

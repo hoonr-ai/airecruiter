@@ -1,0 +1,40 @@
+{
+  "function": "candidateRowId",
+  "cases": [
+    {
+      "name": "candidate_id",
+      "input": {
+        "candidate": {
+          "candidate_id": " 12 "
+        }
+      },
+      "expected": "12"
+    },
+    {
+      "name": "jobdiva fallback",
+      "input": {
+        "candidate": {
+          "candidate_id": "",
+          "jobdiva_candidate_id": 77
+        }
+      },
+      "expected": "77"
+    },
+    {
+      "name": "id",
+      "input": {
+        "candidate": {
+          "id": "x"
+        }
+      },
+      "expected": "x"
+    },
+    {
+      "name": "none",
+      "input": {
+        "candidate": {}
+      },
+      "expected": ""
+    }
+  ]
+}

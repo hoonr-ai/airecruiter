@@ -1,0 +1,2405 @@
+{
+  "function": "computeAutoLaunchSelection",
+  "cases": [
+    {
+      "name": "floor, unscored and below-floor counts",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "a",
+            "source": "LinkedIn",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "b",
+            "source": "Exa",
+            "match_score": 59.5
+          },
+          {
+            "candidate_id": "c",
+            "source": "Exa",
+            "match_score": null
+          },
+          {
+            "candidate_id": "d",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "e",
+            "source": "Exa",
+            "match_score": "90"
+          },
+          {
+            "candidate_id": "f",
+            "source": "Exa",
+            "match_score": true
+          },
+          {
+            "candidate_id": "g",
+            "source": "Exa",
+            "match_score": 60
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "ids": [
+          "a",
+          "g"
+        ],
+        "eligibleTotal": 2,
+        "belowFloor": 1,
+        "unscored": 4
+      }
+    },
+    {
+      "name": "ties keep pool order and the cap applies after sorting",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "a",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "b",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "c",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "d",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "e",
+            "match_score": 70
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 3
+      },
+      "expected": {
+        "ids": [
+          "b",
+          "d",
+          "a"
+        ],
+        "eligibleTotal": 5,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "exclusion, no_contact and launched rows are skipped uncounted",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "x1",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "x2",
+            "source": "LinkedIn",
+            "match_score": 95,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "x3",
+            "source": "LinkedIn",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "x4",
+            "source": "Exa",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "x5",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "x6",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "ok",
+            "source": "Exa",
+            "match_score": 95,
+            "client_conflict": true
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:x3",
+          ":x6"
+        ],
+        "launchedIds": [
+          "x4",
+          "x5-other",
+          "x5"
+        ],
+        "limit": 250
+      },
+      "expected": {
+        "ids": [
+          "ok"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "a duplicate id counts once; an excluded first copy does not take the id",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "d1",
+            "match_score": 90,
+            "available": false
+          },
+          {
+            "candidate_id": "d1",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "d2",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "d2",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": "j1",
+            "match_score": 65
+          },
+          {
+            "id": "i1",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "  ",
+            "match_score": 99
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "ids": [
+          "d2",
+          "d1",
+          "j1",
+          "i1"
+        ],
+        "eligibleTotal": 4,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "limit null clamps to 1",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "a",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "b",
+            "match_score": 80
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": null
+      },
+      "expected": {
+        "ids": [
+          "b"
+        ],
+        "eligibleTotal": 2,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "twin id from the launched answer",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "900",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "li-1",
+            "source": "LinkedIn",
+            "match_score": 88
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:li-0"
+        ],
+        "launchedIds": [
+          "li-0",
+          "900"
+        ],
+        "limit": 10
+      },
+      "expected": {
+        "ids": [
+          "li-1"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "with reasons: every skip reason, then over_limit in rank order",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:done"
+        ],
+        "launchedIds": [
+          "twin",
+          "fly"
+        ],
+        "limit": 2,
+        "blocked": {
+          "fly": "in_flight",
+          "back": "applicant_backlog",
+          "blank-reason": "",
+          "mid": "in_flight"
+        },
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "hi",
+          "blank-reason"
+        ],
+        "eligibleTotal": 4,
+        "belowFloor": 2,
+        "unscored": 2,
+        "skipped": [
+          {
+            "id": "dup",
+            "reason": "duplicate_id"
+          },
+          {
+            "id": "off",
+            "reason": "exclusion:Offer Accepted"
+          },
+          {
+            "id": "nc",
+            "reason": "no_contact"
+          },
+          {
+            "id": "done",
+            "reason": "launched"
+          },
+          {
+            "id": "twin",
+            "reason": "launched"
+          },
+          {
+            "id": "fly",
+            "reason": "launched"
+          },
+          {
+            "id": "back",
+            "reason": "applicant_backlog"
+          },
+          {
+            "id": "na",
+            "reason": "unscored"
+          },
+          {
+            "id": "str",
+            "reason": "unscored"
+          },
+          {
+            "id": "low",
+            "reason": "below_floor"
+          },
+          {
+            "id": "neg",
+            "reason": "below_floor"
+          },
+          {
+            "id": "mid",
+            "reason": "in_flight"
+          },
+          {
+            "id": "dup",
+            "reason": "over_limit"
+          },
+          {
+            "id": "555",
+            "reason": "over_limit"
+          }
+        ]
+      }
+    },
+    {
+      "name": "blocked without reasons: launched wins over blocked; empty reason ignored",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:done"
+        ],
+        "launchedIds": [
+          "twin",
+          "fly"
+        ],
+        "limit": 250,
+        "blocked": {
+          "fly": "in_flight",
+          "back": "applicant_backlog",
+          "blank-reason": "",
+          "mid": "in_flight"
+        }
+      },
+      "expected": {
+        "ids": [
+          "hi",
+          "blank-reason",
+          "dup",
+          "555"
+        ],
+        "eligibleTotal": 4,
+        "belowFloor": 2,
+        "unscored": 2
+      }
+    },
+    {
+      "name": "no floor (QA quick launch): unscored ranked last, below -1 after it",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:done"
+        ],
+        "launchedIds": [
+          "twin",
+          "fly"
+        ],
+        "limit": 250,
+        "minScore": null,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "hi",
+          "back",
+          "blank-reason",
+          "dup",
+          "555",
+          "mid",
+          "low",
+          "na",
+          "str",
+          "neg"
+        ],
+        "eligibleTotal": 10,
+        "belowFloor": 0,
+        "unscored": 0,
+        "skipped": [
+          {
+            "id": "dup",
+            "reason": "duplicate_id"
+          },
+          {
+            "id": "off",
+            "reason": "exclusion:Offer Accepted"
+          },
+          {
+            "id": "nc",
+            "reason": "no_contact"
+          },
+          {
+            "id": "done",
+            "reason": "launched"
+          },
+          {
+            "id": "twin",
+            "reason": "launched"
+          },
+          {
+            "id": "fly",
+            "reason": "launched"
+          }
+        ]
+      }
+    },
+    {
+      "name": "no floor, cap 2",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 2,
+        "minScore": null
+      },
+      "expected": {
+        "ids": [
+          "hi",
+          "done"
+        ],
+        "eligibleTotal": 13,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "custom floor 75",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250,
+        "minScore": 75,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "hi",
+          "done",
+          "twin",
+          "fly",
+          "back",
+          "blank-reason",
+          "dup",
+          "555"
+        ],
+        "eligibleTotal": 8,
+        "belowFloor": 3,
+        "unscored": 2,
+        "skipped": [
+          {
+            "id": "dup",
+            "reason": "duplicate_id"
+          },
+          {
+            "id": "off",
+            "reason": "exclusion:Offer Accepted"
+          },
+          {
+            "id": "nc",
+            "reason": "no_contact"
+          },
+          {
+            "id": "na",
+            "reason": "unscored"
+          },
+          {
+            "id": "str",
+            "reason": "unscored"
+          },
+          {
+            "id": "low",
+            "reason": "below_floor"
+          },
+          {
+            "id": "neg",
+            "reason": "below_floor"
+          },
+          {
+            "id": "mid",
+            "reason": "below_floor"
+          }
+        ]
+      }
+    },
+    {
+      "name": "string floor coerces",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250,
+        "minScore": "70"
+      },
+      "expected": {
+        "ids": [
+          "hi",
+          "done",
+          "twin",
+          "fly",
+          "back",
+          "blank-reason",
+          "dup",
+          "555",
+          "mid"
+        ],
+        "eligibleTotal": 9,
+        "belowFloor": 2,
+        "unscored": 2
+      }
+    },
+    {
+      "name": "limit 0 selects one; reasons list the rest as over_limit",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "hi",
+            "source": "LinkedIn",
+            "match_score": 92
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 80
+          },
+          {
+            "candidate_id": "dup",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "candidate_id": "off",
+            "source": "JobDiva-Applicants",
+            "match_score": 95,
+            "offer_status": "Offer Accepted"
+          },
+          {
+            "candidate_id": "nc",
+            "source": "LinkedIn",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "done",
+            "source": "LinkedIn",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "twin",
+            "source": "JobDiva-TalentSearch",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "fly",
+            "source": "Exa",
+            "match_score": 88
+          },
+          {
+            "candidate_id": "back",
+            "source": "JobDiva-Applicants",
+            "match_score": 87
+          },
+          {
+            "candidate_id": "blank-reason",
+            "source": "Exa",
+            "match_score": 86
+          },
+          {
+            "candidate_id": "na",
+            "source": "Exa"
+          },
+          {
+            "candidate_id": "str",
+            "source": "Exa",
+            "match_score": "91"
+          },
+          {
+            "candidate_id": "low",
+            "source": "Exa",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "neg",
+            "source": "Exa",
+            "match_score": -5
+          },
+          {
+            "candidate_id": "mid",
+            "source": "Exa",
+            "match_score": 70
+          },
+          {
+            "candidate_id": "",
+            "source": "Exa",
+            "match_score": 99
+          },
+          {
+            "jobdiva_candidate_id": 555,
+            "match_score": 75
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 0,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "hi"
+        ],
+        "eligibleTotal": 9,
+        "belowFloor": 2,
+        "unscored": 2,
+        "skipped": [
+          {
+            "id": "dup",
+            "reason": "duplicate_id"
+          },
+          {
+            "id": "off",
+            "reason": "exclusion:Offer Accepted"
+          },
+          {
+            "id": "nc",
+            "reason": "no_contact"
+          },
+          {
+            "id": "na",
+            "reason": "unscored"
+          },
+          {
+            "id": "str",
+            "reason": "unscored"
+          },
+          {
+            "id": "low",
+            "reason": "below_floor"
+          },
+          {
+            "id": "neg",
+            "reason": "below_floor"
+          },
+          {
+            "id": "done",
+            "reason": "over_limit"
+          },
+          {
+            "id": "twin",
+            "reason": "over_limit"
+          },
+          {
+            "id": "fly",
+            "reason": "over_limit"
+          },
+          {
+            "id": "back",
+            "reason": "over_limit"
+          },
+          {
+            "id": "blank-reason",
+            "reason": "over_limit"
+          },
+          {
+            "id": "dup",
+            "reason": "over_limit"
+          },
+          {
+            "id": "555",
+            "reason": "over_limit"
+          },
+          {
+            "id": "mid",
+            "reason": "over_limit"
+          }
+        ]
+      }
+    },
+    {
+      "name": "skipped first copy frees the id for a later copy",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "x",
+            "match_score": 90,
+            "no_contact": true
+          },
+          {
+            "candidate_id": "x",
+            "match_score": 61
+          },
+          {
+            "candidate_id": "y",
+            "match_score": 90
+          },
+          {
+            "candidate_id": "y",
+            "match_score": 95,
+            "no_contact": true
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250,
+        "blocked": {},
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "y",
+          "x"
+        ],
+        "eligibleTotal": 2,
+        "belowFloor": 0,
+        "unscored": 0,
+        "skipped": [
+          {
+            "id": "x",
+            "reason": "no_contact"
+          },
+          {
+            "id": "y",
+            "reason": "duplicate_id"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 1",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": 0,
+            "source": "JobDiva-TalentSearch",
+            "phone": "408-555-0101",
+            "email": "",
+            "match_score": 60,
+            "profile_url": "https://github.com/p"
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9001,
+            "source": "JobDiva-Applicants",
+            "title": "",
+            "phone": null,
+            "match_score": 60,
+            "no_contact": true,
+            "client_conflict": true,
+            "profile_url": "",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": " r2 ",
+            "source": "LinkedIn",
+            "phone": null,
+            "email": "SHARED@x.com",
+            "match_score": 59,
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "match_score": null,
+            "client_conflict": true,
+            "offer_status": "Offer Accepted",
+            "current_company": "Initech",
+            "data": {
+              "phone": ""
+            },
+            "enhanced_info": {
+              "email": " B@X.com "
+            }
+          },
+          {
+            "candidate_id": "r4",
+            "source": "LinkedIn",
+            "firstName": "Di",
+            "email": "SHARED@x.com",
+            "match_score": 61
+          },
+          {
+            "id": "i5",
+            "source": "Dice",
+            "firstName": "Cy",
+            "email": "a@x.com",
+            "match_score": 61,
+            "status": 2,
+            "profile_url": "https://github.com/p",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-TalentSearch",
+            "phone": 4085550104,
+            "email": "SHARED@x.com",
+            "match_score": 59,
+            "no_contact": true,
+            "current_company": "Globex Corporation"
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:r2",
+          "Dice:i5",
+          "JobDiva-TalentSearch:r6"
+        ],
+        "launchedIds": [],
+        "limit": 250,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [
+          "r4"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "random set 2",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "name": "Bo",
+            "lastName": "Oh",
+            "email": " B@X.com ",
+            "match_score": 61,
+            "status": 2,
+            "profile_url": "",
+            "data": {
+              "urls": {
+                "linkedin": "https://linkedin.com/in/d0"
+              }
+            }
+          },
+          {
+            "candidate_id": 1,
+            "source": "LinkedIn",
+            "match_score": 61,
+            "resume_text": "see linkedin.com/in/res1 thanks",
+            "data": {
+              "urls": {
+                "linkedin": "https://linkedin.com/in/d1"
+              }
+            }
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Dice",
+            "firstName": "Cy",
+            "title": "",
+            "phone": 4085550104,
+            "workEmail": "bad"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "lastName": "Oh",
+            "title": "",
+            "phone": "4085550103",
+            "email": "shared@x.com",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-Applicants",
+            "name": "LinkedIn Candidate",
+            "match_score": 60,
+            "status": 1
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:r0",
+          "JobDiva-Applicants:r4"
+        ],
+        "launchedIds": [
+          "r2"
+        ],
+        "limit": 250,
+        "minScore": null,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "1",
+          "r3"
+        ],
+        "eligibleTotal": 2,
+        "belowFloor": 0,
+        "unscored": 0,
+        "skipped": [
+          {
+            "id": "r0",
+            "reason": "launched"
+          },
+          {
+            "id": "r2",
+            "reason": "launched"
+          },
+          {
+            "id": "r4",
+            "reason": "exclusion:Current Employee (Pyramid)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 3",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "lastName": "Oh",
+            "title": "Analyst",
+            "email": " B@X.com ",
+            "match_score": 61,
+            "offer_status": "Offer Accepted",
+            "profile_url": "",
+            "enhanced_info": {}
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "name": "Bo",
+            "title": "Engineer at Globex",
+            "email": "SHARED@x.com",
+            "offer_status": "Interviewing"
+          },
+          {
+            "candidate_id": 2,
+            "name": "LinkedIn Candidate",
+            "lastName": "Ng",
+            "title": "Analyst",
+            "phone": "+1 408 555 0102",
+            "mobilePhone": "",
+            "email": " B@X.com ",
+            "match_score": 95,
+            "profile_url": "https://www.linkedin.com/in/p2"
+          },
+          {
+            "id": "i3",
+            "source": "JobDiva-Applicants",
+            "title": "Engineer at Globex",
+            "mobilePhone": "(408) 555-0101",
+            "workEmail": "x@example.com",
+            "data": {
+              "phone": "408-555-0101"
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "i3"
+        ],
+        "limit": 250,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "2"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 1,
+        "skipped": [
+          {
+            "id": "r0",
+            "reason": "exclusion:Offer Accepted"
+          },
+          {
+            "id": "r1",
+            "reason": "unscored"
+          },
+          {
+            "id": "i3",
+            "reason": "launched"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 4",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "title": "Analyst",
+            "phone": "12",
+            "email": "SHARED@x.com",
+            "match_score": 61,
+            "data": {
+              "phone": null
+            }
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "phone": "12",
+            "match_score": 72,
+            "profile_url": "https://www.linkedin.com/in/p1"
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9002,
+            "source": "JobDiva-TalentSearch",
+            "name": "",
+            "firstName": "Di",
+            "lastName": "Ng",
+            "title": "Analyst",
+            "email": "SHARED@x.com",
+            "match_score": null,
+            "no_contact": "true",
+            "profile_url": "https://www.linkedin.com/in/p2",
+            "data": {
+              "phone": ""
+            }
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Exa",
+            "name": "LinkedIn Candidate",
+            "firstName": "Di",
+            "phone": "408-555-0101",
+            "match_score": 61,
+            "no_contact": true,
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "r4",
+            "lastName": "Oh",
+            "phone": "",
+            "match_score": 60,
+            "profile_url": ""
+          },
+          {
+            "candidate_id": " r5 ",
+            "source": "JobDiva-TalentSearch",
+            "phone": 4085550104,
+            "email": "bad",
+            "workEmail": "SHARED@x.com",
+            "match_score": 72
+          },
+          {
+            "candidate_id": 6,
+            "source": "Exa",
+            "name": "Bo",
+            "firstName": "Di",
+            "phone": "(408) 555-0101",
+            "email": "shared@x.com",
+            "workEmail": "bad",
+            "match_score": 95,
+            "no_contact": "true",
+            "offer_status": "Offer Accepted",
+            "status": "1",
+            "profile_url": "",
+            "resume_text": "see linkedin.com/in/res6 thanks",
+            "enhanced_info": {}
+          },
+          {
+            "id": "i7",
+            "source": "JobDiva-Applicants",
+            "name": "Ann Lee",
+            "firstName": "",
+            "phone": "555-0105",
+            "no_contact": true,
+            "client_conflict": true,
+            "skills": [
+              "Go"
+            ]
+          }
+        ],
+        "launchedKeys": [
+          "JobDiva-Applicants:r0"
+        ],
+        "launchedIds": [],
+        "limit": 1,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [
+          "r1"
+        ],
+        "eligibleTotal": 3,
+        "belowFloor": 0,
+        "unscored": 1
+      }
+    },
+    {
+      "name": "random set 5",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": 0,
+            "name": "",
+            "email": "a@x.com",
+            "match_score": null,
+            "client_conflict": true
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "name": "",
+            "firstName": "",
+            "lastName": "Ng",
+            "phone": "(408) 555-0101",
+            "email": "bad",
+            "match_score": null,
+            "data": {
+              "phone": ""
+            }
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "title": "Engineer at Globex",
+            "phone": "4085550103",
+            "email": " B@X.com ",
+            "match_score": 95,
+            "current_company": "Initech",
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "name": "Ann Lee",
+            "title": "Analyst",
+            "phone": 4085550104,
+            "email": " B@X.com ",
+            "match_score": null,
+            "profile_url": ""
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9004,
+            "source": "JobDiva-Applicants",
+            "lastName": "Oh",
+            "title": "",
+            "phone": "555-0105",
+            "match_score": "80",
+            "current_company": "Globex Corporation"
+          }
+        ],
+        "launchedKeys": [
+          "JobDiva-TalentSearch:r3",
+          "JobDiva-Applicants:9004"
+        ],
+        "launchedIds": [
+          "",
+          "r2"
+        ],
+        "limit": 3,
+        "minScore": 70,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [],
+        "eligibleTotal": 0,
+        "belowFloor": 0,
+        "unscored": 1
+      }
+    },
+    {
+      "name": "random set 6",
+      "input": {
+        "pool": [
+          {
+            "id": "i0",
+            "source": "LinkedIn",
+            "name": "",
+            "lastName": "Ng"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "firstName": "",
+            "lastName": "Ng",
+            "title": "",
+            "phone": "  ",
+            "email": " B@X.com ",
+            "workEmail": "x@example.com",
+            "match_score": 59,
+            "no_contact": true,
+            "skills": "Go, SQL"
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 1,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [],
+        "eligibleTotal": 0,
+        "belowFloor": 0,
+        "unscored": 1,
+        "skipped": [
+          {
+            "id": "i0",
+            "reason": "unscored"
+          },
+          {
+            "id": "r1",
+            "reason": "no_contact"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 7",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "phone": "",
+            "mobilePhone": "555-0105",
+            "match_score": "80",
+            "current_company": "Globex Corporation",
+            "profile_url": "https://github.com/p",
+            "enhanced_info": {}
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "name": "Bo",
+            "firstName": "Cy",
+            "lastName": "Oh",
+            "title": "Engineer at Globex",
+            "phone": "4085550103",
+            "match_score": 0
+          },
+          {
+            "candidate_id": 2,
+            "source": "Dice",
+            "phone": "",
+            "mobilePhone": "",
+            "email": "",
+            "match_score": null,
+            "current_company": "Globex Corporation",
+            "profile_url": "https://www.linkedin.com/in/p2"
+          },
+          {
+            "candidate_id": 3,
+            "source": "Exa",
+            "match_score": 95,
+            "resume_text": "no links here",
+            "data": {
+              "phone": "408-555-0199",
+              "zoominfo_contact_enrichment": {
+                "workPhone": "4085550199",
+                "mobilePhone": "555-0105"
+              }
+            },
+            "enhanced_info": {
+              "mobilePhone": ""
+            }
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Dice",
+            "name": "LinkedIn Candidate",
+            "phone": "408-555-0101",
+            "email": "Auto_9@jobdiva.com",
+            "match_score": null,
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9005,
+            "source": "Dice",
+            "lastName": "Ng",
+            "title": "",
+            "phone": "4085550103",
+            "match_score": 0
+          },
+          {
+            "candidate_id": " r6 ",
+            "source": "LinkedIn",
+            "name": "Ann Lee",
+            "phone": null,
+            "match_score": 59,
+            "offer_status": "Interviewing"
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 2,
+        "minScore": 70,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [
+          "3"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 3,
+        "unscored": 3
+      }
+    },
+    {
+      "name": "random set 8",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9000,
+            "source": "Dice",
+            "name": "Ann Lee",
+            "firstName": "Di",
+            "phone": "",
+            "email": "bad"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "lastName": "Oh",
+            "phone": "408-555-0101",
+            "match_score": null,
+            "no_contact": "true",
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "LinkedIn",
+            "name": "Ann Lee",
+            "phone": null,
+            "email": "SHARED@x.com"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Dice",
+            "lastName": "Oh",
+            "phone": "000-000-0000"
+          },
+          {
+            "candidate_id": " r4 ",
+            "source": "Dice",
+            "phone": "(408) 555-0101",
+            "status": 2,
+            "data": {
+              "email": "shared@x.com"
+            }
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-TalentSearch",
+            "name": "Bo",
+            "title": "Analyst",
+            "match_score": 0,
+            "no_contact": "true"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-Applicants",
+            "name": "Bo",
+            "firstName": "Di",
+            "title": "",
+            "mobilePhone": "+1 408 555 0102",
+            "email": "x@example.com",
+            "match_score": 95,
+            "client_conflict": true,
+            "offer_status": "Offer Accepted",
+            "profile_url": "https://github.com/p"
+          },
+          {
+            "candidate_id": "r7",
+            "phone": "4085550103",
+            "email": "x@example.com",
+            "workEmail": null,
+            "match_score": 60,
+            "no_contact": true
+          }
+        ],
+        "launchedKeys": [
+          "Dice:9000"
+        ],
+        "launchedIds": [
+          "r1"
+        ],
+        "limit": 3,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [],
+        "eligibleTotal": 0,
+        "belowFloor": 1,
+        "unscored": 3
+      }
+    },
+    {
+      "name": "random set 9",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "firstName": "",
+            "lastName": "Oh",
+            "title": ""
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "firstName": "",
+            "phone": "(408) 555-0101",
+            "workEmail": "shared@x.com",
+            "match_score": 60,
+            "no_contact": "true",
+            "status": "1"
+          }
+        ],
+        "launchedKeys": [
+          "LinkedIn:r1"
+        ],
+        "launchedIds": [
+          "r0"
+        ],
+        "limit": 3,
+        "minScore": null,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [],
+        "eligibleTotal": 0,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "random set 10",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": 0,
+            "source": "LinkedIn",
+            "name": "Bo",
+            "title": "",
+            "match_score": 0,
+            "data": {
+              "urls": {
+                "linkedin": "https://linkedin.com/in/d0"
+              }
+            },
+            "enhanced_info": {}
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "name": "LinkedIn Candidate",
+            "firstName": "Cy",
+            "lastName": "Oh",
+            "match_score": 95,
+            "client_conflict": true,
+            "resume_text": "no links here"
+          },
+          {
+            "id": "i2",
+            "source": "JobDiva-Applicants",
+            "name": "",
+            "title": "Engineer at Globex",
+            "mobilePhone": "(408) 555-0101",
+            "workEmail": "Auto_9@jobdiva.com"
+          },
+          {
+            "id": "i3",
+            "source": "JobDiva-TalentSearch",
+            "firstName": "",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-Applicants",
+            "name": "LinkedIn Candidate",
+            "email": "",
+            "match_score": 60,
+            "resume_text": "no links here"
+          },
+          {
+            "candidate_id": "r5",
+            "name": "",
+            "phone": "4085550103",
+            "email": "shared@x.com",
+            "match_score": 95
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "",
+          "r1",
+          "r4"
+        ],
+        "limit": 1,
+        "blocked": {
+          "i3": "in_flight"
+        },
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "r5"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 1,
+        "skipped": [
+          {
+            "id": "r1",
+            "reason": "launched"
+          },
+          {
+            "id": "i2",
+            "reason": "unscored"
+          },
+          {
+            "id": "i3",
+            "reason": "in_flight"
+          },
+          {
+            "id": "r4",
+            "reason": "launched"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 11",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "name": "LinkedIn Candidate",
+            "phone": "(408) 555-0101",
+            "match_score": "80",
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "title": "",
+            "workEmail": "x@example.com",
+            "match_score": 95,
+            "status": 1
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9002,
+            "source": "Exa",
+            "lastName": "Oh",
+            "title": "Engineer at Globex",
+            "phone": "12",
+            "mobilePhone": "12",
+            "email": " B@X.com ",
+            "match_score": 61
+          },
+          {
+            "candidate_id": " r3 ",
+            "source": "Exa",
+            "name": "Bo",
+            "title": "",
+            "match_score": "80",
+            "enhanced_info": {
+              "email": "bad"
+            }
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9004,
+            "source": "JobDiva-TalentSearch",
+            "name": "Ann Lee",
+            "phone": 4085550104,
+            "email": " B@X.com ",
+            "match_score": 0,
+            "current_company": "Globex Corporation"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Dice",
+            "firstName": "Di",
+            "lastName": "Ng",
+            "title": "Engineer at Globex",
+            "phone": "000-000-0000",
+            "match_score": 60,
+            "resume_text": "no links here",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": 6,
+            "source": "JobDiva-TalentSearch",
+            "firstName": "Cy",
+            "phone": "",
+            "match_score": 72,
+            "profile_url": "https://www.linkedin.com/in/p6",
+            "resume_text": "no links here"
+          }
+        ],
+        "launchedKeys": [
+          "Dice:r5"
+        ],
+        "launchedIds": [
+          "r0",
+          "9002",
+          "r3"
+        ],
+        "limit": 3,
+        "minScore": null,
+        "blocked": {
+          "9002": "applicant_backlog",
+          "9004": "in_flight"
+        },
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "6"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 0,
+        "skipped": [
+          {
+            "id": "r0",
+            "reason": "no_contact"
+          },
+          {
+            "id": "r1",
+            "reason": "exclusion:Current Employee (Pyramid)"
+          },
+          {
+            "id": "9002",
+            "reason": "launched"
+          },
+          {
+            "id": "r3",
+            "reason": "launched"
+          },
+          {
+            "id": "9004",
+            "reason": "in_flight"
+          },
+          {
+            "id": "r5",
+            "reason": "launched"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 12",
+      "input": {
+        "pool": [
+          {
+            "id": "i0",
+            "firstName": "",
+            "title": "Analyst",
+            "mobilePhone": "+1 408 555 0102",
+            "workEmail": "x@example.com",
+            "match_score": 61,
+            "client_conflict": true,
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "name": "Ann Lee",
+            "firstName": "",
+            "title": "",
+            "email": "a@x.com",
+            "match_score": 60,
+            "profile_url": "https://www.linkedin.com/in/p1"
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "r1"
+        ],
+        "limit": 3,
+        "minScore": null,
+        "withReasons": false
+      },
+      "expected": {
+        "ids": [
+          "i0"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 0
+      }
+    },
+    {
+      "name": "random set 13",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "name": "LinkedIn Candidate",
+            "title": "Engineer at Globex",
+            "mobilePhone": "12",
+            "match_score": 60,
+            "client_conflict": true,
+            "data": {
+              "phone": "408-555-0199",
+              "zoominfo_contact_enrichment": {
+                "workPhone": "4085550199",
+                "mobilePhone": ""
+              }
+            }
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9001,
+            "source": "JobDiva-Applicants",
+            "name": "LinkedIn Candidate",
+            "lastName": "Oh",
+            "phone": null,
+            "match_score": "80",
+            "resume_text": "no links here"
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 1,
+        "minScore": null,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "r0"
+        ],
+        "eligibleTotal": 2,
+        "belowFloor": 0,
+        "unscored": 0,
+        "skipped": [
+          {
+            "id": "9001",
+            "reason": "over_limit"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 14",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "lastName": "Oh",
+            "phone": "(408) 555-0101",
+            "email": null,
+            "match_score": 60,
+            "resume_text": "no links here",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9001,
+            "name": "Ann Lee",
+            "firstName": "Di",
+            "title": "Engineer at Globex",
+            "phone": "+1 408 555 0102",
+            "mobilePhone": "408-555-0101",
+            "email": "Auto_9@jobdiva.com",
+            "offer_status": "Interviewing",
+            "profile_url": "https://github.com/p"
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 2,
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "r0"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 1,
+        "skipped": [
+          {
+            "id": "9001",
+            "reason": "unscored"
+          }
+        ]
+      }
+    },
+    {
+      "name": "random set 15",
+      "input": {
+        "pool": [
+          {
+            "candidate_id": " r0 ",
+            "source": "JobDiva-Applicants",
+            "name": "Bo",
+            "lastName": "Oh",
+            "email": " B@X.com ",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "workEmail": "a@x.com",
+            "match_score": 95,
+            "profile_url": "https://www.linkedin.com/in/p1",
+            "data": {
+              "email": "bad"
+            }
+          }
+        ],
+        "launchedKeys": [
+          "JobDiva-Applicants:r0"
+        ],
+        "launchedIds": [],
+        "limit": 2,
+        "blocked": {},
+        "withReasons": true
+      },
+      "expected": {
+        "ids": [
+          "r1"
+        ],
+        "eligibleTotal": 1,
+        "belowFloor": 0,
+        "unscored": 0,
+        "skipped": [
+          {
+            "id": "r0",
+            "reason": "launched"
+          }
+        ]
+      }
+    }
+  ]
+}

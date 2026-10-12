@@ -682,6 +682,15 @@ class AutoAssignService:
             return None
 
     async def synchronize_job_applicants(self, job_id: str):
+        """One AutoSync run for ``job_id``. All JobDiva back-off pauses in the
+        run (this method and the hydration it spawns, via context) share one
+        total cap, JOBDIVA_AUTOSYNC_MAX_YIELD_S (default 300 s), after which
+        the run proceeds anyway so live traffic cannot starve AutoSync."""
+        from services import jobdiva_activity as _jd_activity
+        with _jd_activity.yield_budget(label=f"autosync:{job_id}"):
+            return await self._synchronize_job_applicants(job_id)
+
+    async def _synchronize_job_applicants(self, job_id: str):
         """
         Fetches all JobDiva applicants for a job, scores them,
         and upserts them into sourced_candidates.
@@ -979,6 +988,17 @@ class AutoAssignService:
             # to False — only the search emits a truthy value when JobDiva's
             # JobAgent returned "Criteria Not Assigned" for this job.
             jobdiva_criteria_unconfigured = False
+            # Back off while a recruiter search or PAIR launch is running —
+            # for this job or any other (jd:active:*), so the interactive path
+            # gets the JobDiva BI quota. Bounded by MAX_PAUSE_S per
+            # page and by the run's yield budget in total.
+            try:
+                from services import jobdiva_activity as _jd_activity
+                await _jd_activity.wait_while_busy(
+                    str(search_job_id or target_job_id), include_self=True, label="autosync"
+                )
+            except Exception as _act_exc:
+                logger.debug(f"[AutoAssignService] activity check skipped: {_act_exc}")
             async for event in unified_search_service.search_candidates(criteria):
                 if event.get("type") == "stage":
                     logger.debug(f"🤖 [AutoAssignService] Sync Stage for {target_job_id}: {event.get('data')}")

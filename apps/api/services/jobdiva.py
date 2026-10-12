@@ -56,21 +56,59 @@ async def _acquire_within(sem: asyncio.Semaphore, timeout_s: float) -> bool:
         return False
 
 
-# --- JobDiva HTTP request/response logging to New Relic ------------------
+# --- JobDiva HTTP telemetry to New Relic -----------------------------------
 # Every httpx.AsyncClient(...) constructed in this module is transparently
-# wrapped (via the _JDHttpxProxy shim below) so each JobDiva request emits
-# a New Relic custom event + message with the full response body and
-# elapsed time. We do not modify the global httpx module — only the local
-# `httpx` name in this file's namespace.
+# wrapped (via the _JDHttpxProxy shim below) so each JobDiva call is measured.
+# We do not modify the global httpx module — only the local `httpx` name in
+# this file's namespace.
+#
+# Per call: two cheap metrics, Custom/JobDiva/<path>/ms (timing) and
+# Custom/JobDiva/<path>/status/<code> (count). A `JobDivaAPI` custom event only
+# for errors (status >= 400) or slow calls (>= 5 s). No URL, query string or
+# response body ever leaves the process: query strings carry credentials
+# (/api/authenticate) and person fields (searchCandidateProfile's GET
+# fallback), bodies carry candidate data. The body is never buffered here,
+# except a <= 2 KB error body to name the error.
 
-_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to New Relic per call
+_JD_SLOW_MS = 5000
+_JD_ERROR_BODY_MAX = 2048
+_JD_DIGITS = re.compile(r"\d{2,}")  # ids; keeps version tokens like "apiv2"
+_JD_LONG_DIGITS = re.compile(r"\d{7,}")
 
 
-def _jd_redact_url(url: "_httpx_module.URL") -> str:
-    s = str(url)
-    if "password=" in s:
-        s = re.sub(r"(password=)[^&]*", r"\1***", s)
-    return s
+def _jd_metric_path(path: str) -> str:
+    """Last <= 3 path segments, digit runs -> '#': bounded metric names."""
+    segs = [_JD_DIGITS.sub("#", p) for p in (path or "").split("/") if p]
+    return "/".join(segs[-3:]) or "root"
+
+
+async def _jd_error_kind(response: "_httpx_module.Response") -> Optional[str]:
+    """Short error label for a >= 400 response, or None. Reads the body only
+    when it is declared <= 2 KB; drops anything with '@' or a long digit run."""
+    text = ""
+    try:
+        declared = int(response.headers.get("content-length") or -1)
+    except ValueError:
+        declared = -1
+    if 0 <= declared <= _JD_ERROR_BODY_MAX:
+        try:
+            await response.aread()
+            text = (response.text or "")[:_JD_ERROR_BODY_MAX]
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    for key in ("message", "error", "errorMessage", "error_description", "detail", "title"):
+                        if isinstance(parsed.get(key), str) and parsed[key].strip():
+                            text = parsed[key]
+                            break
+            except ValueError:
+                pass
+        except Exception:
+            text = ""
+    text = " ".join(str(text).split())[:80]
+    if not text or "@" in text or _JD_LONG_DIGITS.search(text):
+        text = response.reason_phrase or ""
+    return text[:80] or None
 
 
 async def _jd_on_request(request: "_httpx_module.Request") -> None:
@@ -79,54 +117,40 @@ async def _jd_on_request(request: "_httpx_module.Request") -> None:
 
 async def _jd_on_response(response: "_httpx_module.Response") -> None:
     try:
-        t0 = response.request.extensions.get("_jd_t0")
-        elapsed_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
-
-        # Buffer the body so the caller's .text/.json() still works after us.
-        body_text = ""
         try:
-            await response.aread()
-            body_text = response.text or ""
-        except Exception:
-            body_text = ""
-        body_size = len(body_text)
-        body_truncated = body_text[:_JD_RESPONSE_BODY_LIMIT]
-        was_truncated = body_size > len(body_truncated)
-
-        try:
-            from core.newrelic import is_enabled, record_custom_event, record_message
+            from core.newrelic import is_enabled, record_custom_event, record_custom_metric
         except Exception:
             return
         if not is_enabled():
             return
 
-        method = response.request.method
-        url_path = response.request.url.path
-        url_full = _jd_redact_url(response.request.url)
+        t0 = response.request.extensions.get("_jd_t0")
+        elapsed_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
         status = response.status_code
+        url_path = response.request.url.path  # path only: never the query string
+        metric = _jd_metric_path(url_path)
 
-        try:
-            event_data = {
-                "url": url_full,
+        if elapsed_ms is not None:
+            record_custom_metric(f"Custom/JobDiva/{metric}/ms", elapsed_ms)
+        record_custom_metric(f"Custom/JobDiva/{metric}/status/{status}", {"count": 1})
+
+        if status >= 400 or (elapsed_ms or 0) >= _JD_SLOW_MS:
+            try:
+                size = int(response.headers.get("content-length") or -1)
+            except ValueError:
+                size = -1
+            event = {
                 "endpoint": url_path,
-                "method": method,
+                "method": response.request.method,
                 "status_code": status,
                 "elapsed_ms": elapsed_ms,
-                "response_size_bytes": body_size,
-                "truncated": was_truncated,
-                "response_body": body_truncated,
+                "response_size_bytes": size if size >= 0 else None,
             }
-            record_custom_event("JobDivaAPI", event_data)
-            level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
-            record_message(
-                f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
-                attributes=event_data,
-                level=level,
-            )
-        except Exception:
-            pass
+            if status >= 400:
+                event["error_kind"] = await _jd_error_kind(response)
+            record_custom_event("JobDivaAPI", event)
     except Exception:
-        # Logging must never break the actual API path.
+        # Telemetry must never break the actual API path.
         return
 
 
@@ -4634,7 +4658,10 @@ class JobDivaService:
                         "job_id": job_id,
                         "jobdiva_id": data.get("jobdiva_id") or "",
                         
-                        # Timestamps
+                        # Timestamps. pair_added_at (launch-timing T0) is not
+                        # named here on purpose: its column DEFAULT now()
+                        # stamps it, so this INSERT cannot fail on a boot whose
+                        # startup ALTER has not added it (services/launch_timing.py).
                         "created_at": data.get("created_at") or readable_ist_now(),
                         "updated_at": readable_ist_now()
                     }

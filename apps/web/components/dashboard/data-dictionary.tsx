@@ -139,8 +139,16 @@ const TABS: { key: string; label: string; sections: Section[] }[] = [
             text: "First PAIR launch (or job posted) → the first external submission of a PAIR candidate on the requirement, in JobDiva or recorded in PAIR, whichever came first.",
           },
           {
+            term: "Added → Launch Click",
+            text: "The requirement's arrival in PAIR (its earliest version) → its first Launch PAIR click: the recruiter's part of the launch. Only clicks up to the first launch count, so a later relaunch never stands in for the first click.",
+          },
+          {
+            term: "Launch Click → Launch",
+            text: "The Launch PAIR click → the first interview PAIR Bot created, on the version that launched first: PAIR's part of the launch. Under an hour it is shown in minutes.",
+          },
+          {
             term: "How it rolls up",
-            text: "Each requirement gets its own time; the tile shows the median across requirements, with the average beneath. Requirements that have not reached the milestone are left out.",
+            text: "Each requirement gets its own time; the tile shows the median across requirements, with the average beneath. Requirements that have not reached the milestone are left out — and for the two launch-click tiles, so are requirements launched before the click started being recorded.",
           },
         ],
       },

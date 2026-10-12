@@ -1,0 +1,633 @@
+{
+  "function": "buildSaveCandidatePayload",
+  "cases": [
+    {
+      "name": "full row",
+      "input": {
+        "candidate": {
+          "candidate_id": "c1",
+          "name": "Jane Doe",
+          "email": " Jane@X.com ",
+          "phone": "(408) 555-1234",
+          "skills": [
+            "Java"
+          ],
+          "yearsExtracted": 7,
+          "source": "LinkedIn",
+          "jobdiva_candidate_id": 123,
+          "title": "Engineer",
+          "location": "Austin",
+          "profile_url": "https://linkedin.com/in/j",
+          "image_url": "i.png",
+          "resume_text": "resume",
+          "resumeId": 99,
+          "education": [
+            {
+              "school": "MIT"
+            }
+          ],
+          "certifications": [],
+          "company_experience": [
+            {
+              "company": "A"
+            }
+          ],
+          "urls": {
+            "linkedin": "https://linkedin.com/in/j"
+          },
+          "match_score": 81.5,
+          "detail_failed": "yes",
+          "matched_skills": [
+            "Java"
+          ],
+          "missing_skills": [
+            "Go"
+          ],
+          "match_score_details": {
+            "a": 1
+          },
+          "explainability": [
+            "x"
+          ],
+          "enhanced_info": {
+            "headline": "h"
+          },
+          "linkedin_profile": {
+            "summary": "s"
+          }
+        }
+      },
+      "expected": {
+        "candidate_id": "c1",
+        "name": "Jane Doe",
+        "email": "jane@x.com",
+        "phone": "(408) 555-1234",
+        "skills": [
+          "Java"
+        ],
+        "experience_years": 7,
+        "source": "LinkedIn",
+        "jobdiva_candidate_id": "123",
+        "headline": "Engineer",
+        "location": "Austin",
+        "profile_url": "https://linkedin.com/in/j",
+        "image_url": "i.png",
+        "resume_text": "resume",
+        "resume_id": "99",
+        "is_selected": true,
+        "education": [
+          {
+            "school": "MIT"
+          }
+        ],
+        "certifications": [],
+        "company_experience": [
+          {
+            "company": "A"
+          }
+        ],
+        "urls": {
+          "linkedin": "https://linkedin.com/in/j"
+        },
+        "match_score": 81.5,
+        "detail_failed": true,
+        "matched_skills": [
+          "Java"
+        ],
+        "missing_skills": [
+          "Go"
+        ],
+        "match_score_details": {
+          "a": 1
+        },
+        "explainability": [
+          "x"
+        ],
+        "enhanced_info": {
+          "headline": "h"
+        },
+        "linkedin_profile": {
+          "summary": "s"
+        }
+      }
+    },
+    {
+      "name": "defaults",
+      "input": {
+        "candidate": {}
+      },
+      "expected": {
+        "candidate_id": "unknown",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "string score is null; zero stays",
+      "input": {
+        "candidate": {
+          "candidate_id": "s",
+          "match_score": "80"
+        }
+      },
+      "expected": {
+        "candidate_id": "s",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "zero score",
+      "input": {
+        "candidate": {
+          "candidate_id": "z",
+          "match_score": 0
+        }
+      },
+      "expected": {
+        "candidate_id": "z",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": 0,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "skills json array",
+      "input": {
+        "candidate": {
+          "candidate_id": "j",
+          "skills": "[\"a\",\"b\"]"
+        }
+      },
+      "expected": {
+        "candidate_id": "j",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [
+          "a",
+          "b"
+        ],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "skills json string is wrapped",
+      "input": {
+        "candidate": {
+          "candidate_id": "j",
+          "skills": "\"x\""
+        }
+      },
+      "expected": {
+        "candidate_id": "j",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [
+          "\"x\""
+        ],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "skills not json",
+      "input": {
+        "candidate": {
+          "candidate_id": "j",
+          "skills": "a, b"
+        }
+      },
+      "expected": {
+        "candidate_id": "j",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [
+          "a, b"
+        ],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "skills NaN token is not JSON",
+      "input": {
+        "candidate": {
+          "candidate_id": "j",
+          "skills": "NaN"
+        }
+      },
+      "expected": {
+        "candidate_id": "j",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [
+          "NaN"
+        ],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "skills whitespace",
+      "input": {
+        "candidate": {
+          "candidate_id": "j",
+          "skills": "   "
+        }
+      },
+      "expected": {
+        "candidate_id": "j",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "skills object",
+      "input": {
+        "candidate": {
+          "candidate_id": "j",
+          "skills": {
+            "a": 1
+          }
+        }
+      },
+      "expected": {
+        "candidate_id": "j",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "fallbacks",
+      "input": {
+        "candidate": {
+          "jobdiva_candidate_id": "jd9",
+          "resumeText": "rt",
+          "resume_id": "",
+          "candidate_education": [
+            {
+              "s": 1
+            }
+          ],
+          "candidate_certification": "x",
+          "enhanced_info": {
+            "company_experience": [
+              {
+                "company": "E"
+              }
+            ],
+            "urls": {
+              "linkedin": "u"
+            }
+          },
+          "urls": [
+            "array"
+          ],
+          "headline": "Head",
+          "experience_years": 3,
+          "firstName": "Al",
+          "data": {
+            "phone": "408-555-8888",
+            "email": "Auto_1@jobdiva.com"
+          }
+        }
+      },
+      "expected": {
+        "candidate_id": "jd9",
+        "name": "Al",
+        "email": null,
+        "phone": "408-555-8888",
+        "skills": [],
+        "experience_years": 3,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": "jd9",
+        "headline": "Head",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "rt",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [
+          {
+            "s": 1
+          }
+        ],
+        "certifications": [],
+        "company_experience": [
+          {
+            "company": "E"
+          }
+        ],
+        "urls": {
+          "linkedin": "u"
+        },
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": {
+          "company_experience": [
+            {
+              "company": "E"
+            }
+          ],
+          "urls": {
+            "linkedin": "u"
+          }
+        },
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "empty experience array beats enhanced",
+      "input": {
+        "candidate": {
+          "company_experience": [],
+          "enhanced_info": [],
+          "linkedin_profile": [],
+          "match_score_details": []
+        }
+      },
+      "expected": {
+        "candidate_id": "unknown",
+        "name": "Unnamed candidate",
+        "email": null,
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    },
+    {
+      "name": "work phone only gives null phone",
+      "input": {
+        "candidate": {
+          "candidate_id": "w",
+          "data": {
+            "phone": "408-555-0000",
+            "zoominfo_contact_enrichment": {
+              "workPhone": "4085550000",
+              "workEmail": "w@corp.com"
+            }
+          }
+        }
+      },
+      "expected": {
+        "candidate_id": "w",
+        "name": "Unnamed candidate",
+        "email": "w@corp.com",
+        "phone": null,
+        "skills": [],
+        "experience_years": 0,
+        "source": "JobDiva-Applicants",
+        "jobdiva_candidate_id": null,
+        "headline": "",
+        "location": "",
+        "profile_url": null,
+        "image_url": null,
+        "resume_text": "",
+        "resume_id": "",
+        "is_selected": true,
+        "education": [],
+        "certifications": [],
+        "company_experience": [],
+        "urls": {},
+        "match_score": null,
+        "detail_failed": false,
+        "matched_skills": [],
+        "missing_skills": [],
+        "match_score_details": {},
+        "explainability": [],
+        "enhanced_info": null,
+        "linkedin_profile": null
+      }
+    }
+  ]
+}

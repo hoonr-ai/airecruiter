@@ -1,0 +1,256 @@
+{
+  "name": "PAIR (QA + PROD)",
+  "incidentPreference": "PER_CONDITION_AND_TARGET",
+  "conditions": [
+    {
+      "name": "PAIR API error rate",
+      "enabled": true,
+      "description": "Unexpected (non-4xx) errors as a share of web requests. 404/405/422 are ignored and 400-403/409/429 are expected, so this is real breakage.",
+      "nrql": {
+        "query": "SELECT percentage(count(*), WHERE error IS true) FROM Transaction WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND transactionType = 'Web' FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 5,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        },
+        {
+          "priority": "WARNING",
+          "operator": "ABOVE",
+          "threshold": 2,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR API p95 latency (non-streaming)",
+      "enabled": true,
+      "description": "Seconds. Streaming endpoints (search / launch / enrich / streams) are excluded; they are long by design.",
+      "nrql": {
+        "query": "SELECT percentile(duration, 95) FROM Transaction WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND transactionType = 'Web' AND name NOT LIKE '%search_jobdiva_candidates%' AND name NOT LIKE '%launch%' AND name NOT LIKE '%stream%' AND name NOT LIKE '%enrich%' FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 10,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        },
+        {
+          "priority": "WARNING",
+          "operator": "ABOVE",
+          "threshold": 5,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR API stopped reporting",
+      "enabled": true,
+      "description": "No transactions at all (API down, agent disabled or the VM gone).",
+      "nrql": {
+        "query": "SELECT count(*) FROM Transaction WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "BELOW",
+          "threshold": 1,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md",
+      "expiration": {
+        "expirationDuration": 1200,
+        "openViolationOnExpiration": true,
+        "closeViolationsOnExpiration": false
+      }
+    },
+    {
+      "name": "PAIR scheduler stopped",
+      "enabled": true,
+      "description": "The 15-minute AutoSync job has not run for 45 minutes in any worker (APScheduler dead / lifespan failed).",
+      "nrql": {
+        "query": "SELECT count(*) FROM Transaction WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND name = 'OtherTransaction/Task/scheduler/always_on_sync' FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 900,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "BELOW",
+          "threshold": 1,
+          "thresholdDuration": 2700,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md",
+      "expiration": {
+        "expirationDuration": 3600,
+        "openViolationOnExpiration": true,
+        "closeViolationsOnExpiration": false
+      }
+    },
+    {
+      "name": "PAIR launch session failed",
+      "enabled": true,
+      "description": "A backend-driven Source & Launch gave up after its retries. Inspect it: docs/launch-sessions.md.",
+      "nrql": {
+        "query": "SELECT count(*) FROM PairLaunchSession WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND status = 'failed' FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 60,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 0,
+          "thresholdDuration": 300,
+          "thresholdOccurrences": "AT_LEAST_ONCE"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR launch pipeline stage failures",
+      "enabled": true,
+      "description": "Pairbot POST / creation wait / launch batch failing repeatedly.",
+      "nrql": {
+        "query": "SELECT count(*) FROM PipelineStage WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND ok IS false AND stage IN ('pairbot_post', 'pairbot_wait_creation', 'launch_batch', 'payload_generation') FACET appName, stage"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 3,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR JobDiva server errors",
+      "enabled": true,
+      "description": "JobDiva 5xx answers (sourcing + provisioning depend on it).",
+      "nrql": {
+        "query": "SELECT count(*) FROM JobDivaAPI WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND status_code >= 500 FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 20,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR JobDiva profile invariant",
+      "enabled": true,
+      "description": "The duplicate-JobDiva-profile tripwire fired (PR #615 fail-safe).",
+      "nrql": {
+        "query": "SELECT count(*) FROM JobDivaProfileInvariant WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 60,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 0,
+          "thresholdDuration": 300,
+          "thresholdOccurrences": "AT_LEAST_ONCE"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR web JavaScript errors",
+      "enabled": true,
+      "description": "Uncaught JS errors in the PAIR web app.",
+      "nrql": {
+        "query": "SELECT count(*) FROM JavaScriptError WHERE appName IN ('PAIR Web (QA)', 'PAIR Web (PROD)') FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 50,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    }
+  ],
+  "notes": "No notification workflow is attached by default: add one in New Relic (Alerts > Workflows) pointing this policy at email/Slack."
+}

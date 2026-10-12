@@ -1,0 +1,95 @@
+{
+  "function": "withClientConflictFlag",
+  "cases": [
+    {
+      "name": "flags current employee of the client",
+      "input": {
+        "candidate": {
+          "candidate_id": "1",
+          "company": "Bank of America"
+        },
+        "job": {
+          "customer_name": "Bank of America"
+        }
+      },
+      "expected": {
+        "candidate_id": "1",
+        "company": "Bank of America",
+        "client_conflict": true,
+        "client_conflict_relation": "current",
+        "client_conflict_reason": "Current employer is the hiring client (Bank of America)"
+      }
+    },
+    {
+      "name": "existing false flag untouched",
+      "input": {
+        "candidate": {
+          "candidate_id": "1",
+          "company": "Bank of America",
+          "client_conflict": false
+        },
+        "job": {
+          "customer_name": "Bank of America"
+        }
+      },
+      "expected": {
+        "candidate_id": "1",
+        "company": "Bank of America",
+        "client_conflict": false
+      }
+    },
+    {
+      "name": "existing null flag untouched",
+      "input": {
+        "candidate": {
+          "candidate_id": "1",
+          "company": "Bank of America",
+          "client_conflict": null
+        },
+        "job": {
+          "customer_name": "Bank of America"
+        }
+      },
+      "expected": {
+        "candidate_id": "1",
+        "company": "Bank of America",
+        "client_conflict": null
+      }
+    },
+    {
+      "name": "not employed",
+      "input": {
+        "candidate": {
+          "candidate_id": "1",
+          "company": "Other"
+        },
+        "job": {
+          "customer_name": "Bank of America"
+        }
+      },
+      "expected": {
+        "candidate_id": "1",
+        "company": "Other"
+      }
+    },
+    {
+      "name": "customer fallback in reason",
+      "input": {
+        "candidate": {
+          "candidate_id": "1",
+          "headline": "Dev at Globex"
+        },
+        "job": {
+          "customer": "Globex"
+        }
+      },
+      "expected": {
+        "candidate_id": "1",
+        "headline": "Dev at Globex",
+        "client_conflict": true,
+        "client_conflict_relation": "current",
+        "client_conflict_reason": "Current employer is the hiring client (Globex)"
+      }
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+{
+  "function": "interpretEnrichAnswer",
+  "cases": [
+    {
+      "name": "null answer",
+      "input": {
+        "answer": null,
+        "launchableNow": false
+      },
+      "expected": {
+        "outcome": "failed",
+        "lookedUp": false,
+        "kipplo": ""
+      }
+    },
+    {
+      "name": "error",
+      "input": {
+        "answer": {
+          "status": "error",
+          "phone": "408-555-1234"
+        },
+        "launchableNow": true
+      },
+      "expected": {
+        "outcome": "failed",
+        "lookedUp": false,
+        "kipplo": ""
+      }
+    },
+    {
+      "name": "phone found",
+      "input": {
+        "answer": {
+          "status": "success",
+          "phone": "408-555-1234",
+          "phone_provider": "apollo",
+          "lookup": {
+            "kipplo": "rate_limited"
+          }
+        },
+        "launchableNow": false
+      },
+      "expected": {
+        "outcome": "succeeded",
+        "lookedUp": true,
+        "kipplo": "rate_limited",
+        "override": {
+          "phone": "408-555-1234"
+        },
+        "phoneProvider": "apollo"
+      }
+    },
+    {
+      "name": "mobile only, unnamed provider",
+      "input": {
+        "answer": {
+          "status": "success",
+          "mobilePhone": "408-555-9999"
+        },
+        "launchableNow": false
+      },
+      "expected": {
+        "outcome": "succeeded",
+        "lookedUp": true,
+        "kipplo": "",
+        "override": {
+          "phone": "408-555-9999"
+        },
+        "phoneProvider": "other"
+      }
+    },
+    {
+      "name": "email found from cache",
+      "input": {
+        "answer": {
+          "status": "cached",
+          "email": "x@y.com",
+          "email_provider": "cache"
+        },
+        "launchableNow": true
+      },
+      "expected": {
+        "outcome": "succeeded",
+        "lookedUp": false,
+        "kipplo": "",
+        "override": {
+          "email": "x@y.com"
+        },
+        "emailProvider": "cache"
+      }
+    },
+    {
+      "name": "nothing but reachable",
+      "input": {
+        "answer": {
+          "status": "success"
+        },
+        "launchableNow": true
+      },
+      "expected": {
+        "outcome": "already_reachable",
+        "lookedUp": true,
+        "kipplo": ""
+      }
+    },
+    {
+      "name": "skipped by spend policy",
+      "input": {
+        "answer": {
+          "status": "skipped"
+        },
+        "launchableNow": false
+      },
+      "expected": {
+        "outcome": "not_eligible",
+        "lookedUp": false,
+        "kipplo": ""
+      }
+    },
+    {
+      "name": "nothing found",
+      "input": {
+        "answer": {
+          "status": "success",
+          "phone": "",
+          "email": null
+        },
+        "launchableNow": false
+      },
+      "expected": {
+        "outcome": "no_contact",
+        "lookedUp": true,
+        "kipplo": ""
+      }
+    },
+    {
+      "name": "both",
+      "input": {
+        "answer": {
+          "status": "success",
+          "phone": "408-555-1234",
+          "email": "e@x.com",
+          "phone_provider": "exa",
+          "email_provider": "exa_deep"
+        },
+        "launchableNow": false
+      },
+      "expected": {
+        "outcome": "succeeded",
+        "lookedUp": true,
+        "kipplo": "",
+        "override": {
+          "phone": "408-555-1234",
+          "email": "e@x.com"
+        },
+        "phoneProvider": "exa",
+        "emailProvider": "exa_deep"
+      }
+    }
+  ]
+}

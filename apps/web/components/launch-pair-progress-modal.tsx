@@ -98,6 +98,9 @@ export interface LaunchPairProgress {
   employerUnverified: LaunchUnverifiedEmployer[];
   // Finalization
   finalMessage?: string;
+  // Server launch sessions: why a running launch is not moving right now
+  // (waiting to resume after a back-off / for PAIR, queued for a worker).
+  statusNote?: string;
 }
 
 export const initialLaunchProgress: LaunchPairProgress = {
@@ -130,6 +133,12 @@ interface LaunchPairProgressModalProps {
   // finished run left failures behind (covers both the all-failed and the
   // partial case — phase alone can't, since a partial run ends "completed").
   onRetry?: () => void;
+  // Stops a launch that is still running (server launch sessions: POST
+  // …/cancel). Shown only while the run is not done; omitted = no button.
+  onCancel?: () => void;
+  // Hides the modal while the run goes on (server launch sessions run without
+  // the page). Shown only while the run is not done; omitted = no button.
+  onHide?: () => void;
 }
 
 function StageIcon({ status }: { status: BatchStatus }) {
@@ -176,6 +185,8 @@ export function LaunchPairProgressModal({
   progress,
   onClose,
   onRetry,
+  onCancel,
+  onHide,
 }: LaunchPairProgressModalProps) {
   const {
     open,
@@ -199,6 +210,7 @@ export function LaunchPairProgressModal({
     employerUnverified,
     jobIdForRelaunch,
     finalMessage,
+    statusNote,
   } = progress;
 
   const isDone = phase === "completed" || phase === "failed";
@@ -322,6 +334,9 @@ export function LaunchPairProgressModal({
             )}
             {phase === "failed" && (
               <>{finalMessage || "Some batches did not complete successfully."}</>
+            )}
+            {!isDone && statusNote && (
+              <span className="mt-1 block text-amber-700">{statusNote}</span>
             )}
           </DialogDescription>
         </DialogHeader>
@@ -498,6 +513,21 @@ export function LaunchPairProgressModal({
             <span />
           )}
           <div className="flex gap-2">
+            {!isDone && onHide && (
+              <Button type="button" variant="outline" onClick={onHide}>
+                Hide
+              </Button>
+            )}
+            {!isDone && onCancel && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onCancel}
+                className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+              >
+                Cancel launch
+              </Button>
+            )}
             {showRetry && (
               <Button
                 type="button"

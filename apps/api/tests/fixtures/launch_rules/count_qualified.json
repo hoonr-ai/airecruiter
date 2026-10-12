@@ -1,0 +1,37 @@
+{
+  "function": "countQualified",
+  "cases": [
+    {
+      "name": "coercion",
+      "input": {
+        "candidates": [
+          {
+            "match_score": 60
+          },
+          {
+            "match_score": 59
+          },
+          {
+            "match_score": "75"
+          },
+          {
+            "match_score": null
+          },
+          {
+            "match_score": true
+          },
+          {},
+          {
+            "match_score": [
+              80
+            ]
+          },
+          {
+            "match_score": "abc"
+          }
+        ]
+      },
+      "expected": 3
+    }
+  ]
+}

@@ -123,7 +123,7 @@ def test_step5_finalize_delegates_to_the_shared_policy():
     """
     import inspect
 
-    src = inspect.getsource(U.search_candidates)
+    src = inspect.getsource(U._search_candidates_impl)
     body = src.split("def finalize_candidate(cand):", 1)[1]
     body = body.split("\n\n", 1)[0]
     assert "apply_scoring_policy" in body

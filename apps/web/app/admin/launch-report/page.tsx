@@ -67,6 +67,17 @@ interface LaunchReportRow {
   time_to_launch_minutes: number | null;
   turn_around_time_minutes: number | null;
   /**
+   * Launch timings (services/launch_timing.py). launch_clicked_at = the job's
+   * first Launch PAIR click; added_to_click_minutes (A) = that click − the
+   * job's arrival in PAIR; click_to_launch_minutes (B) = the first interview
+   * PAIR Bot created − the click. null = not recorded (launched before click
+   * tracking, or the read failed) — shown as "—". Optional so a page served
+   * ahead of the backend that sends them renders "—" too.
+   */
+  launch_clicked_at?: string | null;
+  added_to_click_minutes?: number | null;
+  click_to_launch_minutes?: number | null;
+  /**
    * Step 5 ("Source") time. null = not tracked (a job worked before the
    * tracking existed, or the read failed) — shown as "—", never as 0.
    */
@@ -258,6 +269,32 @@ const COLUMN_GROUPS: ColumnGroup[] = [
         render: (r) => (
           <span title="PAIR Launch − PAIR Published">{formatDuration(r.turn_around_time_minutes)}</span>
         ),
+      },
+      // Launch timings (services/launch_timing.py): Turn Around Time split at
+      // the first Launch PAIR click into the recruiter's part (A) and the
+      // system's part (B). A + B can differ from Turn Around Time — B is
+      // normally measured from the click of the attempt that created the
+      // first interview, so it can leave out a failed first attempt. Jobs
+      // launched before click tracking began show "—" in all three.
+      {
+        key: "launch_clicked",
+        label: withEasternLabel("Launch Clicked"),
+        hint: "The job's first Launch PAIR click. — for jobs launched before click tracking began",
+        text: (r) => formatEasternDateTime(r.launch_clicked_at),
+      },
+      {
+        key: "added_to_click",
+        label: "Added → Click",
+        numeric: true,
+        hint: "First Launch PAIR click − added to PAIR (PAIR Published): how long the job waited for a recruiter to launch it",
+        text: (r) => formatDuration(r.added_to_click_minutes),
+      },
+      {
+        key: "click_to_launch",
+        label: "Click → Launch",
+        numeric: true,
+        hint: "First interview created in PAIR Bot (PAIR Launch) − first Launch PAIR click: how long PAIR took to launch after the click",
+        text: (r) => formatDuration(r.click_to_launch_minutes),
       },
       // Measured by the job wizard itself (services/job_step_time.py), so a
       // job worked before that existed has no data and shows "—", not 0m.
@@ -811,7 +848,8 @@ export default function LaunchReportPage() {
         the whole life of the job — so Sourced, Launched and the interview status columns match the job&apos;s Rankings
         page, and the interview status and feedback columns count launched candidates only. Interview status, channel,
         phase and response columns are read live from PAIR Bot. The Step 5 time columns only cover jobs worked since
-        that tracking began; older jobs show a dash. A report that includes today refreshes itself every 2
+        that tracking began, and Launch Clicked, Added → Click and Click → Launch only jobs launched since the Launch
+        PAIR click was recorded; older jobs show a dash. A report that includes today refreshes itself every 2
         minutes while this tab is open. Date ranges are limited to {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
 

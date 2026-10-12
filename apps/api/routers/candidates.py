@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, AsyncIterator
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -763,6 +764,312 @@ async def get_open_to_work_diag(user: UserIdentity = Depends(get_current_user)):
     return diagnostics()
 
 
+def _nr_suppress_apdex() -> None:
+    """Keep a minutes-long streaming endpoint out of Apdex (core.newrelic
+    helper when present; fail-open no-op otherwise)."""
+    try:
+        from core import newrelic as _nr
+        fn = getattr(_nr, "suppress_apdex", None)
+        if callable(fn):
+            fn()
+    except Exception:  # noqa: BLE001 — telemetry never breaks a request
+        pass
+
+
+def build_search_criteria(
+    request: CandidateSearchRequest,
+    *,
+    _resolved: Optional[Dict[str, Any]] = None,
+) -> SearchCriteria:
+    """Step-5 request → SearchCriteria, exactly as /candidates/search builds it
+    (same monitored_jobs fallbacks for location_type, resume_match_filters and
+    customer_name, same radius clamp). Sync: it may read monitored_jobs, so
+    async callers run it in a thread. Shared by the endpoint and the server
+    launch runner so both search with the very same criteria.
+
+    ``_resolved`` (endpoint-internal) receives the intermediate values as
+    they are computed — location, additional_locations, location_type,
+    effective_limit, require_resume, within_miles — for the non-streaming
+    fallback, which only uses those already resolved when this raises.
+    """
+    resolved = _resolved if _resolved is not None else {}
+
+    # `title_criteria` is now the single source of truth — the legacy flat
+    # `titles`/`skills` fields were removed from CandidateSearchRequest.
+    combined_title_criteria = request.title_criteria or []
+
+    # Canonicalize location: top-level `location` is authoritative.
+    location = ""
+    additional_locations: list = []
+    resolved["location"] = location
+    resolved["additional_locations"] = additional_locations
+    if request.location:
+        location = request.location
+    elif request.locations:
+        location = request.locations[0].value
+    resolved["location"] = location
+
+    # Multi-location: carry all request.locations entries whose normalized
+    # value differs from the resolved primary location. This avoids the
+    # locations[1:] slice causing a silent drop when request.location differs
+    # from locations[0].value, or a duplicate when they match.
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+    primary_key = _norm(location)
+    if request.locations:
+        for loc in request.locations:
+            loc_value = str(loc.value or "").strip()
+            if not loc_value or _norm(loc_value) == primary_key:
+                continue
+            loc_radius = 25
+            if loc.radius:
+                digits = "".join(ch for ch in str(loc.radius) if ch.isdigit())
+                if digits:
+                    loc_radius = min(100, max(1, int(digits)))
+            additional_locations.append({
+                "value": loc_value,
+                "within_miles": loc_radius,
+            })
+
+    # Work arrangement: request wins; else read monitored_jobs so Remote
+    # jobs skip the commute-radius constraint even when the caller
+    # doesn't send it. Handles the JobDiva quirk of location_type being
+    # empty with the literal string "REMOTE" in city.
+    location_type = (getattr(request, "location_type", "") or "").strip()
+    if location_type.lower() in ("", "unspecified"):
+        location_type = ""
+        try:
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT location_type, city FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                        (request.job_id, request.job_id),
+                    )
+                    row = cursor.fetchone()
+            finally:
+                conn.close()
+            if row:
+                location_type = str(row[0] or "").strip()
+                if not location_type and str(row[1] or "").strip().upper() == "REMOTE":
+                    location_type = "Remote"
+        except Exception as e:
+            logger.warning(f"Failed to load location_type for job {request.job_id}: {e}")
+    resolved["location_type"] = location_type
+
+    effective_limit = int(request.limit or request.page_size or 100)
+    resolved["effective_limit"] = effective_limit
+    require_resume = True if request.require_resume is None else bool(request.require_resume)
+    resolved["require_resume"] = require_resume
+
+    # Resolve per-location radius if provided (fallback 25 miles).
+    within_miles = 25
+    if request.within_miles is not None and int(request.within_miles) > 0:
+        within_miles = int(request.within_miles)
+    elif request.locations:
+        radius_match = str(request.locations[0].radius or "")
+        digits = "".join(ch for ch in radius_match if ch.isdigit())
+        if digits:
+            within_miles = int(digits)
+    # Hard cap 100 mi everywhere — clamp + log if a caller exceeds it.
+    if within_miles > 100:
+        logger.warning(
+            "within_miles=%s exceeds 100mi cap; clamping to 100",
+            within_miles,
+        )
+        within_miles = 100
+    resolved["within_miles"] = within_miles
+
+    companies = request.companies or []
+
+    # Hiring client / account name, used by the "Same client / industry"
+    # scoring dimension and the currently-employed-by-client veto. Prefer
+    # an explicit request value, else read customer_name from monitored_jobs.
+    client_name = (getattr(request, "client_name", None) or "").strip()
+
+    # Load resume match filters from database if not provided in request
+    resume_match_filters = []
+    if request.resume_match_filters and len(request.resume_match_filters) > 0:
+        resume_match_filters = [f.dict() for f in request.resume_match_filters]
+        logger.info(f"Using {len(resume_match_filters)} resume match filters from request")
+    else:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT resume_match_filters, customer_name FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                (request.job_id, request.job_id)
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                resume_match_filters = row[0] if isinstance(row[0], list) else json.loads(row[0])
+                logger.info(f"Loaded {len(resume_match_filters)} resume match filters from database for job {request.job_id}")
+            if row and len(row) > 1 and row[1] and not client_name:
+                client_name = str(row[1]).strip()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Failed to load resume match filters from database: {e}")
+
+    # Build search criteria — no more flat `titles`/`skills` duplication;
+    # per-source search methods derive what they need via
+    # SearchCriteria.sourcing_skill_values().
+    return SearchCriteria(
+        job_id=request.job_id,
+        title_criteria=[t.dict() for t in combined_title_criteria],
+        skill_criteria=[s.dict() for s in (request.skill_criteria or [])],
+        keywords=request.keywords or [],
+        resume_match_filters=resume_match_filters,
+        location=location,
+        additional_locations=additional_locations,
+        location_type=location_type or "Unspecified",
+        within_miles=within_miles,
+        companies=companies,
+        page_size=effective_limit,
+        sources=request.sources or ["JobDiva"],
+        open_to_work=request.open_to_work,
+        boolean_string=request.boolean_string or "",
+        recent_days=request.recent_days,
+        require_resume=require_resume,
+        include_relocation_candidates=(
+            True if request.include_relocation_candidates is None
+            else bool(request.include_relocation_candidates)
+        ),
+        min_experience_years=request.min_experience_years,
+        max_experience_years=request.max_experience_years,
+        jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
+        jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
+        # Placeholder customer values carry no client signal — skip them.
+        client_name=(
+            "" if client_name.lower() in ("", "external", "unknown", "n/a")
+            else client_name
+        ),
+        search_mode=(
+            "sample" if str(request.search_mode or "").strip().lower() == "sample"
+            else "full"
+        ),
+        # Clamp the preview size: above ~10 per source a "sample" costs
+        # more than it saves (pool + enrichment scale with it).
+        sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
+        assess_all_sources=bool(request.assess_all_sources),
+    )
+
+
+async def _search_event_stream(criteria: SearchCriteria) -> AsyncIterator[Dict[str, Any]]:
+    """The /candidates/search event stream for built criteria: every event of
+    unified_search_service.search_candidates, with the router's gender layer
+    (heuristic fields on each candidate row + an AI result as a later
+    ``candidate_detail`` stage="gender" patch) and an ``error`` event in place
+    of an exception. One dict per NDJSON line the endpoint writes."""
+    # AI name→gender inference must not gate row delivery: awaiting it
+    # inline serialized every fresh-name burst behind one LLM call per
+    # row (up to 8s each), delaying first paint by minutes. Rows now
+    # stream immediately with the heuristic gender fields; a confident
+    # AI result follows as a targeted candidate_detail patch carrying
+    # only the resolved gender fields.
+    gender_tasks: set = set()
+    gender_patches: asyncio.Queue = asyncio.Queue()
+    # The old inline await was concurrency-1 by construction; keep the
+    # OpenAI fan-out bounded now that lookups run in parallel. Later
+    # tasks for repeated names also get to hit the per-name cache
+    # instead of duplicating in-flight calls.
+    gender_semaphore = asyncio.Semaphore(8)
+
+    async def _infer_gender_background(cid: str, cand_snapshot: Dict[str, Any]) -> None:
+        try:
+            async with gender_semaphore:
+                fields = await asyncio.wait_for(
+                    _extract_candidate_gender_fields_with_ai(cand_snapshot),
+                    timeout=8.0,
+                )
+        except Exception:
+            return
+        # Only male/female ever patches the row — a "default" result
+        # must never overwrite the already-streamed heuristic fields.
+        if fields.get("gender_label") in ("male", "female"):
+            await gender_patches.put({
+                "type": "candidate_detail",
+                "candidate_id": cid,
+                "stage": "gender",
+                "patch": fields,
+            })
+
+    def _drain_gender_patches() -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        while not gender_patches.empty():
+            out.append(gender_patches.get_nowait())
+        return out
+
+    try:
+        # aclosing: closing this stream closes the search generator right
+        # away (its cleanup cancels the paid per-source work) instead of
+        # leaving it to the garbage collector after aclose() returned.
+        async with contextlib.aclosing(unified_search_service.search_candidates(criteria)) as search:
+            async for event in search:
+                if event.get("type") == "candidate":
+                    cand = event.get("data") or {}
+                    if isinstance(cand, dict):
+                        cand.update(_extract_candidate_gender_fields(cand))
+                        cid = str(cand.get("candidate_id") or cand.get("id") or "")
+                        if cid and cand.get("gender_label") not in ("male", "female"):
+                            task = asyncio.create_task(
+                                _infer_gender_background(cid, dict(cand))
+                            )
+                            gender_tasks.add(task)
+                            task.add_done_callback(gender_tasks.discard)
+                # Do not inject gender into other candidate_detail patches.
+                # These patches often omit identity fields and would
+                # normalize to "default", unintentionally overwriting a
+                # previously inferred male/female label on the UI row.
+                # (Auto-persistence of streamed rows is disabled: only rows
+                # explicitly launched via /candidates/save are stored.)
+                yield event
+                for patch in _drain_gender_patches():
+                    yield patch
+        # Flush stragglers: give still-pending inferences a bounded
+        # window, then emit whatever resolved. Unresolved tails stay
+        # "default" — same outcome as the old per-row timeout fallback.
+        if gender_tasks:
+            await asyncio.wait(list(gender_tasks), timeout=20.0)
+        for patch in _drain_gender_patches():
+            yield patch
+    except Exception as e:
+        logger.error(f"Error in search stream: {e}", exc_info=True)
+        yield {"type": "error", "message": str(e)}
+    finally:
+        # Client disconnect / stream close: stop any in-flight gender
+        # inferences — nobody is left to consume their patches.
+        for task in list(gender_tasks):
+            if not task.done():
+                task.cancel()
+        if gender_tasks:
+            await asyncio.gather(*gender_tasks, return_exceptions=True)
+
+
+async def iter_search_events(
+    request: CandidateSearchRequest,
+    *,
+    schedule_cross_submissions: bool = True,
+) -> AsyncIterator[Dict[str, Any]]:
+    """The SAME event dicts /candidates/search streams as NDJSON (candidate,
+    candidate_detail incl. the router's gender patches, stage, source_status,
+    summary, keepalive, error), for a server-side consumer. Builds the
+    criteria in a thread (`build_search_criteria`, which raises on failure —
+    there is no fallback search here) and, by default, schedules the
+    cross-submissions scan exactly once, as the endpoint does. No access
+    check: the caller has authorised the job. Consume with
+    ``contextlib.aclosing`` so a stop cancels every producer."""
+    criteria = await asyncio.to_thread(build_search_criteria, request)
+    if schedule_cross_submissions:
+        _schedule_cross_submissions(str(request.job_id), criteria)
+    async with contextlib.aclosing(_search_event_stream(criteria)) as events:
+        async for event in events:
+            yield event
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
@@ -777,6 +1084,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
     - Company experience matching from resume text
     - Two-pool search strategy with prioritization
     """
+    _nr_suppress_apdex()
     logger.info(f"🔍 Unified candidate search for job_id: {request.job_id}")
 
     if not request.job_id:
@@ -784,164 +1092,9 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
 
     _verify_job_access_by_id(str(request.job_id), user)
 
+    resolved: Dict[str, Any] = {}
     try:
-        from services.unified_candidate_search import unified_search_service, SearchCriteria
-
-        # `title_criteria` is now the single source of truth — the legacy flat
-        # `titles`/`skills` fields were removed from CandidateSearchRequest.
-        combined_title_criteria = request.title_criteria or []
-
-        # Canonicalize location: top-level `location` is authoritative.
-        location = ""
-        additional_locations: list = []
-        if request.location:
-            location = request.location
-        elif request.locations:
-            location = request.locations[0].value
-
-        # Multi-location: carry all request.locations entries whose normalized
-        # value differs from the resolved primary location. This avoids the
-        # locations[1:] slice causing a silent drop when request.location differs
-        # from locations[0].value, or a duplicate when they match.
-        import re as _re
-
-        def _norm(s: str) -> str:
-            return _re.sub(r"[^a-z0-9]", "", s.lower())
-
-        primary_key = _norm(location)
-        if request.locations:
-            for loc in request.locations:
-                loc_value = str(loc.value or "").strip()
-                if not loc_value or _norm(loc_value) == primary_key:
-                    continue
-                loc_radius = 25
-                if loc.radius:
-                    digits = "".join(ch for ch in str(loc.radius) if ch.isdigit())
-                    if digits:
-                        loc_radius = min(100, max(1, int(digits)))
-                additional_locations.append({
-                    "value": loc_value,
-                    "within_miles": loc_radius,
-                })
-
-        # Work arrangement: request wins; else read monitored_jobs so Remote
-        # jobs skip the commute-radius constraint even when the caller
-        # doesn't send it. Handles the JobDiva quirk of location_type being
-        # empty with the literal string "REMOTE" in city.
-        location_type = (getattr(request, "location_type", "") or "").strip()
-        if location_type.lower() in ("", "unspecified"):
-            location_type = ""
-            try:
-                conn = get_db_connection()
-                try:
-                    with conn.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT location_type, city FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
-                            (request.job_id, request.job_id),
-                        )
-                        row = cursor.fetchone()
-                finally:
-                    conn.close()
-                if row:
-                    location_type = str(row[0] or "").strip()
-                    if not location_type and str(row[1] or "").strip().upper() == "REMOTE":
-                        location_type = "Remote"
-            except Exception as e:
-                logger.warning(f"Failed to load location_type for job {request.job_id}: {e}")
-
-        effective_limit = int(request.limit or request.page_size or 100)
-        require_resume = True if request.require_resume is None else bool(request.require_resume)
-
-        # Resolve per-location radius if provided (fallback 25 miles).
-        within_miles = 25
-        if request.within_miles is not None and int(request.within_miles) > 0:
-            within_miles = int(request.within_miles)
-        elif request.locations:
-            radius_match = str(request.locations[0].radius or "")
-            digits = "".join(ch for ch in radius_match if ch.isdigit())
-            if digits:
-                within_miles = int(digits)
-        # Hard cap 100 mi everywhere — clamp + log if a caller exceeds it.
-        if within_miles > 100:
-            logger.warning(
-                "within_miles=%s exceeds 100mi cap; clamping to 100",
-                within_miles,
-            )
-            within_miles = 100
-
-        companies = request.companies or []
-
-        # Hiring client / account name, used by the "Same client / industry"
-        # scoring dimension and the currently-employed-by-client veto. Prefer
-        # an explicit request value, else read customer_name from monitored_jobs.
-        client_name = (getattr(request, "client_name", None) or "").strip()
-
-        # Load resume match filters from database if not provided in request
-        resume_match_filters = []
-        if request.resume_match_filters and len(request.resume_match_filters) > 0:
-            resume_match_filters = [f.dict() for f in request.resume_match_filters]
-            logger.info(f"Using {len(resume_match_filters)} resume match filters from request")
-        else:
-            try:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT resume_match_filters, customer_name FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
-                    (request.job_id, request.job_id)
-                )
-                row = cursor.fetchone()
-                if row and row[0]:
-                    resume_match_filters = row[0] if isinstance(row[0], list) else json.loads(row[0])
-                    logger.info(f"Loaded {len(resume_match_filters)} resume match filters from database for job {request.job_id}")
-                if row and len(row) > 1 and row[1] and not client_name:
-                    client_name = str(row[1]).strip()
-                cursor.close()
-                conn.close()
-            except Exception as e:
-                logger.warning(f"Failed to load resume match filters from database: {e}")
-
-        # Build search criteria — no more flat `titles`/`skills` duplication;
-        # per-source search methods derive what they need via
-        # SearchCriteria.sourcing_skill_values().
-        criteria = SearchCriteria(
-            job_id=request.job_id,
-            title_criteria=[t.dict() for t in combined_title_criteria],
-            skill_criteria=[s.dict() for s in (request.skill_criteria or [])],
-            keywords=request.keywords or [],
-            resume_match_filters=resume_match_filters,
-            location=location,
-            additional_locations=additional_locations,
-            location_type=location_type or "Unspecified",
-            within_miles=within_miles,
-            companies=companies,
-            page_size=effective_limit,
-            sources=request.sources or ["JobDiva"],
-            open_to_work=request.open_to_work,
-            boolean_string=request.boolean_string or "",
-            recent_days=request.recent_days,
-            require_resume=require_resume,
-            include_relocation_candidates=(
-                True if request.include_relocation_candidates is None
-                else bool(request.include_relocation_candidates)
-            ),
-            min_experience_years=request.min_experience_years,
-            max_experience_years=request.max_experience_years,
-            jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
-            jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
-            # Placeholder customer values carry no client signal — skip them.
-            client_name=(
-                "" if client_name.lower() in ("", "external", "unknown", "n/a")
-                else client_name
-            ),
-            search_mode=(
-                "sample" if str(request.search_mode or "").strip().lower() == "sample"
-                else "full"
-            ),
-            # Clamp the preview size: above ~10 per source a "sample" costs
-            # more than it saves (pool + enrichment scale with it).
-            sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
-            assess_all_sources=bool(request.assess_all_sources),
-        )
+        criteria = build_search_criteria(request, _resolved=resolved)
 
         # Cross submissions: in the background, look back over candidates PAIR
         # already screened for OTHER jobs (last 60 days, responded) and email
@@ -949,111 +1102,18 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         # throttled per job inside the service; never touches the stream.
         _schedule_cross_submissions(str(request.job_id), criteria)
 
-        # Execute unified search as a stream. Persist each candidate to
-
-        # `sourced_candidates` as it's yielded — fire-and-forget via
-        # asyncio.to_thread so the sync SQLAlchemy call doesn't block the
-        # event loop. We keep a reference list so pending tasks aren't
-        # garbage-collected mid-flight.
         async def stream_candidates():
-            persist_tasks: List[asyncio.Task] = []
-            # AI name→gender inference must not gate row delivery: awaiting it
-            # inline serialized every fresh-name burst behind one LLM call per
-            # row (up to 8s each), delaying first paint by minutes. Rows now
-            # stream immediately with the heuristic gender fields; a confident
-            # AI result follows as a targeted candidate_detail patch carrying
-            # only the resolved gender fields.
-            gender_tasks: set = set()
-            gender_patches: asyncio.Queue = asyncio.Queue()
-            # The old inline await was concurrency-1 by construction; keep the
-            # OpenAI fan-out bounded now that lookups run in parallel. Later
-            # tasks for repeated names also get to hit the per-name cache
-            # instead of duplicating in-flight calls.
-            gender_semaphore = asyncio.Semaphore(8)
-
-            async def _infer_gender_background(cid: str, cand_snapshot: Dict[str, Any]) -> None:
-                try:
-                    async with gender_semaphore:
-                        fields = await asyncio.wait_for(
-                            _extract_candidate_gender_fields_with_ai(cand_snapshot),
-                            timeout=8.0,
-                        )
-                except Exception:
-                    return
-                # Only male/female ever patches the row — a "default" result
-                # must never overwrite the already-streamed heuristic fields.
-                if fields.get("gender_label") in ("male", "female"):
-                    await gender_patches.put({
-                        "type": "candidate_detail",
-                        "candidate_id": cid,
-                        "stage": "gender",
-                        "patch": fields,
-                    })
-
-            def _drain_gender_patches() -> List[str]:
-                lines: List[str] = []
-                while not gender_patches.empty():
-                    lines.append(json.dumps(gender_patches.get_nowait()) + "\n")
-                return lines
-
-            try:
-                async for event in unified_search_service.search_candidates(criteria):
-                    if event.get("type") == "candidate":
-                        cand = event.get("data") or {}
-                        if isinstance(cand, dict):
-                            cand.update(_extract_candidate_gender_fields(cand))
-                            cid = str(cand.get("candidate_id") or cand.get("id") or "")
-                            if cid and cand.get("gender_label") not in ("male", "female"):
-                                task = asyncio.create_task(
-                                    _infer_gender_background(cid, dict(cand))
-                                )
-                                gender_tasks.add(task)
-                                task.add_done_callback(gender_tasks.discard)
-                    # Do not inject gender into other candidate_detail patches.
-                    # These patches often omit identity fields and would
-                    # normalize to "default", unintentionally overwriting a
-                    # previously inferred male/female label on the UI row.
-                    yield json.dumps(event) + "\n"
-                    for line in _drain_gender_patches():
-                        yield line
-                    if event.get("type") == "candidate":
-                        cand = event.get("data") or {}
-                        # Auto-persistence of applicants has been disabled to ensure
-                        # only explicitly selected candidates (via Launch PAIR) are
-                        # saved to the database/Master Pool.
-                        pass
-                # Flush stragglers: give still-pending inferences a bounded
-                # window, then emit whatever resolved. Unresolved tails stay
-                # "default" — same outcome as the old per-row timeout fallback.
-                if gender_tasks:
-                    await asyncio.wait(list(gender_tasks), timeout=20.0)
-                for line in _drain_gender_patches():
+            async with contextlib.aclosing(_search_event_stream(criteria)) as events:
+                async for event in events:
+                    try:
+                        line = json.dumps(event) + "\n"
+                    except Exception as e:  # noqa: BLE001 — e.g. a datetime/Decimal value
+                        # Serialising used to sit inside the stream's own try,
+                        # so a bad value ended the stream WITH an error line.
+                        logger.error(f"Error in search stream: {e}", exc_info=True)
+                        yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+                        return
                     yield line
-            except Exception as e:
-                logger.error(f"Error in search stream: {e}", exc_info=True)
-                yield json.dumps({"type": "error", "message": str(e)}) + "\n"
-            finally:
-                # Client disconnect / stream close: stop any in-flight gender
-                # inferences — nobody is left to consume their patches.
-                for task in list(gender_tasks):
-                    if not task.done():
-                        task.cancel()
-                if gender_tasks:
-                    await asyncio.gather(*gender_tasks, return_exceptions=True)
-                # Drain persist tasks so failures surface in logs instead of
-                # vanishing when the generator closes.
-                if persist_tasks:
-                    results = await asyncio.gather(*persist_tasks, return_exceptions=True)
-                    failures = [r for r in results if isinstance(r, Exception)]
-                    if failures:
-                        logger.warning(
-                            f"Candidate persistence: {len(failures)}/{len(results)} failed"
-                        )
-                    else:
-                        logger.info(
-                            f"Candidate persistence: saved {len(results)} rows for "
-                            f"job {request.job_id}"
-                        )
 
         return StreamingResponse(
             stream_candidates(),
@@ -1072,12 +1132,12 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             token = await jobdiva_service.authenticate()
             candidates = await jobdiva_service.search_candidates(
                 skills=[],
-                location=location,
-                limit=effective_limit,
+                location=resolved["location"],
+                limit=resolved["effective_limit"],
                 job_id=None,
                 boolean_string=request.boolean_string or "",
                 recent_days=request.recent_days,
-                require_resume=require_resume,
+                require_resume=resolved["require_resume"],
             ) if token else []
             for candidate in candidates:
                 candidate["source"] = "JobDiva-TalentSearch"
@@ -1105,16 +1165,16 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
-                    additional_locations=additional_locations,
-                    location_type=location_type or "Unspecified",
-                    within_miles=within_miles,
+                    additional_locations=resolved["additional_locations"],
+                    location_type=resolved["location_type"] or "Unspecified",
+                    within_miles=resolved["within_miles"],
                     companies=request.companies or [],
-                    page_size=effective_limit,
+                    page_size=resolved["effective_limit"],
                     sources=request.sources or ["JobDiva"],
                     open_to_work=request.open_to_work,
                     boolean_string=request.boolean_string or "",
                     recent_days=request.recent_days,
-                    require_resume=require_resume,
+                    require_resume=resolved["require_resume"],
                     min_experience_years=request.min_experience_years,
                     max_experience_years=request.max_experience_years,
                     jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
@@ -1138,7 +1198,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                 logger.warning(f"Fallback scoring setup failed, returning unscored: {score_setup_err}")
 
             return {
-                "candidates": candidates[:effective_limit],
+                "candidates": candidates[:resolved["effective_limit"]],
                 "total": len(candidates),
                 "job_applicants": 0,
                 "talent_pool": len(candidates),
@@ -2154,6 +2214,15 @@ async def save_candidates(
     """
     Saves a batch of candidates to the sourced_candidates table.
     Always stores the alphanumeric jobdiva_id (e.g. '26-05172'), never the numeric job_id PK.
+
+    Also callable directly (the server launch runner does):
+    ``await save_candidates(CandidatesSaveRequest(...), user=UserIdentity(...))``
+    — ``user`` is a plain keyword there (FastAPI only resolves the Depends for
+    HTTP calls), and every gate runs the same: job access, outreach-stopped
+    409, the recruiter-email gate (400/404/503), launched-by attribution,
+    pair_launched_at, DNC and no-contact skips. Raises HTTPException like the
+    endpoint; returns the same dict (``saved_ids`` = the rows to launch). Its
+    DB work is synchronous psycopg2, so it blocks the loop while it runs.
     """
     # allow_not_found=True because `jobdiva_id` here is not always a real
     # monitored job: components/sourced-candidates-view.tsx posts the
@@ -2512,7 +2581,9 @@ async def save_candidates(
                                                 'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
                                                 'engage_interview_id', 'engage_score', 'engage_updated_at',
                                                 'engage_last_response', 'engage_hard_filter_status',
-                                                'engage_hard_filter_reason', 'engage_passed_email_sent'
+                                                'engage_hard_filter_reason', 'engage_passed_email_sent',
+                                                'engage_session_id', 'engage_bulk_id', 'engage_block_reason',
+                                                'engage_status_before_claim', 'jobdiva_provisioning_claimed_at'
                                             )
                                        ), '{}'::jsonb),
                                 status = EXCLUDED.status,
@@ -2595,11 +2666,31 @@ async def save_candidates(
                     _conn = get_db_connection()
                     try:
                         with _conn.cursor() as _cur:
+                            # Merge, never replace (map-critic Q6.2): the blob
+                            # here is the one this request built, so writing it
+                            # over the column erased the launch bookkeeping the
+                            # upsert above had just preserved — re-saving an
+                            # unscored, already-launched row reopened it to a
+                            # second launch and a duplicate JobDiva profile.
+                            # The stored backend-owned keys win, as in the upsert.
                             _cur.execute(
                                 """
                                 UPDATE sourced_candidates
                                 SET resume_match_percentage = %s,
-                                    data = %s,
+                                    data = COALESCE(sourced_candidates.data, '{}'::jsonb)
+                                           || %s::jsonb
+                                           || COALESCE((
+                                                SELECT jsonb_object_agg(e.k, e.v)
+                                                FROM jsonb_each(sourced_candidates.data) AS e(k, v)
+                                                WHERE e.k IN (
+                                                    'jobdiva_candidate_id', 'jobdiva_resume_id', 'engage_status',
+                                                    'engage_interview_id', 'engage_score', 'engage_updated_at',
+                                                    'engage_last_response', 'engage_hard_filter_status',
+                                                    'engage_hard_filter_reason', 'engage_passed_email_sent',
+                                                    'engage_session_id', 'engage_bulk_id', 'engage_block_reason',
+                                                    'engage_status_before_claim', 'jobdiva_provisioning_claimed_at'
+                                                )
+                                           ), '{}'::jsonb),
                                     updated_at = CURRENT_TIMESTAMP
                                 WHERE jobdiva_id = %s
                                   AND candidate_id = %s
@@ -3467,6 +3558,128 @@ class EnrichCandidateContactsRequest(BaseModel):
     candidates: List[EnrichCandidateContactRequest] = []
 
 
+async def _enrich_one_contact(
+    item: EnrichCandidateContactRequest, defaults: Dict[str, Any]
+) -> Dict[str, Any]:
+    """One candidate of a grouped lookup: the single endpoint's chain with the
+    group's defaults filled in; a failure is an ``{"status": "error"}`` answer,
+    never an exception (one candidate never fails the others)."""
+    candidate_id = str(item.candidate_id or "").strip()
+    if not candidate_id:
+        return {"status": "error", "candidate_id": "", "message": "candidate_id is required"}
+    item = item.model_copy(update={
+        k: v for k, v in defaults.items() if v is not None and getattr(item, k) is None
+    })
+    try:
+        return await _enrich_candidate_contact_impl(candidate_id, item)
+    except HTTPException as e:
+        return {"status": "error", "candidate_id": candidate_id, "message": str(e.detail)}
+    except Exception as e:
+        logger.warning("enrich_contacts: lookup failed for %s: %s", candidate_id, e)
+        return {"status": "error", "candidate_id": candidate_id, "message": f"lookup failed: {type(e).__name__}"}
+
+
+# Lookups Launch PAIR keeps in flight (the browser runs 4 groups of 5).
+LAUNCH_ENRICH_CONCURRENCY = 20
+
+
+def _launch_enrich_request(item: Dict[str, Any], job_id: Any) -> EnrichCandidateContactRequest:
+    """Exactly what Launch PAIR's enrichment pass sends per candidate
+    (page.tsx enrichRequest): candidate_id, jobdiva_id, source, linkedin_url,
+    trigger="launch" (the spend policy), match_score only when it is a number."""
+    score = item.get("match_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        score = None
+    return EnrichCandidateContactRequest(
+        candidate_id=str(item.get("candidate_id") or item.get("id") or "").strip() or None,
+        jobdiva_id=str(job_id) if job_id else None,
+        source=str(item["source"]) if item.get("source") else None,
+        linkedin_url=str(item["linkedin_url"]) if item.get("linkedin_url") else None,
+        trigger="launch",
+        match_score=float(score) if score is not None else None,
+    )
+
+
+def _launch_enrich_answer(index: int, candidate_id: str, result: Any) -> Dict[str, Any]:
+    """One lookup's answer, read the way Launch PAIR reads it (page.tsx
+    applyEnrichResult): phone = phone || mobilePhone (a personal number), email,
+    who found each, and the outcome — found | not_eligible (spend policy) |
+    no_contact | failed. "Already reachable" needs the row's own contact, so
+    it is the caller's call."""
+    answer: Dict[str, Any] = {
+        "index": index, "candidate_id": candidate_id, "result": result,
+        "outcome": "failed", "phone": None, "email": None,
+        "phone_provider": None, "email_provider": None,
+        "looked_up": False, "kipplo": "",
+    }
+    if not isinstance(result, dict) or result.get("status") == "error":
+        return answer
+    phone = result.get("phone") or result.get("mobilePhone") or None
+    email = result.get("email") or None
+    lookup = result.get("lookup") if isinstance(result.get("lookup"), dict) else {}
+    answer.update({
+        "phone": phone,
+        "email": email,
+        "phone_provider": str(result.get("phone_provider") or "other") if phone else None,
+        "email_provider": str(result.get("email_provider") or "other") if email else None,
+        "looked_up": result.get("status") == "success",
+        "kipplo": str(lookup.get("kipplo") or ""),
+        "outcome": (
+            "found" if (phone or email)
+            else "not_eligible" if result.get("status") == "skipped"
+            else "no_contact"
+        ),
+    })
+    return answer
+
+
+async def enrich_contacts_for_launch(
+    items: List[Dict[str, Any]],
+    *,
+    job_id: Any,
+    concurrency: int = LAUNCH_ENRICH_CONCURRENCY,
+) -> AsyncIterator[Dict[str, Any]]:
+    """Launch PAIR's contact lookup for a server-side caller: the grouped
+    /candidates/enrich-contacts internals (same chain, same spend policy via
+    trigger="launch", same request fields), ``concurrency`` lookups in flight.
+
+    ``items`` are row dicts with candidate_id (or id), source, linkedin_url,
+    match_score. Yields one `_launch_enrich_answer` dict per candidate as its
+    lookup ends: ``{"index", "candidate_id", "result" (the endpoint's answer),
+    "outcome", "phone", "email", "phone_provider", "email_provider",
+    "looked_up", "kipplo"}``.
+
+    A lookup that has started is paid for, so it runs as a task of its own and
+    finishes (keeping what it finds in the contact cache and the sourced rows)
+    even if the consumer stops; lookups not yet started are cancelled. Consume
+    with ``contextlib.aclosing``.
+    """
+    reqs = [_launch_enrich_request(it or {}, job_id) for it in (items or [])]
+    if not reqs:
+        return
+    defaults = {"jobdiva_id": str(job_id) if job_id else None, "trigger": "launch", "fields": None}
+    sem = asyncio.Semaphore(max(1, int(concurrency or 1)))
+
+    async def _slot(i: int, req: EnrichCandidateContactRequest):
+        async with sem:
+            lookup = asyncio.ensure_future(_enrich_one_contact(req, defaults))
+            _LOOKUP_TASKS.add(lookup)
+            lookup.add_done_callback(_LOOKUP_TASKS.discard)
+            return i, await asyncio.shield(lookup)
+
+    slots = [asyncio.ensure_future(_slot(i, r)) for i, r in enumerate(reqs)]
+    try:
+        for fut in asyncio.as_completed(slots):
+            i, result = await fut
+            yield _launch_enrich_answer(i, str(reqs[i].candidate_id or ""), result)
+    finally:
+        for slot in slots:
+            if not slot.done():
+                slot.cancel()
+        if slots:
+            await asyncio.gather(*slots, return_exceptions=True)
+
+
 @router.post("/candidates/enrich-contacts")
 async def enrich_candidate_contacts(
     request: EnrichCandidateContactsRequest,
@@ -3491,6 +3704,7 @@ async def enrich_candidate_contacts(
     caller goes away they still finish and keep what they find (contact cache,
     sourced rows) for the next Launch or phone click.
     """
+    _nr_suppress_apdex()
     items = list(request.candidates or [])
     if not items:
         raise HTTPException(status_code=400, detail="candidates is required")
@@ -3501,24 +3715,9 @@ async def enrich_candidate_contacts(
         )
     defaults = {"jobdiva_id": request.jobdiva_id, "trigger": request.trigger, "fields": request.fields}
 
-    async def _one(item: EnrichCandidateContactRequest) -> Dict[str, Any]:
-        candidate_id = str(item.candidate_id or "").strip()
-        if not candidate_id:
-            return {"status": "error", "candidate_id": "", "message": "candidate_id is required"}
-        item = item.model_copy(update={
-            k: v for k, v in defaults.items() if v is not None and getattr(item, k) is None
-        })
-        try:
-            return await _enrich_candidate_contact_impl(candidate_id, item)
-        except HTTPException as e:
-            return {"status": "error", "candidate_id": candidate_id, "message": str(e.detail)}
-        except Exception as e:
-            logger.warning("enrich_contacts: lookup failed for %s: %s", candidate_id, e)
-            return {"status": "error", "candidate_id": candidate_id, "message": f"lookup failed: {type(e).__name__}"}
-
     tasks: List[asyncio.Task] = []
     for item in items:
-        task = asyncio.ensure_future(_one(item))
+        task = asyncio.ensure_future(_enrich_one_contact(item, defaults))
         _LOOKUP_TASKS.add(task)
         task.add_done_callback(_LOOKUP_TASKS.discard)
         tasks.append(task)

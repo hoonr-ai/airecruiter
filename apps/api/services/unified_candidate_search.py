@@ -8,6 +8,8 @@ import re
 import time
 from typing import List, Dict, Any, Callable, Optional, Sequence, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
+from services import jobdiva_activity as _jobdiva_activity
+from core import pipeline_trace as _pipeline_trace
 from pydantic import BaseModel, Field, model_validator
 
 from services.jobdiva import JobDivaService
@@ -554,6 +556,29 @@ class SearchCriteria(BaseModel):
                 _add(similar)
         return variants[: max(1, int(max_titles or 1))]
 
+
+def _below_contact_score_floor(cand: Dict[str, Any]) -> bool:
+    """True when ``cand['match_score']`` is a number below CONTACT_ENRICH_MIN_SCORE."""
+    from core import sourcing_config as _sc_floor
+    try:
+        score = float(cand.get("match_score"))
+    except (TypeError, ValueError):
+        return False
+    return score < float(getattr(_sc_floor, "CONTACT_ENRICH_MIN_SCORE", 60))
+
+
+# Job id of the search running in this task context; hydration reads it to
+# know which jd:active marker is its own.
+_search_job_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "ucs_search_job_id", default=None
+)
+
+
+async def _traced(stage: str, coro, **attrs):
+    """Await ``coro`` inside a pipeline_trace span (timing only)."""
+    async with _pipeline_trace.span(stage, **attrs):
+        return await coro
+
 class UnifiedCandidateSearch:
     def __init__(self):
         self.jobdiva_service = JobDivaService()
@@ -662,6 +687,11 @@ class UnifiedCandidateSearch:
         profile_url = str(cand.get("profile_url") or "").strip()
         if "linkedin.com/in/" not in profile_url.lower():
             return
+        # Score floor (Fix 8): never spend a lookup on a scored row below
+        # CONTACT_ENRICH_MIN_SCORE. Unscored rows are left to the caller's
+        # policy (contact_lookup_block_reason).
+        if _below_contact_score_floor(cand):
+            return
         source = str(cand.get("source") or "")
         # Scopes the ZoomInfo name search (an unscoped name is ambiguous) and
         # sharpens the Exa query. The LLM extraction has no `current_company`
@@ -723,6 +753,29 @@ class UnifiedCandidateSearch:
             cand["enhanced_info"]["contact_enrichment_provider"] = enrich.get("provider_used")
 
     async def search_candidates(self, criteria: SearchCriteria):
+        """Run ``_search_candidates_impl`` with a pipeline run id (added to the
+        first SSE event as ``run_id``) and, for interactive searches, the
+        ``jd:active:{job_id}`` marker that makes background JobDiva work
+        (other jobs' hydration, AutoSync) back off. Background (AutoSync)
+        searches don't mark: they are the work that should yield."""
+        job_id = str(getattr(criteria, "job_id", "") or "")
+        run_id = _pipeline_trace.new_run(job_id or "unknown")
+        _search_job_id.set(job_id or None)
+        mark = bool(job_id) and not _bi_rate_limit.in_background()
+        marker = _jobdiva_activity.active_job(job_id if mark else None)
+        first = True
+        async with marker:
+            inner = self._search_candidates_impl(criteria)
+            try:
+                async for event in inner:
+                    if first and isinstance(event, dict):
+                        first = False
+                        event = {**event, "run_id": run_id}
+                    yield event
+            finally:
+                await inner.aclose()
+
+    async def _search_candidates_impl(self, criteria: SearchCriteria):
         """
         Orchestrate candidate search across multiple providers with tiered JobDiva logic.
         Yields candidates as they are finalized.
@@ -1000,7 +1053,8 @@ class UnifiedCandidateSearch:
                 return
             summary["contact_lookup_attempted"] = summary.get("contact_lookup_attempted", 0) + 1
             before = {k: str(cand.get(k) or "").strip() for k in ("email", "phone")}
-            await self._apply_contact_enrichment(cand, criteria, overwrite=overwrite)
+            async with _pipeline_trace.span("contact_enrichment", source=str(cand.get("source") or "")):
+                await self._apply_contact_enrichment(cand, criteria, overwrite=overwrite)
             patch = {
                 k: cand[k] for k in ("email", "phone")
                 if str(cand.get(k) or "").strip() and str(cand.get(k)).strip() != before[k]
@@ -1873,7 +1927,7 @@ class UnifiedCandidateSearch:
                 # wall-clock latency when both are on.
                 pools = []
                 if jobagent_selected:
-                    pools.append(_run_jobagent_pool())
+                    pools.append(_traced("jobagent_pool", _run_jobagent_pool()))
                 if talentsearch_selected:
                     pools.append(_run_talent_search_pool())
                 self._log_stage(
@@ -2542,9 +2596,9 @@ class UnifiedCandidateSearch:
         # each with its own SENTINEL, so they stream concurrently alongside Exa/Dice.
         producers = []
         if applicants_selected:
-            producers.append(asyncio.create_task(produce_jobdiva_applicants()))
+            producers.append(asyncio.create_task(_traced("produce_jobdiva_applicants", produce_jobdiva_applicants())))
         if talent_selected:
-            producers.append(asyncio.create_task(produce_jobdiva_talent()))
+            producers.append(asyncio.create_task(_traced("produce_jobdiva_talent", produce_jobdiva_talent())))
 
         external_order = [
             ("LinkedIn", self._search_linkedin),
@@ -2573,7 +2627,7 @@ class UnifiedCandidateSearch:
                 })
                 continue
             if ext_name in criteria.sources:
-                producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
+                producers.append(asyncio.create_task(_traced("produce_external", produce_external(ext_name, ext_method), source=ext_name)))
 
         # Surface disabled sources even when no provider producers remain
         # (for example, a stale client submitting only LinkedIn).
@@ -2583,7 +2637,7 @@ class UnifiedCandidateSearch:
         # Exa Research API Pass B — depends on Pass A (`produce_external("Exa")`),
         # so only schedule when both the agent is enabled AND Exa is selected.
         if exa_pass_b_should_run:
-            producers.append(asyncio.create_task(produce_exa_agent()))
+            producers.append(asyncio.create_task(_traced("produce_exa_agent", produce_exa_agent())))
 
         # Keepalive producer — emits {"type": "keepalive"} every 20 s while any
         # producer is still running. Without this, the HTTP/2 stream is silent
@@ -2641,11 +2695,13 @@ class UnifiedCandidateSearch:
                 hydration_targets = hydration_targets[
                     : _sc.FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES
                 ]
-                hydration_task = asyncio.create_task(
+                hydration_task = asyncio.create_task(_traced(
+                    "hydrate_jobdiva",
                     self._hydrate_jobdiva_in_background(
                         hydration_targets, queue, SENTINEL
-                    )
-                )
+                    ),
+                    candidates=len(hydration_targets),
+                ))
                 # Drain hydration events. Hydration emits SENTINEL when done.
                 while True:
                     event = await queue.get()
@@ -2688,6 +2744,7 @@ class UnifiedCandidateSearch:
         candidates: List[Dict[str, Any]],
         queue: asyncio.Queue,
         sentinel: Any,
+        job_id: Optional[str] = None,
     ) -> None:
         """Page through CandidatesDetail for the top-scored JobDiva candidates
         and emit one ``candidate_detail`` event per hydrated row.
@@ -2709,6 +2766,8 @@ class UnifiedCandidateSearch:
 
             page_size = max(1, int(sc.FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE))
             page_delay = max(0.0, float(sc.FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S))
+            if job_id is None:
+                job_id = _search_job_id.get()
 
             # Snapshot each candidate's current phone so the détail patch can be
             # upgrade-only (never downgrade a mobile to a home/work number).
@@ -2727,30 +2786,53 @@ class UnifiedCandidateSearch:
 
             backoff_s = 5.0
             total_pages = (len(candidates) + page_size - 1) // page_size
-            for page_idx in range(total_pages):
-                page = candidates[page_idx * page_size : (page_idx + 1) * page_size]
-                page_ids = [
+
+            def _page_ids(idx: int) -> List[str]:
+                page = candidates[idx * page_size : (idx + 1) * page_size]
+                return [
                     str(c.get("candidate_id") or c.get("id") or "")
                     for c in page
                     if c.get("candidate_id") or c.get("id")
                 ]
+
+            async def _fetch_page(ids: List[str]):
+                # Yield to OTHER jobs' live searches/launches (jd:active:*).
+                # Our own job's marker is ignored: the search that set it is
+                # the one that spawned this hydration.
+                await _jobdiva_activity.wait_while_busy(
+                    job_id, include_self=False, label="hydration"
+                )
+                # Background: yields to live searches at the shared
+                # JobDiva BI limiter (services/jobdiva_rate_limit).
+                d = await self.jobdiva_service._fetch_candidate_details_batch(
+                    token, ids, priority=_bi_rate_limit.BACKGROUND
+                )
+                n = await self.jobdiva_service._fetch_candidate_notes_action_types_batch(
+                    token, ids, priority=_bi_rate_limit.BACKGROUND
+                )
+                q = await self.jobdiva_service._fetch_candidate_qualifications_batch(
+                    token, ids, priority=_bi_rate_limit.BACKGROUND
+                )
+                return d, n, q
+
+            # Page k+1 is fetched while page k's patches are built/emitted.
+            prefetch: Optional[asyncio.Task] = None
+            for page_idx in range(total_pages):
+                page_ids = _page_ids(page_idx)
                 if not page_ids:
                     continue
 
                 try:
-                    # Background: yields to live searches at the shared
-                    # JobDiva BI limiter (services/jobdiva_rate_limit).
-                    detail_map = await self.jobdiva_service._fetch_candidate_details_batch(
-                        token, page_ids, priority=_bi_rate_limit.BACKGROUND
-                    )
-                    notes_actions_map = await self.jobdiva_service._fetch_candidate_notes_action_types_batch(
-                        token, page_ids, priority=_bi_rate_limit.BACKGROUND
-                    )
-                    quals_map = await self.jobdiva_service._fetch_candidate_qualifications_batch(
-                        token, page_ids, priority=_bi_rate_limit.BACKGROUND
-                    )
+                    if prefetch is not None:
+                        task, prefetch = prefetch, None
+                        detail_map, notes_actions_map, quals_map = await task
+                    else:
+                        detail_map, notes_actions_map, quals_map = await _fetch_page(page_ids)
                     # Reset backoff on success.
                     backoff_s = 5.0
+                    next_ids = _page_ids(page_idx + 1) if page_idx + 1 < total_pages else []
+                    if next_ids and page_delay <= 0:
+                        prefetch = asyncio.create_task(_fetch_page(next_ids))
                 except Exception as exc:
                     logger.warning(
                         "Hydration page %d/%d failed: %s — backing off %.1fs",
@@ -2869,6 +2951,9 @@ class UnifiedCandidateSearch:
         except Exception as exc:
             logger.exception("Hydration task failed: %s", exc)
         finally:
+            _pf = locals().get("prefetch")
+            if _pf is not None and not _pf.done():
+                _pf.cancel()
             try:
                 await queue.put(sentinel)
             except Exception:
@@ -2921,11 +3006,25 @@ class UnifiedCandidateSearch:
                 # contention: if this is much larger, the coroutine was starved
                 # by concurrent producers/scoring, not by JobDiva itself.
                 _ja_wall_t0 = time.perf_counter()
-                ja_result = await self.jobdiva_service.search_via_job_agent(
-                    job_id=criteria.job_id,
-                    resume_count=resume_count,
-                    require_resume=getattr(criteria, "require_resume", True),
+                # Read-through cache (Fix 7): filled by the job-intake prewarm
+                # or an earlier search; invalidated on criteria edits.
+                from services import jobdiva_jobagent_cache as _ja_cache
+                _req_resume = getattr(criteria, "require_resume", True)
+                ja_result = await _ja_cache.get(
+                    criteria.job_id, resume_count=resume_count, require_resume=_req_resume,
                 )
+                if ja_result is None:
+                    ja_result = await self.jobdiva_service.search_via_job_agent(
+                        job_id=criteria.job_id,
+                        resume_count=resume_count,
+                        require_resume=_req_resume,
+                    )
+                    await _ja_cache.put(
+                        criteria.job_id, ja_result,
+                        resume_count=resume_count, require_resume=_req_resume,
+                    )
+                else:
+                    self._log_stage("TalentSearch", f"JobAgent cache hit (resumeCount={resume_count})")
                 self._log_stage(
                     "TalentSearch",
                     f"JobAgent orchestrator wall-clock="
