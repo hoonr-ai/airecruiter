@@ -23,6 +23,7 @@ from routers._helpers import (
 from services.job_attribution import attribution_fields
 from services.job_candidate_metrics import empty_metrics, fetch_job_candidate_metrics
 from services.job_step_time import STEP_SOURCE, fetch_step_metrics
+from services.launch_timing import timings_for_jobs
 
 router = APIRouter(prefix="/api/v1", tags=["Admin Analytics"])
 logger = logging.getLogger(__name__)
@@ -80,6 +81,9 @@ _METRICS_STATEMENT_TIMEOUT_MS = int(os.getenv("ADMIN_ANALYTICS_METRICS_TIMEOUT_M
 # bound: the sections run one after another, so a slow run here must not add a
 # second full metrics budget before the Step 5 columns show as unavailable.
 _STEP_TIME_STATEMENT_TIMEOUT_MS = int(os.getenv("ADMIN_ANALYTICS_STEP_TIME_TIMEOUT_MS", "10000"))
+# Launch timings: monitored_jobs columns plus the shown jobs' launch audit
+# rows — the same weight class as the Step 5 read, and the same bound.
+_LAUNCH_TIMING_STATEMENT_TIMEOUT_MS = int(os.getenv("ADMIN_ANALYTICS_LAUNCH_TIMING_TIMEOUT_MS", "10000"))
 
 
 def _missing_optional_columns(conn) -> frozenset:
@@ -207,6 +211,60 @@ def _compute_scoped_step_time(conn, scope: Optional[Dict[str, Any]] = None) -> D
     )
 
 
+_LAUNCH_TIMING_FIELDS = ("launch_clicked_at", "added_to_click_minutes", "click_to_launch_minutes")
+
+
+def _timeline_launch_timings(conn, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Launch timings for the timeline's rows (not every scoped job: only the
+    rows the page shows). Definitions live in services/launch_timing.py,
+    shared with the Launch Report and the PAIR Dashboard.
+
+    Under its own statement_timeout, handed back afterwards like
+    _for_scoped_jobs does. None when the read failed, which blanks only those
+    columns: timings_for_jobs runs in a savepoint, so the failure cannot abort
+    the transaction the later sections share.
+    """
+    job_ids = [row.get("job_id") for row in rows if row.get("job_id")]
+    if not job_ids:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_setting('statement_timeout')")
+            previous_timeout = cur.fetchone()[0]
+            cur.execute(f"SET LOCAL statement_timeout = '{int(_LAUNCH_TIMING_STATEMENT_TIMEOUT_MS)}ms'")
+        try:
+            return timings_for_jobs(job_ids, conn)
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = %s", (previous_timeout,))
+    except Exception as e:
+        logger.warning(f"Admin analytics timeline: launch timings unavailable: {e}")
+        # Only if something outside the savepoint failed (the timeout
+        # bookkeeping): the later sections share this transaction.
+        try:
+            import psycopg2.extensions
+
+            if conn.get_transaction_status() == psycopg2.extensions.TRANSACTION_STATUS_INERROR:
+                conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _merge_launch_timings(rows: List[Dict[str, Any]], timings: Optional[Dict[str, Dict[str, Any]]]) -> None:
+    """Fill each timeline row's launch-timing columns (born None) from
+    _timeline_launch_timings output, by job_id. In Python, so the timeline
+    query stays one statement and can't multiply rows."""
+    for row in rows:
+        timing = (timings or {}).get(str(row.get("job_id") or ""))
+        if timing:
+            row.update({
+                "launch_clicked_at": _iso(timing.get("first_launch_clicked_at")),
+                "added_to_click_minutes": timing.get("added_to_click_minutes"),
+                "click_to_launch_minutes": timing.get("click_to_launch_minutes"),
+            })
+
+
 def _compute_jobs_timeline(
     conn,
     scope: Optional[Dict[str, Any]] = None,
@@ -229,6 +287,11 @@ def _compute_jobs_timeline(
     section failed. The Step 5 columns are None then, and also for any job
     nobody timed (everything worked before the tracking shipped), so a job
     reads "—", never "0m".
+
+    The launch-timing columns are born None here and filled afterwards by
+    _merge_launch_timings (its own read). They stay None when that read
+    failed — jobs_timeline_launch_timing_available is False then — and for
+    any job launched before the click was recorded.
     """
     cond, params = _mj_filter(scope)
     missing_columns = _missing_optional_columns(conn)
@@ -297,8 +360,9 @@ def _compute_jobs_timeline(
             m = unavailable_metrics
         else:
             m = job_metrics.get(job_key) or empty_metrics()
-        # Unavailable and untracked both read None here; the response flag
-        # jobs_timeline_step_time_available tells the page which it was.
+        # Unavailable and untracked both read None here; the response flags
+        # jobs_timeline_step_time_available / _launch_timing_available tell
+        # the page which it was.
         step = (step_metrics or {}).get(job_key) or {}
 
         timeline.append({
@@ -309,13 +373,25 @@ def _compute_jobs_timeline(
             "posted_date_raw": str(posted_raw or ""),
             "jobdiva_posted_on": _iso(posted_on),
             "added_to_curate_at": _iso(r["created_at"]),
+            # monitored_jobs.pair_launched_at: the job's first /candidates/save,
+            # i.e. the first save batch of a Launch PAIR attempt. It is written
+            # BEFORE pair-bot is called, so it is neither the click (minutes of
+            # search and enrichment come first) nor a successful launch (it is
+            # set even when every send then fails). Kept under its old key for
+            # the page, the CSV and posted_to_launch_days; the click itself is
+            # launch_clicked_at below.
             "curate_launched_at": _iso(launched_at),
+            # The job's first "Source & Launch PAIR" click and the two launch
+            # timings (services/launch_timing.py): Added → Click (recruiter)
+            # and Click → Launch (system, to the first created interview).
+            # Filled by _merge_launch_timings.
+            **dict.fromkeys(_LAUNCH_TIMING_FIELDS),
             "outreach_stopped_at": _iso(stopped_at),
             "posted_to_launch_days": lag_days,
             # Step 5 ("Source"), in minutes: active time summed over every
             # visit and recruiter, and wall clock from the first Step 5 entry
             # to the first SUCCESSFUL launch — which can be later than
-            # curate_launched_at, the first launch click.
+            # curate_launched_at, the first save of a launch attempt.
             "step5_active_minutes": step.get("active_minutes"),
             "step5_to_launch_minutes": step.get("to_launch_minutes"),
             "is_archived": bool(is_archived),
@@ -807,6 +883,10 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
         jobs_timeline = _section(
             _compute_jobs_timeline, {"rows": [], "total": 0}, scope, job_metrics, step_metrics
         )
+        # Launch timings for the rows shown; None on failure blanks just those
+        # columns (and says so through the flag below).
+        launch_timings = _timeline_launch_timings(conn, jobs_timeline.get("rows", []))
+        _merge_launch_timings(jobs_timeline.get("rows", []), launch_timings)
         launch_speed = _section(_compute_launch_speed, {}, scope)
         weekly_trends = _section(_compute_weekly_trends, {}, scope)
         submission_metrics = _section(_compute_submission_metrics, {}, scope, job_metrics)
@@ -833,6 +913,9 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             # False: the Step 5 columns are None because the read failed, not
             # because the jobs predate the tracking.
             "jobs_timeline_step_time_available": step_metrics is not None,
+            # False: the launch-timing columns are None because the read
+            # failed, not because the jobs predate the click tracking.
+            "jobs_timeline_launch_timing_available": launch_timings is not None,
             "launch_speed": launch_speed,
             "weekly_trends": weekly_trends,
             "submission_metrics": submission_metrics,
@@ -859,6 +942,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             "jobs_timeline_total": 0,
             "jobs_timeline_metrics_available": False,
             "jobs_timeline_step_time_available": False,
+            "jobs_timeline_launch_timing_available": False,
             "launch_speed": {},
             "weekly_trends": {},
             "submission_metrics": {},

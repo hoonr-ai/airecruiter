@@ -1,0 +1,1115 @@
+{
+  "function": "dncDroppedIds",
+  "cases": [
+    {
+      "name": "override and top-level phones only",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "phone": "408-555-0001"
+          },
+          {
+            "candidate_id": "b",
+            "phone": "408-555-0002"
+          },
+          {
+            "candidate_id": "c",
+            "data": {
+              "phone": "408-555-0003"
+            }
+          },
+          {
+            "candidate_id": "d"
+          },
+          {
+            "candidate_id": "e",
+            "phone": "408-555-0001"
+          }
+        ],
+        "selectedIds": [
+          "a",
+          "b",
+          "c",
+          "d"
+        ],
+        "overrides": {
+          "b": {
+            "phone": ""
+          },
+          "d": {
+            "phone": "(408) 555-0004"
+          }
+        },
+        "dncPhones": [
+          "14085550001",
+          "14085550003",
+          "14085550004"
+        ]
+      },
+      "expected": [
+        "a",
+        "d"
+      ]
+    },
+    {
+      "name": "empty DNC list",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "a",
+            "phone": "408-555-0001"
+          },
+          {
+            "candidate_id": "b",
+            "phone": "408-555-0002"
+          },
+          {
+            "candidate_id": "c",
+            "data": {
+              "phone": "408-555-0003"
+            }
+          },
+          {
+            "candidate_id": "d"
+          },
+          {
+            "candidate_id": "e",
+            "phone": "408-555-0001"
+          }
+        ],
+        "selectedIds": [
+          "a"
+        ],
+        "overrides": {},
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 1",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": 0,
+            "source": "JobDiva-TalentSearch",
+            "phone": "408-555-0101",
+            "email": "",
+            "match_score": 60,
+            "profile_url": "https://github.com/p"
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9001,
+            "source": "JobDiva-Applicants",
+            "title": "",
+            "phone": null,
+            "match_score": 60,
+            "no_contact": true,
+            "client_conflict": true,
+            "profile_url": "",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": " r2 ",
+            "source": "LinkedIn",
+            "phone": null,
+            "email": "SHARED@x.com",
+            "match_score": 59,
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "match_score": null,
+            "client_conflict": true,
+            "offer_status": "Offer Accepted",
+            "current_company": "Initech",
+            "data": {
+              "phone": ""
+            },
+            "enhanced_info": {
+              "email": " B@X.com "
+            }
+          },
+          {
+            "candidate_id": "r4",
+            "source": "LinkedIn",
+            "firstName": "Di",
+            "email": "SHARED@x.com",
+            "match_score": 61
+          },
+          {
+            "id": "i5",
+            "source": "Dice",
+            "firstName": "Cy",
+            "email": "a@x.com",
+            "match_score": 61,
+            "status": 2,
+            "profile_url": "https://github.com/p",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-TalentSearch",
+            "phone": 4085550104,
+            "email": "SHARED@x.com",
+            "match_score": 59,
+            "no_contact": true,
+            "current_company": "Globex Corporation"
+          }
+        ],
+        "selectedIds": [
+          "",
+          "9001",
+          "r2",
+          "r3",
+          "r4",
+          "i5",
+          "r6"
+        ],
+        "overrides": {
+          "9001": {
+            "phone": "",
+            "email": "new@x.com"
+          },
+          "": {
+            "email": "Auto_1@jobdiva.com"
+          },
+          "r6": {
+            "phone": "408-555-0177",
+            "email": "shared@x.com"
+          }
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 2",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "name": "Bo",
+            "lastName": "Oh",
+            "email": " B@X.com ",
+            "match_score": 61,
+            "status": 2,
+            "profile_url": "",
+            "data": {
+              "urls": {
+                "linkedin": "https://linkedin.com/in/d0"
+              }
+            }
+          },
+          {
+            "candidate_id": 1,
+            "source": "LinkedIn",
+            "match_score": 61,
+            "resume_text": "see linkedin.com/in/res1 thanks",
+            "data": {
+              "urls": {
+                "linkedin": "https://linkedin.com/in/d1"
+              }
+            }
+          },
+          {
+            "candidate_id": "r2",
+            "source": "Dice",
+            "firstName": "Cy",
+            "title": "",
+            "phone": 4085550104,
+            "workEmail": "bad"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "lastName": "Oh",
+            "title": "",
+            "phone": "4085550103",
+            "email": "shared@x.com",
+            "match_score": 59
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-Applicants",
+            "name": "LinkedIn Candidate",
+            "match_score": 60,
+            "status": 1
+          }
+        ],
+        "selectedIds": [
+          "r0",
+          "1",
+          "r4"
+        ],
+        "overrides": {
+          "r0": {},
+          "r2": {}
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 3",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "lastName": "Oh",
+            "title": "Analyst",
+            "email": " B@X.com ",
+            "match_score": 61,
+            "offer_status": "Offer Accepted",
+            "profile_url": "",
+            "enhanced_info": {}
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "name": "Bo",
+            "title": "Engineer at Globex",
+            "email": "SHARED@x.com",
+            "offer_status": "Interviewing"
+          },
+          {
+            "candidate_id": 2,
+            "name": "LinkedIn Candidate",
+            "lastName": "Ng",
+            "title": "Analyst",
+            "phone": "+1 408 555 0102",
+            "mobilePhone": "",
+            "email": " B@X.com ",
+            "match_score": 95,
+            "profile_url": "https://www.linkedin.com/in/p2"
+          },
+          {
+            "id": "i3",
+            "source": "JobDiva-Applicants",
+            "title": "Engineer at Globex",
+            "mobilePhone": "(408) 555-0101",
+            "workEmail": "x@example.com",
+            "data": {
+              "phone": "408-555-0101"
+            }
+          }
+        ],
+        "selectedIds": [
+          "r0",
+          "r1",
+          2
+        ],
+        "overrides": {
+          "r1": {
+            "phone": ""
+          }
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 4",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "JobDiva-Applicants",
+            "title": "Analyst",
+            "phone": "12",
+            "email": "SHARED@x.com",
+            "match_score": 61,
+            "data": {
+              "phone": null
+            }
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "phone": "12",
+            "match_score": 72,
+            "profile_url": "https://www.linkedin.com/in/p1"
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9002,
+            "source": "JobDiva-TalentSearch",
+            "name": "",
+            "firstName": "Di",
+            "lastName": "Ng",
+            "title": "Analyst",
+            "email": "SHARED@x.com",
+            "match_score": null,
+            "no_contact": "true",
+            "profile_url": "https://www.linkedin.com/in/p2",
+            "data": {
+              "phone": ""
+            }
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Exa",
+            "name": "LinkedIn Candidate",
+            "firstName": "Di",
+            "phone": "408-555-0101",
+            "match_score": 61,
+            "no_contact": true,
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "r4",
+            "lastName": "Oh",
+            "phone": "",
+            "match_score": 60,
+            "profile_url": ""
+          },
+          {
+            "candidate_id": " r5 ",
+            "source": "JobDiva-TalentSearch",
+            "phone": 4085550104,
+            "email": "bad",
+            "workEmail": "SHARED@x.com",
+            "match_score": 72
+          },
+          {
+            "candidate_id": 6,
+            "source": "Exa",
+            "name": "Bo",
+            "firstName": "Di",
+            "phone": "(408) 555-0101",
+            "email": "shared@x.com",
+            "workEmail": "bad",
+            "match_score": 95,
+            "no_contact": "true",
+            "offer_status": "Offer Accepted",
+            "status": "1",
+            "profile_url": "",
+            "resume_text": "see linkedin.com/in/res6 thanks",
+            "enhanced_info": {}
+          },
+          {
+            "id": "i7",
+            "source": "JobDiva-Applicants",
+            "name": "Ann Lee",
+            "firstName": "",
+            "phone": "555-0105",
+            "no_contact": true,
+            "client_conflict": true,
+            "skills": [
+              "Go"
+            ]
+          }
+        ],
+        "selectedIds": [
+          "9002",
+          "r3",
+          " r5 ",
+          "6",
+          "i7"
+        ],
+        "overrides": {
+          "6": {
+            "email": "new@x.com"
+          },
+          "r0": {},
+          "r1": {},
+          "r5": {
+            "phone": "",
+            "email": ""
+          },
+          "i7": {}
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 5",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": 0,
+            "name": "",
+            "email": "a@x.com",
+            "match_score": null,
+            "client_conflict": true
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "name": "",
+            "firstName": "",
+            "lastName": "Ng",
+            "phone": "(408) 555-0101",
+            "email": "bad",
+            "match_score": null,
+            "data": {
+              "phone": ""
+            }
+          },
+          {
+            "candidate_id": "r2",
+            "source": "JobDiva-TalentSearch",
+            "title": "Engineer at Globex",
+            "phone": "4085550103",
+            "email": " B@X.com ",
+            "match_score": 95,
+            "current_company": "Initech",
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "JobDiva-TalentSearch",
+            "name": "Ann Lee",
+            "title": "Analyst",
+            "phone": 4085550104,
+            "email": " B@X.com ",
+            "match_score": null,
+            "profile_url": ""
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9004,
+            "source": "JobDiva-Applicants",
+            "lastName": "Oh",
+            "title": "",
+            "phone": "555-0105",
+            "match_score": "80",
+            "current_company": "Globex Corporation"
+          }
+        ],
+        "selectedIds": [
+          "",
+          "r2",
+          "r3",
+          9004
+        ],
+        "overrides": {
+          "9004": {
+            "email": "new@x.com"
+          },
+          "": {
+            "phone": "12"
+          },
+          "r1": {}
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 6",
+      "input": {
+        "candidates": [
+          {
+            "id": "i0",
+            "source": "LinkedIn",
+            "name": "",
+            "lastName": "Ng"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "firstName": "",
+            "lastName": "Ng",
+            "title": "",
+            "phone": "  ",
+            "email": " B@X.com ",
+            "workEmail": "x@example.com",
+            "match_score": 59,
+            "no_contact": true,
+            "skills": "Go, SQL"
+          }
+        ],
+        "selectedIds": [
+          "i0",
+          "r1"
+        ],
+        "overrides": {
+          "i0": {}
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 7",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "phone": "",
+            "mobilePhone": "555-0105",
+            "match_score": "80",
+            "current_company": "Globex Corporation",
+            "profile_url": "https://github.com/p",
+            "enhanced_info": {}
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "name": "Bo",
+            "firstName": "Cy",
+            "lastName": "Oh",
+            "title": "Engineer at Globex",
+            "phone": "4085550103",
+            "match_score": 0
+          },
+          {
+            "candidate_id": 2,
+            "source": "Dice",
+            "phone": "",
+            "mobilePhone": "",
+            "email": "",
+            "match_score": null,
+            "current_company": "Globex Corporation",
+            "profile_url": "https://www.linkedin.com/in/p2"
+          },
+          {
+            "candidate_id": 3,
+            "source": "Exa",
+            "match_score": 95,
+            "resume_text": "no links here",
+            "data": {
+              "phone": "408-555-0199",
+              "zoominfo_contact_enrichment": {
+                "workPhone": "4085550199",
+                "mobilePhone": "555-0105"
+              }
+            },
+            "enhanced_info": {
+              "mobilePhone": ""
+            }
+          },
+          {
+            "candidate_id": "r4",
+            "source": "Dice",
+            "name": "LinkedIn Candidate",
+            "phone": "408-555-0101",
+            "email": "Auto_9@jobdiva.com",
+            "match_score": null,
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9005,
+            "source": "Dice",
+            "lastName": "Ng",
+            "title": "",
+            "phone": "4085550103",
+            "match_score": 0
+          },
+          {
+            "candidate_id": " r6 ",
+            "source": "LinkedIn",
+            "name": "Ann Lee",
+            "phone": null,
+            "match_score": 59,
+            "offer_status": "Interviewing"
+          }
+        ],
+        "selectedIds": [
+          "r0",
+          "r1",
+          2,
+          "r4",
+          "r6"
+        ],
+        "overrides": {
+          "r1": {},
+          "r6": {}
+        },
+        "dncPhones": [
+          "14085550101",
+          "14085550177",
+          "14085550199"
+        ]
+      },
+      "expected": [
+        "r4"
+      ]
+    },
+    {
+      "name": "random set 8",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9000,
+            "source": "Dice",
+            "name": "Ann Lee",
+            "firstName": "Di",
+            "phone": "",
+            "email": "bad"
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "lastName": "Oh",
+            "phone": "408-555-0101",
+            "match_score": null,
+            "no_contact": "true",
+            "skills": "Go, SQL"
+          },
+          {
+            "candidate_id": "r2",
+            "source": "LinkedIn",
+            "name": "Ann Lee",
+            "phone": null,
+            "email": "SHARED@x.com"
+          },
+          {
+            "candidate_id": "r3",
+            "source": "Dice",
+            "lastName": "Oh",
+            "phone": "000-000-0000"
+          },
+          {
+            "candidate_id": " r4 ",
+            "source": "Dice",
+            "phone": "(408) 555-0101",
+            "status": 2,
+            "data": {
+              "email": "shared@x.com"
+            }
+          },
+          {
+            "candidate_id": "r5",
+            "source": "JobDiva-TalentSearch",
+            "name": "Bo",
+            "title": "Analyst",
+            "match_score": 0,
+            "no_contact": "true"
+          },
+          {
+            "candidate_id": "r6",
+            "source": "JobDiva-Applicants",
+            "name": "Bo",
+            "firstName": "Di",
+            "title": "",
+            "mobilePhone": "+1 408 555 0102",
+            "email": "x@example.com",
+            "match_score": 95,
+            "client_conflict": true,
+            "offer_status": "Offer Accepted",
+            "profile_url": "https://github.com/p"
+          },
+          {
+            "candidate_id": "r7",
+            "phone": "4085550103",
+            "email": "x@example.com",
+            "workEmail": null,
+            "match_score": 60,
+            "no_contact": true
+          }
+        ],
+        "selectedIds": [
+          "r1",
+          "r4",
+          "r7"
+        ],
+        "overrides": {
+          "r1": {
+            "phone": "(408) 555-0101"
+          },
+          "r3": {
+            "phone": "408-555-0177",
+            "email": ""
+          }
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 9",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "Exa",
+            "firstName": "",
+            "lastName": "Oh",
+            "title": ""
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "firstName": "",
+            "phone": "(408) 555-0101",
+            "workEmail": "shared@x.com",
+            "match_score": 60,
+            "no_contact": "true",
+            "status": "1"
+          }
+        ],
+        "selectedIds": [
+          "r0",
+          "r1"
+        ],
+        "overrides": {
+          "r1": {
+            "phone": "",
+            "email": "shared@x.com"
+          }
+        },
+        "dncPhones": [
+          "14085550101",
+          "14085550177",
+          "14085550199"
+        ]
+      },
+      "expected": [
+        "r1"
+      ]
+    },
+    {
+      "name": "random set 10",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": 0,
+            "source": "LinkedIn",
+            "name": "Bo",
+            "title": "",
+            "match_score": 0,
+            "data": {
+              "urls": {
+                "linkedin": "https://linkedin.com/in/d0"
+              }
+            },
+            "enhanced_info": {}
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "name": "LinkedIn Candidate",
+            "firstName": "Cy",
+            "lastName": "Oh",
+            "match_score": 95,
+            "client_conflict": true,
+            "resume_text": "no links here"
+          },
+          {
+            "id": "i2",
+            "source": "JobDiva-Applicants",
+            "name": "",
+            "title": "Engineer at Globex",
+            "mobilePhone": "(408) 555-0101",
+            "workEmail": "Auto_9@jobdiva.com"
+          },
+          {
+            "id": "i3",
+            "source": "JobDiva-TalentSearch",
+            "firstName": "",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "r4",
+            "source": "JobDiva-Applicants",
+            "name": "LinkedIn Candidate",
+            "email": "",
+            "match_score": 60,
+            "resume_text": "no links here"
+          },
+          {
+            "candidate_id": "r5",
+            "name": "",
+            "phone": "4085550103",
+            "email": "shared@x.com",
+            "match_score": 95
+          }
+        ],
+        "selectedIds": [
+          "",
+          "i3",
+          "r4"
+        ],
+        "overrides": {
+          "": {},
+          "i2": {
+            "phone": "12",
+            "email": "new@x.com"
+          },
+          "r5": {
+            "phone": "(408) 555-0101",
+            "email": "shared@x.com"
+          }
+        },
+        "dncPhones": [
+          "14085550101"
+        ]
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 11",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "name": "LinkedIn Candidate",
+            "phone": "(408) 555-0101",
+            "match_score": "80",
+            "no_contact": true
+          },
+          {
+            "candidate_id": "r1",
+            "source": "LinkedIn",
+            "title": "",
+            "workEmail": "x@example.com",
+            "match_score": 95,
+            "status": 1
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9002,
+            "source": "Exa",
+            "lastName": "Oh",
+            "title": "Engineer at Globex",
+            "phone": "12",
+            "mobilePhone": "12",
+            "email": " B@X.com ",
+            "match_score": 61
+          },
+          {
+            "candidate_id": " r3 ",
+            "source": "Exa",
+            "name": "Bo",
+            "title": "",
+            "match_score": "80",
+            "enhanced_info": {
+              "email": "bad"
+            }
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9004,
+            "source": "JobDiva-TalentSearch",
+            "name": "Ann Lee",
+            "phone": 4085550104,
+            "email": " B@X.com ",
+            "match_score": 0,
+            "current_company": "Globex Corporation"
+          },
+          {
+            "candidate_id": "r5",
+            "source": "Dice",
+            "firstName": "Di",
+            "lastName": "Ng",
+            "title": "Engineer at Globex",
+            "phone": "000-000-0000",
+            "match_score": 60,
+            "resume_text": "no links here",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": 6,
+            "source": "JobDiva-TalentSearch",
+            "firstName": "Cy",
+            "phone": "",
+            "match_score": 72,
+            "profile_url": "https://www.linkedin.com/in/p6",
+            "resume_text": "no links here"
+          }
+        ],
+        "selectedIds": [
+          "r0",
+          "r1",
+          "9002",
+          "r3"
+        ],
+        "overrides": {
+          "9002": {
+            "email": "shared@x.com"
+          },
+          "r1": {
+            "email": ""
+          },
+          "r3": {
+            "email": "new@x.com"
+          }
+        },
+        "dncPhones": [
+          "14085550101"
+        ]
+      },
+      "expected": [
+        "r0"
+      ]
+    },
+    {
+      "name": "random set 12",
+      "input": {
+        "candidates": [
+          {
+            "id": "i0",
+            "firstName": "",
+            "title": "Analyst",
+            "mobilePhone": "+1 408 555 0102",
+            "workEmail": "x@example.com",
+            "match_score": 61,
+            "client_conflict": true,
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "r1",
+            "source": "Dice",
+            "name": "Ann Lee",
+            "firstName": "",
+            "title": "",
+            "email": "a@x.com",
+            "match_score": 60,
+            "profile_url": "https://www.linkedin.com/in/p1"
+          }
+        ],
+        "selectedIds": [
+          "i0",
+          "r1"
+        ],
+        "overrides": {
+          "r1": {
+            "phone": "12",
+            "email": "new@x.com"
+          }
+        },
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 13",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "name": "LinkedIn Candidate",
+            "title": "Engineer at Globex",
+            "mobilePhone": "12",
+            "match_score": 60,
+            "client_conflict": true,
+            "data": {
+              "phone": "408-555-0199",
+              "zoominfo_contact_enrichment": {
+                "workPhone": "4085550199",
+                "mobilePhone": ""
+              }
+            }
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9001,
+            "source": "JobDiva-Applicants",
+            "name": "LinkedIn Candidate",
+            "lastName": "Oh",
+            "phone": null,
+            "match_score": "80",
+            "resume_text": "no links here"
+          }
+        ],
+        "selectedIds": [
+          "r0"
+        ],
+        "overrides": {},
+        "dncPhones": []
+      },
+      "expected": []
+    },
+    {
+      "name": "random set 14",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "r0",
+            "source": "LinkedIn",
+            "lastName": "Oh",
+            "phone": "(408) 555-0101",
+            "email": null,
+            "match_score": 60,
+            "resume_text": "no links here",
+            "skills": [
+              "Go"
+            ]
+          },
+          {
+            "candidate_id": "",
+            "jobdiva_candidate_id": 9001,
+            "name": "Ann Lee",
+            "firstName": "Di",
+            "title": "Engineer at Globex",
+            "phone": "+1 408 555 0102",
+            "mobilePhone": "408-555-0101",
+            "email": "Auto_9@jobdiva.com",
+            "offer_status": "Interviewing",
+            "profile_url": "https://github.com/p"
+          }
+        ],
+        "selectedIds": [
+          "r0",
+          "9001"
+        ],
+        "overrides": {
+          "9001": {
+            "phone": "(408) 555-0101"
+          }
+        },
+        "dncPhones": [
+          "14085550101",
+          "14085550177",
+          "14085550199"
+        ]
+      },
+      "expected": [
+        "r0",
+        "9001"
+      ]
+    },
+    {
+      "name": "random set 15",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": " r0 ",
+            "source": "JobDiva-Applicants",
+            "name": "Bo",
+            "lastName": "Oh",
+            "email": " B@X.com ",
+            "match_score": 95
+          },
+          {
+            "candidate_id": "r1",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "workEmail": "a@x.com",
+            "match_score": 95,
+            "profile_url": "https://www.linkedin.com/in/p1",
+            "data": {
+              "email": "bad"
+            }
+          }
+        ],
+        "selectedIds": [
+          "r0"
+        ],
+        "overrides": {},
+        "dncPhones": []
+      },
+      "expected": []
+    }
+  ]
+}

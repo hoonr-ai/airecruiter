@@ -1,0 +1,54 @@
+{
+  "function": "mapStageToStatus",
+  "cases": [
+    {
+      "name": "exa deep",
+      "input": {
+        "stage": "Exa deep-search: done \u2014 3 enriched"
+      },
+      "expected": "Exa deep-search: done \u2014 3 enriched"
+    },
+    {
+      "name": "applicants",
+      "input": {
+        "stage": "Querying JobDiva Applicants"
+      },
+      "expected": "Searching at JobDiva portal (Applicants)..."
+    },
+    {
+      "name": "talent",
+      "input": {
+        "stage": "jobdiva talent search"
+      },
+      "expected": "Searching at JobDiva portal (Talent Search)..."
+    },
+    {
+      "name": "linkedin",
+      "input": {
+        "stage": "LinkedIn recruiter"
+      },
+      "expected": "Searching at LinkedIn portal..."
+    },
+    {
+      "name": "exa",
+      "input": {
+        "stage": "Exa pass A"
+      },
+      "expected": "Searching at Exa portal..."
+    },
+    {
+      "name": "dice",
+      "input": {
+        "stage": "Dice"
+      },
+      "expected": "Searching at Dice portal..."
+    },
+    {
+      "name": "other",
+      "input": {
+        "stage": "Scoring"
+      },
+      "expected": "Scoring"
+    }
+  ]
+}

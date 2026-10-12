@@ -1,0 +1,204 @@
+{
+  "function": "isLaunchableNow",
+  "cases": [
+    {
+      "name": "mobile when phone empty",
+      "input": {
+        "candidate": {
+          "phone": "",
+          "mobilePhone": "408-555-1111"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "whitespace phone skipped",
+      "input": {
+        "candidate": {
+          "phone": "  ",
+          "data": {
+            "phone": "408-555-2222"
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "first non-empty even if invalid",
+      "input": {
+        "candidate": {
+          "phone": "123",
+          "mobilePhone": "408-555-3333"
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "saved work number skipped",
+      "input": {
+        "candidate": {
+          "phone": "(408) 555-0000",
+          "data": {
+            "zoominfo_contact_enrichment": {
+              "workPhone": "408-555-0000",
+              "mobilePhone": "408-555-9999"
+            }
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "work equals mobile is not excluded",
+      "input": {
+        "candidate": {
+          "phone": "408-555-0000",
+          "data": {
+            "zoominfo_contact_enrichment": {
+              "workPhone": "408-555-0000",
+              "mobilePhone": "4085550000"
+            }
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "numeric phone",
+      "input": {
+        "candidate": {
+          "phone": 4085551234
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "enhanced mobile",
+      "input": {
+        "candidate": {
+          "enhanced_info": {
+            "mobilePhone": " 408-555-4444 "
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "only saved work \u2192 empty",
+      "input": {
+        "candidate": {
+          "data": {
+            "phone": "408-555-0000",
+            "zoominfo_contact_enrichment": {
+              "workPhone": "4085550000"
+            }
+          }
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nothing",
+      "input": {
+        "candidate": {}
+      },
+      "expected": false
+    },
+    {
+      "name": "top-level empty falls through",
+      "input": {
+        "candidate": {
+          "email": "",
+          "workEmail": "W@X.com"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "enhanced personal",
+      "input": {
+        "candidate": {
+          "enhanced_info": {
+            "personalEmail": "p@x.com"
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "zoominfo work email",
+      "input": {
+        "candidate": {
+          "data": {
+            "zoominfo_contact_enrichment": {
+              "workEmail": "z@x.com"
+            }
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "first truthy wins even if synthetic",
+      "input": {
+        "candidate": {
+          "email": "Auto_1@jobdiva.com",
+          "data": {
+            "email": "real@x.com"
+          }
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "empty array is truthy in JS",
+      "input": {
+        "candidate": {
+          "email": [],
+          "workEmail": "w@x.com"
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "zero is falsy",
+      "input": {
+        "candidate": {
+          "email": 0,
+          "workEmail": "w@x.com"
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "data enhanced work",
+      "input": {
+        "candidate": {
+          "data": {
+            "enhanced_info": {
+              "workEmail": " DEW@X.COM "
+            }
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "nothing",
+      "input": {
+        "candidate": {}
+      },
+      "expected": false
+    },
+    {
+      "name": "data is a string",
+      "input": {
+        "candidate": {
+          "data": "oops",
+          "personalEmail": "pe@x.com"
+        }
+      },
+      "expected": true
+    }
+  ]
+}

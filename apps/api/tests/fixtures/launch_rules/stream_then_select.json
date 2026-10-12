@@ -1,0 +1,3227 @@
+{
+  "function": "streamThenSelect",
+  "cases": [
+    {
+      "name": "hydration offer status keeps a 95% row out of the launch",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "c1",
+                "source": "JobDiva-TalentSearch",
+                "match_score": 95
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "c2",
+                "source": "LinkedIn",
+                "match_score": 70
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "c1",
+              "patch": {
+                "offer_status": "Offer Accepted"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "c3",
+                "source": "Exa"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "c3",
+              "patch": {
+                "match_score": 64
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "c2",
+              "patch": {
+                "action_types": [
+                  "hired"
+                ]
+              },
+              "stage": "jobdiva_details"
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "c1",
+          "c2",
+          "c3"
+        ],
+        "selection": {
+          "ids": [
+            "c3"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "exclusions": [
+          "Offer Accepted",
+          "Offer Accepted",
+          ""
+        ],
+        "pool": [
+          "c1",
+          "c2",
+          "c3"
+        ],
+        "poolSelection": {
+          "ids": [
+            "c3"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "qualified": 3
+      }
+    },
+    {
+      "name": "relaxed score passes the floor; dedup keeps one copy",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "a",
+                "source": "Exa",
+                "email": "a@x.com",
+                "match_score": 40
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "a2",
+                "source": "LinkedIn",
+                "email": "a@x.com",
+                "match_score": 66
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "a",
+              "patch": {
+                "match_score": 61
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "b",
+                "source": "Exa",
+                "match_score": 99
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "b"
+        ],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "a2",
+          "b"
+        ],
+        "selection": {
+          "ids": [
+            "a2"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "exclusions": [
+          "",
+          ""
+        ],
+        "pool": [
+          "a",
+          "a2",
+          "b"
+        ],
+        "poolSelection": {
+          "ids": [
+            "a2"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 1,
+          "unscored": 0
+        },
+        "qualified": 2
+      }
+    },
+    {
+      "name": "random run 1",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "email": "b@x.com",
+                "phone": "408-555-1001",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 72
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 45,
+                "offer_status": "Offer Accepted"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 72,
+                "offer_status": "Offer Accepted"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Dice",
+                "email": "a@x.com",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "LinkedIn",
+                "email": "A@x.com",
+                "phone": "408-555-1001",
+                "lastName": "Li",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 95,
+                "no_contact": true,
+                "email": "A@x.com"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 95,
+                "email": "A@x.com"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "JobDiva-TalentSearch",
+                "email": "auto_1@jobdiva.com",
+                "phone": "408-555-1001",
+                "firstName": "Bo",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "JobDiva-TalentSearch",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "firstName": "Bo",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "JobDiva-Applicants",
+                "email": "",
+                "phone": "408-555-1001",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 72,
+                "email": "b@x.com"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "JobDiva-Applicants",
+                "email": "auto_1@jobdiva.com",
+                "phone": "4085551001",
+                "lastName": "Li",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 72,
+                "email": "b@x.com"
+              },
+              "stage": "scored"
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "t0",
+          "t1"
+        ],
+        "limit": 2
+      },
+      "expected": {
+        "table": [
+          "t1",
+          "t3"
+        ],
+        "selection": {
+          "ids": [],
+          "eligibleTotal": 0,
+          "belowFloor": 1,
+          "unscored": 0
+        },
+        "exclusions": [
+          "",
+          ""
+        ],
+        "pool": [
+          "t6",
+          "t1",
+          "t3"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t6"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 1,
+          "unscored": 0
+        },
+        "qualified": 2
+      }
+    },
+    {
+      "name": "random run 2",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Dice",
+                "email": "",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "Dice",
+                "email": "auto_1@jobdiva.com",
+                "firstName": "",
+                "lastName": "Li",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "Exa",
+                "email": "b@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "Exa",
+                "email": "a@x.com",
+                "phone": "",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "JobDiva-Applicants",
+                "email": "b@x.com",
+                "phone": "",
+                "lastName": "Doe",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "LinkedIn",
+                "lastName": "Doe",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "JobDiva-TalentSearch",
+                "email": "auto_1@jobdiva.com",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Dice",
+                "email": "A@x.com",
+                "phone": "",
+                "firstName": "Bo",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "JobDiva-Applicants",
+                "firstName": "Jane",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "408-555-1001",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "JobDiva-TalentSearch",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "firstName": "",
+                "lastName": "Li",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "JobDiva-TalentSearch",
+                "email": "a@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "LinkedIn",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Exa",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "lastName": "Li",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "t5"
+        ],
+        "limit": 2
+      },
+      "expected": {
+        "table": [
+          "t4",
+          "t0",
+          "t3",
+          "t6",
+          "t5"
+        ],
+        "selection": {
+          "ids": [
+            "t4",
+            "t3"
+          ],
+          "eligibleTotal": 4,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "exclusions": [
+          "",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "pool": [
+          "t4",
+          "t0",
+          "t1",
+          "t3",
+          "t6",
+          "t5"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t4",
+            "t3"
+          ],
+          "eligibleTotal": 5,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "qualified": 6
+      }
+    },
+    {
+      "name": "random run 3",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 72,
+                "email": "auto_1@jobdiva.com"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 72
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": ""
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "LinkedIn",
+                "email": "A@x.com",
+                "phone": "",
+                "firstName": "Jane",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 95
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 45
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 72
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 45
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "Exa",
+                "email": "auto_1@jobdiva.com",
+                "phone": "",
+                "firstName": "Jane",
+                "lastName": "Li",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "JobDiva-TalentSearch",
+                "email": "A@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 45
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Exa",
+                "email": "auto_1@jobdiva.com",
+                "firstName": "Jane",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "Dice",
+                "email": "",
+                "phone": "4085551001",
+                "firstName": "Jane",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 72,
+                "offer_status": "Offer Accepted",
+                "email": "a@x.com"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "4085551001"
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "t0",
+          "t5"
+        ],
+        "selection": {
+          "ids": [
+            "t0"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 1
+        },
+        "exclusions": [
+          "",
+          ""
+        ],
+        "pool": [
+          "t2",
+          "t0",
+          "t5"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t0"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 2
+        },
+        "qualified": 1
+      }
+    },
+    {
+      "name": "random run 4",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "Dice",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Exa",
+                "email": "A@x.com",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 60,
+                "email": "a@x.com"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "email": "A@x.com",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 95
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "Exa",
+                "email": "auto_1@jobdiva.com",
+                "phone": "",
+                "lastName": "Doe",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "JobDiva-TalentSearch",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 95,
+                "offer_status": "Offer Accepted"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "JobDiva-TalentSearch",
+                "email": "auto_1@jobdiva.com",
+                "firstName": "",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 72
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "email": "b@x.com",
+                "phone": "408-555-1001",
+                "firstName": "Bo",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "Exa",
+                "phone": "",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 60,
+                "no_contact": true,
+                "email": "A@x.com"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "LinkedIn",
+                "email": "a@x.com",
+                "phone": "000-000-0000",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "t4"
+        ],
+        "limit": 2
+      },
+      "expected": {
+        "table": [
+          "t5",
+          "t4",
+          "t0"
+        ],
+        "selection": {
+          "ids": [
+            "t0"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "exclusions": [
+          "Offer Accepted",
+          "",
+          ""
+        ],
+        "pool": [
+          "t1",
+          "t5",
+          "t2",
+          "t4",
+          "t0"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t0",
+            "t1"
+          ],
+          "eligibleTotal": 2,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "qualified": 4
+      }
+    },
+    {
+      "name": "random run 5",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 45,
+                "email": "a@x.com"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 72,
+                "offer_status": "Offer Accepted",
+                "email": ""
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "Dice",
+                "email": "auto_1@jobdiva.com",
+                "phone": "408-555-1001",
+                "firstName": "Jane",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 45,
+                "offer_status": "Offer Accepted"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "phone": "4085551001",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "Exa",
+                "email": "A@x.com",
+                "phone": "",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 95,
+                "no_contact": true
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "no_contact": true
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "JobDiva-Applicants",
+                "email": "auto_1@jobdiva.com",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "JobDiva-Applicants",
+                "email": "a@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 72
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 95
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "JobDiva-Applicants",
+                "phone": "000-000-0000",
+                "firstName": "",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "JobDiva-Applicants",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "t2",
+          "t6",
+          "t4"
+        ],
+        "selection": {
+          "ids": [
+            "t6"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 1
+        },
+        "exclusions": [
+          "Offer Accepted",
+          "",
+          ""
+        ],
+        "pool": [
+          "t2",
+          "t6",
+          "t0",
+          "t4",
+          "t1"
+        ],
+        "poolSelection": {
+          "ids": [],
+          "eligibleTotal": 0,
+          "belowFloor": 0,
+          "unscored": 4
+        },
+        "qualified": 2
+      }
+    },
+    {
+      "name": "random run 6",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 60,
+                "offer_status": "Offer Accepted"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "no_contact": true
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Dice",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "firstName": "",
+                "lastName": "Li",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Dice",
+                "email": "b@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "firstName": "Bo",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "lastName": "Li"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 95
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "LinkedIn",
+                "email": "a@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 95
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "JobDiva-TalentSearch",
+                "email": "b@x.com",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "JobDiva-Applicants",
+                "email": "auto_1@jobdiva.com",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 72
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "408-555-2002",
+                "firstName": "Jane",
+                "lastName": "Li"
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "t4",
+          "t5",
+          "t0"
+        ],
+        "selection": {
+          "ids": [
+            "t4"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 2
+        },
+        "exclusions": [
+          "",
+          "",
+          ""
+        ],
+        "pool": [
+          "t4",
+          "t3",
+          "t5",
+          "t0"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t4"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 0,
+          "unscored": 3
+        },
+        "qualified": 1
+      }
+    },
+    {
+      "name": "random run 7",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "LinkedIn",
+                "email": "A@x.com",
+                "phone": "408-555-2002",
+                "lastName": "Li",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Dice",
+                "email": "",
+                "phone": "",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "Exa",
+                "email": "",
+                "phone": "408-555-1001",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 60,
+                "no_contact": true
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 72,
+                "no_contact": true
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "JobDiva-TalentSearch",
+                "phone": "",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Dice",
+                "email": "",
+                "lastName": "Li",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "408-555-2002",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "JobDiva-Applicants",
+                "email": "a@x.com",
+                "phone": "408-555-2002",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Dice",
+                "phone": "000-000-0000",
+                "firstName": "",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "LinkedIn",
+                "email": "auto_1@jobdiva.com",
+                "phone": "408-555-1001",
+                "firstName": "",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "JobDiva-TalentSearch",
+                "phone": "408-555-1001",
+                "firstName": "Jane"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "Exa",
+                "email": "",
+                "phone": "",
+                "firstName": "Jane",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "JobDiva-TalentSearch",
+                "phone": "408-555-1001",
+                "lastName": "Li",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 60,
+                "no_contact": true,
+                "email": "a@x.com"
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "t2"
+        ],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "t4",
+          "t2",
+          "t5",
+          "t1",
+          "t0"
+        ],
+        "selection": {
+          "ids": [
+            "t5",
+            "t0"
+          ],
+          "eligibleTotal": 2,
+          "belowFloor": 0,
+          "unscored": 2
+        },
+        "exclusions": [
+          "",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "pool": [
+          "t4",
+          "t2",
+          "t5",
+          "t1",
+          "t0"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t5",
+            "t0"
+          ],
+          "eligibleTotal": 2,
+          "belowFloor": 0,
+          "unscored": 2
+        },
+        "qualified": 3
+      }
+    },
+    {
+      "name": "random run 8",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "lastName": "Doe",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Dice",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "firstName": "Jane",
+                "lastName": "Li"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "firstName": "Jane",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "match_score": 72
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Dice",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "firstName": "",
+                "lastName": "Li"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Dice",
+                "email": "",
+                "phone": "408-555-2002",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 45
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "email": "auto_1@jobdiva.com",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "JobDiva-Applicants",
+                "email": "",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "lastName": "Doe",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "LinkedIn",
+                "email": "A@x.com",
+                "firstName": "Bo",
+                "lastName": "Li"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "LinkedIn",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "JobDiva-Applicants",
+                "phone": "408-555-2002",
+                "firstName": "Jane",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "offer_status": "Offer Accepted"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "Dice",
+                "email": "A@x.com",
+                "phone": "408-555-1001",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "Exa",
+                "email": "A@x.com",
+                "phone": "4085551001",
+                "firstName": "Jane",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Dice",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "firstName": "Bo",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 95,
+                "email": "b@x.com"
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 95
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "t1",
+          "t2"
+        ],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "t0",
+          "t4",
+          "t3"
+        ],
+        "selection": {
+          "ids": [
+            "t0",
+            "t3"
+          ],
+          "eligibleTotal": 2,
+          "belowFloor": 0,
+          "unscored": 1
+        },
+        "exclusions": [
+          "",
+          "",
+          ""
+        ],
+        "pool": [
+          "t2",
+          "t5",
+          "t6",
+          "t0",
+          "t1",
+          "t4",
+          "t3"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t3"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 2,
+          "unscored": 2
+        },
+        "qualified": 2
+      }
+    },
+    {
+      "name": "random run 9",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 45,
+                "offer_status": "Offer Accepted"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 72
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "LinkedIn",
+                "email": "a@x.com",
+                "phone": "4085551001",
+                "firstName": "Bo",
+                "lastName": "Doe",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Dice",
+                "email": "b@x.com",
+                "phone": "408-555-2002"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t2",
+                "source": "JobDiva-Applicants",
+                "email": "A@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": 75
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 95
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t4",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "email": "A@x.com"
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t3",
+                "source": "Exa",
+                "email": "A@x.com",
+                "phone": "408-555-2002",
+                "lastName": "Doe",
+                "match_score": null
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "Exa",
+                "email": "",
+                "phone": "4085551001",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 95,
+                "no_contact": true
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "LinkedIn",
+                "email": "a@x.com",
+                "phone": "4085551001",
+                "firstName": "Jane",
+                "lastName": "Li",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Exa",
+                "email": "A@x.com",
+                "phone": "4085551001",
+                "lastName": "Li",
+                "match_score": 61
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "JobDiva-TalentSearch",
+                "phone": "000-000-0000",
+                "firstName": "Jane",
+                "lastName": "Li",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Dice",
+                "email": "auto_1@jobdiva.com",
+                "phone": "000-000-0000",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "match_score": 60
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "LinkedIn",
+                "email": "b@x.com",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t0",
+                "source": "Exa",
+                "email": "A@x.com",
+                "phone": "408-555-2002",
+                "firstName": "Bo",
+                "match_score": 90
+              }
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [],
+        "limit": 250
+      },
+      "expected": {
+        "table": [
+          "t1",
+          "t5",
+          "t2"
+        ],
+        "selection": {
+          "ids": [
+            "t1",
+            "t5",
+            "t2"
+          ],
+          "eligibleTotal": 3,
+          "belowFloor": 0,
+          "unscored": 0
+        },
+        "exclusions": [
+          "",
+          "",
+          ""
+        ],
+        "pool": [
+          "t3",
+          "t2",
+          "t1",
+          "t4",
+          "t6",
+          "t5",
+          "t0"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t1",
+            "t5",
+            "t0",
+            "t2",
+            "t6",
+            "t4"
+          ],
+          "eligibleTotal": 6,
+          "belowFloor": 1,
+          "unscored": 0
+        },
+        "qualified": 6
+      }
+    },
+    {
+      "name": "random run 10",
+      "input": {
+        "steps": [
+          {
+            "begin": "replace"
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "JobDiva-TalentSearch",
+                "email": "a@x.com",
+                "firstName": "Jane",
+                "lastName": "Li",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "begin": "append"
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "LinkedIn",
+                "email": "",
+                "phone": "408-555-1001",
+                "firstName": "Jane",
+                "lastName": "Li",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "LinkedIn",
+                "email": "A@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Jane"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "no_contact": true,
+                "email": "b@x.com"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Dice",
+                "email": "a@x.com",
+                "phone": "4085551001",
+                "firstName": "",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {
+                "match_score": 60,
+                "no_contact": true,
+                "email": ""
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Exa",
+                "email": "b@x.com",
+                "phone": "4085551001",
+                "firstName": "Jane",
+                "lastName": "Doe"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t3",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "Exa",
+                "email": "",
+                "phone": "408-555-1001",
+                "firstName": "",
+                "lastName": "Doe",
+                "match_score": 55
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t5",
+              "patch": {
+                "match_score": 45
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Dice",
+                "email": "A@x.com",
+                "phone": "000-000-0000",
+                "firstName": "Bo",
+                "lastName": "Doe",
+                "match_score": 90
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t2",
+              "patch": {
+                "match_score": 45
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t1",
+              "patch": {}
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t6",
+                "source": "Dice",
+                "email": "b@x.com",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": "70"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t6",
+              "patch": {
+                "match_score": 45
+              },
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {},
+              "stage": "scored"
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t1",
+                "source": "JobDiva-Applicants",
+                "email": "A@x.com",
+                "phone": "",
+                "firstName": "",
+                "lastName": "Li",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t5",
+                "source": "JobDiva-Applicants",
+                "email": "A@x.com",
+                "phone": "",
+                "firstName": "Bo",
+                "lastName": "Li",
+                "match_score": 60
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate",
+              "data": {
+                "candidate_id": "t4",
+                "source": "Exa",
+                "email": "A@x.com"
+              }
+            }
+          },
+          {
+            "event": {
+              "type": "candidate_detail",
+              "candidate_id": "t0",
+              "patch": {
+                "_drop_reason": "x"
+              },
+              "stage": "dropped"
+            }
+          }
+        ],
+        "launchedKeys": [],
+        "launchedIds": [
+          "t4"
+        ],
+        "limit": 2
+      },
+      "expected": {
+        "table": [
+          "t1",
+          "t6"
+        ],
+        "selection": {
+          "ids": [],
+          "eligibleTotal": 0,
+          "belowFloor": 1,
+          "unscored": 0
+        },
+        "exclusions": [
+          "",
+          ""
+        ],
+        "pool": [
+          "t6",
+          "t1",
+          "t5",
+          "t4"
+        ],
+        "poolSelection": {
+          "ids": [
+            "t6"
+          ],
+          "eligibleTotal": 1,
+          "belowFloor": 1,
+          "unscored": 0
+        },
+        "qualified": 2
+      }
+    }
+  ]
+}

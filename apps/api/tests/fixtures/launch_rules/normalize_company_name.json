@@ -1,0 +1,68 @@
+{
+  "function": "normalizeCompanyName",
+  "cases": [
+    {
+      "name": "legal suffix",
+      "input": {
+        "value": "Bank of America, N.A."
+      },
+      "expected": "bank of america n a"
+    },
+    {
+      "name": "filler words",
+      "input": {
+        "value": "Acme Technologies Inc."
+      },
+      "expected": "acme"
+    },
+    {
+      "name": "accented",
+      "input": {
+        "value": "Caf\u00e9 Solutions"
+      },
+      "expected": "caf"
+    },
+    {
+      "name": "hyphen",
+      "input": {
+        "value": "IBM-India Pvt Ltd"
+      },
+      "expected": "ibm india"
+    },
+    {
+      "name": "co is filler",
+      "input": {
+        "value": "Co-op"
+      },
+      "expected": "op"
+    },
+    {
+      "name": "ascii word boundary",
+      "input": {
+        "value": "na\u00efve na"
+      },
+      "expected": "ve"
+    },
+    {
+      "name": "null",
+      "input": {
+        "value": null
+      },
+      "expected": ""
+    },
+    {
+      "name": "number",
+      "input": {
+        "value": 42
+      },
+      "expected": "42"
+    },
+    {
+      "name": "whitespace",
+      "input": {
+        "value": "  Foo\u00a0 Bar  "
+      },
+      "expected": "foo bar"
+    }
+  ]
+}

@@ -33,6 +33,7 @@ must never take a launch down, only inform it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -424,8 +425,17 @@ async def resolve_employer_signals(
         if not text:
             meta["extraction"] = "no_resume"
             return
-        async with sem:
-            if time.monotonic() - started > budget:
+        # Fix 4: a parsed_resumes hit costs no LLM call, so it bypasses the
+        # semaphore and the overall budget — only fresh parses are throttled.
+        # process_jobdiva_candidate still runs (it reuses the same cached
+        # parse) so the result keeps persisting to candidate_enhanced_info.
+        from services.resume_profile import ResumeProfileService  # noqa: PLC0415
+        cached_parse = await ResumeProfileService.lookup(text)
+        cache_hit = cached_parse is not None
+        meta["parsed_resume_cache"] = "hit" if cache_hit else "miss"
+        gate = contextlib.nullcontext() if cache_hit else sem
+        async with gate:
+            if not cache_hit and time.monotonic() - started > budget:
                 meta["extraction"] = "budget_exhausted"
                 return
             try:
@@ -440,7 +450,7 @@ async def resolve_employer_signals(
                         "title": cand.get("title") or cand.get("headline"),
                         "location": cand.get("location"),
                         "source": str(cand.get("source") or "JobDiva"),
-                    }),
+                    }, **({"cached_parse": cached_parse} if cache_hit else {})),
                     timeout=per_timeout,
                 )
             except asyncio.TimeoutError:

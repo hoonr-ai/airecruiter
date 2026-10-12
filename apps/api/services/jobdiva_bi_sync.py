@@ -1100,6 +1100,11 @@ async def scheduled_sync() -> None:
     started = time.monotonic()
     try:
         summary = await run_sync_cycle()
-        logger.info(f"[JobDivaBI] cycle done in {time.monotonic() - started:.0f}s: {summary}")
+        # 7 of 8 workers skip every cycle (another one holds the lock): DEBUG,
+        # or they were most of the API's forwarded log lines.
+        skipped = isinstance(summary, dict) and summary.get("skipped")
+        (logger.debug if skipped else logger.info)(
+            f"[JobDivaBI] cycle done in {time.monotonic() - started:.0f}s: {summary}"
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error(f"[JobDivaBI] cycle crashed: {exc}", exc_info=True)

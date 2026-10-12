@@ -66,6 +66,12 @@ async def update_job_criteria(job_id: str, update: JobCriteriaUpdate):
                     (job_id, criteria_data)
                 )
                 conn.commit()
+        # Fix 7: cached JobAgentSearch results are stale once criteria change.
+        try:
+            from services.jobdiva_jobagent_cache import invalidate
+            await invalidate(job_id)
+        except Exception as exc:
+            logger.warning(f"jobagent cache invalidation failed for {job_id}: {exc}")
         return {"status": "SUCCESS"}
     except Exception as e:
         logger.error(f"update_job_criteria failed for {job_id}: {e}")

@@ -1,0 +1,84 @@
+{
+  "function": "resolveLinkedInUrl",
+  "cases": [
+    {
+      "name": "skips non-profile profile_url",
+      "input": {
+        "candidate": {
+          "profile_url": "https://github.com/x",
+          "linkedin_url": "https://linkedin.com/in/real"
+        }
+      },
+      "expected": "https://linkedin.com/in/real"
+    },
+    {
+      "name": "urls.linkedin_url",
+      "input": {
+        "candidate": {
+          "urls": {
+            "linkedin_url": " https://www.linkedin.com/in/u1 "
+          }
+        }
+      },
+      "expected": "https://www.linkedin.com/in/u1"
+    },
+    {
+      "name": "data.urls.linkedin",
+      "input": {
+        "candidate": {
+          "data": {
+            "urls": {
+              "linkedin": "https://linkedin.com/in/d1"
+            }
+          }
+        }
+      },
+      "expected": "https://linkedin.com/in/d1"
+    },
+    {
+      "name": "resume regex",
+      "input": {
+        "candidate": {
+          "resume_text": "Contact: HTTPS://WWW.LinkedIn.com/in/jane-doe_123?x"
+        }
+      },
+      "expected": "HTTPS://WWW.LinkedIn.com/in/jane-doe_123"
+    },
+    {
+      "name": "resumeText then data.resume_text",
+      "input": {
+        "candidate": {
+          "data": {
+            "resume_text": "linkedin.com/in/nope https://linkedin.com/in/yes"
+          }
+        }
+      },
+      "expected": "https://linkedin.com/in/yes"
+    },
+    {
+      "name": "company page only",
+      "input": {
+        "candidate": {
+          "profile_url": "https://linkedin.com/company/acme"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "urls is a string",
+      "input": {
+        "candidate": {
+          "urls": "https://linkedin.com/in/s"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "none",
+      "input": {
+        "candidate": {}
+      },
+      "expected": ""
+    }
+  ]
+}

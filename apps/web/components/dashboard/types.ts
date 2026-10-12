@@ -92,6 +92,11 @@ export type SpeedMetric = {
   from: string;
   median_hours: number | null;
   mean_hours: number | null;
+  /** Minute precision, sent only on the launch timings (added_to_launch_click,
+   *  launch_click_to_launch); absent elsewhere and from an older API. */
+  median_minutes?: number | null;
+  mean_minutes?: number | null;
+  /** Requirements with a value (n). */
   jobs: number;
 };
 

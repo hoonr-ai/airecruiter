@@ -37,7 +37,11 @@ def _fresh_limiter(monkeypatch):
     monkeypatch.setattr(rl, "_redis_client", None)
     monkeypatch.setattr(rl, "_redis_down_until", 0.0)
     monkeypatch.setattr(rl, "MIN_INTERVAL_S", 0.05)
-    monkeypatch.setattr(rl, "_local_next", 0.0)
+    monkeypatch.setattr(rl, "_local_tokens", None)
+    monkeypatch.setattr(rl, "_local_ts", 0.0)
+    monkeypatch.setattr(rl, "_prio_stats", {})
+    monkeypatch.setattr(rl, "BURST", 1.0)
+    monkeypatch.setattr(rl, "BACKGROUND_BURST", 1.0)
     monkeypatch.setattr(rl, "_local_cooldown_until", 0.0)
     monkeypatch.setattr(rl, "_local_fg_waiting_until", 0.0)
     monkeypatch.setattr(rl, "_local_lock", None)
@@ -49,7 +53,7 @@ def redis_keys(monkeypatch):
     """Point the limiter at the test Redis with unique keys; clean them up after."""
     tag = uuid.uuid4().hex
     keys = {
-        "_NEXT_KEY": f"test:{tag}:next",
+        "_BUCKET_KEY": f"test:{tag}:bucket",
         "_COOLDOWN_KEY": f"test:{tag}:cooldown",
         "_FG_WAITING_KEY": f"test:{tag}:fg",
     }
@@ -366,7 +370,7 @@ def test_background_context_forces_background_priority(monkeypatch):
 
     async def fake_take(background):
         seen.append(background)
-        return 0.0
+        return 0.0, 0.0
 
     monkeypatch.setattr(rl, "_take", fake_take)
 
@@ -410,3 +414,76 @@ def test_bg_get_interactive_429_starts_shared_cooldown():
     asyncio.run(rl.bg_get(client, "https://x/y", label="t"))
     assert rl.stats()["http_429"] == 1
     assert rl._local_cooldown_until > time.monotonic()
+
+
+# ---- token bucket (Fix 5) ----------------------------------------------------
+
+def test_bucket_step_math(monkeypatch):
+    monkeypatch.setattr(rl, "BURST", 3.0)
+    monkeypatch.setattr(rl, "BACKGROUND_BURST", 1.0)
+    # full bucket: interactive takes, leaving 2
+    wait, tok, ts = rl._bucket_step(3.0, 0.0, 0.0, 1.5, False, False, 0.0)
+    assert wait == 0 and tok == 2.0
+    # background must leave the 2-token interactive reserve: needs 3
+    wait, tok, _ = rl._bucket_step(2.0, 0.0, 0.0, 1.5, True, False, 0.0)
+    assert wait == pytest.approx(1.5)
+    # refill: 0 tokens + 3s at 1.5s/token = 2 tokens
+    wait, tok, ts = rl._bucket_step(0.0, 0.0, 3.0, 1.5, False, False, 0.0)
+    assert wait == 0 and tok == pytest.approx(1.0) and ts == 3.0
+    # refill caps at burst
+    _, tok, _ = rl._bucket_step(0.0, 0.0, 100.0, 1.5, False, False, 0.0)
+    assert tok == pytest.approx(2.0)
+    # empty: wait the time to one token
+    wait, _, _ = rl._bucket_step(0.25, 0.0, 0.0, 1.5, False, False, 0.0)
+    assert wait == pytest.approx(1.125)
+    # cooldown wins over available tokens
+    wait, tok, _ = rl._bucket_step(3.0, 0.0, 0.0, 1.5, False, False, 4.0)
+    assert wait == 4.0 and tok == 3.0
+    # background yields to waiting interactive even with tokens
+    wait, _, _ = rl._bucket_step(3.0, 0.0, 0.0, 1.5, True, True, 0.0)
+    assert wait == 1.5
+
+
+def test_default_throughput_matches_old_limiter():
+    # burst 1: steady 1 call per MIN_INTERVAL_S, first call immediate
+    assert rl.BURST == 1.0
+    stamps = asyncio.run(_timed_acquires(4))
+    assert all(g >= 0.045 for g in _gaps(stamps)), _gaps(stamps)
+
+
+def test_burst_allows_immediate_calls_then_paces(monkeypatch):
+    monkeypatch.setattr(rl, "BURST", 3.0)
+    monkeypatch.setattr(rl, "MIN_INTERVAL_S", 0.2)
+
+    async def run():
+        t0 = time.monotonic()
+        stamps = await _timed_acquires(4)
+        return [s - t0 for s in stamps]
+
+    stamps = asyncio.run(run())
+    assert stamps[2] < 0.1 and stamps[3] >= 0.18
+
+
+def test_priority_counters_track_wait_and_429():
+    async def run():
+        await rl.note_429("1", priority=rl.BACKGROUND)
+        assert await rl.acquire(5.0, priority=rl.BACKGROUND)
+
+    asyncio.run(run())
+    bp = rl.stats()["by_priority"][rl.BACKGROUND]
+    assert bp["bi_429_total"] == 1
+    assert bp["bi_wait_ms"] >= 900 and bp["bi_cooldown_ms"] >= 900
+
+
+@needs_redis
+def test_redis_bucket_burst(redis_keys, monkeypatch):
+    monkeypatch.setattr(rl, "BURST", 3.0)
+    monkeypatch.setattr(rl, "MIN_INTERVAL_S", 0.2)
+
+    async def run():
+        t0 = time.monotonic()
+        stamps = await _timed_acquires(4)
+        return [s - t0 for s in stamps]
+
+    stamps = asyncio.run(run())
+    assert stamps[2] < 0.1 and stamps[3] >= 0.15

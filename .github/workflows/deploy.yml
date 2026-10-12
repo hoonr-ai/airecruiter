@@ -66,7 +66,7 @@ jobs:
         run: |
           npm ci --legacy-peer-deps
           npm run build
-          node --experimental-strip-types --test lib/activityTimeline.test.ts lib/candidateVisibility.test.ts
+          node --experimental-strip-types --test lib/activityTimeline.test.ts lib/candidateVisibility.test.ts lib/launch-rules.test.ts lib/launch-session.test.ts lib/nr-config.test.ts lib/newrelic.test.ts lib/analytics-props.test.ts lib/fetch-auth.test.ts
 
   # ----------------------
   # QA DEPLOYMENT
@@ -108,6 +108,19 @@ jobs:
           LEGACY_DOMAIN: qacurate.hoonr.ai
           # Contact enrichment key; deploy-azure.sh writes it to apps/api/.env when set.
           KIPPLO_API_KEY: ${{ secrets.KIPPLO_API_KEY }}
+          # New Relic APM (docs/observability/new-relic.md). deploy-azure.sh writes
+          # each into apps/api/.env only when non-empty, so an unset secret leaves
+          # a key added to .env by hand alone. Never echoed.
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+          NEW_RELIC_APP_NAME: "PAIR API (QA)"
+          NEW_RELIC_ENVIRONMENT: qa
+          # Server launch sessions (docs/launch-sessions.md "Rollout and deploys"):
+          # GitHub environment VARIABLES of the qa environment. deploy-azure.sh
+          # writes each into apps/api/.env only when non-empty; never set = the
+          # code default (on for QA). Set "false" + re-run the deploy to turn off.
+          # Deleting the variable later keeps the last written value in .env.
+          PAIR_SERVER_LAUNCH_ENABLED: ${{ vars.PAIR_SERVER_LAUNCH_ENABLED }}
+          PAIR_LAUNCH_RUNNER_ENABLED: ${{ vars.PAIR_LAUNCH_RUNNER_ENABLED }}
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << EOF
             set -e
@@ -118,8 +131,45 @@ jobs:
             export LEGACY_DOMAIN="$LEGACY_DOMAIN"
             export LEGACY_REDIRECT_UNTIL="$LEGACY_REDIRECT_UNTIL"
             export KIPPLO_API_KEY="$KIPPLO_API_KEY"
-            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
+            export NEW_RELIC_LICENSE_KEY="$NEW_RELIC_LICENSE_KEY"
+            export NEW_RELIC_APP_NAME="$NEW_RELIC_APP_NAME"
+            export NEW_RELIC_ENVIRONMENT="$NEW_RELIC_ENVIRONMENT"
+            export PAIR_SERVER_LAUNCH_ENABLED="$PAIR_SERVER_LAUNCH_ENABLED"
+            export PAIR_LAUNCH_RUNNER_ENABLED="$PAIR_LAUNCH_RUNNER_ENABLED"
+            # The health check is the last link of the chain, so the job goes red
+            # when the API is unhealthy after setup-ssl.sh (and still goes red,
+            # as before, when deploy-azure.sh or setup-ssl.sh fails).
+            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh \
+              && curl -fsS --max-time 10 --retry 12 --retry-delay 5 --retry-all-errors -o /dev/null http://localhost:8000/api/health
           EOF
+
+      - name: New Relic deployment marker
+        # Best effort: never fails the deploy. Skipped when NEW_RELIC_API_KEY
+        # (a User key) is unset or the APM entity does not exist yet (first deploy).
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          NR_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+          NR_ENTITY_NAME: "PAIR API (QA)"
+          NR_USER: ${{ github.actor }}
+          NR_VERSION: ${{ github.sha }}
+        run: |
+          # Key checked here, never in `if:` (secrets are not allowed there and
+          # the workflow would fail to parse). Never set -x / curl -v.
+          [ -n "$NR_API_KEY" ] || { echo "NEW_RELIC_API_KEY unset; skipping deployment marker"; exit 0; }
+          command -v jq >/dev/null || { echo "jq not installed; skipping deployment marker"; exit 0; }
+          nerdgraph() {
+            curl -sS --max-time 20 https://api.newrelic.com/graphql \
+              -H "Content-Type: application/json" -H "API-Key: $NR_API_KEY" --data "$1"
+          }
+          search=$(jq -n --arg q "name = '$NR_ENTITY_NAME' AND domain = 'APM' AND type = 'APPLICATION'" \
+            '{query: "query($q: String!) { actor { entitySearch(query: $q) { results { entities { guid name } } } } }", variables: {q: $q}}')
+          guid=$(nerdgraph "$search" | jq -r --arg n "$NR_ENTITY_NAME" \
+            '[.data.actor.entitySearch.results.entities[]? | select(.name == $n) | .guid][0] // empty' || true)
+          [ -n "$guid" ] || { echo "No APM entity named '$NR_ENTITY_NAME' yet; skipping deployment marker"; exit 0; }
+          mutation=$(jq -n --arg guid "$guid" --arg version "${NR_VERSION:0:7}" --arg commit "$NR_VERSION" --arg user "$NR_USER" \
+            '{query: "mutation($guid: EntityGuid!, $version: String!, $commit: String, $user: String) { changeTrackingCreateDeployment(deployment: {entityGuid: $guid, version: $version, commit: $commit, user: $user, deploymentType: BASIC}) { deploymentId } }", variables: {guid: $guid, version: $version, commit: $commit, user: $user}}')
+          nerdgraph "$mutation" | jq -c '{deploymentId: .data.changeTrackingCreateDeployment.deploymentId, errors: [.errors[]?.message]}' || true
 
       - name: Deployment Info
         env:
@@ -169,6 +219,17 @@ jobs:
           LEGACY_DOMAIN: curate.hoonr.ai
           # Contact enrichment key; deploy-azure.sh writes it to apps/api/.env when set.
           KIPPLO_API_KEY: ${{ secrets.KIPPLO_API_KEY }}
+          # New Relic APM. Rollout: leave the production secret unset until QA
+          # has run 48 h and the ingest change is measured (runbook).
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+          NEW_RELIC_APP_NAME: "PAIR API (PROD)"
+          NEW_RELIC_ENVIRONMENT: prod
+          # Server launch sessions: GitHub environment VARIABLES of the
+          # production environment, written to apps/api/.env when non-empty.
+          # Unset = the code default (OFF on PROD). Turn on after QA sign-off by
+          # setting BOTH to "true" and re-running this deploy.
+          PAIR_SERVER_LAUNCH_ENABLED: ${{ vars.PAIR_SERVER_LAUNCH_ENABLED }}
+          PAIR_LAUNCH_RUNNER_ENABLED: ${{ vars.PAIR_LAUNCH_RUNNER_ENABLED }}
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << EOF
             set -e
@@ -179,8 +240,43 @@ jobs:
             export LEGACY_DOMAIN="$LEGACY_DOMAIN"
             export LEGACY_REDIRECT_UNTIL="$LEGACY_REDIRECT_UNTIL"
             export KIPPLO_API_KEY="$KIPPLO_API_KEY"
-            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
+            export NEW_RELIC_LICENSE_KEY="$NEW_RELIC_LICENSE_KEY"
+            export NEW_RELIC_APP_NAME="$NEW_RELIC_APP_NAME"
+            export NEW_RELIC_ENVIRONMENT="$NEW_RELIC_ENVIRONMENT"
+            export PAIR_SERVER_LAUNCH_ENABLED="$PAIR_SERVER_LAUNCH_ENABLED"
+            export PAIR_LAUNCH_RUNNER_ENABLED="$PAIR_LAUNCH_RUNNER_ENABLED"
+            # The health check is the last link of the chain, so the job goes red
+            # when the API is unhealthy after setup-ssl.sh (and still goes red,
+            # as before, when deploy-azure.sh or setup-ssl.sh fails).
+            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh \
+              && curl -fsS --max-time 10 --retry 12 --retry-delay 5 --retry-all-errors -o /dev/null http://localhost:8000/api/health
           EOF
+
+      - name: New Relic deployment marker
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          NR_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+          NR_ENTITY_NAME: "PAIR API (PROD)"
+          NR_USER: ${{ github.actor }}
+          NR_VERSION: ${{ github.sha }}
+        run: |
+          # Key checked here, never in `if:` (secrets are not allowed there and
+          # the workflow would fail to parse). Never set -x / curl -v.
+          [ -n "$NR_API_KEY" ] || { echo "NEW_RELIC_API_KEY unset; skipping deployment marker"; exit 0; }
+          command -v jq >/dev/null || { echo "jq not installed; skipping deployment marker"; exit 0; }
+          nerdgraph() {
+            curl -sS --max-time 20 https://api.newrelic.com/graphql \
+              -H "Content-Type: application/json" -H "API-Key: $NR_API_KEY" --data "$1"
+          }
+          search=$(jq -n --arg q "name = '$NR_ENTITY_NAME' AND domain = 'APM' AND type = 'APPLICATION'" \
+            '{query: "query($q: String!) { actor { entitySearch(query: $q) { results { entities { guid name } } } } }", variables: {q: $q}}')
+          guid=$(nerdgraph "$search" | jq -r --arg n "$NR_ENTITY_NAME" \
+            '[.data.actor.entitySearch.results.entities[]? | select(.name == $n) | .guid][0] // empty' || true)
+          [ -n "$guid" ] || { echo "No APM entity named '$NR_ENTITY_NAME' yet; skipping deployment marker"; exit 0; }
+          mutation=$(jq -n --arg guid "$guid" --arg version "${NR_VERSION:0:7}" --arg commit "$NR_VERSION" --arg user "$NR_USER" \
+            '{query: "mutation($guid: EntityGuid!, $version: String!, $commit: String, $user: String) { changeTrackingCreateDeployment(deployment: {entityGuid: $guid, version: $version, commit: $commit, user: $user, deploymentType: BASIC}) { deploymentId } }", variables: {guid: $guid, version: $version, commit: $commit, user: $user}}')
+          nerdgraph "$mutation" | jq -c '{deploymentId: .data.changeTrackingCreateDeployment.deploymentId, errors: [.errors[]?.message]}' || true
 
       - name: Deployment Info
         env:

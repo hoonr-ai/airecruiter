@@ -12,12 +12,15 @@ import {
   formatRangeLabel,
   formatRate,
   formatShortDay,
+  formatSpeedValue,
   formatWeekLabel,
   hoursAsDays,
   presetRange,
   rangeDays,
   rateChange,
   shareOfTop,
+  speedDetail,
+  splitSpeedMetrics,
 } from "./dashboard.ts";
 
 describe("dashboard presets", () => {
@@ -129,5 +132,64 @@ describe("dashboard formats", () => {
     assert.equal(shareOfTop(188, 94), 0.5);
     assert.equal(shareOfTop(0, 3), 0);
     assert.equal(shareOfTop(10, 12), 1);
+  });
+});
+
+describe("dashboard speed tiles", () => {
+  it("shows minute-precision launch timings in minutes under an hour", () => {
+    assert.equal(formatSpeedValue(0.2, 12.4), "12 min");
+    assert.equal(formatSpeedValue(0, 0), "0 min");
+    assert.equal(formatSpeedValue(0, 0.2), "< 1 min");
+    assert.equal(formatSpeedValue(1, 59.4), "59 min");
+    // 59.6 rounds to an hour, so it switches to hours rather than "60 min".
+    assert.equal(formatSpeedValue(1, 59.6), "1 hrs");
+    assert.equal(formatSpeedValue(1.3, 75), "1.3 hrs");
+    assert.equal(formatSpeedValue(40.5, 2430), "41 hrs");
+    assert.equal(formatSpeedValue(null, null), "—");
+  });
+
+  it("falls back to hours for tiles without minutes (and an older API)", () => {
+    assert.equal(formatSpeedValue(0.46), "0.5 hrs");
+    assert.equal(formatSpeedValue(864, undefined), "864 hrs");
+    assert.equal(formatSpeedValue(null), "—");
+  });
+
+  it("keeps the pipeline tiles' detail line unchanged", () => {
+    assert.equal(
+      speedDetail({ median_hours: 30, mean_hours: 42.4, jobs: 4 }),
+      "median · 1.3 days · avg 42 hrs · 4 reqs",
+    );
+    assert.equal(speedDetail({ median_hours: 5, mean_hours: 5, jobs: 1 }), "median · under a day · avg 5 hrs · 1 req");
+    assert.equal(speedDetail({ median_hours: null, mean_hours: null, jobs: 0 }), null);
+  });
+
+  it("drops the days part for a launch timing under a day", () => {
+    assert.equal(
+      speedDetail({ median_hours: 0.2, mean_hours: 0.3, median_minutes: 12, mean_minutes: 18.2, jobs: 3 }),
+      "median · avg 18 min · 3 reqs",
+    );
+    assert.equal(
+      speedDetail({ median_hours: 50, mean_hours: 61.2, median_minutes: 3000, mean_minutes: 3672, jobs: 2 }),
+      "median · 2.1 days · avg 61 hrs · 2 reqs",
+    );
+    assert.equal(
+      speedDetail({ median_hours: null, mean_hours: null, median_minutes: null, mean_minutes: null, jobs: 0 }),
+      null,
+    );
+  });
+
+  it("splits the launch-timing tiles from the pipeline tiles, keeping order", () => {
+    const speed = [
+      { key: "time_to_launch" },
+      { key: "added_to_launch_click" },
+      { key: "time_to_first_pass" },
+      { key: "launch_click_to_launch" },
+    ];
+    assert.deepEqual(splitSpeedMetrics(speed), {
+      pipeline: [{ key: "time_to_launch" }, { key: "time_to_first_pass" }],
+      launch: [{ key: "added_to_launch_click" }, { key: "launch_click_to_launch" }],
+    });
+    // An older API sends no launch timings: nothing to show in that group.
+    assert.deepEqual(splitSpeedMetrics([{ key: "time_to_launch" }]).launch, []);
   });
 });

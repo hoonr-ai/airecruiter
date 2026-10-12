@@ -43,7 +43,10 @@ export default function RootLayout({
             </AIProvider>
           </AuthGuard>
         </MsalProviderWrapper>
-        {/* New Relic Browser agent (self-gates to pair.pyramidci.com; no-op elsewhere) */}
+        {/* New Relic Browser agent: picks the PAIR Web app per host (PROD / QA;
+            localhost only after ?nr=1) and is a no-op on any other host.
+            beforeInteractive so it wraps fetch/XHR before app code (and
+            lib/api.ts's fetch patch) runs. Table: lib/nr-config.ts. */}
         <Script src="/newrelic-browser-agent.js" strategy="beforeInteractive" />
       </body>
     </html>

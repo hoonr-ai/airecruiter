@@ -1,0 +1,47 @@
+{
+  "function": "extractLinkedInFromText",
+  "cases": [
+    {
+      "name": "upper case url",
+      "input": {
+        "text": "Profile: HTTPS://WWW.LinkedIn.com/in/jane-doe_123?x=1 more"
+      },
+      "expected": "HTTPS://WWW.LinkedIn.com/in/jane-doe_123"
+    },
+    {
+      "name": "no www",
+      "input": {
+        "text": "see http://linkedin.com/in/bo%20li/"
+      },
+      "expected": "http://linkedin.com/in/bo%20li"
+    },
+    {
+      "name": "company page",
+      "input": {
+        "text": "https://linkedin.com/company/acme"
+      },
+      "expected": ""
+    },
+    {
+      "name": "none",
+      "input": {
+        "text": "no links"
+      },
+      "expected": ""
+    },
+    {
+      "name": "null",
+      "input": {
+        "text": null
+      },
+      "expected": ""
+    },
+    {
+      "name": "long-s is not s",
+      "input": {
+        "text": "https://linkedin.com/in/\u017fam"
+      },
+      "expected": ""
+    }
+  ]
+}

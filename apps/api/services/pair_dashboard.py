@@ -373,6 +373,11 @@ class Req:
     openings: int = 1
     stopped: bool = False
     archived: bool = False
+    # Launch timings (services/launch_timing.py), folded over the versions by
+    # attach_launch_timings: A = added → first Launch click, B = click → first
+    # interview of the req's first launch. None = not recorded.
+    added_to_click_hours: Optional[float] = None
+    click_to_launch_hours: Optional[float] = None
 
     @property
     def launched(self) -> bool:
@@ -735,6 +740,16 @@ def _stats(values: Iterable[float]) -> Dict[str, Any]:
     }
 
 
+def _timing_stats(hours: Iterable[Optional[float]]) -> Dict[str, Any]:
+    """_stats plus minute precision for the launch timings: click → launch is
+    usually minutes, and one decimal of an hour is six of them."""
+    cleaned = sorted(v for v in hours if v is not None)
+    stats = _stats(cleaned)
+    stats["median_minutes"] = round(statistics.median(cleaned) * 60.0, 1) if cleaned else None
+    stats["mean_minutes"] = round(sum(cleaned) / len(cleaned) * 60.0, 1) if cleaned else None
+    return stats
+
+
 def _hours_between(start: Optional[datetime.datetime], end: Optional[datetime.datetime]) -> Optional[float]:
     """Hours from start to end, both made aware. Up to a day backwards is
     clock skew (JobDiva dates some records at midnight) and reads as 0; more
@@ -868,6 +883,12 @@ def compute_funnel(
         {"key": "time_to_first_pass", "label": "Time to First Pass", "from": "from PAIR launch", **_stats(to_pass)},
         {"key": "time_to_first_submit", "label": "Time to First Submit", "from": "from PAIR launch", **_stats(submit_from_launch)},
         {"key": "time_to_first_submit_posted", "label": "Time to First Submit", "from": "from job posted", **_stats(submit_from_posted)},
+        # Launch timings (services/launch_timing.py), over the cohort reqs that
+        # have them: A is the recruiter's part, B the system's. `jobs` is n.
+        {"key": "added_to_launch_click", "label": "Added → Launch Click", "from": "from added to PAIR",
+         **_timing_stats(r.added_to_click_hours for r in cohort)},
+        {"key": "launch_click_to_launch", "label": "Launch Click → Launch", "from": "from launch click",
+         **_timing_stats(r.click_to_launch_hours for r in cohort)},
     ]
 
     # Rejection reasons: the recruiter's Reject reason on PAIR candidates.
@@ -1365,6 +1386,54 @@ def first_launch_by_req(people: Iterable[Person]) -> Dict[str, datetime.datetime
         if person.launched_at is not None and (person.req not in out or person.launched_at < out[person.req]):
             out[person.req] = person.launched_at
     return out
+
+
+def fold_launch_timings(reqs: Iterable[Req], timings: Dict[str, Dict[str, Any]]) -> None:
+    """Set each req's A / B hours from its versions' launch timings
+    (services/launch_timing.timings_for_jobs, keyed by job_id). Pure.
+
+    A req is the whole version family, so A runs from the family's first
+    arrival in PAIR (the earliest pair_added_at over the versions) to its
+    first Launch click — counting only clicks no later than the family's first
+    launch: a click recorded after it (a v2 cloned and launched months after
+    an untracked v1 launch, a relaunch) is not the click that launched the
+    req, so such a req's A is None. B is the B of the version that launched
+    first, None when that version has none (never a later version's B).
+    """
+    for req in reqs:
+        versions = [timings[j] for j in req.job_ids if j in timings]
+        added = [as_instant(v.get("pair_added_at")) for v in versions if v.get("pair_added_at")]
+        launched = [v for v in versions if v.get("first_launch_at") is not None]
+        first = min(launched, key=lambda v: as_instant(v["first_launch_at"])) if launched else None
+        first_launch = as_instant(first["first_launch_at"]) if first else None
+        clicked = [
+            at for at in (
+                as_instant(v.get("first_launch_clicked_at")) for v in versions if v.get("first_launch_clicked_at")
+            )
+            if first_launch is None or at <= first_launch
+        ]
+        req.added_to_click_hours = None
+        if added and clicked:
+            span = (min(clicked) - min(added)).total_seconds()
+            req.added_to_click_hours = span / 3600.0 if span >= 0 else None
+        b = first.get("click_to_launch_seconds") if first else None
+        req.click_to_launch_hours = b / 3600.0 if b is not None else None
+
+
+def attach_launch_timings(conn, reqs: Sequence[Req]) -> bool:
+    """fold_launch_timings over every req, read in one statement. Best-effort:
+    a failed read is logged and leaves the timings None (the two speed tiles
+    then read "no requirement has reached this yet"). The read is savepointed,
+    so it cannot abort the caller's transaction. True when it was read."""
+    from services.launch_timing import timings_for_jobs
+
+    try:
+        timings = timings_for_jobs([job_id for req in reqs for job_id in req.job_ids], conn)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"PAIR dashboard: launch timings unavailable: {exc}")
+        return False
+    fold_launch_timings(reqs, timings)
+    return True
 
 
 def _window_sql(column: str, lo: Optional[datetime.date], hi: datetime.date) -> Tuple[str, List[Any]]:

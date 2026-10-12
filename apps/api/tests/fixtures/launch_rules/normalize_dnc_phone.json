@@ -1,0 +1,61 @@
+{
+  "function": "normalizeDncPhone",
+  "cases": [
+    {
+      "name": "10 digits",
+      "input": {
+        "value": "408-555-1234"
+      },
+      "expected": "14085551234"
+    },
+    {
+      "name": "11 with 1",
+      "input": {
+        "value": "1 408 555 1234"
+      },
+      "expected": "14085551234"
+    },
+    {
+      "name": "uk",
+      "input": {
+        "value": "+44 20 7946 0958"
+      },
+      "expected": null
+    },
+    {
+      "name": "empty",
+      "input": {
+        "value": ""
+      },
+      "expected": null
+    },
+    {
+      "name": "null",
+      "input": {
+        "value": null
+      },
+      "expected": null
+    },
+    {
+      "name": "seven",
+      "input": {
+        "value": "5551234"
+      },
+      "expected": null
+    },
+    {
+      "name": "11 not starting 1",
+      "input": {
+        "value": "24085551234"
+      },
+      "expected": null
+    },
+    {
+      "name": "number",
+      "input": {
+        "value": 4085551234
+      },
+      "expected": "14085551234"
+    }
+  ]
+}
