@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff } from "lucide-react";
+import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -13,6 +13,7 @@ import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
+import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
 import { cn } from "@/lib/utils";
 
 function emptyFilterMessage(filter: NotificationFilter): string {
@@ -161,6 +162,42 @@ export default function NotificationsPage() {
   const [filter, setFilter] = useState<NotificationFilter>("all");
   const hasNotifications = notifications.length > 0;
 
+  // Starts false (sound on) — the SSR-rendered value — and is only ever
+  // corrected from localStorage inside an effect, after mount: reading it
+  // in a useState lazy initializer would run during the first client
+  // render and disagree with the server-rendered markup (same hydration
+  // hazard the cache-seeding effects elsewhere in this app already guard
+  // against). getSafeStorage (not window.localStorage directly) since
+  // merely evaluating that property can throw in some environments
+  // (blocked storage, certain privacy modes, sandboxed iframes).
+  const [soundMuted, setSoundMutedState] = useState(false);
+  useEffect(() => {
+    setSoundMutedState(isSoundMuted(getSafeStorage()));
+  }, []);
+
+  // Cross-tab sync: another tab's own toggle fires a `storage` event here
+  // (never in the tab that made the change), so this can't loop.
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === NOTIFICATION_SOUND_MUTED_KEY) {
+        setSoundMutedState(isSoundMuted(getSafeStorage()));
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
+
+  const handleToggleSound = () => {
+    const next = !soundMuted;
+    setSoundMuted(getSafeStorage(), next);
+    setSoundMutedState(next);
+    // Unmuting is itself a click — a real user gesture — so use it to
+    // unlock the chime's AudioContext too, in case this recruiter's
+    // permission was already granted in an earlier session and they never
+    // triggered the "Enable" button's own unlock this time.
+    if (!next) unlockNotificationSound();
+  };
+
   const handleConfirmClear = () => {
     setConfirmingClear(false);
     clearAll();
@@ -215,6 +252,19 @@ export default function NotificationsPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {notificationPermission === "granted" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 text-slate-400 hover:text-slate-700"
+              onClick={handleToggleSound}
+              aria-label="Notification sound"
+              aria-pressed={!soundMuted}
+              title={soundMuted ? "Notification sound is off — click to turn on" : "Notification sound is on — click to mute"}
+            >
+              {soundMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+            </Button>
+          )}
           {unreadCount > 0 && (
             <Button variant="outline" size="sm" onClick={markAllRead}>
               <CheckCheck className="h-4 w-4 mr-1.5" />

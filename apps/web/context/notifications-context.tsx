@@ -10,6 +10,7 @@ import {
   shouldShowBrowserPopup,
 } from "@/lib/browser-notifications";
 import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotifications } from "@/lib/notifications-cache";
+import { playNotificationChime, unlockNotificationSound } from "@/lib/notification-sound";
 
 export type { BrowserNotificationPermission };
 
@@ -125,6 +126,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // opt-in control and calls this in response to a click.
   const requestNotificationPermission = useCallback(() => {
     if (typeof window === "undefined" || !("Notification" in window)) return;
+    // This click is the one real user gesture in the whole desktop-
+    // notification flow — resume the shared chime AudioContext here while
+    // it's still on the gesture stack, so the later async chime (triggered
+    // by an SSE push, not a click) can actually play under strict browser
+    // autoplay policies.
+    unlockNotificationSound();
     Notification.requestPermission()
       .then(setNotificationPermission)
       .catch((err) => console.error("Failed to request notification permission:", err));
@@ -160,6 +167,25 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // A recruiter who already granted desktop-notification permission in an
+  // earlier session never clicks "Enable" this session — requestNotification
+  // Permission's own unlockNotificationSound() call never fires for them, so
+  // without this they'd never unlock the chime's AudioContext at all, and
+  // every SSE-triggered chime would be silently dropped by the autoplay
+  // policy. A one-time pointerdown/keydown anywhere on the page (removed
+  // after the first fire, or on unmount/permission change) stands in for
+  // that missing "Enable" click.
+  useEffect(() => {
+    if (notificationPermission !== "granted" || typeof window === "undefined") return;
+    const unlock = () => unlockNotificationSound();
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, [notificationPermission]);
+
   // Native OS-level popup for a new notification, as a companion to the
   // in-app badge/feed — only when permission is granted and the user
   // plausibly wouldn't already see the in-app update (see
@@ -181,6 +207,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         routerRef.current.push(notificationClickPath(item));
         popup.close();
       };
+      // Tied to the popup actually being shown, not to every incoming
+      // notification — playNotificationChime checks the mute preference
+      // itself, so there's nothing to gate here beyond "a popup fired."
+      playNotificationChime();
     } catch (err) {
       console.error("Failed to show browser notification:", err);
     }
