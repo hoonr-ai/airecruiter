@@ -85,17 +85,27 @@ function NotificationRow({
       <button
         onClick={handleToggleRead}
         className={cn(
-          "shrink-0 h-3.5 w-3.5 rounded-full border-2 transition-colors",
-          isUnread ? "bg-primary border-primary" : "bg-transparent border-slate-300 hover:border-primary"
+          "group shrink-0 -m-2 p-2 rounded-full transition-colors",
+          "focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
         )}
         aria-label={isUnread ? "Mark as read" : "Mark as unread"}
         title={isUnread ? "Mark as read" : "Mark as unread"}
-      />
+      >
+        <span
+          className={cn(
+            "block h-3.5 w-3.5 rounded-full border-2 transition-colors",
+            isUnread ? "bg-primary border-primary" : "bg-transparent border-slate-300 group-hover:border-primary"
+          )}
+        />
+      </button>
       <div className="flex-1 min-w-0">
-        {/* Title + JobDiva id on one line (body is dropped: for
-            candidate_passed it was always just "Score: X/100", now shown
-            as a single "X/100" badge instead — showing both was redundant
-            and cost a 3rd line). */}
+        {/* Title + JobDiva id on one line. item.body is never rendered here:
+            candidate_passed is the only type that ever sets it (always
+            "Score: X/100", now shown as the "X/100" badge instead — showing
+            both was redundant and cost a 3rd line); pair_launched and
+            pair_inactive never set body at all (see
+            services/notifications_service.py — their title alone carries
+            the full message), so there's nothing of theirs being hidden. */}
         <p
           className={cn(
             "text-sm line-clamp-2",

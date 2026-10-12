@@ -73,10 +73,8 @@ _CONFLICT_PAIR_INACTIVE = (
     "WHERE type = 'pair_inactive' AND cleared_at IS NULL DO NOTHING"
 )
 # pair_launched has NO index-backed ON CONFLICT (see
-# _pair_launched_duplicate_in_last_minute below for why) — this constant
-# exists only so _insert_notification's call sites all take the same kind of
-# argument; the clause itself is empty (bare INSERT, no ON CONFLICT at all).
-_CONFLICT_PAIR_LAUNCHED = ""
+# _pair_launched_duplicate_in_last_minute below for why) — its caller omits
+# conflict_clause entirely (bare INSERT) rather than passing an empty one.
 
 
 def _parse_recruiter_emails(val: Any) -> List[str]:
@@ -107,7 +105,7 @@ def _insert_notification(
     cur,
     *,
     notification_type: str,
-    conflict_clause: str,
+    conflict_clause: Optional[str] = None,
     recipient_email: str,
     job_id: Optional[str],
     jobdiva_id: Optional[str],
@@ -117,17 +115,20 @@ def _insert_notification(
     score: Optional[float],
 ) -> bool:
     """candidate_id is None for job-level event types (pair_launched,
-    pair_inactive). Those pass their own type-specific `conflict_clause`
-    (the _CONFLICT_PAIR_* constants above) rather than the candidate-level
-    one, because the unique index behind the candidate-level clause keys on
-    candidate_id — and NULL never equals another NULL there, so it would
-    silently stop deduping at all for these two types."""
+    pair_inactive). pair_inactive passes its own type-specific
+    `conflict_clause` (_CONFLICT_PAIR_INACTIVE above) rather than the
+    candidate-level one, because the unique index behind the candidate-level
+    clause keys on candidate_id — and NULL never equals another NULL there,
+    so it would silently stop deduping at all for this type. pair_launched
+    omits conflict_clause entirely (bare INSERT, no ON CONFLICT) since its
+    dedup is an application-level pre-insert check done by its caller
+    instead (see _pair_launched_duplicate_in_last_minute)."""
     cur.execute(
         f"""
         INSERT INTO notifications
             (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        {conflict_clause}
+        {conflict_clause or ""}
         RETURNING id
         """,
         (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score),
@@ -363,7 +364,10 @@ def _pair_launched_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_i
     calls could both pass it), but that was already the accepted trade-off
     here per the original design ("a client retry or racing workers
     handling what's really one launch") — a rare duplicate row is a far
-    smaller problem than the notification never being created at all.
+    smaller problem than the notification never being created at all. This
+    runs once per recipient on every launch, so the lookup below is backed
+    by routers/notifications.py's idx_notifications_pair_launched_recent
+    partial index rather than a sequential scan.
     """
     cur.execute(
         """
@@ -392,7 +396,6 @@ def _create_pair_launched_notification_sync(
                 _insert_notification(
                     cur,
                     notification_type="pair_launched",
-                    conflict_clause=_CONFLICT_PAIR_LAUNCHED,
                     recipient_email=recipient,
                     job_id=job_id,
                     jobdiva_id=jobdiva_id,

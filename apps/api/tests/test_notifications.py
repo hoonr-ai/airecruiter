@@ -39,7 +39,6 @@ from services.notifications_service import (
     _insert_notification,
     _pair_launched_duplicate_in_last_minute,
     _CONFLICT_CANDIDATE_PASSED,
-    _CONFLICT_PAIR_LAUNCHED,
     _CONFLICT_PAIR_INACTIVE,
     create_candidate_passed_notifications,
     create_pair_launched_notification,
@@ -165,7 +164,6 @@ def test_insert_notification_job_level_types_use_their_own_conflict_clause():
     inserted = _insert_notification(
         cur,
         notification_type="pair_launched",
-        conflict_clause=_CONFLICT_PAIR_LAUNCHED,
         recipient_email="a@x.com",
         job_id="J1",
         jobdiva_id="JD1",
@@ -485,6 +483,51 @@ def test_mark_notification_unread_returns_false_for_already_unread_or_someone_el
     assert _mark_notification_unread_sync(5, "me@x.com") is False
 
 
+class _FakeUser:
+    def __init__(self, email="me@x.com"):
+        self.email = email
+
+
+def test_mark_notification_read_endpoint_requires_authentication():
+    """401 path for the route handler itself (the _sync helper's own
+    scoping is covered separately above)."""
+    from routers.notifications import mark_notification_read
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(mark_notification_read(5, user=_FakeUser(email="")))
+    assert exc_info.value.status_code == 401
+
+
+def test_mark_notification_read_endpoint_404s_when_sync_helper_finds_nothing(monkeypatch):
+    from routers.notifications import mark_notification_read
+
+    monkeypatch.setattr("routers.notifications._mark_notification_read_sync", lambda *a: False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(mark_notification_read(5, user=_FakeUser()))
+    assert exc_info.value.status_code == 404
+
+
+def test_mark_notification_unread_endpoint_requires_authentication():
+    """401 path for the route handler itself (the _sync helper's own
+    scoping is covered separately above)."""
+    from routers.notifications import mark_notification_unread
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(mark_notification_unread(5, user=_FakeUser(email="")))
+    assert exc_info.value.status_code == 401
+
+
+def test_mark_notification_unread_endpoint_404s_when_sync_helper_finds_nothing(monkeypatch):
+    from routers.notifications import mark_notification_unread
+
+    monkeypatch.setattr("routers.notifications._mark_notification_unread_sync", lambda *a: False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(mark_notification_unread(5, user=_FakeUser()))
+    assert exc_info.value.status_code == 404
+
+
 # --- SSE subscriber bookkeeping: the cursor-reset bug + its follow-ups ------
 
 def _clear_subscriber_state(notif, email):
@@ -657,11 +700,8 @@ def test_clear_notifications_endpoint_requires_authentication():
     """401 path: no email on the resolved user."""
     from routers.notifications import clear_notifications
 
-    class _FakeUser:
-        email = ""
-
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(clear_notifications(user=_FakeUser()))
+        asyncio.run(clear_notifications(user=_FakeUser(email="")))
     assert exc_info.value.status_code == 401
 
 

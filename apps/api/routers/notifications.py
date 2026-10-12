@@ -173,6 +173,18 @@ def init_notifications_schema_sync() -> None:
                 cur.execute(
                     "DROP INDEX IF EXISTS uniq_notifications_pair_launched_per_minute;"
                 )
+                # Not a dedup guarantee (that's the pre-insert check in
+                # notifications_service.py) — just makes that check's own
+                # lookup (recipient_email, jobdiva_id, type='pair_launched',
+                # created_at >= ...) an index scan instead of a sequential
+                # scan, since it now runs once per recipient on every launch.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_notifications_pair_launched_recent
+                        ON notifications (recipient_email, jobdiva_id, created_at)
+                        WHERE type = 'pair_launched';
+                    """
+                )
                 conn.commit()
     except Exception as e:  # noqa: BLE001 - schema init must never crash boot
         logger.error(f"init_notifications_schema failed: {e}")
