@@ -43,6 +43,7 @@ from routers._helpers import (
 from core.auth import get_current_user, get_user_scope_emails, parse_recruiter_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
 from services.launched_candidates import LAUNCHED_COUNT_BY_JOB_SQL, fetch_launched_candidates, interview_id_of
+from services.notifications_service import create_recruiter_assigned_notifications
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1080,6 +1081,94 @@ def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> Non
         draft_data.recruiter_emails = current
 
 
+def _fetch_old_recruiter_emails_for_diff_sync(job_id: str) -> Optional[List[str]]:
+    """Minimal, failure-tolerant lookup for _notify_newly_added_recruiters'
+    before-vs-after diff — just recruiter_emails, not the full
+    _get_job_draft_sync payload (SELECT *, every field JSON-parsed) that
+    neither wizard save endpoint otherwise needs for this.
+
+    Returns [] when the job genuinely doesn't exist yet (a brand-new job
+    legitimately has no prior recruiters — every entry in the new list is
+    "newly added"), or None when the lookup itself failed (DB hiccup, pool
+    exhaustion). The caller (_notify_newly_added_recruiters) must treat
+    those two differently: [] still runs the diff, None means the old state
+    is unknown and the diff is skipped entirely — notifying someone who may
+    already have been a recruiter on this job, just because this lookup
+    happened to fail, would be a false positive worse than silently missing
+    a real notification this one time.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT recruiter_emails FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                    (job_id, job_id),
+                )
+                row = cur.fetchone()
+    except Exception as e:  # noqa: BLE001 - must never crash the save for a best-effort notification
+        logger.error(f"Failed to fetch old recruiter_emails for recruiter-assigned diff, job={job_id}: {e}")
+        return None
+
+    if not row or not row[0]:
+        return []
+    raw = row[0]
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _notify_newly_added_recruiters(
+    background_tasks: BackgroundTasks,
+    job_id: str,
+    jobdiva_id: str,
+    job_title: str,
+    old_recruiter_emails: Optional[List[str]],
+    new_recruiter_emails: Any,
+    acting_user_email: str,
+) -> None:
+    """Diffs a job's recruiter_emails before vs. after a wizard save and
+    queues an in-app notification (via BackgroundTasks — same fire-after-
+    response idiom this file already uses for stamp_job_posted_by/rubric
+    persistence/JobDiva UDF sync) for every email newly present.
+
+    Covers both halves of "added as co-recruiter": old list empty/missing
+    (brand-new job) and old list non-empty but missing this entry (added to
+    an existing active search). The acting user is always excluded, even if
+    they're technically "new" (e.g. _ensure_user_in_recruiter_emails just
+    auto-added them, or they included themselves while creating their own
+    job) — nobody needs to be told they assigned themselves.
+
+    old_recruiter_emails is None when _fetch_old_recruiter_emails_for_diff_sync
+    couldn't determine the prior state (see its docstring) — that's "unknown,"
+    not "empty," so the diff is skipped entirely rather than risk a false
+    "newly added" notification.
+    """
+    if old_recruiter_emails is None:
+        return
+
+    def _clean(emails: Any) -> set:
+        if not isinstance(emails, list):
+            return set()
+        return {str(e).strip().lower() for e in emails if e}
+
+    acting = (acting_user_email or "").strip().lower()
+    newly_added = _clean(new_recruiter_emails) - _clean(old_recruiter_emails) - {acting}
+    if not newly_added:
+        return
+
+    background_tasks.add_task(
+        create_recruiter_assigned_notifications,
+        job_id=str(job_id),
+        jobdiva_id=str(jobdiva_id),
+        job_title=job_title,
+        assigned_emails=list(newly_added),
+    )
+
+
 @router.post("/jobs/{job_id}/save")
 async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks: BackgroundTasks, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1087,6 +1176,12 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     Consolidated into monitored_jobs using the reference number as job_id.
     """
     _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
+    # Fetched before _ensure_user_in_recruiter_emails mutates draft_data
+    # below, so the "added as co-recruiter" diff (after the write commits,
+    # see _notify_newly_added_recruiters) compares against the list as it
+    # stood before this save, not after. asyncio.to_thread since this is a
+    # blocking psycopg2 call inside an async def handler.
+    old_recruiter_emails = await asyncio.to_thread(_fetch_old_recruiter_emails_for_diff_sync, job_id)
     _ensure_user_in_recruiter_emails(draft_data, user)
     # Runs after the response — i.e. only when the save succeeded and the row
     # exists. First writer wins (services/job_attribution.py).
@@ -1236,6 +1331,12 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
                 conn.commit()
         
+        _notify_newly_added_recruiters(
+            background_tasks, db_job_id, ref_code,
+            draft_data.enhanced_title or draft_data.title,
+            old_recruiter_emails, draft_data.recruiter_emails, user.email,
+        )
+
         # 2. Persist Structured Rubric (Titles, Skills, etc.) via Background Task
         # to ensure the main record is UNLOCKED before the rubric update starts.
         if draft_data.rubric:
@@ -1398,6 +1499,9 @@ async def save_job_to_monitored_jobs_only(
     This is used when the user wants form data to go straight to monitoring.
     """
     _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
+    # See save_job_draft's identical comment: fetched before
+    # _ensure_user_in_recruiter_emails mutates draft_data below.
+    old_recruiter_emails = await asyncio.to_thread(_fetch_old_recruiter_emails_for_diff_sync, job_id)
     _ensure_user_in_recruiter_emails(draft_data, user)
     background_tasks.add_task(stamp_job_posted_by, job_id, user.email)
     try:
@@ -1536,6 +1640,12 @@ async def save_job_to_monitored_jobs_only(
         cursor.close()
         conn.close()
         
+        _notify_newly_added_recruiters(
+            background_tasks, numeric_id, ref_id,
+            draft_data.enhanced_title or draft_data.title,
+            old_recruiter_emails, draft_data.recruiter_emails, user.email,
+        )
+
         # Push recruiter notes to JobDiva UDF so it's reflected in the system
         if draft_data.recruiter_notes:
             try:

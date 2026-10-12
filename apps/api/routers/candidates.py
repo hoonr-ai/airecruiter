@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, Query, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple, AsyncIterator
@@ -36,6 +36,10 @@ from routers.jobs import invalidate_monitored_jobs_cache
 from routers._helpers import _verify_job_access_by_id, _get_job_draft_sync
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
+from services.notifications_service import (
+    create_candidate_submitted_notifications,
+    create_candidate_rejected_notifications,
+)
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -5560,6 +5564,7 @@ async def save_candidate_feedback(
     job_id_or_ref: str,
     candidate_id: str,
     request: CandidateFeedbackRequest,
+    background_tasks: BackgroundTasks,
     user: UserIdentity = Depends(get_current_user),
 ):
     """
@@ -5789,6 +5794,31 @@ async def save_candidate_feedback(
         raise HTTPException(
             status_code=500,
             detail="Failed to persist candidate feedback in database. Please try again."
+        )
+
+    # 3.5. Notify co-recruiters in-app of this feedback outcome — Submit or
+    #      Reject only (not Unreachable), and only once feedback is actually
+    #      persisted. Queued via BackgroundTasks (same fire-after-response
+    #      idiom routers/jobs.py's wizard save endpoints use) rather than
+    #      awaited, so the response doesn't wait on an insert per
+    #      co-recruiter — both calls swallow their own errors regardless, so
+    #      nothing is lost by deferring. Independent of the JobDiva push
+    #      below: co-recruiters should know regardless of whether that sync
+    #      succeeds. Both calls exclude the acting recruiter from the
+    #      recipient list.
+    if request.feedback_type == "Submit":
+        background_tasks.add_task(
+            create_candidate_submitted_notifications,
+            job_id=str(app_job_ref or job_id_or_ref),
+            candidate_id=jd_candidate_id,
+            submitter_email=user.email,
+        )
+    elif request.feedback_type == "Reject":
+        background_tasks.add_task(
+            create_candidate_rejected_notifications,
+            job_id=str(app_job_ref or job_id_or_ref),
+            candidate_id=jd_candidate_id,
+            rejecter_email=user.email,
         )
 
     # 4. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
