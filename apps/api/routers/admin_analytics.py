@@ -22,7 +22,7 @@ from routers._helpers import (
 )
 from services.job_attribution import attribution_fields
 from services.job_candidate_metrics import empty_metrics, fetch_job_candidate_metrics
-from services.job_step_time import STEP_SOURCE, fetch_step_metrics
+from services.job_step_time import STEP_SOURCE, fetch_step_metrics, posting_time_columns
 from services.launch_timing import timings_for_jobs
 
 router = APIRouter(prefix="/api/v1", tags=["Admin Analytics"])
@@ -394,6 +394,8 @@ def _compute_jobs_timeline(
             # curate_launched_at, the first save of a launch attempt.
             "step5_active_minutes": step.get("active_minutes"),
             "step5_to_launch_minutes": step.get("to_launch_minutes"),
+            # Steps 1–4 and the Steps 1–5 total (services/job_step_time).
+            **posting_time_columns(step),
             "is_archived": bool(is_archived),
             "archive_reason": r["archive_reason"],
             "jobdiva_status": str(status or ""),
