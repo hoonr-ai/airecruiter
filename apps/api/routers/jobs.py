@@ -1080,6 +1080,47 @@ def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> Non
         draft_data.recruiter_emails = current
 
 
+def _notify_newly_added_recruiters(
+    background_tasks: BackgroundTasks,
+    job_id: str,
+    jobdiva_id: str,
+    job_title: str,
+    old_recruiter_emails: Any,
+    new_recruiter_emails: Any,
+    acting_user_email: str,
+) -> None:
+    """Diffs a job's recruiter_emails before vs. after a wizard save and
+    queues an in-app notification (via BackgroundTasks — same fire-after-
+    response idiom this file already uses for stamp_job_posted_by/rubric
+    persistence/JobDiva UDF sync) for every email newly present.
+
+    Covers both halves of "added as co-recruiter": old list empty/missing
+    (brand-new job) and old list non-empty but missing this entry (added to
+    an existing active search). The acting user is always excluded, even if
+    they're technically "new" (e.g. _ensure_user_in_recruiter_emails just
+    auto-added them, or they included themselves while creating their own
+    job) — nobody needs to be told they assigned themselves.
+    """
+    def _clean(emails: Any) -> set:
+        if not isinstance(emails, list):
+            return set()
+        return {str(e).strip().lower() for e in emails if e}
+
+    acting = (acting_user_email or "").strip().lower()
+    newly_added = _clean(new_recruiter_emails) - _clean(old_recruiter_emails) - {acting}
+    if not newly_added:
+        return
+
+    from services.notifications_service import create_recruiter_assigned_notifications
+    background_tasks.add_task(
+        create_recruiter_assigned_notifications,
+        job_id=str(job_id),
+        jobdiva_id=str(jobdiva_id),
+        job_title=job_title,
+        assigned_emails=list(newly_added),
+    )
+
+
 @router.post("/jobs/{job_id}/save")
 async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks: BackgroundTasks, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1087,6 +1128,17 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     Consolidated into monitored_jobs using the reference number as job_id.
     """
     _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
+    # Fetched before _ensure_user_in_recruiter_emails mutates draft_data
+    # below, so the "added as co-recruiter" diff (after the write commits,
+    # see _notify_newly_added_recruiters) compares against the list as it
+    # stood before this save, not after. A cheap extra SELECT —
+    # _verify_job_access_by_id above already runs this same lookup
+    # internally but doesn't surface it to its caller.
+    old_job_draft = _get_job_draft_sync(job_id)
+    old_recruiter_emails = (
+        (old_job_draft.get("data") or {}).get("recruiter_emails")
+        if old_job_draft.get("status") == "success" else []
+    )
     _ensure_user_in_recruiter_emails(draft_data, user)
     # Runs after the response — i.e. only when the save succeeded and the row
     # exists. First writer wins (services/job_attribution.py).
@@ -1094,7 +1146,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     try:
         import json
         import psycopg2.extras
-        
+
         # SWAPPED IDENTIFIERS:
         # db_job_id (PK) = Numeric ID (31920032, or negative for External jobs)
         # jobdiva_id = Reference String (26-06182, or EXT-N for External jobs)
@@ -1235,7 +1287,13 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     ))
                     logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
                 conn.commit()
-        
+
+        _notify_newly_added_recruiters(
+            background_tasks, db_job_id, ref_code,
+            draft_data.enhanced_title or draft_data.title,
+            old_recruiter_emails, draft_data.recruiter_emails, user.email,
+        )
+
         # 2. Persist Structured Rubric (Titles, Skills, etc.) via Background Task
         # to ensure the main record is UNLOCKED before the rubric update starts.
         if draft_data.rubric:
@@ -1398,11 +1456,18 @@ async def save_job_to_monitored_jobs_only(
     This is used when the user wants form data to go straight to monitoring.
     """
     _verify_job_access_by_id(job_id, user, allow_not_found=True, check_duplicate_launch=True)
+    # See save_job_draft's identical comment: fetched before
+    # _ensure_user_in_recruiter_emails mutates draft_data below.
+    old_job_draft = _get_job_draft_sync(job_id)
+    old_recruiter_emails = (
+        (old_job_draft.get("data") or {}).get("recruiter_emails")
+        if old_job_draft.get("status") == "success" else []
+    )
     _ensure_user_in_recruiter_emails(draft_data, user)
     background_tasks.add_task(stamp_job_posted_by, job_id, user.email)
     try:
         import json
-        
+
         # 1. Resolve to Numeric PK if Reference ID was provided
         # job_id could be '26-06182' (ref) or '31920032' (numeric pk)
         numeric_id = job_id
@@ -1535,7 +1600,13 @@ async def save_job_to_monitored_jobs_only(
         conn.commit()
         cursor.close()
         conn.close()
-        
+
+        _notify_newly_added_recruiters(
+            background_tasks, numeric_id, ref_id,
+            draft_data.enhanced_title or draft_data.title,
+            old_recruiter_emails, draft_data.recruiter_emails, user.email,
+        )
+
         # Push recruiter notes to JobDiva UDF so it's reflected in the system
         if draft_data.recruiter_notes:
             try:

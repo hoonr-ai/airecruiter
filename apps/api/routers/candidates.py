@@ -5791,6 +5791,27 @@ async def save_candidate_feedback(
             detail="Failed to persist candidate feedback in database. Please try again."
         )
 
+    # 3.5. Notify co-recruiters in-app of this feedback outcome — Submit or
+    #      Reject only (not Unreachable), and only once feedback is actually
+    #      persisted. Independent of the JobDiva push below: co-recruiters
+    #      should know regardless of whether that sync succeeds. Both calls
+    #      swallow their own errors and exclude the acting recruiter from
+    #      the recipient list.
+    if request.feedback_type == "Submit":
+        from services.notifications_service import create_candidate_submitted_notifications
+        await create_candidate_submitted_notifications(
+            job_id=str(app_job_ref or job_id_or_ref),
+            candidate_id=jd_candidate_id,
+            submitter_email=user.email,
+        )
+    elif request.feedback_type == "Reject":
+        from services.notifications_service import create_candidate_rejected_notifications
+        await create_candidate_rejected_notifications(
+            job_id=str(app_job_ref or job_id_or_ref),
+            candidate_id=jd_candidate_id,
+            rejecter_email=user.email,
+        )
+
     # 4. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID

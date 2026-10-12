@@ -185,6 +185,18 @@ def init_notifications_schema_sync() -> None:
                         WHERE type = 'pair_launched';
                     """
                 )
+                # Same purpose as idx_notifications_pair_launched_recent above,
+                # for recruiter_assigned's identical pre-insert existence check
+                # (see _job_level_duplicate_in_last_minute in
+                # services/notifications_service.py) — the job wizard's
+                # autosave can call this diff-and-notify path frequently.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_notifications_recruiter_assigned_recent
+                        ON notifications (recipient_email, jobdiva_id, created_at)
+                        WHERE type = 'recruiter_assigned';
+                    """
+                )
                 conn.commit()
     except Exception as e:  # noqa: BLE001 - schema init must never crash boot
         logger.error(f"init_notifications_schema failed: {e}")

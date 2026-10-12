@@ -154,6 +154,13 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     monkeypatch.setattr("core.email.notify_internal_submission_to_manager", fake_notify_manager)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
 
+    notif_calls = []
+    async def fake_notify_submitted(**kwargs):
+        notif_calls.append(kwargs)
+    monkeypatch.setattr(
+        "services.notifications_service.create_candidate_submitted_notifications", fake_notify_submitted
+    )
+
     user = UserIdentity(
         email="ronak.jain@celsiortech.com",
         role="recruiter"
@@ -190,6 +197,11 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     # The manager email links the same JobDiva profile the panel/rank list open.
     assert email_calls[0]["jobdiva_candidate_id"] == "21562841721070"
 
+    assert len(notif_calls) == 1
+    assert notif_calls[0]["job_id"] == "33087136"
+    assert notif_calls[0]["candidate_id"] == "21562841721070"
+    assert notif_calls[0]["submitter_email"] == "ronak.jain@celsiortech.com"
+
 
 @pytest.mark.anyio
 async def test_save_candidate_feedback_external_submit_route(monkeypatch):
@@ -212,6 +224,13 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
 
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
+
+    notif_calls = []
+    async def fake_notify_submitted(**kwargs):
+        notif_calls.append(kwargs)
+    monkeypatch.setattr(
+        "services.notifications_service.create_candidate_submitted_notifications", fake_notify_submitted
+    )
 
     user = UserIdentity(
         email="recruiter@pyramidci.com",
@@ -236,6 +255,11 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR External Submission"
 
+    assert len(notif_calls) == 1
+    assert notif_calls[0]["job_id"] == "33087136"
+    assert notif_calls[0]["candidate_id"] == "21562841721070"
+    assert notif_calls[0]["submitter_email"] == "recruiter@pyramidci.com"
+
 
 @pytest.mark.anyio
 async def test_save_candidate_feedback_rejection_route(monkeypatch):
@@ -259,6 +283,19 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 0})
 
+    def _fail_if_called(**_kwargs):
+        raise AssertionError("candidate_submitted notification must not fire on Reject")
+    monkeypatch.setattr(
+        "services.notifications_service.create_candidate_submitted_notifications", _fail_if_called
+    )
+
+    rejected_calls = []
+    async def fake_notify_rejected(**kwargs):
+        rejected_calls.append(kwargs)
+    monkeypatch.setattr(
+        "services.notifications_service.create_candidate_rejected_notifications", fake_notify_rejected
+    )
+
     user = UserIdentity(
         email="recruiter@pyramidci.com",
         role="recruiter"
@@ -280,6 +317,11 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
     assert res["action_string"] == "PAIR Reject - Skills do not meet requirements"
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
+
+    assert len(rejected_calls) == 1
+    assert rejected_calls[0]["job_id"] == "33087136"
+    assert rejected_calls[0]["candidate_id"] == "21562841721070"
+    assert rejected_calls[0]["rejecter_email"] == "recruiter@pyramidci.com"
 
 
 @pytest.mark.anyio
@@ -349,6 +391,13 @@ async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypa
     monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
 
+    notif_calls = []
+    async def fake_notify_submitted(**kwargs):
+        notif_calls.append(kwargs)
+    monkeypatch.setattr(
+        "services.notifications_service.create_candidate_submitted_notifications", fake_notify_submitted
+    )
+
     user = UserIdentity(
         email="recruiter@pyramidci.com",
         role="recruiter"
@@ -375,4 +424,9 @@ async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypa
     assert jobdiva_calls[0]["candidate_id"] == "21574563071254"
     assert jobdiva_calls[0]["job_id"] == "32163479"
     assert jobdiva_calls[0]["action"] == "PAIR External Submission"
+
+    assert len(notif_calls) == 1
+    assert notif_calls[0]["job_id"] == "32163479"
+    assert notif_calls[0]["candidate_id"] == "21574563071254"
+    assert notif_calls[0]["submitter_email"] == "recruiter@pyramidci.com"
 

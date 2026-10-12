@@ -1,5 +1,5 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Three types today:
+existing email notifications. Six types today:
 
 - candidate_passed (create_candidate_passed_notifications): a candidate's
   interview result. Independent of the pass-email trigger in
@@ -13,6 +13,20 @@ existing email notifications. Three types today:
   candidate_id, jobdiva_id, type) dedupes a repeat trigger for the same
   candidate/job/recipient.
 
+- candidate_submitted / candidate_rejected (create_candidate_submitted_notifications
+  / create_candidate_rejected_notifications): fired from
+  routers/candidates.py's save_candidate_feedback on feedback_type ==
+  "Submit" / "Reject" respectively (not "Unreachable" — neither fires for
+  that), to every OTHER recruiter on the job (the acting recruiter is
+  excluded from their own notification). Both share
+  _create_candidate_feedback_notifications_sync (same shape, different
+  type/title) and candidate_passed's conflict clause/index — `type` keeps
+  every one of these three dedup spaces independent, so the same candidate
+  can be Passed AND Submitted AND (later) Rejected without any of them
+  blocking another, but a resubmission or re-rejection (feedback can be
+  edited and resaved — see save_candidate_feedback's docstring) only ever
+  notifies once per (recipient, candidate, job, type).
+
 - pair_launched / pair_inactive (create_pair_launched_notification /
   create_pair_inactive_notification): job-level events with no single
   candidate (a launch has a candidate COUNT; an inactivity transition has
@@ -24,13 +38,25 @@ existing email notifications. Three types today:
   dedicated partial unique index (see routers/notifications.py's schema init
   and _CONFLICT_PAIR_INACTIVE below); pair_launched dedupes via a plain
   pre-insert existence check instead (see
-  _pair_launched_duplicate_in_last_minute below) rather than an index,
-  because its natural dedup key involves a time window, and Postgres can't
-  index that in a way it will accept (see that function's docstring for
-  why). The two events have different "worth a fresh notification"
-  semantics: a relaunch is always new and notable, while an inactivity
-  transition should show at most one active notification until the user
-  clears it.
+  _job_level_duplicate_in_last_minute below) rather than an index, because
+  its natural dedup key involves a time window, and Postgres can't index
+  that in a way it will accept (see that function's docstring for why). The
+  two events have different "worth a fresh notification" semantics: a
+  relaunch is always new and notable, while an inactivity transition should
+  show at most one active notification until the user clears it.
+
+- recruiter_assigned (create_recruiter_assigned_notifications): fired from
+  routers/jobs.py's save_job_draft / save_job_to_monitored_jobs_only
+  (the job wizard's save endpoints) whenever a diff of the job's
+  recruiter_emails before vs. after that save shows an email present now
+  that wasn't before — covers both "assigned to a brand-new requisition"
+  (old list is empty/nonexistent) and "added to an existing active search."
+  Job-level like pair_launched/pair_inactive (candidate_id NULL), and
+  shares pair_launched's dedup shape (_job_level_duplicate_in_last_minute)
+  for the same reason: the wizard autosaves frequently, so a diff-driven
+  trigger needs a race guard, not an "only ever once" index — being
+  removed and later re-added to the same job is a legitimately new,
+  separately-worth-notifying event.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -62,7 +88,11 @@ from services.engage_status import (
 logger = logging.getLogger(__name__)
 
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
-_CONFLICT_CANDIDATE_PASSED = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
+# Shared by every candidate-level type (candidate_passed, candidate_submitted)
+# — `type` is part of the unique index this targets
+# (uniq_notifications_recipient_candidate_job_type), so each type gets its own
+# independent dedup slot for the same (recipient, candidate, job).
+_CONFLICT_CANDIDATE_LEVEL = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
 # Job-level dedup, matching the partial unique index of the same name in
 # routers/notifications.py's init_notifications_schema_sync — the column
 # list and WHERE clause must match an existing index exactly for Postgres to
@@ -72,9 +102,10 @@ _CONFLICT_PAIR_INACTIVE = (
     "ON CONFLICT (recipient_email, jobdiva_id) "
     "WHERE type = 'pair_inactive' AND cleared_at IS NULL DO NOTHING"
 )
-# pair_launched has NO index-backed ON CONFLICT (see
-# _pair_launched_duplicate_in_last_minute below for why) — its caller omits
-# conflict_clause entirely (bare INSERT) rather than passing an empty one.
+# pair_launched (and recruiter_assigned, below) has NO index-backed ON
+# CONFLICT (see _job_level_duplicate_in_last_minute below for why) — its
+# caller omits conflict_clause entirely (bare INSERT) rather than passing an
+# empty one.
 
 
 def _parse_recruiter_emails(val: Any) -> List[str]:
@@ -120,9 +151,9 @@ def _insert_notification(
     candidate-level one, because the unique index behind the candidate-level
     clause keys on candidate_id — and NULL never equals another NULL there,
     so it would silently stop deduping at all for this type. pair_launched
-    omits conflict_clause entirely (bare INSERT, no ON CONFLICT) since its
-    dedup is an application-level pre-insert check done by its caller
-    instead (see _pair_launched_duplicate_in_last_minute)."""
+    and recruiter_assigned omit conflict_clause entirely (bare INSERT, no ON
+    CONFLICT) since their dedup is an application-level pre-insert check
+    done by their caller instead (see _job_level_duplicate_in_last_minute)."""
     cur.execute(
         f"""
         INSERT INTO notifications
@@ -197,7 +228,7 @@ def _create_candidate_passed_notifications_sync(job_id: str, candidate_id: str, 
                 if _insert_notification(
                     cur,
                     notification_type="candidate_passed",
-                    conflict_clause=_CONFLICT_CANDIDATE_PASSED,
+                    conflict_clause=_CONFLICT_CANDIDATE_LEVEL,
                     recipient_email=recipient,
                     job_id=app_job_id,
                     jobdiva_id=jobdiva_id,
@@ -253,6 +284,122 @@ async def create_candidate_passed_notifications(
         )
 
 
+def _create_candidate_feedback_notifications_sync(
+    job_id: str, candidate_id: str, actor_email: str, notification_type: str, title_template: str
+) -> None:
+    """Shared by candidate_submitted and candidate_rejected — same shape,
+    different type/title: notify every OTHER recruiter on the job (the
+    recruiter who just acted is excluded from their own notification)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id)
+            if not job_row or not cand_row:
+                return
+
+            actor = (actor_email or "").strip().lower()
+            recipients = [
+                e for e in _parse_recruiter_emails(job_row.get("recruiter_emails")) if e != actor
+            ]
+            if not recipients:
+                return
+
+            candidate_name = cand_row.get("name") or "A candidate"
+            job_title = _resolve_job_title(job_row, job_id)
+            title = title_template.format(candidate_name=candidate_name, job_title=job_title)
+            jobdiva_id = job_row.get("jobdiva_id") or job_id
+            app_job_id = job_row.get("job_id") or job_id
+
+            any_inserted = False
+            for recipient in recipients:
+                if _insert_notification(
+                    cur,
+                    notification_type=notification_type,
+                    conflict_clause=_CONFLICT_CANDIDATE_LEVEL,
+                    recipient_email=recipient,
+                    job_id=app_job_id,
+                    jobdiva_id=jobdiva_id,
+                    candidate_id=candidate_id,
+                    title=title,
+                    body=None,
+                    score=None,
+                ):
+                    any_inserted = True
+            conn.commit()
+            if any_inserted:
+                logger.info(
+                    "notification_created type=%s candidate=%s job=%s recipients=%d",
+                    notification_type, candidate_id, jobdiva_id, len(recipients),
+                )
+    finally:
+        conn.close()
+
+
+async def create_candidate_submitted_notifications(
+    job_id: str,
+    candidate_id: str,
+    submitter_email: str,
+) -> None:
+    """Fire in-app "candidate submitted" notifications for every OTHER
+    recruiter on `job_id` — the submitter is excluded so they don't get
+    notified for their own action.
+
+    Called from routers/candidates.py's save_candidate_feedback only when
+    feedback_type == "Submit" (not Unreachable): the point is letting
+    co-recruiters on a shared requisition know a candidate has already been
+    submitted, so they don't duplicate the work.
+
+    Safe to call unconditionally (including on a resubmission — feedback can
+    be edited and resaved, see save_candidate_feedback's docstring): dedup is
+    the same (recipient_email, candidate_id, jobdiva_id, type) unique index
+    candidate_passed uses, so a resubmission's repeat call is a no-op rather
+    than a second notification. All failures are caught and logged here,
+    never raised back into the feedback endpoint's response.
+    """
+    try:
+        if not job_id or not candidate_id:
+            return
+        await asyncio.to_thread(
+            _create_candidate_feedback_notifications_sync,
+            job_id, candidate_id, submitter_email,
+            "candidate_submitted", "{candidate_name} was submitted for {job_title}",
+        )
+    except Exception as e:  # noqa: BLE001 - must never raise into the feedback endpoint
+        logger.error(
+            "create_candidate_submitted_notifications_failed candidate=%s job=%s: %s",
+            candidate_id, job_id, e, exc_info=True,
+        )
+
+
+async def create_candidate_rejected_notifications(
+    job_id: str,
+    candidate_id: str,
+    rejecter_email: str,
+) -> None:
+    """Fire in-app "candidate rejected" notifications for every OTHER
+    recruiter on `job_id` — mirrors create_candidate_submitted_notifications
+    exactly (see its docstring), just the Reject counterpart: called from
+    save_candidate_feedback when feedback_type == "Reject". A distinct
+    `candidate_rejected` type (not reusing candidate_submitted) gives it its
+    own independent dedup slot, since a candidate could plausibly be
+    rejected and later resubmitted (or vice versa) and each should be able
+    to notify once in its own right.
+    """
+    try:
+        if not job_id or not candidate_id:
+            return
+        await asyncio.to_thread(
+            _create_candidate_feedback_notifications_sync,
+            job_id, candidate_id, rejecter_email,
+            "candidate_rejected", "{candidate_name} was rejected for {job_title}",
+        )
+    except Exception as e:  # noqa: BLE001 - must never raise into the feedback endpoint
+        logger.error(
+            "create_candidate_rejected_notifications_failed candidate=%s job=%s: %s",
+            candidate_id, job_id, e, exc_info=True,
+        )
+
+
 # Reconciliation lookback: catch anything the webhook-triggered path missed
 # (a crashed worker, a status flip outside the webhook) without re-scanning
 # the entire table every 10 minutes.
@@ -304,7 +451,7 @@ def _reconcile_missed_pass_notifications_sync() -> None:
                     if _insert_notification(
                         cur,
                         notification_type="candidate_passed",
-                        conflict_clause=_CONFLICT_CANDIDATE_PASSED,
+                        conflict_clause=_CONFLICT_CANDIDATE_LEVEL,
                         recipient_email=recipient,
                         job_id=row.get("job_id"),
                         jobdiva_id=row.get("jobdiva_id"),
@@ -342,41 +489,46 @@ async def reconcile_missed_pass_notifications() -> None:
         logger.error("reconcile_missed_pass_notifications_failed: %s", e, exc_info=True)
 
 
-def _pair_launched_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_id: str) -> bool:
-    """True if this recipient already has a pair_launched row for this job
-    within the last minute.
+def _job_level_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_id: str, notification_type: str) -> bool:
+    """True if this recipient already has a `notification_type` row for this
+    job within the last minute. Shared by every job-level event type whose
+    natural dedup key is "the same event, fired again within a moment" —
+    pair_launched (a racing retry re-processing what's really one launch)
+    and recruiter_assigned (an auto-saving wizard racing itself) today.
 
-    This used to be a DB-level partial unique index on
-    date_trunc('minute', created_at) — removed: Postgres only allows
-    IMMUTABLE expressions in an index, and date_trunc(text, timestamptz) is
-    STABLE (its result depends on the session timezone), so that CREATE
-    INDEX failed on every boot. Every statement in init_notifications_schema
-    runs in one transaction that commits once at the end, so that one
-    failure rolled back the WHOLE schema-init pass each time — silently
-    preventing this feature from ever working: create_pair_launched_notification's
-    INSERT referenced an index that had never actually been created, which
-    fails outright, caught and swallowed by that function's own top-level
-    try/except (the candidate still got the separate PAIR-launched EMAIL,
-    which doesn't go through this table at all — that's why only the email
-    ever arrived).
+    This used to be, for pair_launched specifically, a DB-level partial
+    unique index on date_trunc('minute', created_at) — removed: Postgres
+    only allows IMMUTABLE expressions in an index, and
+    date_trunc(text, timestamptz) is STABLE (its result depends on the
+    session timezone), so that CREATE INDEX failed on every boot. Every
+    statement in init_notifications_schema runs in one transaction that
+    commits once at the end, so that one failure rolled back the WHOLE
+    schema-init pass each time — silently preventing the feature from ever
+    working: create_pair_launched_notification's INSERT referenced an index
+    that had never actually been created, which fails outright, caught and
+    swallowed by that function's own top-level try/except (the candidate
+    still got the separate PAIR-launched EMAIL, which doesn't go through
+    this table at all — that's why only the email ever arrived).
 
     This existence check + insert is a two-step race (two truly concurrent
-    calls could both pass it), but that was already the accepted trade-off
-    here per the original design ("a client retry or racing workers
+    calls could both pass it), but that's an accepted trade-off per the
+    original pair_launched design ("a client retry or racing workers
     handling what's really one launch") — a rare duplicate row is a far
     smaller problem than the notification never being created at all. This
-    runs once per recipient on every launch, so the lookup below is backed
-    by routers/notifications.py's idx_notifications_pair_launched_recent
-    partial index rather than a sequential scan.
+    runs once per recipient on every call site's event, so the lookup below
+    is backed by a per-type partial index in routers/notifications.py
+    (idx_notifications_pair_launched_recent,
+    idx_notifications_recruiter_assigned_recent) rather than a sequential
+    scan.
     """
     cur.execute(
         """
         SELECT 1 FROM notifications
-        WHERE recipient_email = %s AND jobdiva_id = %s AND type = 'pair_launched'
+        WHERE recipient_email = %s AND jobdiva_id = %s AND type = %s
           AND created_at >= now() - INTERVAL '1 minute'
         LIMIT 1
         """,
-        (recipient_email, jobdiva_id),
+        (recipient_email, jobdiva_id, notification_type),
     )
     return cur.fetchone() is not None
 
@@ -391,7 +543,7 @@ def _create_pair_launched_notification_sync(
     try:
         with conn.cursor() as cur:
             for recipient in recipients:
-                if _pair_launched_duplicate_in_last_minute(cur, recipient, jobdiva_id):
+                if _job_level_duplicate_in_last_minute(cur, recipient, jobdiva_id, "pair_launched"):
                     continue
                 _insert_notification(
                     cur,
@@ -425,9 +577,9 @@ async def create_pair_launched_notification(
 
     Job-level — candidate_id is NULL, since a launch is a batch event with a
     candidate COUNT, never a single candidate. Dedup is an application-level
-    pre-insert existence check (_pair_launched_duplicate_in_last_minute),
-    not an index: a relaunch is a new, separately-worth-notifying event, so
-    only same-recipient/job/minute duplicates — a retry or racing workers
+    pre-insert existence check (_job_level_duplicate_in_last_minute), not an
+    index: a relaunch is a new, separately-worth-notifying event, so only
+    same-recipient/job/minute duplicates — a retry or racing workers
     handling what's really one launch — are collapsed.
     """
     try:
@@ -500,3 +652,63 @@ async def create_pair_inactive_notification(
         await asyncio.to_thread(_create_pair_inactive_notification_sync, job_id, jobdiva_id, job_title, recipients)
     except Exception as e:  # noqa: BLE001 - must never raise into the poll cycle
         logger.error("create_pair_inactive_notification_failed job=%s: %s", job_id, e, exc_info=True)
+
+
+def _create_recruiter_assigned_notifications_sync(
+    job_id: str, jobdiva_id: str, job_title: str, recipients: List[str]
+) -> None:
+    title = f"You were added as a recruiter for {job_title or 'this job'}"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            for recipient in recipients:
+                if _job_level_duplicate_in_last_minute(cur, recipient, jobdiva_id, "recruiter_assigned"):
+                    continue
+                _insert_notification(
+                    cur,
+                    notification_type="recruiter_assigned",
+                    recipient_email=recipient,
+                    job_id=job_id,
+                    jobdiva_id=jobdiva_id,
+                    candidate_id=None,
+                    title=title,
+                    body=None,
+                    score=None,
+                )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+async def create_recruiter_assigned_notifications(
+    *,
+    job_id: str,
+    jobdiva_id: str,
+    job_title: str,
+    assigned_emails: List[str],
+) -> None:
+    """Fire in-app "added as a recruiter" notifications for every email in
+    `assigned_emails` — the caller (routers/jobs.py's save_job_draft /
+    save_job_to_monitored_jobs_only) has already diffed the job's
+    recruiter_emails before vs. after this save and passes only the ones
+    newly present (and already excludes the person who made the change).
+
+    Job-level — candidate_id is NULL, same as pair_launched/pair_inactive.
+    Dedup is the same application-level pre-insert existence check
+    pair_launched uses (_job_level_duplicate_in_last_minute), not an index:
+    the wizard autosaves frequently, so this guards against a rapid
+    double-save re-notifying for what's really one edit, while still
+    letting a genuine later remove-then-re-add notify again.
+    """
+    try:
+        if not job_id or not jobdiva_id or not assigned_emails:
+            return
+        recipients = _parse_recruiter_emails(assigned_emails)
+        if not recipients:
+            return
+        await asyncio.to_thread(
+            _create_recruiter_assigned_notifications_sync, job_id, jobdiva_id, job_title, recipients
+        )
+    except Exception as e:  # noqa: BLE001 - must never raise into the job-save endpoint
+        logger.error("create_recruiter_assigned_notifications_failed job=%s: %s", job_id, e, exc_info=True)
