@@ -13,7 +13,7 @@ import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
-import { isSoundMuted, setSoundMuted } from "@/lib/notification-sound";
+import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
 import { cn } from "@/lib/utils";
 
 function emptyFilterMessage(filter: NotificationFilter): string {
@@ -167,16 +167,35 @@ export default function NotificationsPage() {
   // in a useState lazy initializer would run during the first client
   // render and disagree with the server-rendered markup (same hydration
   // hazard the cache-seeding effects elsewhere in this app already guard
-  // against).
+  // against). getSafeStorage (not window.localStorage directly) since
+  // merely evaluating that property can throw in some environments
+  // (blocked storage, certain privacy modes, sandboxed iframes).
   const [soundMuted, setSoundMutedState] = useState(false);
   useEffect(() => {
-    setSoundMutedState(isSoundMuted(window.localStorage));
+    setSoundMutedState(isSoundMuted(getSafeStorage()));
+  }, []);
+
+  // Cross-tab sync: another tab's own toggle fires a `storage` event here
+  // (never in the tab that made the change), so this can't loop.
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === NOTIFICATION_SOUND_MUTED_KEY) {
+        setSoundMutedState(isSoundMuted(getSafeStorage()));
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   const handleToggleSound = () => {
     const next = !soundMuted;
-    setSoundMuted(window.localStorage, next);
+    setSoundMuted(getSafeStorage(), next);
     setSoundMutedState(next);
+    // Unmuting is itself a click — a real user gesture — so use it to
+    // unlock the chime's AudioContext too, in case this recruiter's
+    // permission was already granted in an earlier session and they never
+    // triggered the "Enable" button's own unlock this time.
+    if (!next) unlockNotificationSound();
   };
 
   const handleConfirmClear = () => {
@@ -239,8 +258,8 @@ export default function NotificationsPage() {
               size="sm"
               className="h-7 w-7 p-0 text-slate-400 hover:text-slate-700"
               onClick={handleToggleSound}
-              aria-label={soundMuted ? "Unmute notification sound" : "Mute notification sound"}
-              aria-pressed={soundMuted}
+              aria-label="Notification sound"
+              aria-pressed={!soundMuted}
               title={soundMuted ? "Notification sound is off — click to turn on" : "Notification sound is on — click to mute"}
             >
               {soundMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}

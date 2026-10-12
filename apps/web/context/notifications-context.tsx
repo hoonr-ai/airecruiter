@@ -167,6 +167,25 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // A recruiter who already granted desktop-notification permission in an
+  // earlier session never clicks "Enable" this session — requestNotification
+  // Permission's own unlockNotificationSound() call never fires for them, so
+  // without this they'd never unlock the chime's AudioContext at all, and
+  // every SSE-triggered chime would be silently dropped by the autoplay
+  // policy. A one-time pointerdown/keydown anywhere on the page (removed
+  // after the first fire, or on unmount/permission change) stands in for
+  // that missing "Enable" click.
+  useEffect(() => {
+    if (notificationPermission !== "granted" || typeof window === "undefined") return;
+    const unlock = () => unlockNotificationSound();
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, [notificationPermission]);
+
   // Native OS-level popup for a new notification, as a companion to the
   // in-app badge/feed — only when permission is granted and the user
   // plausibly wouldn't already see the in-app update (see
