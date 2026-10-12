@@ -429,6 +429,15 @@ async def lifespan(app: FastAPI):
             timezone="Asia/Kolkata",
             id="daily_digest_notifications",
             replace_existing=True,
+            # Default misfire grace is 1s — a restart, deploy, or a busy
+            # event loop right at 19:00 IST would otherwise drop that day's
+            # digest outright (PR review follow-up). coalesce=True collapses
+            # any backlog of missed ticks into a single run instead of
+            # firing once per missed tick; the cross-worker advisory lock
+            # and 20h dedup window in notifications_service.py already
+            # guard against a late fire double-sending.
+            coalesce=True,
+            misfire_grace_time=3600,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(f"daily_digest_notifications_schedule_failed: {e}; continuing")
@@ -716,6 +725,8 @@ def save_monitored_jobs(jobs_data: Dict[str, Any]):
 
 POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
 AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
+# 728196 is core/startup_once.py's STARTUP_SCHEMA_LOCK_KEY; 728197 is
+# services/notifications_service.py's _DAILY_DIGEST_LOCK_KEY.
 
 
 @background_transaction("scheduler/job_status_poll")

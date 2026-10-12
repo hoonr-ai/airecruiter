@@ -106,6 +106,7 @@ import logging
 
 import psycopg2.extras
 
+from core.advisory_lock import AdvisoryLock
 from core.db import get_db_connection
 from services.engage_status import (
     format_engage_status,
@@ -830,6 +831,17 @@ async def create_zero_match_notification(*, job_id: str, searcher_email: str) ->
 # without re-firing for what's really the same morning, but short enough
 # that the next genuine day's digest isn't blocked.
 _DIGEST_DEDUP_WINDOW_HOURS = 20
+# Every uvicorn worker's own APScheduler instance fires this job at the
+# same cron tick, and _recipient_already_digested_recently is check-then-
+# insert, not atomic — without this lock, two workers could both see "not
+# digested yet" for the same recipient and both insert (PR review
+# follow-up). core/advisory_lock.py's cross-worker session lock is the
+# existing pattern for exactly this (see main.py's AUTO_SYNC_LOCK_KEY,
+# core/startup_once.py's STARTUP_SCHEMA_LOCK_KEY) — one worker runs the
+# whole digest pass, the rest skip outright rather than racing the dedup
+# check. 728193-728196 are already taken (poll, jobdiva_bi_sync, AutoSync,
+# startup schema); this is the next free key in that registry.
+_DAILY_DIGEST_LOCK_KEY = 728197
 
 
 def _recipient_already_digested_recently(cur, recipient_email: str) -> bool:
@@ -855,13 +867,14 @@ def _recipient_already_digested_recently(cur, recipient_email: str) -> bool:
 
 
 def _digest_title(passed_count: int, job_count: int) -> str:
-    """A friendly, honest summary line — phrasing varies by count/job
-    spread rather than one rigid template, but always states the two
-    numbers a recruiter actually needs: how many, across how many jobs."""
+    """A friendly, honest summary line — the greeting and "for this job" /
+    "across N jobs" phrase vary with count/job spread, but the closing
+    clause is the same words (just singular/plural agreement) in both
+    branches, not two different sign-offs."""
     where = "for this job" if job_count <= 1 else f"across {job_count} jobs"
     if passed_count == 1:
         return f"Good morning! 1 candidate passed their interview {where} and is waiting on your review."
-    return f"Good morning! {passed_count} candidates passed their interviews {where} — ready whenever you are."
+    return f"Good morning! {passed_count} candidates passed their interviews {where} and are waiting on your review."
 
 
 def _create_daily_digest_notifications_sync() -> None:
@@ -869,19 +882,25 @@ def _create_daily_digest_notifications_sync() -> None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # Every recipient with at least one unread, uncleared
-            # candidate_passed notification right now — HAVING COUNT(*) > 0
-            # is redundant with the WHERE clause here (GROUP BY only ever
-            # produces rows with >= 1 match) but documents the intent: a
-            # recipient with nothing unread is never considered, let alone
-            # digested with "0 candidates."
+            # candidate_passed notification right now. Deliberately counts
+            # ALL currently-unread rows, not just ones from the last 24h —
+            # so a recruiter who doesn't clear their queue gets the same
+            # (growing) count again tomorrow rather than the backlog going
+            # silently uncounted. That's intended: the digest is meant to
+            # reflect "how much is waiting on you right now," which only
+            # shrinks once they actually read/clear those notifications.
+            # COALESCE(jobdiva_id, job_id) because COUNT(DISTINCT ...)
+            # ignores NULLs outright — a row with neither would still count
+            # as "no job," which _digest_title already renders sensibly
+            # ("for this job" at job_count <= 1), so no extra handling
+            # needed, just the right count.
             cur.execute(
                 """
                 SELECT recipient_email, COUNT(*) AS passed_count,
-                       COUNT(DISTINCT jobdiva_id) AS job_count
+                       COUNT(DISTINCT COALESCE(jobdiva_id, job_id)) AS job_count
                 FROM notifications
                 WHERE type = 'candidate_passed' AND read_at IS NULL AND cleared_at IS NULL
                 GROUP BY recipient_email
-                HAVING COUNT(*) > 0
                 """
             )
             rows = cur.fetchall()
@@ -932,8 +951,20 @@ async def create_daily_digest_notifications() -> None:
     routers/notifications.py's schema init for the nullable-jobdiva_id
     migration this required). All failures are caught and logged here,
     never raised back into the scheduler loop.
+
+    Every uvicorn worker schedules this same job, so it takes a cross-
+    worker advisory lock first (_DAILY_DIGEST_LOCK_KEY) — only one worker
+    actually runs the digest pass per cron tick; the rest skip immediately.
+    Without this, _recipient_already_digested_recently's check-then-insert
+    could let two workers both insert for the same recipient.
     """
+    lock = AdvisoryLock(_DAILY_DIGEST_LOCK_KEY, "DailyDigest")
+    if not await lock.try_acquire():
+        logger.info("DailyDigest: another worker is running this cycle; skipping.")
+        return
     try:
         await asyncio.to_thread(_create_daily_digest_notifications_sync)
     except Exception as e:  # noqa: BLE001 - must never crash the scheduler loop
         logger.error("create_daily_digest_notifications_failed: %s", e, exc_info=True)
+    finally:
+        await lock.release()
