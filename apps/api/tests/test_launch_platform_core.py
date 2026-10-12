@@ -40,6 +40,14 @@ class FakeDB:
             if self.idem_error is not None:
                 raise self.idem_error
             return self.idem_rows
+        if sql is eng._PERSON_GATE_ROWS_SQL:
+            # Each requested id has its own contact-less row (the payload's
+            # shared test phone must not make them one person); the person
+            # gate's own behaviour is pinned in test_launch_person_gate_pg.py.
+            return [
+                (c, "LinkedIn-Exa") + (None,) * 10 + ("", "", "")
+                for c in params["ids"] if c not in self.rowless
+            ]
         if sql is eng._SEND_CLAIM_SQL:
             if self.claim_error is not None:
                 raise self.claim_error
@@ -502,7 +510,7 @@ def test_release_send_claim_is_fail_open(monkeypatch):
     monkeypatch.setattr(eng, "_get_db_connection", no_db)
     assert eng._release_send_claim((JOB, REF), ["a"], None) == 0
     assert eng._release_send_claim((JOB, REF), [], None) == 0
-    assert eng._claim_rows_for_send(("", ""), ["a"], None) == ([], set())
+    assert eng._claim_rows_for_send(("", ""), ["a"], None) == ([], set(), {})
 
 
 # ------------------------------------------------------- bulk id / stamps ----
@@ -806,8 +814,14 @@ def test_claim_and_release_shapes(pb):
     assert eng.claim_candidates_for_session(("", ""), ["a"], "S") == []
     assert db.log == []                               # nothing to claim → no DB round-trip
     eng.claim_candidates_for_session((JOB, REF, JOB), ["a", "b", "a"], "S")
-    (sql, params), = db.log
-    assert sql is eng._CLAIM_SESSION_SQL and params == {"keys": [JOB, REF], "ids": ["a", "b"], "sid": "S"}
+    claims = [(s, p) for s, p in db.log if s is eng._CLAIM_SESSION_SQL]
+    (sql, params), = claims
+    assert params == {"keys": [JOB, REF], "ids": ["a", "b"], "sid": "S"}
+    # The person gate runs first, in the same transaction, under the per-job lock.
+    assert [p for s, p in db.log if "pg_advisory_xact_lock" in s] == [
+        (eng._LAUNCH_PERSON_LOCK_KEY, k) for k in sorted([JOB, REF])     # one fixed order: no deadlock
+    ]
+    assert db.log.index(claims[0]) > max(i for i, (s, _) in enumerate(db.log) if s is eng._PERSON_GATE_ROWS_SQL)
     db.log.clear()
     eng.release_session_claims("S", (JOB, REF), candidate_ids=[])
     assert db.log == []
@@ -861,3 +875,40 @@ def test_queued_and_in_flight_read_pending():
     assert format_engage_status("passed", None, "") == "Pass"
     assert format_engage_status("failed", 40.0, "") == "Fail"
     assert format_engage_status("in_progress", None, "") == "In Progress"
+
+
+# ------------------------------------------- silent ≠ failed (parked) ----
+
+def test_a_candidate_pairbot_is_silent_about_is_parked_not_failed(pb):
+    """A 2xx whose data[] does not list a candidate is NOT proof Pairbot made
+    no interview (its echo may not have matched): the row is parked
+    'processing' — in flight for every launch path, never re-posted — and
+    settled against by-job later. A candidate Pairbot named in
+    failed_interviews is a definite, retryable 'failed'."""
+    pb["creation"] = {
+        "status": "creation_completed",
+        "data": [{"source_candidate_id": "a", "interview_id": "iv-a"}],
+        "failed_interviews": [{"resume_index": 2, "error": "invalid phone", "error_type": "ValidationError"}],
+    }
+    res = _send(["a", "b", "c"])
+    db = pb["db"]
+    writes = db.engage_writes()
+    assert ("sent", "iv-a", "a") in writes
+    assert ("processing", "", "b") in writes           # silent → parked
+    assert ("failed", "", "c") in writes               # named → failed (retryable)
+    assert ("b", "", "unconfirmed") in db.audit_inserts()
+    assert ("c", "", "failed") in db.audit_inserts()
+    rows = {r["candidate_id"]: r for r in res["data"]}
+    assert rows["b"].get("unconfirmed") is True and "unconfirmed" not in rows["c"]
+
+
+def test_pairbot_rejected_ids_places_items_by_echo_or_resume_index():
+    payload = {"resumes": [{"source_candidate_id": "a"}, {"source_candidate_id": "b"}, {}]}
+    items = [
+        {"resume_index": 1, "error_type": "X"},
+        {"source_candidate_id": "z", "error_type": "Y"},     # not requested
+        {"candidate_id": "a", "error_type": "Y"},
+        {"resume_index": 2}, {"resume_index": "x"}, {"resume_index": True}, "junk",
+    ]
+    assert eng._pairbot_rejected_ids(items, payload, ["a", "b", "c"]) == {"a", "b"}
+    assert eng._pairbot_rejected_ids(None, payload, ["a"]) == set()

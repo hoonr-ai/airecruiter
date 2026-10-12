@@ -262,6 +262,7 @@ def test_record_timing_event_sends_ids_durations_and_counts_only(monkeypatch):
     attrs = lt.record_timing_event(
         _session(error="Pairbot said no for jane@example.com", contact={"phone": "5551234567"}),
         job_added_at=_utc(2026, 10, 1, 9, 0),
+        job_first_launch_at=_utc(2026, 10, 1, 10, 9),   # this session created the job's first interview
     )
     assert sent == [("PairLaunchTiming", attrs)]
     assert attrs["job_id"] == "31990001" and attrs["session_id"] == "s-1"
@@ -288,9 +289,15 @@ def test_record_timing_event_marks_a_relaunch_and_drops_its_added_to_click(monke
     assert relaunch["click_to_launch_s"] == 540.0  # the session's own B still goes out
     # This session produced the first launch (T2 after its click): not a relaunch.
     first = lt.record_timing_event(_session(), job_added_at=added, job_first_launch_at=_utc(2026, 10, 1, 10, 9))
-    assert first["relaunch"] is False and first["added_to_click_s"] == 5_306_400.0  # 61 days
-    # T2 not supplied: unknown, so no relaunch attribute either way.
-    assert "relaunch" not in lt.record_timing_event(_session(), job_added_at=added)
+    assert first["relaunch"] is False and first["first_launch"] is True
+    assert first["added_to_click_s"] == 5_306_400.0  # 61 days
+    # No T2 (the session launched nobody, or it was not readable): relaunch is
+    # still a boolean, and the job-level A is not sent — a session that
+    # launched nobody and its needs-contact child must not both report it.
+    nobody = lt.record_timing_event(_session(counts={"sent": 0}), job_added_at=added)
+    assert nobody["relaunch"] is False and nobody["first_launch"] is False
+    assert "added_to_click_s" not in nobody
+    assert "added_to_click_s" not in lt.record_timing_event(_session(), job_added_at=added)
 
 
 def test_record_timing_event_uses_the_rows_own_added_at_and_never_raises(monkeypatch):
@@ -300,7 +307,9 @@ def test_record_timing_event_uses_the_rows_own_added_at_and_never_raises(monkeyp
         raise RuntimeError("agent exploded")
 
     monkeypatch.setattr(newrelic, "record_custom_event", boom)
-    attrs = lt.record_timing_event(_session(job_added_at="2026-10-01T09:30:00+00:00"))
+    attrs = lt.record_timing_event(
+        _session(job_added_at="2026-10-01T09:30:00+00:00"), job_first_launch_at=_utc(2026, 10, 1, 10, 9),
+    )
     assert attrs["added_to_click_s"] == 1800.0
     # A row that is not even a mapping: logged, None, no exception.
     assert lt.record_timing_event(None) is None  # type: ignore[arg-type]
@@ -967,3 +976,38 @@ def test_pg_new_version_clone_restarts_the_timings(pg, monkeypatch):
     assert _cols(pg, "26-001-v2", "title")[0] == "Data Engineer"
     # v1 untouched.
     assert _cols(pg, "31990001", "first_launch_clicked_at")[0] == _utc(2026, 9, 2)
+
+
+def test_pg_first_launch_event_fires_once_per_job(pg, monkeypatch):
+    """PairJobFirstLaunch: the once-per-job New Relic sample, sent by the call
+    that sets T2 for the FIRST time — never by later batches, relaunches, or
+    an earlier-dated correction (those would double-count the job)."""
+    _seed_backfill(pg)
+    monkeypatch.setattr(lt, "_connect", lambda: _Session(pg))
+    events = []
+    monkeypatch.setattr(lt, "record_first_launch_event", lambda job: events.append(job))
+    assert lt.stamp_first_launch("60", at=_utc(2026, 9, 22, 10, 0)) == "60"
+    assert events == ["60"]
+    assert lt.stamp_first_launch("60", at=_utc(2026, 9, 22, 11, 0)) == "60"     # later batch / relaunch
+    assert lt.stamp_first_launch("60", at=_utc(2026, 9, 22, 9, 0)) == "60"      # earlier correction
+    assert _cols(pg, "60", "first_launch_at")[0] == _utc(2026, 9, 22, 9, 0)
+    assert events == ["60"]
+
+
+def test_first_launch_event_carries_job_level_spans_only(monkeypatch):
+    from core import newrelic
+
+    sent = []
+    monkeypatch.setattr(newrelic, "record_custom_event", lambda event, params=None: sent.append((event, params)))
+    monkeypatch.setattr(lt, "timings_for_jobs", lambda ids: {"7": {
+        **lt.empty_timing("7", "26-7"),
+        "pair_added_at": _utc(2026, 10, 1, 8, 0), "first_launch_clicked_at": _utc(2026, 10, 1, 9, 0),
+        "first_launch_at": _utc(2026, 10, 1, 9, 30), "added_to_click_seconds": 3600.0,
+        "click_to_launch_seconds": 1800.0, "click_to_launch_source": "job",
+    }})
+    attrs = lt.record_first_launch_event("7")
+    assert sent == [("PairJobFirstLaunch", attrs)]
+    assert attrs == {"job_id": "7", "jobdiva_id": "26-7", "added_to_click_s": 3600.0, "click_to_launch_s": 1800.0,
+                     "added_to_launch_s": 5400.0, "click_recorded": True, "click_to_launch_source": "job"}
+    monkeypatch.setattr(lt, "timings_for_jobs", lambda ids: (_ for _ in ()).throw(RuntimeError("db down")))
+    assert lt.record_first_launch_event("7") is None                                # never raises

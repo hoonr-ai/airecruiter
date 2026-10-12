@@ -493,11 +493,18 @@ class PgStore:
                            SELECT 1 FROM engage_interview_audit a
                            WHERE a.candidate_id = sc.candidate_id AND a.jobdiva_id = ANY(%(keys)s)
                              AND COALESCE(a.interview_id, '') <> ''
-                       ) AS audit_launched
+                       ) AS audit_launched,
+                       -- Contacts, for the person gate's launched_person set
+                       -- (services/launch_person_keys.py).
+                       COALESCE(NULLIF(sc.email, ''), sc.data->>'email') AS email,
+                       COALESCE(NULLIF(sc.phone, ''), sc.data->>'phone') AS phone,
+                       COALESCE(NULLIF(sc.profile_url, ''), sc.data->>'profile_url',
+                                sc.data->>'linkedin_url', sc.data->'urls'->>'linkedin') AS profile_url
                 FROM sourced_candidates sc
                 WHERE sc.jobdiva_id = ANY(%(keys)s)
                 UNION ALL
-                SELECT DISTINCT a.candidate_id, NULL, '', '', '', '', '', TRUE
+                SELECT DISTINCT ON (a.candidate_id) a.candidate_id, NULL, '', '', '', '', '', TRUE,
+                       a.candidate_email, NULL, NULL
                 FROM engage_interview_audit a
                 WHERE a.jobdiva_id = ANY(%(keys)s) AND COALESCE(a.interview_id, '') <> ''
                   AND NOT EXISTS (

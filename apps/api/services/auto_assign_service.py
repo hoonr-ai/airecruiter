@@ -621,19 +621,27 @@ class AutoAssignService:
 
     async def _calculate_time_to_first_pass(self, target_job_id: str) -> float:
         """
-        Calculate minutes between first PAIR interview send and first candidate PASS.
-        PAIRLaunched  = MIN(created_at)  from engage_interview_audit for this job.
-        FirstPAIRPass = MIN(data->>'engage_updated_at') from sourced_candidates
-                        where engage_status IN ('pass', 'passed').
+        Minutes from the job's first PAIR interview to its first PASS.
+
+        PAIRLaunched  = monitored_jobs.first_launch_at (T2: the first interview
+                        created — services/launch_timing), falling back to
+                        pair_launched_at (the first /candidates/save) only for
+                        jobs launched before T2 existed. pair_launched_at alone
+                        started the clock at a save whose launch may have failed.
+        FirstPAIRPass = the earliest FIXED completion time of a passed,
+                        LAUNCHED person (data.first_completed_at, else
+                        engage_completed_at). It used to be
+                        MIN(engage_updated_at), which every later status
+                        write-back moves forward, so the metric drifted later on
+                        every relaunch and webhook.
         Returns the difference in minutes, or None if data is insufficient.
         """
         try:
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    # Get job activation and canonical IDs from monitored_jobs table
                     cur.execute(
                         """
-                        SELECT pair_launched_at, jobdiva_id, job_id
+                        SELECT COALESCE(first_launch_at, pair_launched_at), jobdiva_id, job_id
                         FROM monitored_jobs
                         WHERE (jobdiva_id = %s OR job_id = %s)
                         """,
@@ -642,22 +650,28 @@ class AutoAssignService:
                     row = cur.fetchone()
                     if not row:
                         return None
-                    
+
                     pair_launched, ref_id, num_id = row
 
                     if not pair_launched:
                         return None
 
-                    # Get earliest pass timestamp from sourced_candidates. We check both 
-                    # possible ID formats (alphanumeric ref and numeric PK) to be safe.
+                    # Only ISO-looking text is cast, so one malformed value
+                    # cannot fail the statement.
                     cur.execute(
-                        """
+                        r"""
                         SELECT MIN(
-                            NULLIF(data->>'engage_updated_at', '')::timestamptz
+                            CASE WHEN done_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}'
+                                 THEN done_at::timestamptz END
                         ) AS first_pass_ts
-                        FROM sourced_candidates
-                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                        FROM (
+                            SELECT COALESCE(NULLIF(data->>'first_completed_at', ''),
+                                            NULLIF(data->>'engage_completed_at', '')) AS done_at
+                            FROM sourced_candidates
+                            WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                              AND LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                              AND NULLIF(data->>'engage_interview_id', '') IS NOT NULL
+                        ) passed
                         """,
                         (ref_id, num_id)
                     )
@@ -1256,20 +1270,15 @@ class AutoAssignService:
                         )
                         return
                     resolved_job_id, resolved_jobdiva_ref = row[0], row[1]
-                    set_clauses = [
-                        "time_to_first_pass = %s",
-                        "candidates_sourced = %s",
-                        "candidates_launched = %s",
-                        "complete_submissions = %s",
-                        "pass_submissions = %s",
-                    ]
-                    params: List[Any] = [
-                        time_to_pass,
-                        counters["candidates_sourced"],
-                        counters["candidates_launched"],
-                        counters["complete_submissions"],
-                        counters["pass_submissions"],
-                    ]
+                    set_clauses = ["time_to_first_pass = %s"]
+                    params: List[Any] = [time_to_pass]
+                    # None = "couldn't determine" (DB error / timeout): keep the
+                    # last-known counters rather than writing zeros.
+                    if counters is not None:
+                        for col in ("candidates_sourced", "candidates_launched",
+                                    "complete_submissions", "pass_submissions"):
+                            set_clauses.append(f"{col} = %s")
+                            params.append(counters[col])
                     # Same guard the JobDiva total already had: a None from
                     # either counter means "couldn't determine", not "zero".
                     # Writing the 0 anyway is what made PAIR EXTERNAL SUBS /
@@ -1333,30 +1342,33 @@ class AutoAssignService:
                 f"pass_time={time_to_pass}min ext_subs={ext_subs} "
                 f"feedback={(feedback_metrics or {}).get('feedback_completed')} "
                 f"pair_submits={(feedback_metrics or {}).get('pair_submits')} "
-                f"sourced={counters['candidates_sourced']} pass={counters['pass_submissions']} "
+                f"sourced={(counters or {}).get('candidates_sourced')} "
+                f"launched={(counters or {}).get('candidates_launched')} "
+                f"pass={(counters or {}).get('pass_submissions')} "
                 f"jd_total_subs={'n/a (fetch failed)' if submittals is None else len(submittals)} "
                 f"jd_unconfigured={jobdiva_criteria_unconfigured}"
             )
         except Exception as e:
             logger.warning(f"[AutoAssignService] Metrics refresh failed for job {target_job_id}: {e}")
 
-    def _compute_candidate_counters(self, target_job_id: str) -> Dict[str, int]:
+    def _compute_candidate_counters(self, target_job_id: str) -> Optional[Dict[str, int]]:
         """Compute the four candidate counters for a single job.
 
         Uses the same aggregate logic as `_aggregate_candidate_metrics` in
         routers/jobs.py but scoped to one job and called from a background
         path so a slow query never blocks the dashboard. Bounded with
         statement_timeout=10s — generous because this is async and not in
-        the user request path; if 10s still isn't enough on a degenerate
-        row count, the warning is logged and we leave the counters as their
-        last-known value.
+        the user request path.
+
+        ``candidates_launched`` is the launched population every screen
+        shares (services/launched_candidates.count_launched_candidates — the
+        Rankings header and the Launch Report), not distinct JSONB interview
+        ids. Returns None when the counters could not be computed (DB error,
+        timeout, no job row): the caller then leaves the columns at their
+        last-known value — writing zeros is what made them flicker to 0.
         """
-        zero = {
-            "candidates_sourced": 0,
-            "candidates_launched": 0,
-            "complete_submissions": 0,
-            "pass_submissions": 0,
-        }
+        from services.launched_candidates import count_launched_candidates
+
         try:
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -1368,7 +1380,7 @@ class AutoAssignService:
                     )
                     mj_row = cur.fetchone()
                     if not mj_row:
-                        return zero
+                        return None
                     ref_id, num_id = _monitored_job_ids(mj_row, target_job_id)
 
                     # Match both storage shapes — some rows are keyed by
@@ -1377,8 +1389,7 @@ class AutoAssignService:
                         """
                         SELECT
                             COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
-                            -- Counts distinct interviews; ≤ candidates where two share an email (shared-email edge case).
-                            COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', '')) AS candidates_launched,
+                            0                                                               AS unused,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
@@ -1401,18 +1412,20 @@ class AutoAssignService:
                     )
                     row = cur.fetchone()
                     if not row:
-                        return zero
+                        return None
+                    launched = count_launched_candidates(conn, [ref_id, num_id])
                     return {
                         "candidates_sourced": int(row[0] or 0),
-                        "candidates_launched": int(row[1] or 0),
+                        "candidates_launched": int(launched),
                         "complete_submissions": int(row[2] or 0),
                         "pass_submissions": int(row[3] or 0),
                     }
         except Exception as e:
             logger.warning(
-                f"[AutoAssignService] _compute_candidate_counters failed for {target_job_id}: {e}"
+                f"[AutoAssignService] _compute_candidate_counters failed for {target_job_id}: {e} "
+                "(counters keep their last-known values)"
             )
-            return zero
+            return None
 
 
 auto_assign_service = AutoAssignService()

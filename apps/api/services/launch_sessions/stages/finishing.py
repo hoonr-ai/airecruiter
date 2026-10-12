@@ -88,7 +88,12 @@ async def fire_side_effects(ctx: StageContext, *, sent: int, full: bool, clean: 
         return "already_fired"
     wanted = opts.get("send_job_posting_email")
     job_posting = full and (initial if wanted is None else bool(wanted)) and clean
-    kwargs = dict(notify_recruiters=notify, send_job_posting_email=job_posting, is_initial_launch=initial)
+    kwargs = dict(
+        notify_recruiters=notify, send_job_posting_email=job_posting, is_initial_launch=initial,
+        # The fire-once ledger's "this launch" boundary: the session's birth
+        # (its click). Only a first interview created since then is ours.
+        launch_started_at=ctx.session.get("created_at"),
+    )
     try:
         ok = ctx.fx.fire_side_effects(
             ctx.job_ref, sent_count=sent, app_base_url=str(ctx.input.get("app_base_url") or ""), **kwargs,

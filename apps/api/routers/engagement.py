@@ -1327,7 +1327,10 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
 # Fires Email #1 (launch confirmation) + Email #2 (job posting request)
 # from a single DB query so we don't hit monitored_jobs twice.
 # ---------------------------------------------------------------------------
-async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job_posting: bool = True, app_base_url: str = "") -> None:
+async def _send_pair_launch_email(
+    *, job_id: str, candidate_count: int, send_job_posting: bool = True, app_base_url: str = "",
+    relaunch: bool = False,
+) -> None:
     """
     Fetches job metadata from monitored_jobs and fires launch emails.
 
@@ -1335,6 +1338,8 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
     Email #2 (job posting team request) is gated on `send_job_posting` —
     callers pass False on re-launches so we don't re-spam the posting team
     every time a recruiter sources another batch of candidates.
+    ``relaunch`` (the job's first interview predates this launch) words Email
+    #1 as "more candidates launched" instead of a new campaign.
 
     Runs inside asyncio.create_task() so failures are fully isolated.
     """
@@ -1382,6 +1387,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
             recruiter_emails=clean_emails,
             job_id=db_job_id,
             app_base_url=app_base_url,
+            relaunch=relaunch,
         )
 
         # ── Email #2: Job Posting Request (skipped on re-launch or no boards) ──
@@ -2026,6 +2032,187 @@ async def reconcile_with_pairbot(
     return result
 
 
+# --- Settling parked legacy rows -----------------------------------------------
+# A launch outside a session can leave a row 'processing' with no recorded
+# outcome: Pairbot's 2xx was silent about it (the core parks it instead of
+# calling it failed), or the creation wait ended unconfirmed. 'processing' is
+# in flight for every launch path — never re-posted — so nothing would ever
+# settle it. This sweep (launch-session housekeeping, one worker per tick)
+# asks Pairbot's by-job record about rows parked > _LEGACY_SETTLE_AFTER_S:
+#   listed under the row's own id   → 'sent' + audit row (reconcile writes it),
+#                                     then provisioned to JobDiva
+#   listed under another PAIR id    → failed + blocked duplicate_person_this_job
+#   missing (and nothing creating)  → still parked; after _LEGACY_SETTLE_GIVE_UP_S
+#                                     → 'failed' (retryable): its echo may be
+#                                     broken, so one 'missing' is not proof
+#   by-job unreadable               → still parked, checked again later
+# A row 'sending' > 30 min with no session (the process died mid-POST) is
+# settled the same way. Each row is checked at most every
+# _LEGACY_SETTLE_EVERY_S across the fleet (conditional claim).
+_LEGACY_SETTLE_AFTER_S = 600
+_LEGACY_SENDING_AFTER_S = 1800
+_LEGACY_SETTLE_EVERY_S = 600
+_LEGACY_SETTLE_GIVE_UP_S = 24 * 3600
+
+_LEGACY_PARKED_CLAIM_SQL = """
+    WITH due AS (
+        SELECT id FROM sourced_candidates
+        WHERE COALESCE(data->>'engage_session_id', '') = ''
+          AND COALESCE(data->>'engage_interview_id', '') = ''
+          AND (
+                (LOWER(COALESCE(data->>'engage_status', '')) = 'processing'
+                 AND updated_at < now() - make_interval(secs => %(after)s))
+             OR (LOWER(COALESCE(data->>'engage_status', '')) = 'sending'
+                 AND updated_at < now() - make_interval(secs => %(sending_after)s))
+          )
+          AND COALESCE(data->>'engage_settle_checked_at', '') < %(checked_before)s
+        ORDER BY id
+        LIMIT %(limit)s
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE sourced_candidates sc
+    SET data = COALESCE(sc.data, '{}'::jsonb) || jsonb_build_object('engage_settle_checked_at', %(now)s::text)
+    FROM due
+    WHERE sc.id = due.id
+    RETURNING sc.jobdiva_id, sc.candidate_id, COALESCE(sc.data->>'engage_updated_at', ''), sc.updated_at
+"""
+
+_LEGACY_SETTLE_FAIL_SQL = """
+    UPDATE sourced_candidates
+    SET data = COALESCE(data, '{}'::jsonb) || jsonb_build_object(
+            'engage_status', 'failed',
+            'engage_updated_at', %(now)s::text,
+            'engage_last_response', jsonb_build_object('settled', %(why)s::text))
+        || CASE WHEN %(block)s <> '' THEN jsonb_build_object('engage_block_reason', %(block)s::text)
+                ELSE '{}'::jsonb END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE jobdiva_id = ANY(%(keys)s)
+      AND candidate_id = ANY(%(ids)s)
+      AND LOWER(COALESCE(data->>'engage_status', '')) IN ('processing', 'sending')
+      AND COALESCE(data->>'engage_session_id', '') = ''
+      AND COALESCE(data->>'engage_interview_id', '') = ''
+    RETURNING candidate_id
+"""
+
+
+def _claim_parked_legacy_rows(limit: int) -> List[Tuple[str, str, str, Any]]:
+    now = datetime.now(timezone.utc)
+    params = {
+        "after": _LEGACY_SETTLE_AFTER_S,
+        "sending_after": _LEGACY_SENDING_AFTER_S,
+        "checked_before": (now - timedelta(seconds=_LEGACY_SETTLE_EVERY_S)).isoformat(),
+        "limit": int(limit),
+        "now": now.isoformat(),
+    }
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(_LEGACY_PARKED_CLAIM_SQL, params)
+        rows = [(str(r[0] or ""), str(r[1] or ""), str(r[2] or ""), r[3]) for r in cur.fetchall() or []]
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+    return rows
+
+
+def _legacy_job_keys(job_key: str) -> List[str]:
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT job_id::text, jobdiva_id FROM monitored_jobs WHERE job_id::text = %s OR jobdiva_id = %s LIMIT 1",
+            (job_key, job_key),
+        )
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    return _job_key_list((job_key,) + (tuple(row) if row else ()))
+
+
+def _fail_parked_legacy_rows(keys: Sequence[str], ids: Sequence[str], why: str, block: str = "") -> List[str]:
+    if not ids:
+        return []
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(_LEGACY_SETTLE_FAIL_SQL, {
+            "keys": list(keys), "ids": list(ids), "why": why, "block": block,
+            "now": datetime.now(timezone.utc).isoformat(),
+        })
+        out = [str(r[0]) for r in cur.fetchall() or []]
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+    return out
+
+
+def _parked_age_s(engage_updated_at: str, updated_at: Any) -> Optional[float]:
+    ts: Optional[datetime] = None
+    try:
+        ts = datetime.fromisoformat(engage_updated_at) if engage_updated_at else None
+    except ValueError:
+        ts = None
+    if ts is None and isinstance(updated_at, datetime):
+        ts = updated_at
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
+async def settle_parked_legacy_rows(limit: int = 200) -> Dict[str, int]:
+    """One sweep (see above). Never raises: a failure leaves rows parked."""
+    out = {"checked": 0, "sent": 0, "blocked": 0, "failed": 0, "still_parked": 0}
+    try:
+        rows = await asyncio.to_thread(_claim_parked_legacy_rows, limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("legacy_settle claim failed: %s", exc)
+        return out
+    by_job: Dict[str, List[Tuple[str, str, Any]]] = {}
+    for job_key, cid, eua, ua in rows:
+        if job_key and cid:
+            by_job.setdefault(job_key, []).append((cid, eua, ua))
+    for job_key, items in by_job.items():
+        ids = list(dict.fromkeys(c for c, _, _ in items))
+        out["checked"] += len(ids)
+        try:
+            keys = await asyncio.to_thread(_legacy_job_keys, job_key)
+            res = await reconcile_with_pairbot(keys, ids)
+            sent = [str(c) for c in (res.get("sent") or {})]
+            out["sent"] += len(sent)
+            twins = [str(c) for c in (res.get("duplicate_of") or {})]
+            if twins:
+                out["blocked"] += len(await asyncio.to_thread(
+                    _fail_parked_legacy_rows, keys, twins, "listed_under_another_id",
+                    LAUNCH_BLOCK_DUPLICATE_PERSON_THIS_JOB,
+                ))
+            age = {c: _parked_age_s(eua, ua) for c, eua, ua in items}
+            give_up = [
+                str(c) for c in res.get("missing") or []
+                if (age.get(str(c)) or 0) >= _LEGACY_SETTLE_GIVE_UP_S
+            ]
+            if give_up:
+                out["failed"] += len(await asyncio.to_thread(
+                    _fail_parked_legacy_rows, keys, give_up, "not_created_at_pairbot",
+                ))
+            settled = set(sent) | set(twins) | set(give_up) | {str(c) for c in (res.get("unrecorded") or {})}
+            out["still_parked"] += len([c for c in ids if c not in settled])
+            if sent and jobdiva_provisioning_enabled():
+                try:
+                    await provision_sent_candidates(keys[-1], sent)
+                except Exception as exc:  # noqa: BLE001 — the rows stay launched
+                    logger.warning("legacy_settle provisioning failed job=%s: %s", job_key, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("legacy_settle failed job=%s candidates=%d: %s", job_key, len(ids), exc)
+    if out["checked"]:
+        logger.info("legacy_settle %s", " ".join(f"{k}={v}" for k, v in out.items()))
+    return out
+
+
 # --- Pairbot DuplicateInterview ----------------------------------------------
 # Pairbot answers a duplicate with failed_interviews[] {resume_index,
 # error_type: "DuplicateInterview", existing_interview_id}. Its dedupe
@@ -2064,6 +2251,38 @@ _LAUNCH_BLOCK_REASON_TEXT = {
 
 def _launch_block_reason_text(reason: str) -> str:
     return _LAUNCH_BLOCK_REASON_TEXT.get(reason, f"launch blocked ({reason})")
+
+
+def _pairbot_rejected_ids(
+    failed_interviews: Any,
+    payload_obj: Dict[str, Any],
+    candidate_ids: Sequence[str],
+) -> set:
+    """Candidate ids Pairbot's ``failed_interviews`` explicitly names (any
+    error type): placed by ``resume_index`` into the posted payload, or by an
+    echoed ``source_candidate_id`` / ``candidate_id``. A candidate Pairbot
+    answered for is a definite outcome; one it is silent about is not."""
+    if not isinstance(failed_interviews, list):
+        return set()
+    resumes = payload_obj.get("resumes") if isinstance(payload_obj, dict) else None
+    resumes = resumes if isinstance(resumes, list) else []
+    wanted = {str(c) for c in candidate_ids}
+    out: set = set()
+    for item in failed_interviews:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("source_candidate_id") or item.get("candidate_id") or "").strip()
+        raw_idx = item.get("resume_index")
+        if not cid and not isinstance(raw_idx, bool):
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError):
+                idx = -1
+            if 0 <= idx < len(resumes) and isinstance(resumes[idx], dict):
+                cid = str(resumes[idx].get("source_candidate_id") or "").strip()
+        if cid and cid in wanted:
+            out.add(cid)
+    return out
 
 
 def _map_duplicate_interviews(
@@ -2215,28 +2434,135 @@ _RELEASE_SEND_CLAIM_SQL = """
 """
 
 
+# --- Person gate (services/launch_person_keys.py) ------------------------------
+# The claims above are per candidate_id, but one human can be several ids
+# (JobDiva numeric, exa_<url>, a Unipile id, a manual upload …). Before either
+# claim runs, the same transaction takes a per-job advisory lock (so two
+# claims for different ids of one person serialize) and drops every requested
+# id whose email / phone / LinkedIn / JobDiva id is already HELD for the job by
+# another candidate_id — an interview id, or queued/sending/processing/sent —
+# or by an earlier id of the same request. Nothing is written for a dropped
+# id: if the holder's launch later fails, the person is launchable again.
+_LAUNCH_PERSON_LOCK_KEY = 728199  # 728193-728198 are taken (see launch_sessions/schema.py)
+
+_PERSON_GATE_ROWS_SQL = """
+    SELECT sc.candidate_id, sc.source, sc.email, sc.phone, sc.profile_url,
+           sc.data->>'email', sc.data->>'phone', sc.data->>'profile_url',
+           sc.data->>'linkedin_url', sc.data->>'public_profile_url', sc.data->'urls'->>'linkedin',
+           sc.data->>'jobdiva_candidate_id',
+           COALESCE(sc.data->>'engage_status', ''), COALESCE(sc.data->>'engage_interview_id', ''),
+           COALESCE(sc.data->>'engage_session_id', '')
+    FROM sourced_candidates sc
+    WHERE sc.jobdiva_id = ANY(%(keys)s)
+      AND (sc.candidate_id = ANY(%(ids)s)
+           OR COALESCE(sc.data->>'engage_interview_id', '') <> ''
+           OR LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('queued', 'sending', 'processing', 'sent'))
+    ORDER BY sc.id
+"""
+
+_PERSON_GATE_AUDIT_SQL = """
+    SELECT DISTINCT candidate_id, candidate_email
+    FROM engage_interview_audit
+    WHERE jobdiva_id = ANY(%(keys)s)
+      AND COALESCE(interview_id, '') <> ''
+      AND COALESCE(candidate_email, '') <> ''
+"""
+
+
+def _person_gate_row(r: Sequence[Any]) -> Dict[str, Any]:
+    return {
+        "candidate_id": r[0], "source": r[1], "email": r[2], "phone": r[3], "profile_url": r[4],
+        "data": {
+            "email": r[5], "phone": r[6], "profile_url": r[7], "linkedin_url": r[8],
+            "public_profile_url": r[9], "urls": {"linkedin": r[10]}, "jobdiva_candidate_id": r[11],
+        },
+        "engage_status": r[12], "engage_interview_id": r[13], "engage_session_id": r[14],
+    }
+
+
+def _person_gate(
+    cur,
+    keys: List[str],
+    ids: List[str],
+    session_id: str,
+    fallback_rows: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Tuple[str, str]]:
+    """Run inside a claim transaction (before the claim statement). Returns
+    ``{candidate_id: (holder candidate_id, key kind)}`` for the requested ids
+    to drop. ``fallback_rows`` gives contacts for requested ids with no saved
+    row (legacy posts those unclaimed — they must still not double a person)."""
+    from services import launch_person_keys as lpk
+
+    for k in sorted(set(keys)):
+        cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (_LAUNCH_PERSON_LOCK_KEY, k))
+    cur.execute(_PERSON_GATE_ROWS_SQL, {"keys": keys, "ids": ids})
+    wanted = set(ids)
+    order = {cid: i for i, cid in enumerate(ids)}
+    requested: List[Tuple[str, List[str]]] = []
+    holders: List[Tuple[str, List[str]]] = []
+    with_rows: set = set()
+    for raw in cur.fetchall() or []:
+        row = _person_gate_row(raw)
+        cid = str(row["candidate_id"] or "")
+        pkeys = lpk.person_keys(row)
+        if cid in wanted:
+            requested.append((cid, pkeys))
+            with_rows.add(cid)
+        if lpk.holds_person(row, session_id=session_id):
+            holders.append((cid, pkeys))
+    for cid, row in (fallback_rows or {}).items():
+        if cid in wanted and cid not in with_rows:
+            requested.append((cid, lpk.person_keys(row)))
+    cur.execute(_PERSON_GATE_AUDIT_SQL, {"keys": keys})
+    for cid, email in cur.fetchall() or []:
+        ek = lpk.email_key(email)
+        if ek:
+            holders.append((str(cid or ""), [f"{lpk.KEY_EMAIL}:{ek}"]))
+    requested.sort(key=lambda e: order.get(e[0], len(order)))
+    dups = lpk.find_person_duplicates(requested, holders)
+    for cid, (other, kind) in dups.items():
+        logger.warning(
+            "duplicate_person job=%s candidate=%s holder=%s key=%s session=%s",
+            keys[0], cid, other, kind, bool(session_id),
+        )
+    return dups
+
+
+def _person_duplicate_reason(other: str, kind: str) -> str:
+    return f"Same person already launched for this job (matched by {kind}; candidate {other})"
+
+
 def _claim_rows_for_send(
-    job_keys: Sequence[str], candidate_ids: Sequence[str], session_id: Optional[str]
-) -> Tuple[List[str], set]:
-    """Run the send claim (sync). Returns (claimed ids in input order, every
-    id that has a row under the job's keys). Raises on a DB error — the
-    caller then posts nothing."""
+    job_keys: Sequence[str],
+    candidate_ids: Sequence[str],
+    session_id: Optional[str],
+    fallback_rows: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[List[str], set, Dict[str, Tuple[str, str]]]:
+    """Run the person gate + the send claim (sync). Returns (claimed ids in
+    input order, every id that has a row under the job's keys, the ids the
+    person gate dropped as ``{id: (holder id, key kind)}``). Raises on a DB
+    error — the caller then posts nothing."""
     keys = _job_key_list(job_keys)
     ids = [str(c) for c in dict.fromkeys(candidate_ids or []) if str(c).strip()]
     if not keys or not ids:
-        return [], set()
+        return [], set(), {}
+    sid = str(session_id or "").strip()
     conn = _get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute(_SEND_CLAIM_SQL, {"keys": keys, "ids": ids, "sid": str(session_id or "").strip()})
-        rows = cur.fetchall() or []
+        dups = _person_gate(cur, keys, ids, sid, fallback_rows)
+        gated = [c for c in ids if c not in dups]
+        rows = []
+        if gated:
+            cur.execute(_SEND_CLAIM_SQL, {"keys": keys, "ids": gated, "sid": sid})
+            rows = cur.fetchall() or []
         conn.commit()
         cur.close()
     finally:
         conn.close()
     with_rows = {str(r[0]) for r in rows}
     claimed = {str(r[0]) for r in rows if r[1]}
-    return [c for c in ids if c in claimed], with_rows
+    return [c for c in ids if c in claimed], with_rows, dups
 
 
 def _release_send_claim(
@@ -2270,13 +2596,18 @@ def _release_send_claim(
 
 
 def claim_candidates_for_session(
-    job_keys: Tuple[str, ...], candidate_ids: Sequence[str], session_id: str
+    job_keys: Tuple[str, ...],
+    candidate_ids: Sequence[str],
+    session_id: str,
+    duplicates: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> List[str]:
     """Atomically claim rows for a launch session (sync; call via to_thread).
 
     Returns the claimed candidate ids in input order; only these may be sent
     (with ``claimed_session_id=session_id``). Ids not returned are launched,
-    in flight, blocked or owned by another session — never post them.
+    in flight, blocked, owned by another session, or (person gate) another id
+    of a person already held for the job — never post them. ``duplicates``,
+    when given, is filled with the person gate's ``{id: (holder id, kind)}``.
     """
     keys = _job_key_list(job_keys)
     ids = [str(c) for c in dict.fromkeys(candidate_ids or []) if str(c).strip()]
@@ -2286,12 +2617,18 @@ def claim_candidates_for_session(
     conn = _get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute(_CLAIM_SESSION_SQL, {"keys": keys, "ids": ids, "sid": sid})
-        claimed = {str(r[0]) for r in (cur.fetchall() or [])}
+        dups = _person_gate(cur, keys, ids, sid)
+        gated = [c for c in ids if c not in dups]
+        claimed: set = set()
+        if gated:
+            cur.execute(_CLAIM_SESSION_SQL, {"keys": keys, "ids": gated, "sid": sid})
+            claimed = {str(r[0]) for r in (cur.fetchall() or [])}
         conn.commit()
         cur.close()
     finally:
         conn.close()
+    if duplicates is not None:
+        duplicates.update(dups)
     return [c for c in ids if c in claimed]
 
 
@@ -3184,6 +3521,8 @@ async def _send_bulk_interview_core(
                           order; its id is the client bulk_id. If it raises,
                           nothing is posted.
     """
+    # The fire-once ledger's "this launch" boundary (launch_effects_ledger).
+    _core_started_at = datetime.now(timezone.utc)
     # Pool-leak safety net for the audit-write block below: if any exception
     # fires between `conn = _get_db_connection()` and the explicit close, the
     # outer try's finally returns the slot. The explicit close stays on the
@@ -3560,9 +3899,18 @@ async def _send_bulk_interview_core(
                 str(job_id_from_payload or ""),
                 str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
             )
+            # Contacts of the payload's résumés, for the person gate's view of
+            # ids that have no saved row (legacy posts those unclaimed).
+            _gate_fallback: Dict[str, Dict[str, Any]] = {}
+            for _r in (payload_obj.get("resumes") if isinstance(payload_obj, dict) else None) or []:
+                if isinstance(_r, dict) and str(_r.get("source_candidate_id") or "").strip():
+                    _gate_fallback[str(_r["source_candidate_id"]).strip()] = {
+                        "email": _r.get("email"), "phone": _r.get("phone"),
+                        "profile_url": _r.get("linkedin_url") or _r.get("linkedin") or _r.get("profile_url"),
+                    }
             try:
-                _send_claimed, _send_with_rows = _claim_rows_for_send(
-                    _send_keys, list(request.real_candidate_ids), claimed_session_id,
+                _send_claimed, _send_with_rows, _send_dups = _claim_rows_for_send(
+                    _send_keys, list(request.real_candidate_ids), claimed_session_id, _gate_fallback,
                 )
             except Exception as _claim_err:  # noqa: BLE001
                 logger.error(
@@ -3579,7 +3927,16 @@ async def _send_bulk_interview_core(
                     "raw_response": {},
                 }
             _send_keep = set(_send_claimed)
-            _rowless = [str(c) for c in request.real_candidate_ids if str(c) not in _send_with_rows]
+            # Person gate: another id of a person already held for this job.
+            # Never posted, never "row-less", reported as an exclusion.
+            for _c, (_other, _kind) in _send_dups.items():
+                excluded_records.append({
+                    "candidate_id": _c, "name": "", "reason": _person_duplicate_reason(_other, _kind),
+                })
+            _rowless = [
+                str(c) for c in request.real_candidate_ids
+                if str(c) not in _send_with_rows and str(c) not in _send_dups
+            ]
             if _rowless:
                 if claimed_session_id:
                     # A session posts only rows it holds — never a row-less id.
@@ -3616,8 +3973,8 @@ async def _send_bulk_interview_core(
                         if isinstance(r, dict)
                         and str(r.get("source_candidate_id") or "").strip() in _send_keep
                     ]
-                elif _send_lost:
-                    _send_drop = set(_send_lost)
+                elif _send_lost or _send_dups:
+                    _send_drop = set(_send_lost) | set(_send_dups)
                     payload_obj["resumes"] = [
                         r for r in _send_resumes
                         if not (
@@ -4017,6 +4374,15 @@ async def _send_bulk_interview_core(
 
             # Log any interviews Pairbot explicitly failed on its side.
             failed_interviews_from_pairbot = response_data.get("failed_interviews") or []
+            # A candidate Pairbot named in failed_interviews was rejected (a
+            # definite 'failed', retryable). One it is silent about — neither
+            # created in data[] nor failed — may well have an interview whose
+            # echo did not match: parked 'processing' (in flight for every
+            # launch path, never re-posted) until Pairbot's by-job record
+            # settles it (settle_parked_legacy_rows / the session's settle).
+            pairbot_rejected_ids = _pairbot_rejected_ids(
+                failed_interviews_from_pairbot, payload_obj, request.real_candidate_ids,
+            )
             if failed_interviews_from_pairbot:
                 failed_ids = [item.get("candidate_id") or item.get("source_candidate_id") or "?" for item in failed_interviews_from_pairbot]
                 logger.warning(
@@ -4157,8 +4523,17 @@ async def _send_bulk_interview_core(
                 # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
                 job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
 
-                audit_status = "Initiated" if interview_id else "failed"
-                engage_status = "sent" if interview_id else "failed"
+                unconfirmed = (
+                    not interview_id
+                    and not request.dry_run
+                    and str(candidate_id) not in pairbot_rejected_ids
+                )
+                if interview_id:
+                    audit_status, engage_status = "Initiated", "sent"
+                elif unconfirmed:
+                    audit_status, engage_status = "unconfirmed", "processing"
+                else:
+                    audit_status, engage_status = "failed", "failed"
 
                 cur.execute("""
                     INSERT INTO engage_interview_audit
@@ -4190,7 +4565,9 @@ async def _send_bulk_interview_core(
                     "candidate_email": candidate_email,
                     "links": interview_info.get("links", {}),
                     "session_token": interview_info.get("session_token", ""),
-                    "created_at": interview_info.get("created_at", "")
+                    "created_at": interview_info.get("created_at", ""),
+                    # Parked 'processing': Pairbot was silent about this one.
+                    **({"unconfirmed": True} if unconfirmed else {}),
                 })
 
             # Any items left in interview_by_source_id were created by Pairbot
@@ -4247,39 +4624,39 @@ async def _send_bulk_interview_core(
                 logger.warning("launch T2 stamp failed job=%s: %s", _t2_job_key, _t2_err)
 
         if is_success:
-            # ── Fire PAIR launch confirmation email (non-blocking) ──────────
-            if request.is_initial_launch:
-                # v22: initial launch — immediate sync of existing JobDiva applicants.
-                # Applicants are assigned to rankings with match_score=0 (N/A).
-                logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
-                _spawn_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
-
-            # Manual rankings Screen sends should create the interview only.
-            # Wizard Launch/re-source flows pass notify_recruiters=True so the
-            # launch confirmation email goes out. (Pre-fix, this gate was
-            # `is_initial_launch or dry_run` — but dry_run also skipped the
-            # pairbot call, so wizard launches never actually created
-            # interviews.)
+            # People this call actually created an interview for — not every
+            # row it answered for (a 'failed' / parked row is not a launch).
+            _created_count = sum(1 for r in interview_results if r.get("interview_id"))
+            # ── Applicant sync + launch email (non-blocking) ───────────────
+            # Manual rankings Screen sends create the interview only; wizard
+            # Launch/re-source flows pass notify_recruiters=True. The
+            # first-launch effects (applicant sync, job-posting email) go
+            # through the fire-once ledger like every other launch path.
+            # (Pre-fix, this gate was `is_initial_launch or dry_run` — but
+            # dry_run also skipped the pairbot call, so wizard launches never
+            # actually created interviews.)
             if request.is_initial_launch or request.notify_recruiters:
                 send_job_posting = (
                     request.send_job_posting_email
                     if request.send_job_posting_email is not None
                     else request.is_initial_launch
                 )
-                _spawn_task(
-                    _send_pair_launch_email(
-                        job_id=job_id_from_payload,
-                        candidate_count=len(interview_results),
-                        send_job_posting=send_job_posting,
-                        app_base_url=request.app_base_url,
-                    )
+                fire_launch_side_effects(
+                    job_id_from_payload,
+                    sent_count=_created_count,
+                    notify_recruiters=bool(request.notify_recruiters),
+                    send_job_posting_email=bool(send_job_posting),
+                    is_initial_launch=bool(request.is_initial_launch),
+                    app_base_url=request.app_base_url,
+                    launch_started_at=_core_started_at,
                 )
             try:
                 from core.newrelic import record_custom_event
                 record_custom_event("EngageSendBulkInterview", {
                     "success": True,
                     "bulk_id": response_data.get("bulk_id"),
-                    "count": len(interview_results),
+                    "count": _created_count,
+                    "answered_count": len(interview_results),
                     "skipped_count": len(skipped_already_sent),
                 })
             except Exception:
@@ -4881,6 +5258,13 @@ async def _launch_progress_stream(launch_id: str):
 
 # --- Launch side effects -----------------------------------------------------
 
+def _decide_launch_effects(job_id: str, **kwargs: Any) -> Tuple[bool, bool, bool]:
+    """services.launch_effects_ledger.decide (a seam the tests stub)."""
+    from services import launch_effects_ledger
+
+    return launch_effects_ledger.decide(job_id, **kwargs)
+
+
 def fire_launch_side_effects(
     job_id: str,
     *,
@@ -4889,6 +5273,7 @@ def fire_launch_side_effects(
     send_job_posting_email: bool,
     is_initial_launch: bool,
     app_base_url: str,
+    launch_started_at: Optional[datetime] = None,
 ) -> bool:
     """The once-per-launch side effects, spawned as tracked background tasks:
     the applicant sync (initial launch only) and the recruiter launch email
@@ -4896,28 +5281,50 @@ def fire_launch_side_effects(
     only when ``send_job_posting_email`` — the caller decides that (today:
     requested AND the launch ran clean: not aborted, no failed batch).
 
-    Nothing fires when ``sent_count <= 0``. The caller owns "once": /engage/launch
-    keeps an in-memory flag; a launch session claims a DB guard first. Returns
-    True only when every requested effect was spawned (False on an error, which
-    is logged, never raised). Must be called with a running event loop."""
+    The FIRST-launch effects (applicant sync, job-posting email) are then
+    checked against the job's fire-once ledger (services/launch_effects_ledger):
+    they fire only for the launch that produced the job's first interview,
+    once per job version, whatever the browser's flags say. The recruiter
+    email still goes out for every launch that sent someone, worded as a
+    relaunch when the job's first interview predates ``launch_started_at``.
+
+    Nothing fires when ``sent_count <= 0``. The caller owns "once" per launch:
+    /engage/launch keeps an in-memory flag; a launch session claims a DB guard
+    first. Returns True only when every requested effect was spawned (False on
+    an error, which is logged, never raised). Must be called with a running
+    event loop."""
     if sent_count <= 0:
         return False
+    if not (is_initial_launch or notify_recruiters):
+        return False
+    initial, job_posting, relaunch = _decide_launch_effects(
+        job_id,
+        is_initial_launch=bool(is_initial_launch),
+        send_job_posting_email=bool(send_job_posting_email),
+        launch_started_at=launch_started_at,
+    )
     fired = False
     try:
-        if is_initial_launch:
+        if initial:
             logger.info("launch: initial launch for job %s -> applicant sync", job_id)
-            _spawn_task(auto_assign_service.synchronize_job_applicants(job_id))
+            try:
+                _spawn_task(auto_assign_service.synchronize_job_applicants(job_id))
+            except Exception:
+                from services import launch_effects_ledger
+
+                launch_effects_ledger.release(job_id, launch_effects_ledger.INITIAL)
+                raise
             fired = True
-        if is_initial_launch or notify_recruiters:
-            _spawn_task(
-                _send_pair_launch_email(
-                    job_id=job_id,
-                    candidate_count=sent_count,
-                    send_job_posting=bool(send_job_posting_email),
-                    app_base_url=app_base_url,
-                )
+        _spawn_task(
+            _send_pair_launch_email(
+                job_id=job_id,
+                candidate_count=sent_count,
+                send_job_posting=bool(job_posting),
+                app_base_url=app_base_url,
+                relaunch=bool(relaunch),
             )
-            fired = True
+        )
+        fired = True
     except Exception as _se_err:
         logger.warning("launch: side-effect firing failed: %s", _se_err)
         return False
@@ -5094,10 +5501,18 @@ async def _run_one_batch(
             rows = res.get("data") or []
             # Only rows PAIR actually created an interview for count as "sent".
             sent = sum(1 for r in rows if isinstance(r, dict) and r.get("interview_id"))
-            no_interview = len(rows) - sent
+            # Pairbot was silent about these: parked 'processing' until its
+            # by-job record settles them — neither sent nor a failure yet.
+            unconfirmed_ids = [
+                str(r.get("candidate_id")) for r in rows
+                if isinstance(r, dict) and not r.get("interview_id") and r.get("unconfirmed")
+            ]
+            no_interview = len(rows) - sent - len(unconfirmed_ids)
             res_out.update({
                 "sent": sent,
                 "no_interview": no_interview,
+                "unconfirmed": len(unconfirmed_ids),
+                "unconfirmed_ids": unconfirmed_ids,
                 "already_sent": len(skipped),
                 "employer_unverified": list(batch_unverified),
                 "employer_unverified_count": len(batch_unverified),
@@ -5107,7 +5522,7 @@ async def _run_one_batch(
                 ],
                 "no_interview_ids": [
                     str(r.get("candidate_id")) for r in rows
-                    if isinstance(r, dict) and not r.get("interview_id")
+                    if isinstance(r, dict) and not r.get("interview_id") and not r.get("unconfirmed")
                 ],
                 "bulk_id": res.get("bulk_id"),
             })
@@ -5118,6 +5533,8 @@ async def _run_one_batch(
                 "status": "completed",
                 "sent": sent,
                 "no_interview": no_interview,
+                # Only when non-zero: the wire shape is unchanged otherwise.
+                **({"unconfirmed": len(unconfirmed_ids)} if unconfirmed_ids else {}),
                 "already_sent": len(skipped),
                 "excluded": len(batch_excluded),
                 "employer_unverified": len(batch_unverified),
@@ -5247,6 +5664,9 @@ async def run_launch(
     stopped = False
     aborted = False
     side_effects_fired = {"done": False}
+    # The fire-once ledger's "this launch" boundary: the job's first interview
+    # at or after this moment came from THIS launch (launch_effects_ledger).
+    launch_started_at = datetime.now(timezone.utc)
     abort_flag = {"aborted": False}
     tasks: List[asyncio.Task] = []
 
@@ -5290,6 +5710,7 @@ async def run_launch(
             ),
             is_initial_launch=request.is_initial_launch,
             app_base_url=request.app_base_url,
+            launch_started_at=launch_started_at,
         )
 
     # Per-batch session hooks ride along only when set (legacy call shape).
@@ -5346,6 +5767,9 @@ async def run_launch(
                 totals["sent"] += r["sent"]
                 totals["already_sent"] += r["already_sent"]
                 totals["no_interview"] += r["no_interview"]
+                if r.get("unconfirmed"):
+                    # Only present when non-zero (wire shape unchanged otherwise).
+                    totals["unconfirmed"] = totals.get("unconfirmed", 0) + int(r["unconfirmed"])
                 totals["employer_unverified"] += r["employer_unverified_count"]
                 all_employer_unverified.extend(r["employer_unverified"])
                 all_sent_ids.extend(r.get("sent_ids") or [])

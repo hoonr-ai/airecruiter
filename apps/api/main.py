@@ -715,10 +715,23 @@ def load_monitored_jobs() -> Dict[str, Any]:
     """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
     return jobdiva_service.get_all_monitored_jobs()
 
+# The only fields the legacy "monitored jobs file" callers ever change.
+_LEGACY_SNAPSHOT_FIELDS = ("status", "customer_name", "title")
+
+
 def save_monitored_jobs(jobs_data: Dict[str, Any]):
-    """Save/Update monitored jobs in PostgreSQL via JobDivaService"""
+    """Write the legacy snapshot's status fields back to PostgreSQL.
+
+    ``jobs_data`` is a snapshot of EVERY job (load_monitored_jobs) taken
+    before the caller's own work. Writing whole rows back reverted every
+    column changed meanwhile — the dashboard counters (candidates_launched,
+    pair_submits, feedback_completed …), processing_status, recruiter_emails —
+    so only the status / customer / title the legacy callers maintain go back.
+    """
     for jid, details in jobs_data.get("jobs", {}).items():
-        jobdiva_service.monitor_job_locally(jid, details)
+        fields = {k: details.get(k) for k in _LEGACY_SNAPSHOT_FIELDS if k in (details or {})}
+        if fields:
+            jobdiva_service.monitor_job_locally(jid, fields)
 
 POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
 AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
@@ -836,9 +849,12 @@ async def _run_poll_cycle():
             logger.info(f"▶️ Job {job_id} reactivated ({current_status}). Clearing inactive-notified marker.")
             asyncio.create_task(_clear_pair_inactive_marker(job_id))
     
-    # Save updated data
-    jobs_data["last_sync"] = readable_ist_now()
-    save_monitored_jobs(jobs_data)
+    # No bulk write-back here. The status changes above were already written
+    # per job (monitor_job_locally(job_id, db_data)); re-saving the snapshot
+    # loaded at the START of the cycle wrote every column of every job back
+    # after the JobDiva round-trip, reverting whatever changed meanwhile — the
+    # dashboard counters (candidates_launched, pair_submits, feedback_completed,
+    # time_to_first_pass …), processing_status, recruiter_emails.
     
     if changes_detected:
         logger.info(f"📢 Status changes detected: {changes_detected}")

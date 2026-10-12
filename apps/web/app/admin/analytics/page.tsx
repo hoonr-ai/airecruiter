@@ -74,7 +74,13 @@ interface JobTimelineEntry {
   posted_date_raw: string;
   jobdiva_posted_on: string | null;
   added_to_curate_at: string | null;
+  /** The first Launch PAIR ATTEMPT (its first candidate save — set even when
+   *  that attempt created no interview). Shown as "Launch Attempted". */
   curate_launched_at: string | null;
+  /** The job's first SUCCESSFUL launch: its first PAIR interview (T2). This
+   *  is "Launched (PAIR)", as on the Launch Report; undefined when the
+   *  launch timings could not be read (the attempt is shown instead). */
+  first_launched_at?: string | null;
   outreach_stopped_at: string | null;
   posted_to_launch_days: number | null;
   is_archived: boolean;
@@ -131,6 +137,8 @@ interface JobTimelineEntry {
 
 interface LaunchSpeed {
   launched_jobs?: number;
+  /** Jobs with a launch ATTEMPT (first save), successful or not. */
+  launch_attempted_jobs?: number;
   unlaunched_active_jobs?: number;
   aged_unlaunched_jobs?: number;
   avg_days_posted_to_launch?: number | null;
@@ -268,6 +276,11 @@ const formatRelativeTime = (iso: string | null | undefined): string => {
 /** One decimal only when not whole: 3 → "3", 3.5 → "3.5". */
 const formatLagValue = (lag: number): string =>
   Number.isInteger(lag) ? `${lag}` : lag.toFixed(1);
+
+/** "Launched (PAIR)": the first successful launch; the first attempt only
+ *  when the launch timings were unavailable (first_launched_at undefined). */
+const launchedOnPair = (job: JobTimelineEntry): string | null =>
+  job.first_launched_at === undefined ? job.curate_launched_at : job.first_launched_at;
 
 const renderDateCell = (iso: string | null | undefined) => {
   const formatted = formatEasternDateTime(iso);
@@ -460,6 +473,7 @@ const timelineCsvHeaders = (withRecruiters: boolean): string[] => [
   "Posted on JobDiva",
   withEasternLabel("Added to PAIR"),
   withEasternLabel("Launched on PAIR"),
+  withEasternLabel("Launch Attempted"),
   "Lag (days)",
   withEasternLabel("Launch Clicked"),
   "Added → Click",
@@ -496,6 +510,7 @@ const timelineCsvRow = (job: JobTimelineEntry, withRecruiters: boolean): string[
     ? formatEasternDate(job.jobdiva_posted_on)
     : job.posted_date_raw || EMPTY_DATE,
   formatEasternDateTime(job.added_to_curate_at),
+  formatEasternDateTime(launchedOnPair(job)),
   formatEasternDateTime(job.curate_launched_at),
   lagCsvValue(job.posted_to_launch_days),
   formatEasternDateTime(job.launch_clicked_at),
@@ -819,7 +834,7 @@ export default function AdminAnalyticsPage() {
 
     if (timelineStartDate || timelineEndDate) {
       const jobDate = normalizeToUtcDate(
-        job.curate_launched_at || job.added_to_curate_at,
+        launchedOnPair(job) || job.added_to_curate_at,
       );
       if (!jobDate) return false;
 
@@ -1404,7 +1419,10 @@ export default function AdminAnalyticsPage() {
               </div>
             )}
             <div className="text-[12px] text-slate-400 mt-1.5 font-medium">
-              all time
+              all time · first interview created
+              {typeof launchSpeed.launch_attempted_jobs === "number" &&
+                launchSpeed.launch_attempted_jobs !== launchSpeed.launched_jobs &&
+                ` · ${launchSpeed.launch_attempted_jobs.toLocaleString()} attempted`}
             </div>
           </div>
         </div>
@@ -2463,7 +2481,7 @@ export default function AdminAnalyticsPage() {
                   {withEasternLabel("Added (PAIR)")}
                 </th>
                 <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
-                  <HeaderHint hint="When the job's first Launch PAIR attempt saved its candidates, just before PAIR Bot was called: shortly after the click (Launch Clicked), and set even if that attempt then failed.">
+                  <HeaderHint hint="The job's first SUCCESSFUL launch: when PAIR Bot created its first interview (the Launch Report's PAIR Launch). A relaunch never moves it. The small line under it is the first launch ATTEMPT (its candidates saved, just before PAIR Bot was called), shown when it differs — an attempt can create nobody.">
                     {withEasternLabel("Launched (PAIR)")}
                   </HeaderHint>
                 </th>
@@ -2668,7 +2686,14 @@ export default function AdminAnalyticsPage() {
                         {renderDateCell(job.added_to_curate_at)}
                       </td>
                       <td className="py-3.5 px-6 whitespace-nowrap">
-                        {renderDateCell(job.curate_launched_at)}
+                        {renderDateCell(launchedOnPair(job))}
+                        {job.first_launched_at !== undefined &&
+                          job.curate_launched_at &&
+                          job.curate_launched_at !== job.first_launched_at && (
+                            <div className="text-[11px] text-slate-400">
+                              attempted {formatEasternDateTime(job.curate_launched_at)}
+                            </div>
+                          )}
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderLagChip(job.posted_to_launch_days)}

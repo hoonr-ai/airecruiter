@@ -1,0 +1,41 @@
+{
+  "_about": "Golden cases for the launch person keys. Python: services/launch_person_keys.py (tests/test_launch_person_keys.py). TypeScript: apps/web/lib/launch-person-keys.ts (lib/launch-person-keys.test.ts). Both must produce exactly these keys.",
+  "keys": [
+    {
+      "row": {"candidate_id": "exa_x", "source": "LinkedIn-Exa", "email": " Jane.Doe@Acme.io ", "phone": "+1 (415) 555-0142",
+              "profile_url": "https://www.linkedin.com/in/Jane-Doe-42/?trk=x", "data": {"jobdiva_candidate_id": "4471"}},
+      "keys": ["email:jane.doe@acme.io", "phone:4155550142", "linkedin:jane-doe-42", "jobdiva:4471"]
+    },
+    {"row": {"candidate_id": "4471", "source": "JobDiva-Applicant"}, "keys": ["jobdiva:4471"]},
+    {"row": {"candidate_id": "4471", "source": "LinkedIn"}, "keys": []},
+    {"row": {"candidate_id": "c", "jobdiva_candidate_id": "981"}, "keys": ["jobdiva:981"]},
+    {"row": {"candidate_id": "c", "data": {"email": "a@b.co", "phone": "4155550142", "urls": {"linkedin": "https://linkedin.com/in/ab"}}},
+     "keys": ["email:a@b.co", "phone:4155550142", "linkedin:ab"]},
+    {"row": {"candidate_id": "c", "linkedin_url": "https://in.linkedin.com/in/J%C3%B6rg/", "public_profile_url": "http://linkedin.com/pub/other"},
+     "keys": ["linkedin:jörg", "linkedin:other"]},
+    {"row": {"candidate_id": "c", "email": "Auto_123@jobdiva.com", "phone": "555-555-5555"}, "keys": []},
+    {"row": {"candidate_id": "c", "email": "pair-4155550142@no-email.jobdiva.local", "phone": "4155550142"}, "keys": ["phone:4155550142"]},
+    {"row": {"candidate_id": "c", "email": "Available upon request", "phone": "555-0142"}, "keys": []},
+    {"row": {"candidate_id": "c", "email": "x@noemail.pair.ai", "profile_url": "https://www.linkedin.com/talent/profile/AEMAAABC"}, "keys": []},
+    {"row": {"candidate_id": "c", "email": "test@example.com", "phone": "000-000-0000"}, "keys": []},
+    {"row": {"candidate_id": "c", "email": "candidate@acme.io"}, "keys": []},
+    {"row": {"candidate_id": "c", "email": "x@host.local"}, "keys": []},
+    {"row": {"candidate_id": "c", "phone": "+44 20 7946 0958"}, "keys": ["phone:2079460958"]},
+    {"row": {"candidate_id": "c", "email": "", "phone": "", "data": {"email": "B@C.io"}}, "keys": ["email:b@c.io"]}
+  ],
+  "blocks": [
+    {
+      "owners": {"email:jane@x.com": "exa_jane", "phone:4155550142": "exa_jane", "jobdiva:4471": "exa_jane"},
+      "pool": [
+        {"candidate_id": "4471", "source": "JobDiva-Applicant"},
+        {"candidate_id": "exa_jane", "email": "jane@x.com"},
+        {"candidate_id": "u1", "email": "JANE@x.com"},
+        {"candidate_id": "u2", "phone": "(415) 555-0142"},
+        {"candidate_id": "bob", "email": "bob@x.com"},
+        {"jobdiva_candidate_id": "5000", "email": "jane@x.com"}
+      ],
+      "blocked": {"4471": "launched_person", "u1": "launched_person", "u2": "launched_person", "5000": "launched_person"}
+    },
+    {"owners": {}, "pool": [{"candidate_id": "a", "email": "a@x.com"}], "blocked": {}}
+  ]
+}

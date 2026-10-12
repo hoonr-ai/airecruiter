@@ -191,12 +191,10 @@ def test_jobs_query_binds_params_in_statement_order():
     scope = {"job_ids": ["55", "56"], "sc_keys": ["55", "26-01234"]}
     lr._fetch_jobs_launched_on(_Conn(), datetime.date(2026, 8, 27), scope)
 
-    assert captured["params"] == [
-        ["55", "56"],
-        lr.REPORT_DB_TIMEZONE,
-        str(lr.REPORT_TIMEZONE),
-        datetime.date(2026, 8, 27),
-    ]
+    day = [lr.REPORT_DB_TIMEZONE, str(lr.REPORT_TIMEZONE), datetime.date(2026, 8, 27)]
+    # scope; the "launched in period" filter (period CTE); then the first-launch
+    # filter twice (the first_launch_in_period column, the WHERE).
+    assert captured["params"] == [["55", "56"]] + day + day + day
     # The empty-string guard must survive refactors: without it, an audit row
     # with jobdiva_id='' joins every job whose jobdiva_id is also ''.
     assert "NULLIF(a.jobdiva_id, '') IS NOT NULL" in captured["sql"]
@@ -2049,12 +2047,16 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     assert "AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''" in cte
     # Unused total_launched removed from CTE and outer query
     assert "total_launched" not in sql
-    # Outer query filters on l.first_launch_at
-    assert "WHERE ((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in sql
+    # Outer query: first launch in range, OR people first launched in range
+    # (a relaunch) — each person on the day of their FIRST interview.
+    assert ("WHERE (((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s) "
+            "OR COALESCE(p.launched_in_period, 0) > 0") in squashed
+    assert "SELECT s.job_id, a.candidate_id, MIN(a.created_at) AS first_at" in squashed
+    assert "((pp.first_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in squashed
     # Posted By / Launched By come straight off the job row.
     assert "mj.pair_posted_by AS pair_posted_by," in squashed
     assert "mj.pair_launched_by AS pair_launched_by," in squashed
-    assert sql.count("%s") == 4
+    assert sql.count("%s") == 12
 
 
 def test_jobs_query_success_rule_matches_the_launched_population():
@@ -2125,7 +2127,7 @@ def test_jobs_query_selects_null_when_attribution_columns_are_missing():
     assert "NULL::text AS pair_launched_by," in jobs_sql
     assert "mj.pair_posted_by" not in jobs_sql and "mj.pair_launched_by" not in jobs_sql
     # The catalog lookup must not shift the jobs query's positional params.
-    assert statements[-1][1] == [lr.REPORT_DB_TIMEZONE, str(lr.REPORT_TIMEZONE), datetime.date(2026, 8, 27)]
+    assert statements[-1][1] == [lr.REPORT_DB_TIMEZONE, str(lr.REPORT_TIMEZONE), datetime.date(2026, 8, 27)] * 3
 
 
 def test_report_loads_launched_rows_with_their_feedback(monkeypatch):
@@ -2172,3 +2174,37 @@ def test_build_row_classifies_each_launched_candidate_once(monkeypatch):
     by_iid = {"1": _outreach("completed"), "2": _outreach("pending"), "3": _outreach("in_progress")}
     lr._build_row(_job(3), launched, [], by_iid)
     assert len(calls) == 3
+
+
+def test_a_relaunch_that_reaches_new_people_lists_the_job_on_that_day(pg_conn):
+    """Relaunch work shows on the day it happened: the job first launched on
+    Aug 27 (Eastern); a relaunch on Sep 2 reached one NEW person and called c1
+    again. Sep 2 lists the job as a relaunch row with 1 launched in period —
+    c1 counts only on the day of their FIRST interview."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, status, created_at) VALUES "
+            "('c9', '26-06182', '909', 'Initiated', '2026-09-02 15:00:00'), "
+            "('c1', '26-06182', '911', 'Initiated', '2026-09-02 15:05:00')"
+        )
+    first_day = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 8, 27), None)}
+    assert first_day["26-06182"]["first_launch_in_period"] is True
+    assert first_day["26-06182"]["launched_in_period"] == 2          # c1, c2
+
+    relaunch_day = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 9, 2), None)}
+    assert set(relaunch_day) == {"26-06182"}
+    job = relaunch_day["26-06182"]
+    assert job["first_launch_in_period"] is False and job["launched_in_period"] == 1   # c9 only
+    row = lr._build_row(job, [], [], {})
+    assert row["first_launch_in_period"] is False and row["candidates_launched_in_period"] == 1
+    assert row["launch_date"] == "2026-08-27"                          # its first launch, unchanged
+
+    # A range covering both days: one row, both days' new people.
+    both = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(
+        pg_conn, datetime.date(2026, 8, 27), None, datetime.date(2026, 9, 2))}
+    assert both["26-06182"]["launched_in_period"] == 3 and both["26-06182"]["first_launch_in_period"] is True
+    # A day with no new people (only c1's re-call would be there) lists nothing.
+    with pg_conn.cursor() as cur:
+        cur.execute("INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, status, created_at) "
+                    "VALUES ('c2', '26-06182', '912', 'Initiated', '2026-09-05 15:00:00')")
+    assert lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 9, 5), None) == []

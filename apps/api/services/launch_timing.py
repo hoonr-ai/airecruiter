@@ -234,8 +234,13 @@ _JOB_ROW_SQL = """
 # EARLIER (two writers arriving out of order still leave the first moment) —
 # so the launch paths can call this for every batch without rewriting a hot
 # monitored_jobs row each time. The matched job is returned either way.
+# The second column says whether THIS call set the value for the first time
+# (it was NULL and the UPDATE took the row): the once-per-job trigger for the
+# PairJobFirstLaunch event. A later, earlier-dated correction is not a first.
 _STAMP_SQL = """
-WITH target AS ({target}), stamped AS (
+WITH target AS ({target}), prev AS (
+    SELECT mj.{column} AS prev FROM monitored_jobs mj JOIN target t ON mj.job_id = t.job_id
+), stamped AS (
     UPDATE monitored_jobs mj
     SET {column} = COALESCE(%s::timestamptz, now())
     FROM target
@@ -243,7 +248,9 @@ WITH target AS ({target}), stamped AS (
       AND (mj.{column} IS NULL OR mj.{column} > COALESCE(%s::timestamptz, now())){guard}
     RETURNING mj.job_id
 )
-SELECT job_id::text FROM target
+SELECT job_id::text,
+       EXISTS (SELECT 1 FROM stamped) AND NOT EXISTS (SELECT 1 FROM prev WHERE prev IS NOT NULL)
+FROM target
 """
 
 # T1 only: a click AFTER the job's first launch is a relaunch ("launch
@@ -265,10 +272,16 @@ def _check_stamp_args(job_key: Any, at: Any) -> None:
 
 
 def _stamp(column: str, job_key: Any, at: Optional[datetime.datetime]) -> Optional[str]:
+    return _stamp_full(column, job_key, at)[0]
+
+
+def _stamp_full(column: str, job_key: Any, at: Optional[datetime.datetime]) -> Tuple[Optional[str], bool]:
+    """(canonical job_id matched or None, whether this call set the column
+    for the first time)."""
     _check_stamp_args(job_key, at)
     key = str(job_key if job_key is not None else "").strip()
     if not key:
-        return None
+        return None, False
     try:
         conn = _connect()
         try:
@@ -289,8 +302,10 @@ def _stamp(column: str, job_key: Any, at: Optional[datetime.datetime]) -> Option
     except Exception as e:  # noqa: BLE001
         # A missing column or a lock costs only this timestamp.
         logger.warning(f"[LaunchTiming] could not stamp {column} for job {key}: {e}")
-        return None
-    return str(row[0]) if row and row[0] is not None else None
+        return None, False
+    job = str(row[0]) if row and row[0] is not None else None
+    first = bool(row[1]) if row and len(row) > 1 else False
+    return job, first and job is not None
 
 
 def stamp_launch_clicked(job_id: Any, at: Optional[datetime.datetime] = None) -> Optional[str]:
@@ -308,8 +323,49 @@ def stamp_first_launch(job_key: Any, at: Optional[datetime.datetime] = None) -> 
     """T2: record the job's first created interview (no-op when an earlier one
     is recorded). Call it when an audit row with an interview id is written.
     Same key / ``at`` / return / raising rules as stamp_launch_clicked; a
-    naive ``at`` is read in REPORT_DB_TIMEZONE, like the audit's own column."""
-    return _stamp("first_launch_at", job_key, at)
+    naive ``at`` is read in REPORT_DB_TIMEZONE, like the audit's own column.
+
+    The call that sets it for the first time also sends the once-per-job
+    ``PairJobFirstLaunch`` New Relic event (record_first_launch_event) — from
+    every launch path, so the legacy browser-driven launch (PROD) is timed
+    too, and a relaunch never adds a second sample for the job."""
+    job, first = _stamp_full("first_launch_at", job_key, at)
+    if first:
+        record_first_launch_event(job)
+    return job
+
+
+def record_first_launch_event(job_id: Any) -> Optional[Dict[str, Any]]:
+    """Send ``PairJobFirstLaunch`` for one job: the job-level launch timings
+    at the moment its first interview was created (job_timing's definitions,
+    services/launch_timing). One event per job version — the NR source for
+    "Added → Click" / "Click → Launch" / "Added → Launch" averages, which
+    per-session events can't give without double counting relaunches. Only
+    ids and durations. Never raises; returns the attributes or None."""
+    try:
+        timing = (timings_for_jobs([job_id]) or {}).get(str(job_id))
+        if not timing:
+            return None
+        attrs = {
+            "job_id": str(job_id),
+            "jobdiva_id": timing.get("jobdiva_id"),
+            "added_to_click_s": timing.get("added_to_click_seconds"),
+            "click_to_launch_s": timing.get("click_to_launch_seconds"),
+            "added_to_launch_s": _span(timing.get("pair_added_at"), timing.get("first_launch_at")),
+            "click_recorded": timing.get("first_launch_clicked_at") is not None,
+            "click_to_launch_source": timing.get("click_to_launch_source"),
+        }
+        attrs = {k: v for k, v in attrs.items() if v is not None}
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[LaunchTiming] could not build the first-launch event for {job_id}: {e}")
+        return None
+    try:
+        from core.newrelic import record_custom_event
+
+        record_custom_event("PairJobFirstLaunch", attrs)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[LaunchTiming] could not record the first-launch event: {e}")
+    return attrs
 
 
 # ---------------------------------------------------------------------------
@@ -706,20 +762,26 @@ def record_timing_event(
     ``session_row`` is the launch_sessions row (dict). ``job_added_at`` is T0
     for added_to_click_s; the row's own ``job_added_at`` when omitted.
     ``job_first_launch_at`` is the job's T2 (monitored_jobs.first_launch_at),
-    when the caller has it: a session clicked AFTER the job's first launch is
-    a relaunch — sent with ``relaunch=true`` and without added_to_click_s,
-    which would otherwise span the whole first launch. Only ids, enums,
-    durations in seconds and counters are sent — never requested_by, names,
-    emails, phones or error text. Returns the attributes (for logs and tests),
-    or None if building them failed. Never raises.
+    when the caller has it. ``relaunch`` is always a boolean: true when the
+    job's first interview predates this session's click. ``added_to_click_s``
+    (the job-level "Added → Click") rides only on the session that created the
+    job's FIRST interview — a session that launched nobody, its needs-contact
+    child and every relaunch would otherwise each add a sample for one job.
+    The once-per-job figures are PairJobFirstLaunch (record_first_launch_event).
+    Only ids, enums, durations in seconds and counters are sent — never
+    requested_by, names, emails, phones or error text. Returns the attributes
+    (for logs and tests), or None if building them failed. Never raises.
     """
     try:
         t = session_timing(session_row)
         added = _as_dt(job_added_at) or _as_dt(session_row.get("job_added_at"))
         first_launch = _as_dt(job_first_launch_at)
-        relaunch = (
-            first_launch is not None and t["clicked_at"] is not None and first_launch < t["clicked_at"]
-        ) if job_first_launch_at is not None else None
+        clicked = t["clicked_at"]
+        relaunch = bool(first_launch is not None and clicked is not None and first_launch < clicked)
+        sent = (t.get("counts") or {}).get("sent") if isinstance(t.get("counts"), dict) else None
+        made_first_launch = (
+            first_launch is not None and clicked is not None and not relaunch and int(sent or 0) > 0
+        )
         attrs: Dict[str, Any] = {
             "job_id": t["job_id"],
             "session_id": t["session_id"],
@@ -728,7 +790,8 @@ def record_timing_event(
             "status": t["status"],
             "attempt": t["attempt"],
             "relaunch": relaunch,
-            "added_to_click_s": None if relaunch else _span(added, t["clicked_at"]),
+            "first_launch": made_first_launch,
+            "added_to_click_s": _span(added, clicked) if made_first_launch else None,
             "click_to_launch_s": t["click_to_launch_seconds"],
             "machine_s": t["machine_seconds"],
             "click_to_first_dial_s": t["click_to_first_dial_seconds"],

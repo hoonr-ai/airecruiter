@@ -240,17 +240,31 @@ async def settle(ctx: StageContext, *, final: bool = False) -> Dict[str, int]:
         items.append({"candidate_id": str(cid), "state": S.ROW_SKIPPED, "reason": "duplicate_person_this_job"})
         resolved.add(str(cid))
     repost: List[str] = []
+    exhausted: List[str] = []
     waiting: List[float] = []
     stale_after = cfg.repost_after_s()
+    reposts: Dict[str, int] = {str(k): int(v or 0) for k, v in (s7.get("reposts") or {}).items()}
     for cid in res.get("missing") or []:
         cid = str(cid)
         if cid in resolved:
             continue
         age = _age_s(index[cid][1]) if cid in index else None
         if age is None or age >= stale_after:
-            repost.append(cid)
+            # A row we already POSTED and re-posted PAIR_LAUNCH_MAX_REPOSTS
+            # times is never posted again: "missing" is judged by its echoed
+            # source_candidate_id only, so an interview Pairbot filed under
+            # another id would otherwise be re-created every ~10 minutes.
+            if cid in index and not final and reposts.get(cid, 0) >= cfg.max_reposts():
+                exhausted.append(cid)
+            else:
+                repost.append(cid)
         else:
             waiting.append(stale_after - age)
+    if exhausted:
+        items += [{"candidate_id": c, "state": S.ROW_UNCONFIRMED, "reason": "unconfirmed",
+                   "error": "Pairbot never listed this candidate after a re-post"} for c in exhausted]
+        resolved |= set(exhausted)
+        await ctx.event("repost_limit", stage=S.STAGE_LAUNCHING, count=len(exhausted))
     if repost:
         if final:
             failed = await ctx.db(ctx.store.fail_engage_rows, ctx.job_keys, repost, ctx.sid)
@@ -259,6 +273,10 @@ async def settle(ctx: StageContext, *, final: bool = False) -> Dict[str, int]:
         else:
             requeued = await ctx.db(ctx.store.requeue_engage_rows, ctx.job_keys, repost, ctx.sid)
             items += [{"candidate_id": c, "state": S.ROW_SAVED, "reason": None} for c in requeued]
+            for c in requeued:
+                if c in index:  # a row never posted is posted, not RE-posted
+                    reposts[c] = reposts.get(c, 0) + 1
+            s7["reposts"] = reposts
             await _forget_posted(ctx, s7, set(requeued))
         resolved |= set(repost)
     await ctx.set_states(items, from_states=[S.ROW_LAUNCHING])
@@ -433,13 +451,19 @@ async def launch_pass(ctx: StageContext, ids: List[str]) -> None:
         requested_by=ctx.session.get("requested_by"), session_id=ctx.sid,
     )
     await ctx.assert_owner()
-    claimed = await ctx.db(ctx.fx.claim_for_session, ctx.job_keys, ids, ctx.sid)
+    duplicates: Dict[str, Any] = {}
+    claimed = await ctx.db(ctx.fx.claim_for_session, ctx.job_keys, ids, ctx.sid, duplicates=duplicates)
     claimed_set = set(claimed)
     lost = [c for c in ids if c not in claimed_set]
     if lost:
         facts = await _facts(ctx, lost)
         items = []
         for cid in lost:
+            if cid in duplicates:
+                # Person gate: another id of this person is already held for
+                # the job (launched, or in flight elsewhere) — never posted.
+                items.append({"candidate_id": cid, "state": S.ROW_SKIPPED, "reason": "duplicate_person_this_job"})
+                continue
             fact = facts.get(cid)
             kind = classify(fact, session_id=ctx.sid, posted=False, claimed=False)
             if kind == "launched":

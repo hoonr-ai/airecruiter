@@ -109,6 +109,7 @@ import { useEngagementFlow, type LaunchUnverifiedEmployer } from "@/hooks/use-en
 import { useStepActiveTime } from "@/hooks/use-step-active-time";
 import { useStepAutosave } from "@/hooks/use-step-autosave";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
+import { isLaunchedPerson, launchedPersonBlocks, personOwnersFromResponse } from "@/lib/launch-person-keys";
 import {
   OUTREACH_MIN_SCORE,
   SCORE_BAND_EXCELLENT,
@@ -614,6 +615,11 @@ function NewJobPageContent() {
   // resilient fallback so a candidate re-sourced under a slightly different
   // `source` string still gets hidden once they're launched / in the rank list.
   const [launchedCandidateIds, setLaunchedCandidateIds] = useState<Set<string>>(new Set());
+  // Person keys (email / phone / LinkedIn / JobDiva id) of everyone launched or
+  // in flight for this job → their candidate_id. Another id of one of these
+  // people is "already launched" too: the server's launch claim refuses it
+  // (lib/launch-person-keys.ts).
+  const [launchedPersonOwners, setLaunchedPersonOwners] = useState<Map<string, string>>(new Map());
   // DNC (Do Not Contact) phone set, fetched once at mount. Used to flag and
   // skip candidates whose phone matches a Zoom DNC entry.
   const [dncPhones, setDncPhones] = useState<Set<string>>(new Set());
@@ -1387,6 +1393,7 @@ function NewJobPageContent() {
   const visibilityCtx = {
     launchedKeys: launchedCandidateKeys,
     launchedIds: launchedCandidateIds,
+    isLaunchedPerson: (c: any) => isLaunchedPerson(c, launchedPersonOwners),
     isExcluded: (c: any) => Boolean(getCandidateExclusionReason(c)),
     minScore,
     getScore: getCandidateMatchScore,
@@ -1474,14 +1481,14 @@ function NewJobPageContent() {
     };
 
     return [...filtered].sort(cmp);
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds]);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds, launchedPersonOwners]);
 
   // Feeds the all-hidden empty state; memoized because it runs the
   // string-heavy exclusion classifier over every loaded row and would
   // otherwise recompute per keystroke while that state is showing.
   const hiddenBreakdown = useMemo(
     () => computeHiddenBreakdown(candidates.filter((c: any) => matchesSourceFilter(c)), visibilityCtx),
-    [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds]
+    [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds, launchedPersonOwners]
   );
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
@@ -1673,6 +1680,7 @@ function NewJobPageContent() {
       const { keys, ids } = launchedSetsFromResponse(json?.launched);
       setLaunchedCandidateKeys(keys);
       setLaunchedCandidateIds(ids);
+      setLaunchedPersonOwners(personOwnersFromResponse(json?.person_keys));
     } catch (err) {
       console.warn('Failed to load launched candidate keys', err);
     }
@@ -6699,6 +6707,9 @@ function NewJobPageContent() {
       launchedKeys: launchedCandidateKeys,
       launchedIds: launchedCandidateIds,
       limit,
+      // Another id of a person already launched for this job: the launch
+      // claim would refuse it, so it never takes a slot of the cap.
+      blocked: launchedPersonBlocks(pool, launchedPersonOwners),
     });
 
   // ── Server launch sessions ──────────────────────────────────────────────
@@ -7514,6 +7525,7 @@ function NewJobPageContent() {
       launchedIds: launchedCandidateIds,
       limit: qaQuickLaunchCount,
       minScore: null,
+      blocked: launchedPersonBlocks(candidatesRef.current, launchedPersonOwners),
     });
     if (ids.length === 0) {
       showToast("QA quick launch: no launchable rows on screen. Run Search first.", "info");
@@ -10731,7 +10743,7 @@ function NewJobPageContent() {
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
+                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !isLaunchedPerson(c, launchedPersonOwners) && !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
