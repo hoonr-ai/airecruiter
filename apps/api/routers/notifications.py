@@ -74,7 +74,7 @@ def init_notifications_schema_sync() -> None:
                         type            TEXT NOT NULL DEFAULT 'candidate_passed',
                         job_id          TEXT,
                         jobdiva_id      TEXT NOT NULL,
-                        candidate_id    TEXT NOT NULL,
+                        candidate_id    TEXT,
                         title           TEXT NOT NULL,
                         body            TEXT,
                         score           NUMERIC,
@@ -90,6 +90,16 @@ def init_notifications_schema_sync() -> None:
                 # on CREATE TABLE would otherwise silently skip.
                 cur.execute(
                     "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS cleared_at TIMESTAMPTZ;"
+                )
+                # candidate_id shipped NOT NULL (every notification was
+                # candidate-level then). pair_launched/pair_inactive are
+                # job-level — a launch has a candidate COUNT, not one
+                # candidate, and an inactivity transition has none at all —
+                # so candidate_id is NULL for those. DROP COLUMN ... NOT NULL
+                # is a no-op if it's already nullable (fresh installs from
+                # the CREATE TABLE above).
+                cur.execute(
+                    "ALTER TABLE notifications ALTER COLUMN candidate_id DROP NOT NULL;"
                 )
                 cur.execute(
                     """

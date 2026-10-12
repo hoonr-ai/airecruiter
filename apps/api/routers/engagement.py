@@ -68,6 +68,7 @@ from services.profile_resume import (
 )
 from utils.email_utils import is_placeholder_email
 from services.auto_assign_service import auto_assign_service
+from services.notifications_service import create_pair_launched_notification
 from core.auth import UserIdentity, get_current_user
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
@@ -1388,6 +1389,16 @@ async def _send_pair_launch_email(
             job_id=db_job_id,
             app_base_url=app_base_url,
             relaunch=relaunch,
+        )
+
+        # In-app companion to Email #1 — same recipients, same trigger point,
+        # job-level (see services/notifications_service.py).
+        await create_pair_launched_notification(
+            job_id=db_job_id,
+            jobdiva_id=jobdiva_id,
+            job_title=job_title,
+            candidate_count=candidate_count,
+            recruiter_emails=clean_emails,
         )
 
         # ── Email #2: Job Posting Request (skipped on re-launch or no boards) ──

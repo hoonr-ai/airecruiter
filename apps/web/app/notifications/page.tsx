@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
+import { notificationClickPath } from "@/lib/browser-notifications";
 import { cn } from "@/lib/utils";
 
 function formatRelativeTime(iso: string): string {
@@ -28,20 +29,19 @@ function formatRelativeTime(iso: string): string {
 function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id: number) => void }) {
   const router = useRouter();
   const isUnread = !item.read_at;
-  // Both present on every notification created after the NOT NULL schema
-  // tightening; still guarded in case an older row predates it.
-  const reportHref =
-    item.jobdiva_id && item.candidate_id
-      ? `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`
-      : null;
+  // Candidate-level notifications (candidate_passed) go to that candidate's
+  // report; job-level ones (pair_launched, pair_inactive — candidate_id is
+  // always null for those) go to the job's rankings page instead. Every
+  // notification in this app has a jobdiva_id, so this always resolves to a
+  // real destination in practice.
+  const clickHref = notificationClickPath(item);
 
   const handleRowClick = () => {
     if (isUnread) onRead(item.id);
-    if (reportHref) router.push(reportHref);
+    router.push(clickHref);
   };
 
   const handleRowKeyDown = (e: React.KeyboardEvent) => {
-    if (!reportHref) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       handleRowClick();
@@ -52,12 +52,12 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
     <Card
       onClick={handleRowClick}
       onKeyDown={handleRowKeyDown}
-      role={reportHref ? "link" : undefined}
-      tabIndex={reportHref ? 0 : undefined}
+      role="link"
+      tabIndex={0}
       className={cn(
-        "flex-row items-center gap-4 px-5 py-4 transition-colors",
-        isUnread ? "bg-primary/5 border-primary/20" : "bg-white",
-        reportHref && "hover:border-primary/40 cursor-pointer focus-visible:outline-2 focus-visible:outline-primary"
+        "flex-row items-center gap-4 px-5 py-4 transition-colors cursor-pointer",
+        "hover:border-primary/40 focus-visible:outline-2 focus-visible:outline-primary",
+        isUnread ? "bg-primary/5 border-primary/20" : "bg-white"
       )}
     >
       <div className="flex-1 min-w-0">

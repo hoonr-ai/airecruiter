@@ -23,6 +23,7 @@ from core import (
     JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS
 )
 from core.email import notify_pair_launched, notify_job_posting, notify_pair_inactive
+from services.notifications_service import create_pair_inactive_notification
 
 PAIR_INACTIVE_STATUSES = os.getenv("PAIR_INACTIVE_STATUSES", "closed,filled,cancelled,canceled,expired,ignored,declined").lower().split(",")
 
@@ -847,7 +848,7 @@ async def _fire_pair_inactive_notification(job_id: str):
                SET pair_inactive_notified_at = NOW()
              WHERE job_id = %s
                AND pair_inactive_notified_at IS NULL
-            RETURNING recruiter_emails, jobdiva_id
+            RETURNING recruiter_emails, jobdiva_id, title, enhanced_title
             """,
             (job_id,),
         )
@@ -876,6 +877,15 @@ async def _fire_pair_inactive_notification(job_id: str):
                 jobdiva_id=row["jobdiva_id"] or job_id,
                 recruiter_emails=recruiter_emails,
                 job_id=job_id,  # enables the live JobDiva deep-link
+            )
+            # In-app companion — same recipients, same claimed trigger
+            # (see services/notifications_service.py for why this needs no
+            # dedup of its own).
+            await create_pair_inactive_notification(
+                job_id=job_id,
+                jobdiva_id=row["jobdiva_id"] or job_id,
+                job_title=row.get("enhanced_title") or row.get("title") or "",
+                recruiter_emails=recruiter_emails,
             )
         except Exception as send_err:
             # Send failed after we claimed — release the marker so the next

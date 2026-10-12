@@ -17,6 +17,12 @@
   supplied since_id resume path (authoritative, and the only one that's
   correct across a reconnect landing on a different worker); and
   _prune_stale_cursors's bookkeeping cleanup.
+- create_pair_launched_notification / create_pair_inactive_notification: the
+  job-level (candidate_id=NULL) companions to the existing PAIR-launched and
+  PAIR-inactive emails — one row per recruiter, no dedup of their own (a
+  relaunch / a fresh inactivity event is each worth notifying; see their
+  docstrings for why the unique index's NULL-candidate_id behavior makes
+  that safe).
 """
 import asyncio
 import json
@@ -29,6 +35,8 @@ from services.notifications_service import (
     _parse_recruiter_emails,
     _insert_notification,
     create_candidate_passed_notifications,
+    create_pair_launched_notification,
+    create_pair_inactive_notification,
     reconcile_missed_pass_notifications,
 )
 
@@ -106,7 +114,7 @@ def test_parse_recruiter_emails_empty_and_none():
 def test_insert_notification_returns_true_when_row_inserted():
     cur = FakeCursor(fetchone_results=[{"id": 1}])
     inserted = _insert_notification(
-        cur, recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
+        cur, notification_type="candidate_passed", recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
         candidate_id="C1", title="t", body=None, score=90.0,
     )
     assert inserted is True
@@ -117,10 +125,27 @@ def test_insert_notification_returns_true_when_row_inserted():
 def test_insert_notification_returns_false_on_conflict():
     cur = FakeCursor(fetchone_results=[None])
     inserted = _insert_notification(
-        cur, recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
+        cur, notification_type="candidate_passed", recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
         candidate_id="C1", title="t", body=None, score=90.0,
     )
     assert inserted is False
+
+
+def test_insert_notification_allows_null_candidate_id_for_job_level_types():
+    """Job-level types (pair_launched, pair_inactive) pass candidate_id=None.
+    A NULL never equals another NULL in the unique index, so this always
+    "inserts" (RETURNING a row) rather than deduping — intentional, see
+    _insert_notification's docstring."""
+    cur = FakeCursor(fetchone_results=[{"id": 1}])
+    inserted = _insert_notification(
+        cur, notification_type="pair_launched", recipient_email="a@x.com", job_id="J1", jobdiva_id="JD1",
+        candidate_id=None, title="t", body=None, score=None,
+    )
+    assert inserted is True
+    sql, params = cur.executed[0]
+    assert params[0] == "a@x.com"
+    assert params[1] == "pair_launched"
+    assert params[4] is None  # candidate_id position
 
 
 # --- create_candidate_passed_notifications: the Pass gate -------------------
@@ -211,6 +236,87 @@ def test_reconcile_backfills_new_recipient_for_already_notified_candidate(monkey
     insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
     assert len(insert_calls) == 1
     assert insert_calls[0][1][0] == "new-recruiter@x.com"
+
+
+# --- create_pair_launched_notification / create_pair_inactive_notification --
+
+def test_create_pair_launched_notification_inserts_one_row_per_recruiter_with_null_candidate(monkeypatch):
+    cur = FakeCursor(fetchone_results=[{"id": 1}, {"id": 2}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_pair_launched_notification(
+        job_id="J1",
+        jobdiva_id="26-14907",
+        job_title="MS SQL Developer",
+        candidate_count=12,
+        recruiter_emails=["a@x.com", "b@x.com"],
+    ))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 2
+    for sql, params in insert_calls:
+        assert params[1] == "pair_launched"
+        assert params[4] is None  # candidate_id
+    assert {c[1][0] for c in insert_calls} == {"a@x.com", "b@x.com"}
+    assert "12 candidates" in insert_calls[0][1][5]  # title
+    assert conn.committed is True
+
+
+def test_create_pair_launched_notification_singular_candidate_count(monkeypatch):
+    cur = FakeCursor(fetchone_results=[{"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_pair_launched_notification(
+        job_id="J1", jobdiva_id="26-14907", job_title="MS SQL Developer",
+        candidate_count=1, recruiter_emails=["a@x.com"],
+    ))
+
+    title = cur.executed[0][1][5]
+    assert "1 candidate" in title and "1 candidates" not in title
+
+
+def test_create_pair_launched_notification_noop_without_recruiters_or_jobdiva_id(monkeypatch):
+    def _fail():
+        raise AssertionError("must not touch the DB without recruiters/jobdiva_id")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_pair_launched_notification(
+        job_id="J1", jobdiva_id="", job_title="X", candidate_count=1, recruiter_emails=["a@x.com"],
+    ))
+    asyncio.run(create_pair_launched_notification(
+        job_id="J1", jobdiva_id="26-14907", job_title="X", candidate_count=1, recruiter_emails=[],
+    ))
+
+
+def test_create_pair_inactive_notification_inserts_per_recruiter_with_null_candidate(monkeypatch):
+    cur = FakeCursor(fetchone_results=[{"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_pair_inactive_notification(
+        job_id="J1", jobdiva_id="26-14907", job_title="MS SQL Developer",
+        recruiter_emails=["a@x.com"],
+    ))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    sql, params = insert_calls[0]
+    assert params[1] == "pair_inactive"
+    assert params[4] is None  # candidate_id
+    assert "MS SQL Developer" in params[5]  # title
+    assert conn.committed is True
+
+
+def test_create_pair_inactive_notification_noop_without_recruiters(monkeypatch):
+    def _fail():
+        raise AssertionError("must not touch the DB without recruiters")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_pair_inactive_notification(
+        job_id="J1", jobdiva_id="26-14907", job_title="X", recruiter_emails=[],
+    ))
 
 
 # --- recipient scoping on the read/mark-read sync helpers -------------------

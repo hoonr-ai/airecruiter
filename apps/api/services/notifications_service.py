@@ -1,17 +1,32 @@
-"""In-app notification creation for candidates who passed their interview.
+"""In-app notification creation, alongside (never instead of) this app's
+existing email notifications. Three types today:
 
-Independent of (and in addition to) the pass-email trigger in
-routers/engagement.py (`_check_and_fire_candidate_passed_notification`): that
-function gates on the stricter, email-specific hard-filter check, while this
-one gates on `engage_status.format_engage_status(...) == "Pass"` — the same
-rule Rankings, the launch report and admin analytics use — so "you got
-notified in-app" always agrees with "this candidate shows as Pass everywhere
-else in the product."
+- candidate_passed (create_candidate_passed_notifications): a candidate's
+  interview result. Independent of the pass-email trigger in
+  routers/engagement.py (`_check_and_fire_candidate_passed_notification`):
+  that function gates on the stricter, email-specific hard-filter check,
+  while this one gates on `engage_status.format_engage_status(...) ==
+  "Pass"` — the same rule Rankings, the launch report and admin analytics
+  use — so "you got notified in-app" always agrees with "this candidate
+  shows as Pass everywhere else in the product." Candidate-level:
+  candidate_id is set, and the unique index on (recipient_email,
+  candidate_id, jobdiva_id, type) dedupes a repeat trigger for the same
+  candidate/job/recipient.
 
-One row is written per recruiter in the job's `recruiter_emails`. Dedup is a
-unique index on (recipient_email, candidate_id, jobdiva_id, type), claimed
-atomically via `INSERT ... ON CONFLICT DO NOTHING RETURNING id` so concurrent
-webhook deliveries across uvicorn workers can't double-insert.
+- pair_launched / pair_inactive (create_pair_launched_notification /
+  create_pair_inactive_notification): job-level events with no single
+  candidate (a launch has a candidate COUNT; an inactivity transition has
+  none at all) — candidate_id is NULL. Mirror core/email.py's
+  notify_pair_launched / notify_pair_inactive, fired from the same call
+  sites. See _insert_notification's docstring for why a NULL candidate_id
+  means these intentionally do NOT dedupe against themselves the way
+  candidate_passed does: a relaunch or a fresh inactivity event is each
+  worth its own notification, and the real "exactly once" guarantee for
+  both already lives at their call sites (same as for the email).
+
+One row is written per recruiter in the job's `recruiter_emails`, via
+`INSERT ... ON CONFLICT DO NOTHING RETURNING id` so concurrent webhook
+deliveries across uvicorn workers can't double-insert.
 """
 from typing import Any, Dict, List, Optional
 import json
@@ -57,23 +72,33 @@ def _parse_recruiter_emails(val: Any) -> List[str]:
 def _insert_notification(
     cur,
     *,
+    notification_type: str,
     recipient_email: str,
     job_id: Optional[str],
     jobdiva_id: Optional[str],
-    candidate_id: str,
+    candidate_id: Optional[str],
     title: str,
     body: Optional[str],
     score: Optional[float],
 ) -> bool:
+    """candidate_id is None for job-level event types (pair_launched,
+    pair_inactive — see create_pair_launched_notification /
+    create_pair_inactive_notification). The unique index on (recipient_email,
+    candidate_id, jobdiva_id, type) never finds two NULLs equal, so a NULL
+    candidate_id here always inserts rather than deduping — intentional: both
+    job-level events recur (relaunch, reactivate-then-go-inactive-again) and
+    are each worth their own notification, and the real "only one in flight"
+    guarantee for them lives at the caller (the launch-session claim / the
+    pair_inactive_notified_at atomic claim), not in this table."""
     cur.execute(
         """
         INSERT INTO notifications
             (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score)
-        VALUES (%s, 'candidate_passed', %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING
         RETURNING id
         """,
-        (recipient_email, job_id, jobdiva_id, candidate_id, title, body, score),
+        (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score),
     )
     return cur.fetchone() is not None
 
@@ -154,6 +179,7 @@ async def create_candidate_passed_notifications(
                 for recipient in recruiter_emails:
                     if _insert_notification(
                         cur,
+                        notification_type="candidate_passed",
                         recipient_email=recipient,
                         job_id=app_job_id,
                         jobdiva_id=jobdiva_id,
@@ -243,6 +269,7 @@ async def reconcile_missed_pass_notifications() -> None:
                     for recipient in recruiter_emails:
                         if _insert_notification(
                             cur,
+                            notification_type="candidate_passed",
                             recipient_email=recipient,
                             job_id=row.get("job_id"),
                             jobdiva_id=row.get("jobdiva_id"),
@@ -259,3 +286,107 @@ async def reconcile_missed_pass_notifications() -> None:
             conn.close()
     except Exception as e:  # noqa: BLE001 - scheduler job must never crash the loop
         logger.error("reconcile_missed_pass_notifications_failed: %s", e, exc_info=True)
+
+
+async def create_pair_launched_notification(
+    *,
+    job_id: str,
+    jobdiva_id: str,
+    job_title: str,
+    candidate_count: int,
+    recruiter_emails: List[str],
+) -> None:
+    """Fire in-app "PAIR launched" notifications for every recruiter on the
+    job, alongside the existing email (routers/engagement.py's
+    _send_pair_launch_email, which calls core.email.notify_pair_launched).
+
+    Job-level — candidate_id is NULL, since a launch is a batch event with a
+    candidate COUNT, never a single candidate (see the launch endpoints in
+    engagement.py: they only ever pass an int). No dedup here, matching the
+    email: a relaunch is a new, separately-worth-notifying event, and
+    _insert_notification's unique index never dedupes a NULL candidate_id
+    against another NULL, so every call inserts fresh rows. The "only one in
+    flight per actual launch" guarantee is the caller's launch-session claim
+    / in-memory flag — the same thing the email already relies on.
+    """
+    try:
+        if not job_id or not jobdiva_id or not recruiter_emails:
+            return
+        recipients = _parse_recruiter_emails(recruiter_emails)
+        if not recipients:
+            return
+
+        plural = "s" if candidate_count != 1 else ""
+        title = f"PAIR launched for {job_title or 'this job'} — {candidate_count} candidate{plural}"
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                for recipient in recipients:
+                    _insert_notification(
+                        cur,
+                        notification_type="pair_launched",
+                        recipient_email=recipient,
+                        job_id=job_id,
+                        jobdiva_id=jobdiva_id,
+                        candidate_id=None,
+                        title=title,
+                        body=None,
+                        score=None,
+                    )
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 - must never raise into the launch flow
+        logger.error("create_pair_launched_notification_failed job=%s: %s", job_id, e, exc_info=True)
+
+
+async def create_pair_inactive_notification(
+    *,
+    job_id: str,
+    jobdiva_id: str,
+    job_title: str,
+    recruiter_emails: List[str],
+) -> None:
+    """Fire in-app "PAIR inactive" notifications, alongside the existing
+    email (main.py's _fire_pair_inactive_notification, which calls
+    core.email.notify_pair_inactive).
+
+    Job-level, like create_pair_launched_notification, and for the same
+    reason: an inactivity transition has no candidate. Call this only from
+    the already-claimed branch of _fire_pair_inactive_notification — that
+    function's atomic `UPDATE monitored_jobs ... WHERE pair_inactive_notified_at
+    IS NULL RETURNING` is the real "exactly once per inactive event" guard
+    (identical to the one the email relies on); this function doesn't need
+    its own, and _insert_notification's NULL candidate_id means it wouldn't
+    provide one anyway.
+    """
+    try:
+        if not job_id or not jobdiva_id or not recruiter_emails:
+            return
+        recipients = _parse_recruiter_emails(recruiter_emails)
+        if not recipients:
+            return
+
+        title = f"PAIR is now inactive for {job_title or 'this job'}"
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                for recipient in recipients:
+                    _insert_notification(
+                        cur,
+                        notification_type="pair_inactive",
+                        recipient_email=recipient,
+                        job_id=job_id,
+                        jobdiva_id=jobdiva_id,
+                        candidate_id=None,
+                        title=title,
+                        body=None,
+                        score=None,
+                    )
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 - must never raise into the poll cycle
+        logger.error("create_pair_inactive_notification_failed job=%s: %s", job_id, e, exc_info=True)

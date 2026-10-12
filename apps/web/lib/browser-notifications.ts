@@ -36,14 +36,23 @@ export function shouldShowBrowserPopup(
   return !(isDocumentVisible && documentHasFocus);
 }
 
-// Where clicking a desktop popup should take the user. Falls back to the
-// notifications page itself when either id is missing (older rows, or a
-// malformed event) rather than just focusing the window and going nowhere.
+// Where clicking a notification (the in-app row or a desktop popup) should
+// take the user:
+// - candidate-level (candidate_passed): straight to that candidate's report.
+// - job-level (pair_launched, pair_inactive — candidate_id is always NULL
+//   for these, see services/notifications_service.py): there's no single
+//   candidate to open, so the job's rankings page is the closest "show me
+//   what this is about" destination.
+// - neither id present (older row, malformed event): the notifications page
+//   itself, rather than just focusing the window and going nowhere.
 export function notificationClickPath(
   item: Pick<NotificationItem, "jobdiva_id" | "candidate_id">
 ): string {
   if (item.jobdiva_id && item.candidate_id) {
     return `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`;
+  }
+  if (item.jobdiva_id) {
+    return `/jobs/${encodeURIComponent(item.jobdiva_id)}/rankings`;
   }
   return "/notifications";
 }
