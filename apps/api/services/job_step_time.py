@@ -1,12 +1,13 @@
-"""Time recruiters spend on a job-wizard step — Step 5 ("Source") for the reports.
+"""Time recruiters spend on each job-wizard step, for the reports.
 
-Nothing measured this before 2026-09-23: Step 5 is the wizard's last step, so
-the Amplitude `job_wizard_step_completed.duration_ms` timer never fires for it,
-and PAIR's own tables only know when the job was launched. The wizard now
-reports ACTIVE time while Step 5 is open: the tab is visible and the recruiter
-has interacted within the last few minutes (apps/web/lib/step-time.ts). The
-page sends it about once a minute, as a delta, to POST
-/api/v1/jobs/{job}/step-time.
+The wizard (apps/web/hooks/use-step-active-time.ts) reports ACTIVE time on
+whichever step is open: the tab is visible and the recruiter has interacted
+within the last few minutes (apps/web/lib/step-time.ts). It sends it as a
+delta every few minutes, and when the step is left or the tab hidden, to
+POST /api/v1/jobs/{job}/step-time. Steps 1–4 (Intake, Publish, Establish
+Rubric, Set Filters) are timed while the job is being set up (the wizard's
+edit mode); Step 5 (Source) in every mode. Step 5 started on 2026-09-23 and
+Steps 1–4 on 2026-10-12; jobs worked earlier have no rows for them.
 
 One row per (job, step, recruiter), so the reports can show both a job's total
 and who spent it:
@@ -14,19 +15,20 @@ and who spent it:
   active_ms         summed over every visit by that recruiter
   first_entered_at  the first time that recruiter opened the step on the job
 
-Two numbers come out of it, computed in ONE place (fetch_step_metrics) so the
-Launch Report, Admin Analytics and Recruiter Analytics can never disagree:
+The numbers come out of ONE read (fetch_step_metrics) so the Launch Report,
+Admin Analytics and Recruiter Analytics can never disagree:
 
-  Step 5 Active Time  SUM(active_ms) over all recruiters on the job.
-  Step 5 → Launch     wall-clock from the job's first Step 5 entry (any
-                      recruiter) to its first SUCCESSFUL launch — the Launch
-                      Report's definition of launched (an audit row with an
-                      interview id). None when either end is missing, or when
-                      the launch came first (a job launched before this
-                      tracking existed and re-opened later).
+  Step N Active Time   SUM(active_ms) over all recruiters on the job, for
+                       each step (active_minutes_by_step).
+  Posting Active Time  the same over Steps 1–5 together.
+  Step 5 → Launch      wall-clock from the job's first Step 5 entry (any
+                       recruiter) to its first SUCCESSFUL launch — the Launch
+                       Report's definition of launched (an audit row with an
+                       interview id). None when either end is missing, or when
+                       the launch came first (a job launched before this
+                       tracking existed and re-opened later).
 
-Jobs worked on before the tracking existed have no rows, and the reports show a
-dash for them.
+A step nobody timed reads None, never 0, and the reports show a dash.
 """
 
 import datetime
@@ -36,6 +38,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# The wizard's steps (apps/web/app/jobs/new/page.tsx STEP_LABELS).
+WIZARD_STEPS = (1, 2, 3, 4, 5)
 STEP_SOURCE = 5
 # The page flushes about every 60s; a single report can never carry more than
 # this, whatever the client sends (a bug, a clock jump, a replayed request).
@@ -109,6 +113,18 @@ step_time AS (
     WHERE t.step = %s
     GROUP BY t.job_id
 ),
+every_step AS (
+    -- Active time per step over every recruiter, for all five steps at once
+    -- (the step-specific CTE above only reads the requested one).
+    SELECT job_key, jsonb_object_agg(step::text, active_ms) AS by_step
+    FROM (
+        SELECT t.job_id AS job_key, t.step, SUM(t.active_ms) AS active_ms
+        FROM job_step_time t
+        JOIN jobs ON jobs.job_key = t.job_id
+        GROUP BY t.job_id, t.step
+    ) per_step
+    GROUP BY job_key
+),
 launches AS (
     -- First SUCCESSFUL launch, the Launch Report's rule
     -- (routers/launch_report._fetch_jobs_launched_on): an audit row on either
@@ -122,11 +138,16 @@ launches AS (
       AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''
     GROUP BY keys.job_key
 )
-SELECT jobs.job_key, st.active_ms, st.first_entered_at, st.by_user, l.first_launch_at
+SELECT jobs.job_key, st.active_ms, st.first_entered_at, st.by_user, l.first_launch_at, es.by_step
 FROM jobs
 LEFT JOIN step_time st ON st.job_key = jobs.job_key
 LEFT JOIN launches l ON l.job_key = jobs.job_key
+LEFT JOIN every_step es ON es.job_key = jobs.job_key
 """
+
+
+def _ms_to_minutes(ms: Optional[int]) -> Optional[float]:
+    return round(ms / 60000.0, 1) if ms is not None else None
 
 
 def empty_step_metrics() -> Dict[str, Any]:
@@ -137,7 +158,39 @@ def empty_step_metrics() -> Dict[str, Any]:
         "first_launch_at": None,
         "to_launch_minutes": None,
         "by_user": {},
+        "active_minutes_by_step": {step: None for step in WIZARD_STEPS},
+        "posting_active_minutes": None,
     }
+
+
+def posting_time_columns(metrics: Optional[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    """The report columns for Steps 1–4 and the Steps 1–5 total, from one
+    fetch_step_metrics entry (None, or a failed read: every column None).
+    Step 5 keeps its own columns (step5_active_minutes / step5_to_launch_minutes).
+    Shared by the Launch Report and Admin Analytics so the two can't drift."""
+    by_step = (metrics or {}).get("active_minutes_by_step") or {}
+    columns: Dict[str, Optional[float]] = {
+        f"step{step}_active_minutes": by_step.get(step) for step in WIZARD_STEPS if step != STEP_SOURCE
+    }
+    columns["posting_active_minutes"] = (metrics or {}).get("posting_active_minutes")
+    return columns
+
+
+def _by_step_minutes(by_step: Any) -> Tuple[Dict[int, Optional[float]], Optional[float]]:
+    """({step: minutes or None} for every wizard step, total minutes over them
+    or None when no step was timed) from the read's {"<step>": ms} object.
+    Steps outside WIZARD_STEPS are ignored."""
+    ms_by_step: Dict[int, int] = {}
+    for key, value in (by_step or {}).items():
+        try:
+            step = int(key)
+        except (TypeError, ValueError):
+            continue
+        if step in WIZARD_STEPS:
+            ms_by_step[step] = int(value or 0)
+    minutes = {step: _ms_to_minutes(ms_by_step.get(step)) for step in WIZARD_STEPS}
+    total = _ms_to_minutes(sum(ms_by_step.values())) if ms_by_step else None
+    return minutes, total
 
 
 def _aware(value: Any) -> Optional[datetime.datetime]:
@@ -181,7 +234,10 @@ def fetch_step_metrics(
     Every requested job gets an entry (empty_step_metrics() when nothing was
     recorded). ``active_ms`` / ``active_minutes`` are None — not 0 — for a job
     nobody has timed, so a report can tell "not tracked" from "0 minutes".
-    ``by_user`` maps lowercased recruiter email → active ms. Plain tuple-cursor
+    ``by_user`` maps lowercased recruiter email → active ms (for ``step``).
+    ``active_minutes_by_step`` covers every wizard step whatever ``step`` is
+    ({1: minutes or None, ..., 5: ...}), and ``posting_active_minutes`` is
+    their total (None when no step was timed). Plain tuple-cursor
     psycopg2 connection; raises on DB errors (callers own the fallback).
     """
     pairs: List[Tuple[str, str]] = []
@@ -202,19 +258,22 @@ def fetch_step_metrics(
             STEP_METRICS_SQL,
             ([k for k, _ in pairs], [r for _, r in pairs], int(step), _DB_TIMEZONE),
         )
-        for job_key, active_ms, first_entered_at, by_user, first_launch_at in cur.fetchall():
+        for job_key, active_ms, first_entered_at, by_user, first_launch_at, by_step in cur.fetchall():
             key = str(job_key)
             if key not in result:
                 continue
             entered = _aware(first_entered_at)
             launched = _aware(first_launch_at)
             ms = int(active_ms) if active_ms is not None else None
+            minutes_by_step, posting_minutes = _by_step_minutes(by_step)
             result[key] = {
                 "active_ms": ms,
-                "active_minutes": round(ms / 60000.0, 1) if ms is not None else None,
+                "active_minutes": _ms_to_minutes(ms),
                 "first_entered_at": entered,
                 "first_launch_at": launched,
                 "to_launch_minutes": to_launch_minutes(entered, launched),
                 "by_user": _merge_by_user(by_user),
+                "active_minutes_by_step": minutes_by_step,
+                "posting_active_minutes": posting_minutes,
             }
     return result

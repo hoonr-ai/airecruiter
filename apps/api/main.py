@@ -40,7 +40,6 @@ def readable_ist_now() -> str:
 from core.logging import configure_logging, RequestIDMiddleware
 from core.advisory_lock import AdvisoryLock
 from core.startup_once import claim_once, run_schema_once
-from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -247,6 +246,9 @@ async def lifespan(app: FastAPI):
         # JobDiva BI mirror behind the PAIR Dashboard.
         if jobdiva_bi_sync is not None:
             steps.append(("jobdiva_bi_schema_init", jobdiva_bi_sync.init_jobdiva_bi_schema, 10))
+        # In-app notifications table.
+        if notifications_router is not None and hasattr(notifications_router, "init_notifications_schema"):
+            steps.append(("notifications_schema_init", notifications_router.init_notifications_schema, 10))
 
         # Imported inside each step so a broken module fails only its step.
         async def _scs_init():
@@ -392,6 +394,23 @@ async def lifespan(app: FastAPI):
         id="monitored_jobs_cache_warmer",
         replace_existing=True,
     )
+
+    # Safety net for the webhook-triggered in-app notification (a crashed
+    # worker loses an asyncio.create_task before it completes, or a status
+    # changes outside the webhook path). Backfills anything the webhook path
+    # missed; dedup is the notifications table's own unique index, so this
+    # can never double-insert.
+    try:
+        from services.notifications_service import reconcile_missed_pass_notifications
+        scheduler.add_job(
+            reconcile_missed_pass_notifications,
+            "interval",
+            minutes=10,
+            id="notifications_reconciliation",
+            replace_existing=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"notifications_reconciliation_schedule_failed: {e}; continuing")
     # Prime cache once at startup so the first dashboard request after
     # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
     # failure is logged inside the warmer and never blocks boot. Stays
@@ -512,6 +531,7 @@ live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
 apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
+notifications_router = _safe_import("notifications")
 pairbot_webhook_router = _safe_import("pairbot_webhook")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
@@ -576,6 +596,7 @@ _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
 _mount(pairbot_webhook_router, "pairbot_webhook")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+_mount(notifications_router, "notifications", prefix="/api/v1/notifications")
 
 from core.auth import auth_router
 app.include_router(auth_router)
@@ -645,69 +666,6 @@ async def api_health():
     else:
         status, code = "ok", 200
     return JSONResponse({"status": status, "checks": checks}, status_code=code)
-
-@app.middleware("http")
-async def amplitude_request_tracking(request: Request, call_next):
-    """Best-effort API telemetry: request journey + failures."""
-    started = time.perf_counter()
-    method = request.method
-    path = request.url.path
-    query = request.url.query
-    user_id = request.headers.get("x-user-id") or request.headers.get("x-user-email")
-
-    try:
-        response = await call_next(request)
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        track_event_async(
-            "api_request",
-            {
-                "method": method,
-                "path": path,
-                "query": query,
-                "status_code": response.status_code,
-                "duration_ms": duration_ms,
-            },
-            user_id=user_id,
-            device_id="airecruiter-api",
-        )
-        if response.status_code >= 500:
-            track_event_async(
-                "api_server_error",
-                {
-                    "method": method,
-                    "path": path,
-                    "status_code": response.status_code,
-                    "duration_ms": duration_ms,
-                },
-                user_id=user_id,
-                device_id="airecruiter-api",
-            )
-        return response
-    except Exception as e:
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        track_event_async(
-            "api_exception",
-            {
-                "method": method,
-                "path": path,
-                "query": query,
-                "duration_ms": duration_ms,
-                "error": str(e),
-            },
-            user_id=user_id,
-            device_id="airecruiter-api",
-        )
-        raise
-
-
-
-
-
-
-
-
-
-
 
 
 # Job monitoring utility functions

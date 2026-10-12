@@ -2649,7 +2649,10 @@ export default function CandidateRankingsPage() {
                           {idx + 1}
                         </TableCell>
                         <TableCell className="border-b border-slate-200 sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                          {/* No prefetch: one per row as it scrolls into view was up
+                              to 100 page requests per screen of candidates. */}
                           <Link
+                            prefetch={false}
                             href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-1"
                           >

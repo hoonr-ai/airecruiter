@@ -1736,8 +1736,17 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
-  // Step 5 active time for the reports (hooks/use-step-active-time.ts).
-  useStepActiveTime({ jobRef: String(jobdivaId || numericJobId || ""), step: 5, enabled: currentStep === 5 });
+  // Active time on the open wizard step, for the reports' per-step columns
+  // (hooks/use-step-active-time.ts). Steps 1–4 count while the job is being
+  // set up (edit mode; the read-only modes only display them), Step 5 in every
+  // mode. Steps 1–4 start once a job is loaded and use ITS ref: the Step 1 ID
+  // box edits jobdivaId on every keystroke, which would restart the timer.
+  const loadedJobRef = jobData ? String(jobData.jobdiva_id || jobData.id || numericJobId || "").trim() : "";
+  useStepActiveTime({
+    jobRef: currentStep === 5 ? String(jobdivaId || numericJobId || "") : loadedJobRef,
+    step: currentStep,
+    enabled: currentStep === 5 || wizardMode === "edit",
+  });
 
   // Open-to-Work polling for Exa-sourced LinkedIn candidates.
   // Mirrors the Hoonrai/Revelio frontend polling pattern: every 5s POST any

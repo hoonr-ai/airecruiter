@@ -124,6 +124,14 @@ interface JobTimelineEntry {
    *  unavailable this time (jobs_timeline_step_time_available=false). */
   step5_active_minutes?: number | null;
   step5_to_launch_minutes?: number | null;
+  /** Active time on Steps 1–4 of the job wizard and on Steps 1–5 together,
+   *  in minutes (services/job_step_time.posting_time_columns). null = not
+   *  tracked (Steps 1–4: jobs set up before 10/12/2026) or unavailable. */
+  step1_active_minutes?: number | null;
+  step2_active_minutes?: number | null;
+  step3_active_minutes?: number | null;
+  step4_active_minutes?: number | null;
+  posting_active_minutes?: number | null;
   /** The job's first Launch PAIR click and the two launch timings in minutes
    *  (services/launch_timing.py): Added → Click = that click − Added (PAIR);
    *  Click → Launch = the first interview PAIR Bot created − the click. null
@@ -345,6 +353,28 @@ const renderDurationCell = (minutes: number | null | undefined) => {
   );
 };
 
+// The job wizard's steps (app/jobs/new/page.tsx STEP_LABELS), for the
+// Posting Time breakdown and its CSV columns.
+const POSTING_STEPS = [
+  { step: 1, name: "Intake", minutes: (j: JobTimelineEntry) => j.step1_active_minutes },
+  { step: 2, name: "Publish", minutes: (j: JobTimelineEntry) => j.step2_active_minutes },
+  { step: 3, name: "Rubric", minutes: (j: JobTimelineEntry) => j.step3_active_minutes },
+  { step: 4, name: "Filters", minutes: (j: JobTimelineEntry) => j.step4_active_minutes },
+  { step: 5, name: "Source", minutes: (j: JobTimelineEntry) => j.step5_active_minutes },
+] as const;
+
+/** Total job-wizard time, with the per-step split on hover. */
+const renderPostingTimeCell = (job: JobTimelineEntry) => {
+  const total = formatDuration(job.posting_active_minutes);
+  if (total === EMPTY_DATE) return renderDurationCell(job.posting_active_minutes);
+  const breakdown = POSTING_STEPS.map((s) => `Step ${s.step} ${s.name}: ${formatDuration(s.minutes(job))}`).join("\n");
+  return (
+    <span className="font-semibold text-slate-700 cursor-help underline decoration-dotted decoration-slate-300 underline-offset-4" title={breakdown}>
+      {total}
+    </span>
+  );
+};
+
 /** CSV twin of renderCountCell. No locale grouping: "1,234" would split the cell. */
 const countCsvValue = (value: number | null | undefined): string =>
   value === null || value === undefined ? EMPTY_DATE : String(value);
@@ -408,6 +438,7 @@ const TIMELINE_SKELETON_BARS: Array<{ center?: boolean; bar: string }> = [
   { bar: "h-4 w-20 rounded" }, // Launch Clicked
   { center: true, bar: "h-4 w-12 rounded" }, // Added → Click
   { center: true, bar: "h-4 w-12 rounded" }, // Click → Launch
+  { center: true, bar: "h-4 w-12 rounded" }, // Posting Time
   { center: true, bar: "h-4 w-12 rounded" }, // Step 5 Active Time
   { center: true, bar: "h-4 w-12 rounded" }, // Step 5 → Launch
   { center: true, bar: "h-5 w-16 rounded-full" }, // Active / Archived
@@ -443,7 +474,7 @@ const timelineCsvNote = (
   ...(stepTimeUnavailable
     ? [
         escapeCSV(
-          "Note: Step 5 time columns (Step 5 Active Time / Step 5 → Launch) were unavailable for this export and show —",
+          "Note: wizard step time columns (Posting Time / Step N Active Time / Step 5 → Launch) were unavailable for this export and show —",
         ),
       ]
     : []),
@@ -479,7 +510,8 @@ const timelineCsvHeaders = (withRecruiters: boolean): string[] => [
   "Added → Click",
   "Click → Launch",
   // Durations as on screen ("1h 22m"), like the Launch Report's CSV; no zone.
-  "Step 5 Active Time",
+  "Posting Time (Steps 1–5)",
+  ...POSTING_STEPS.map((s) => `Step ${s.step} ${s.name} Active Time`),
   "Step 5 → Launch",
   "Active / Archived Jobs",
   "Archive Reason",
@@ -516,7 +548,8 @@ const timelineCsvRow = (job: JobTimelineEntry, withRecruiters: boolean): string[
   formatEasternDateTime(job.launch_clicked_at),
   formatDuration(job.added_to_click_minutes),
   formatDuration(job.click_to_launch_minutes),
-  formatDuration(job.step5_active_minutes),
+  formatDuration(job.posting_active_minutes),
+  ...POSTING_STEPS.map((s) => formatDuration(s.minutes(job))),
   formatDuration(job.step5_to_launch_minutes),
   job.is_archived ? "Archived" : "Active",
   job.archive_reason || "",
@@ -2423,8 +2456,8 @@ export default function AdminAnalyticsPage() {
           >
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
             <span>
-              Step 5 time columns (Step 5 Active Time and Step 5 &rarr; Launch)
-              couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Reload
+              Wizard step time columns (Posting Time, Step 5 Active Time and
+              Step 5 &rarr; Launch) couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Reload
               to try again.
             </span>
           </div>
@@ -2499,6 +2532,11 @@ export default function AdminAnalyticsPage() {
                 <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
                   <HeaderHint hint="From the Launch PAIR click to the first interview PAIR Bot created (the first successful launch): how long PAIR took to launch after the click. — until the job has launched, and when the click wasn't recorded.">
                     Click &rarr; Launch
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Time recruiters had the job wizard open and in use on this job, Steps 1–5 together (hover a value for the per-step split), summed across every visit and every recruiter. It pauses while the tab is hidden or after 5 minutes with no activity. Steps 1–4 are tracked since 10/12/2026 and Step 5 since 09/23/2026; jobs worked earlier show — or Step 5 only.">
+                    Posting Time
                   </HeaderHint>
                 </th>
                 <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
@@ -2706,6 +2744,9 @@ export default function AdminAnalyticsPage() {
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderDurationCell(job.click_to_launch_minutes)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderPostingTimeCell(job)}
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderDurationCell(job.step5_active_minutes)}

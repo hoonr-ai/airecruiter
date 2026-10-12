@@ -83,7 +83,7 @@ from services.feedback_metrics import (
     submission_kind,
 )
 from services.job_attribution import attribution_fields
-from services.job_step_time import STEP_SOURCE, fetch_step_metrics
+from services.job_step_time import STEP_SOURCE, fetch_step_metrics, posting_time_columns
 from services.launch_timing import SUCCESSFUL_LAUNCH_AUDIT_SQL, first_launch_sql, timings_for_jobs
 from services.pair_auth import get_pair_auth_headers
 from services.outreach_normalization import (
@@ -1284,6 +1284,10 @@ def _build_row(
         # row with an interview id, on either job key), so the span ends at
         # the PAIR Launch shown on this row, not at a failed attempt.
         "step5_to_launch_minutes": step5.get("to_launch_minutes"),
+        # Active time on Steps 1–4 (step1_active_minutes … step4_active_minutes)
+        # and on Steps 1–5 together (posting_active_minutes), same rules as
+        # Step 5: None for a step nobody timed (Steps 1–4 since 10/12/2026).
+        **posting_time_columns(step_metrics),
 
         # Pending + In Progress + Completed + Partial Complete == Launched.
         "pending": buckets["pending"],
@@ -1351,9 +1355,9 @@ def _keys_for(job: Dict[str, Any]) -> List[str]:
 
 
 def _load_step_metrics(conn, jobs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Step 5 time for every report job in one statement, keyed by str(job_id).
+    """Wizard step time for every report job in one statement, keyed by str(job_id).
 
-    Best-effort: these two columns are an add-on to the report, so a failed
+    Best-effort: these columns are an add-on to the report, so a failed
     read is logged and returns {}, which every row reports as not tracked. It
     must never cost the recruiter the rest of the report.
     """

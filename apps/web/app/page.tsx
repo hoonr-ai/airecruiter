@@ -63,9 +63,15 @@ const SCREENING_LEVEL_STYLES: Record<string, string> = {
 // FEEDBACK COMPLETED and PAIR EXTERNAL SUBS change from background work
 // (a teammate's feedback, the JobDiva sync) — without this the page only
 // ever showed the numbers as of the moment it was opened. The backend
-// serves this from a 30s cache warmed every 25s, so polling at 30s adds
-// essentially no DB load.
-const DASHBOARD_REFRESH_MS = 30_000;
+// serves it from a cache, so the cost is the request itself: it returns the
+// whole job list, and nginx gives /jobs/monitored 30 requests a minute per
+// client IP, i.e. per office. At 30s, plus a fetch on every return to the
+// tab, a handful of recruiters with PAIR open used that budget up and
+// starved candidate search and Tira, which share it.
+const DASHBOARD_REFRESH_MS = 60_000;
+// Returning to the tab refreshes only data at least this old, so flicking
+// between PAIR and JobDiva doesn't fire a request each time.
+const DASHBOARD_REFOCUS_MIN_AGE_MS = 30_000;
 
 const sortJobsBy = (list: Job[], field: SortField, direction: SortDirection): Job[] =>
   [...list].sort((a, b) => {
@@ -156,6 +162,10 @@ export default function DashboardPage() {
   // would show a hard failure over a populated, healthy table.
   const allJobsCountRef = useRef(0);
 
+  // When the last /jobs/monitored fetch started, and whether it is still out,
+  // so a background refresh never stacks on one in flight or a fresh answer.
+  const jobsFetchRef = useRef({ inFlight: false, startedAt: 0 });
+
   useEffect(() => {
     fetchJobs();
   }, [activeTab]);
@@ -164,18 +174,24 @@ export default function DashboardPage() {
   // from work that happens off this page — another recruiter submitting
   // feedback, the JobDiva submittal sync — so an open dashboard would
   // otherwise sit on the numbers it loaded with until someone reloaded.
-  // Silent (no spinner), paused while the tab is hidden, and refreshed
-  // immediately on returning to the tab so a backgrounded dashboard is
-  // never showing minutes-old data.
+  // Silent (no spinner), paused while the tab is hidden, and refreshed on
+  // returning to the tab when the data is DASHBOARD_REFOCUS_MIN_AGE_MS old,
+  // so a backgrounded dashboard never shows minutes-old data.
   useEffect(() => {
-    const refreshIfVisible = () => {
-      if (document.visibilityState === "visible") fetchJobs({ background: true });
+    const refreshIfDue = (minAgeMs: number) => {
+      if (document.visibilityState !== "visible") return;
+      const { inFlight, startedAt } = jobsFetchRef.current;
+      if (inFlight || Date.now() - startedAt < minAgeMs) return;
+      fetchJobs({ background: true });
     };
-    const interval = setInterval(refreshIfVisible, DASHBOARD_REFRESH_MS);
-    document.addEventListener("visibilitychange", refreshIfVisible);
+    // Timer ticks land a little late, never early; the slack keeps a tick
+    // from skipping because the previous fetch started a moment under 60s ago.
+    const interval = setInterval(() => refreshIfDue(DASHBOARD_REFRESH_MS - 5_000), DASHBOARD_REFRESH_MS);
+    const onVisibilityChange = () => refreshIfDue(DASHBOARD_REFOCUS_MIN_AGE_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       clearInterval(interval);
-      document.removeEventListener("visibilitychange", refreshIfVisible);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [activeTab]);
 
@@ -198,6 +214,7 @@ export default function DashboardPage() {
     // aborted, so the dashboard rendered blank with no signal to the user.
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
+    jobsFetchRef.current = { inFlight: true, startedAt: Date.now() };
     try {
       const includeArchived = activeTab === "archived";
       const response = await authFetch(
@@ -294,6 +311,7 @@ export default function DashboardPage() {
       }
     } finally {
       clearTimeout(timeoutId);
+      jobsFetchRef.current = { ...jobsFetchRef.current, inFlight: false };
       if (!background) setIsLoading(false);
     }
   };

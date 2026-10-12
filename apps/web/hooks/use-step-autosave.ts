@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 
 export type SaveJobDraft = (params: {
   currentStep: number;
@@ -37,6 +37,15 @@ export function useStepAutosave(
   // Use a ref to store previous dependencies so we only mark dirty on actual changes
   const prevDeps = useRef<any[]>(deps);
 
+  // page.tsx recreates saveJobDraft on every render, so it must not be an
+  // effect dependency. When it was, any unrelated re-render (Step 5 re-renders
+  // every few seconds from the launch-session poll) re-ran the debounce
+  // effect: the cleanup cancelled the pending timer and the re-run didn't
+  // reschedule it because the data hadn't changed, so autosaves only landed
+  // on step change or tab hide. An effect event always calls the latest
+  // saveJobDraft without making the effects re-run when it changes.
+  const save = useEffectEvent(saveJobDraft);
+
   useEffect(() => {
     // 1. Check if any dependency actually changed (skip if identical or first run)
     const depsChanged = haveDepsChanged(deps, prevDeps.current);
@@ -52,12 +61,12 @@ export function useStepAutosave(
     // 2. Mark as dirty and set a debounce timer
     dirtyRef.current = true;
     const handle = setTimeout(async () => {
-      const ok = await saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true });
+      const ok = await save({ currentStep: targetStep, saveType: "auto", skipToast: true });
       if (ok.ok) dirtyRef.current = false;
     }, 1500);
 
     return () => clearTimeout(handle);
-  }, [currentStep, targetStep, isReadOnly, isHydrated, saveJobDraft, ...deps]);
+  }, [currentStep, targetStep, isReadOnly, isHydrated, ...deps]);
 
   // 3. Flush on step change
   useEffect(() => {
@@ -67,8 +76,8 @@ export function useStepAutosave(
     if (!isHydrated) return;
 
     dirtyRef.current = false;
-    saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true });
-  }, [currentStep, targetStep, isReadOnly, isHydrated, saveJobDraft]);
+    save({ currentStep: targetStep, saveType: "auto", skipToast: true });
+  }, [currentStep, targetStep, isReadOnly, isHydrated]);
 
   // 4. Tab close / refresh / backgrounding: warn while dirty, and best-effort
   // flush the pending save with keepalive so it has a chance to land after
@@ -81,7 +90,7 @@ export function useStepAutosave(
     const flush = () => {
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
-      saveJobDraft({ currentStep: targetStep, saveType: "auto", skipToast: true, keepalive: true });
+      save({ currentStep: targetStep, saveType: "auto", skipToast: true, keepalive: true });
     };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (dirtyRef.current) {
@@ -101,5 +110,5 @@ export function useStepAutosave(
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pagehide", flush);
     };
-  }, [currentStep, targetStep, isReadOnly, isHydrated, saveJobDraft]);
+  }, [currentStep, targetStep, isReadOnly, isHydrated]);
 }

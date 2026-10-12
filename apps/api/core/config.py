@@ -301,11 +301,6 @@ ZOOMINFO_SCOPES          = get_env_with_default("ZOOMINFO_SCOPES",          "api
 # Apollo will short-circuit with a logged warning.
 APOLLO_API_KEY = get_env_with_default("APOLLO_API_KEY", "")
 
-# ---- Amplitude Telemetry ----
-AMPLITUDE_API_KEY = get_env_with_default("AMPLITUDE_API_KEY", "")
-AMPLITUDE_API_URL = get_env_with_default("AMPLITUDE_API_URL", "https://api2.amplitude.com/2/httpapi")
-AMPLITUDE_TRACK_LOGS = get_env_bool("AMPLITUDE_TRACK_LOGS", True)
-
 # ---- Candidate Scoring Calibration ----
 # These knobs tune how harsh the match_score curve is. Defaults were calibrated
 # after observing that no candidate scored above ~60% in real searches. Lower

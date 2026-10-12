@@ -447,7 +447,10 @@ export function JobLiveReportPanel({
           }
 
           setActiveConnections((prev) => new Set(prev).add(bulkId));
-          retryCounts.set(bulkId, 0);
+          // The backoff resets on the first real event, not on this 200: when
+          // PAIR Bot's stream is down the API answers 200, sends one
+          // {"type":"error"} event and closes, and resetting here reconnected
+          // (and refetched the snapshot) every 2-3s for the whole outage.
           resetWatchdog();
 
           const reader = response.body.getReader();
@@ -472,6 +475,7 @@ export function JobLiveReportPanel({
               const interviewId = payload.interview_id ?? payload.interviewId;
               const eventType = payload.event_type ?? payload.type;
               if (interviewId && eventType && eventType !== "connected") {
+                if (!receivedAnyEvent) retryCounts.set(bulkId, 0);
                 receivedAnyEvent = true;
                 activityEventRef.current({
                   interviewId: Number(interviewId),
@@ -491,14 +495,7 @@ export function JobLiveReportPanel({
 
           while (true) {
             const { done, value } = await reader.read();
-            if (done) {
-              // If stream cleanly ended without emitting any event, do not reset retry backoff
-              if (!receivedAnyEvent) {
-                const cur = retryCounts.get(bulkId) || 0;
-                retryCounts.set(bulkId, Math.min(cur + 1, 6));
-              }
-              break;
-            }
+            if (done) break; // the finally below backs the reconnect off
             buffer += decoder.decode(value, { stream: true });
             let match: RegExpExecArray | null;
             delimiterRegex.lastIndex = 0;

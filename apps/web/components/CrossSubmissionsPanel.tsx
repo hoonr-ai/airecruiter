@@ -236,6 +236,7 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
                         <div className="flex items-center gap-3 mt-1 text-[11px] font-medium">
                           {reportHref && (
                             <Link
+                              prefetch={false} // opens in a new tab, so a prefetch is never used
                               href={reportHref}
                               target="_blank"
                               className="inline-flex items-center gap-1 text-indigo-600 hover:underline"

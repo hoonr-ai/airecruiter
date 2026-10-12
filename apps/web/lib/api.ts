@@ -2,8 +2,9 @@
 // place. Streaming and multipart calls pass `API_BASE` directly; the `req`
 // helper handles the JSON case.
 
-import { trackEvent } from "@/lib/analytics";
-import { msalInstance } from "@/lib/msal-config";
+import type { AccountInfo } from "@azure/msal-browser";
+import { msalInstance, loginRequest } from "@/lib/msal-config";
+import { createApiTokenSource, type TokenOutcome } from "@/lib/auth-token";
 import type { Snapshot } from "@/app/admin/live-report/types";
 import {
   candidatesQueryString,
@@ -38,6 +39,80 @@ export function getActiveUserEmail(): string | undefined {
   return undefined;
 }
 
+// ---- API token ------------------------------------------------------------
+// The API authenticates with the Microsoft ID token. lib/auth-token.ts holds
+// the rules (why the ID token's own expiry is checked, the shared lookup, the
+// reuse window); this wires MSAL into them.
+
+const LOGIN_SCOPES = loginRequest.scopes;
+
+let signInRedirectStarted = false;
+
+function currentAccount(): AccountInfo | null {
+  try {
+    return msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
+  } catch {
+    // MSAL not initialized yet
+    return null;
+  }
+}
+
+const apiTokens = createApiTokenSource<AccountInfo>({
+  currentAccount,
+  acquireSilent: (account, forceRefresh) =>
+    msalInstance.acquireTokenSilent({ scopes: LOGIN_SCOPES, account, forceRefresh }),
+});
+
+/** The token for the API, or why there is none. Never throws. */
+export async function acquireApiToken(): Promise<TokenOutcome> {
+  if (typeof window === "undefined") return { token: null, signInRequired: false };
+  return apiTokens.acquire();
+}
+
+/**
+ * Send the browser to Microsoft sign-in, once. Returns false when it did not
+ * go: a redirect was started moments ago (the 401 loop guard in
+ * lib/api-error.ts) or there is no account to sign back in.
+ */
+export function redirectToSignIn(): boolean {
+  if (typeof window === "undefined") return false;
+  if (signInRedirectStarted) return true;
+  try {
+    if (isWithinRedirectCooldown(Date.now(), window.sessionStorage)) {
+      console.warn("Skipping MSAL loginRedirect: one started within the cooldown window (redirect loop guard).");
+      return false;
+    }
+  } catch {
+    // storage unavailable: let the redirect go
+  }
+  if (!currentAccount()) return false;
+  try {
+    recordRedirectTimestamp(Date.now(), window.sessionStorage);
+  } catch {
+    // Ignore storage write failure
+  }
+  signInRedirectStarted = true;
+  apiTokens.forget();
+  msalInstance.loginRedirect({ scopes: LOGIN_SCOPES }).catch(() => {
+    signInRedirectStarted = false;
+  });
+  return true;
+}
+
+/**
+ * Run before the app renders (components/auth/AuthGuard.tsx): make sure the
+ * cached sign-in still yields a token the API accepts. "redirecting" means
+ * the page is on its way to Microsoft sign-in, so nothing should load in the
+ * meantime. "unavailable" (no network, MSAL error) lets the app render anyway,
+ * as it did before this check existed.
+ */
+export async function ensureApiSession(): Promise<"ready" | "redirecting" | "unavailable"> {
+  const { token, signInRequired } = await acquireApiToken();
+  if (token) return "ready";
+  if (signInRequired && redirectToSignIn()) return "redirecting";
+  return "unavailable";
+}
+
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   if (typeof window === "undefined") return {};
 
@@ -47,43 +122,13 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
     headers["X-User-Email"] = userEmail;
   }
 
-  try {
-    const activeAccount =
-      msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
-    if (activeAccount) {
-      try {
-        const tokenResponse = await msalInstance.acquireTokenSilent({
-          scopes: ["User.Read"],
-          account: activeAccount,
-        });
-        let token = tokenResponse?.idToken || tokenResponse?.accessToken;
-        if (!token && (activeAccount as any)?.idToken) {
-          token = (activeAccount as any).idToken;
-        }
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`;
-        }
-      } catch (err: any) {
-        const errMsg = strError(err);
-        if (
-          err?.name === "InteractionRequiredAuthError" ||
-          errMsg.includes("interaction_required") ||
-          errMsg.includes("aadsts160021") ||
-          errMsg.includes("login_required")
-        ) {
-          msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
-        }
-      }
-    }
-  } catch (e) {
-    // ignore if MSAL not initialized
+  const { token, signInRequired } = await acquireApiToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  } else if (signInRequired) {
+    redirectToSignIn();
   }
-
   return headers;
-}
-
-function strError(e: any): string {
-  return (e?.message || e?.errorCode || String(e || "")).toLowerCase();
 }
 
 export async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
@@ -146,80 +191,30 @@ type JsonInit = Omit<RequestInit, "body" | "headers"> & {
 
 async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
   const { body, headers, ...rest } = init;
-  const method = (rest.method || "GET").toUpperCase();
-  const started = typeof performance !== "undefined" ? performance.now() : Date.now();
-  let trackedError = false;
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...rest,
+    headers: {
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...authHeaders,
+      ...(headers || {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
 
-  try {
-    const authHeaders = await getAuthHeaders();
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...rest,
-      headers: {
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        ...authHeaders,
-        ...(headers || {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-
-    const ended = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const durationMs = Math.round((ended - started) * 100) / 100;
-
-    if (!res.ok) {
-      if (res.status === 401 && typeof window !== "undefined") {
-        let withinCooldown = false;
-        try {
-          withinCooldown = isWithinRedirectCooldown(Date.now(), window.sessionStorage);
-        } catch {
-          withinCooldown = false;
-        }
-
-        if (withinCooldown) {
-          console.warn("Skipping MSAL loginRedirect: 401 received within cooldown window to prevent redirect loop.");
-        } else {
-          const activeAccount =
-            msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
-          if (activeAccount) {
-            try {
-              recordRedirectTimestamp(Date.now(), window.sessionStorage);
-            } catch {
-              // Ignore storage write failure
-            }
-            msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
-          }
-        }
-      }
-      const text = await res.text().catch(() => "");
-      trackedError = true;
-      trackEvent("api_request_error", {
-        path,
-        method,
-        status: res.status,
-        duration_ms: durationMs,
-      });
-      throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`);
+  if (!res.ok) {
+    if (res.status === 401) {
+      // The token was refused although it looked valid: sign in again (once,
+      // and never twice within the cooldown, so a misconfigured API can't
+      // loop the page).
+      apiTokens.forget();
+      redirectToSignIn();
     }
-
-    trackEvent("api_request_success", {
-      path,
-      method,
-      status: res.status,
-      duration_ms: durationMs,
-    });
-    return res.json() as Promise<T>;
-  } catch (error: any) {
-    if (!trackedError) {
-      const ended = typeof performance !== "undefined" ? performance.now() : Date.now();
-      const durationMs = Math.round((ended - started) * 100) / 100;
-      trackEvent("api_request_exception", {
-        path,
-        method,
-        duration_ms: durationMs,
-        message: error?.message || "unknown_error",
-      });
-    }
-    throw error;
+    const text = await res.text().catch(() => "");
+    throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`);
   }
+
+  return res.json() as Promise<T>;
 }
 
 export type CrossSubmission = {
@@ -703,5 +698,38 @@ export const api = {
     streamUrl: (bulkId: string) =>
       `${API_BASE}/api/analytics/live-report/${encodeURIComponent(bulkId)}/stream`,
   },
+  notifications: {
+    list: (params?: { limit?: number; beforeId?: number; unreadOnly?: boolean }) => {
+      const qs = new URLSearchParams();
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.beforeId) qs.set("before_id", String(params.beforeId));
+      if (params?.unreadOnly) qs.set("unread_only", "true");
+      const queryStr = qs.toString();
+      return req<NotificationListResponse>(`/api/v1/notifications${queryStr ? `?${queryStr}` : ""}`);
+    },
+    unreadCount: () => req<{ unread_count: number }>(`/api/v1/notifications/unread-count`),
+    markRead: (id: number) => req<{ success: boolean }>(`/api/v1/notifications/${id}/read`, { method: "POST" }),
+    markAllRead: () => req<{ success: boolean }>(`/api/v1/notifications/mark-all-read`, { method: "POST" }),
+    streamUrl: () => `${API_BASE}/api/v1/notifications/stream`,
+  },
   launchSessions: launchSessionsApi,
 };
+
+export interface NotificationItem {
+  id: number;
+  type: string;
+  job_id: string | null;
+  jobdiva_id: string | null;
+  candidate_id: string | null;
+  title: string;
+  body: string | null;
+  score: number | null;
+  metadata: Record<string, unknown>;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationListResponse {
+  notifications: NotificationItem[];
+  unread_count: number;
+}

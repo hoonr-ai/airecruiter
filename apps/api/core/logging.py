@@ -186,30 +186,6 @@ class RepeatedWarningSampler(logging.Filter):
             return False, summaries
 
 
-class AmplitudeLogHandler(logging.Handler):
-    """Best-effort log forwarding for warning/error records to Amplitude."""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.levelno < logging.WARNING:
-            return
-        try:
-            from core.amplitude import track_event_async
-
-            event_type = "backend_error" if record.levelno >= logging.ERROR else "backend_log"
-            track_event_async(
-                event_type,
-                {
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "message": record.getMessage(),
-                    "request_id": getattr(record, "request_id", None),
-                },
-                device_id="airecruiter-api-logs",
-            )
-        except Exception:
-            return
-
-
 # The sampler configure_logging() installed; other handlers (New Relic) share
 # it so every handler makes the same keep/drop decision for a record.
 _WARNING_SAMPLER: Optional[RepeatedWarningSampler] = None
@@ -254,11 +230,6 @@ def configure_logging(
             )
         )
     root.addHandler(handler)
-
-    if os.getenv("AMPLITUDE_API_KEY") and os.getenv("AMPLITUDE_TRACK_LOGS", "true").lower() in {"1", "true", "yes", "on"}:
-        amp = AmplitudeLogHandler()
-        amp.addFilter(sampler)
-        root.addHandler(amp)
 
     root.setLevel(level)
 
