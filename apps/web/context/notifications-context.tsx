@@ -45,6 +45,7 @@ interface NotificationsContextType {
   requestNotificationPermission: () => void;
   refresh: () => void;
   markRead: (id: number) => void;
+  markUnread: (id: number) => void;
   markAllRead: () => void;
   clearAll: () => void;
 }
@@ -437,6 +438,27 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const markUnread = useCallback(async (id: number) => {
+    // Mirrors markRead above: functional update (no `notifications` in the
+    // dependency array) so this callback's identity stays stable.
+    let alreadyUnread = false;
+    setNotifications((prev) =>
+      prev.map((n) => {
+        if (n.id !== id) return n;
+        if (!n.read_at) alreadyUnread = true;
+        return n.read_at ? { ...n, read_at: null } : n;
+      })
+    );
+    if (alreadyUnread) return;
+    setUnreadCount((prev) => prev + 1);
+    try {
+      await api.notifications.markUnread(id);
+    } catch (err) {
+      console.error("Failed to mark notification unread:", err);
+      refreshRef.current();
+    }
+  }, []);
+
   const markAllRead = useCallback(async () => {
     const now = new Date().toISOString();
     setNotifications((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })));
@@ -483,6 +505,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         requestNotificationPermission,
         refresh,
         markRead,
+        markUnread,
         markAllRead,
         clearAll,
       }}

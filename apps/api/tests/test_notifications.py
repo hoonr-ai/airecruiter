@@ -433,6 +433,34 @@ def test_mark_notification_read_returns_false_for_someone_elses_notification(mon
     assert _mark_notification_read_sync(5, "someone-else@x.com") is False
 
 
+def test_mark_notification_unread_scopes_update_to_caller_email(monkeypatch):
+    from routers.notifications import _mark_notification_unread_sync
+
+    cur = FakeCursor(fetchone_results=[{"id": 5}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("routers.notifications.get_db_connection", lambda: conn)
+
+    updated = _mark_notification_unread_sync(5, "me@x.com")
+
+    assert updated is True
+    update_sql, params = cur.executed[0]
+    assert "read_at = NULL" in update_sql
+    assert "recipient_email = %s" in update_sql
+    assert params == (5, "me@x.com")
+
+
+def test_mark_notification_unread_returns_false_for_already_unread_or_someone_elses(monkeypatch):
+    from routers.notifications import _mark_notification_unread_sync
+
+    # RETURNING yields no row either because it's already unread (read_at IS
+    # NOT NULL in the WHERE clause excludes it) or it belongs to another caller.
+    cur = FakeCursor(fetchone_results=[None])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("routers.notifications.get_db_connection", lambda: conn)
+
+    assert _mark_notification_unread_sync(5, "me@x.com") is False
+
+
 # --- SSE subscriber bookkeeping: the cursor-reset bug + its follow-ups ------
 
 def _clear_subscriber_state(notif, email):

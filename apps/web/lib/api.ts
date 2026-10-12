@@ -747,6 +747,7 @@ export const api = {
     },
     unreadCount: () => req<{ unread_count: number }>(`/api/v1/notifications/unread-count`),
     markRead: (id: number) => req<{ success: boolean }>(`/api/v1/notifications/${id}/read`, { method: "POST" }),
+    markUnread: (id: number) => req<{ success: boolean }>(`/api/v1/notifications/${id}/unread`, { method: "POST" }),
     markAllRead: () => req<{ success: boolean }>(`/api/v1/notifications/mark-all-read`, { method: "POST" }),
     clear: () => req<{ success: boolean }>(`/api/v1/notifications/clear`, { method: "POST" }),
     // sinceId resumes from the client's own high-water mark (standard SSE

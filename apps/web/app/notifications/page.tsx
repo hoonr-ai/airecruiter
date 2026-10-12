@@ -26,7 +26,15 @@ function formatRelativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id: number) => void }) {
+function NotificationRow({
+  item,
+  onRead,
+  onUnread,
+}: {
+  item: NotificationItem;
+  onRead: (id: number) => void;
+  onUnread: (id: number) => void;
+}) {
   const router = useRouter();
   const isUnread = !item.read_at;
   // Candidate-level notifications (candidate_passed) go to that candidate's
@@ -51,6 +59,17 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
     }
   };
 
+  // A separate, explicit toggle — independent of the row's own click-to-
+  // navigate behavior (stopPropagation keeps this from also firing that).
+  // Lets a notification be marked read without leaving the page, and marked
+  // back unread (e.g. "I'll deal with this later"), which the implicit
+  // mark-on-click behavior alone can't do.
+  const handleToggleRead = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isUnread) onRead(item.id);
+    else onUnread(item.id);
+  };
+
   return (
     <Card
       onClick={handleRowClick}
@@ -63,6 +82,15 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
         isUnread ? "bg-primary/5 border-primary/20" : "bg-white"
       )}
     >
+      <button
+        onClick={handleToggleRead}
+        className={cn(
+          "shrink-0 h-3.5 w-3.5 rounded-full border-2 transition-colors",
+          isUnread ? "bg-primary border-primary" : "bg-transparent border-slate-300 hover:border-primary"
+        )}
+        aria-label={isUnread ? "Mark as read" : "Mark as unread"}
+        title={isUnread ? "Mark as read" : "Mark as unread"}
+      />
       <div className="flex-1 min-w-0">
         <p
           className={cn(
@@ -84,7 +112,6 @@ function NotificationRow({ item, onRead }: { item: NotificationItem; onRead: (id
         <p className="text-xs text-slate-400 mt-1">{formatRelativeTime(item.created_at)}</p>
       </div>
       {item.score !== null && <ScoreBadge score={item.score} />}
-      {isUnread && <span className="h-2 w-2 rounded-full bg-primary shrink-0" aria-label="unread" />}
     </Card>
   );
 }
@@ -100,6 +127,7 @@ export default function NotificationsPage() {
     requestNotificationPermission,
     refresh,
     markRead,
+    markUnread,
     markAllRead,
     clearAll,
   } = useNotificationsStream();
@@ -219,7 +247,7 @@ export default function NotificationsPage() {
         <ScrollArea className="h-[calc(100vh-180px)]">
           <div className="space-y-3 pr-2">
             {notifications.map((item) => (
-              <NotificationRow key={item.id} item={item} onRead={markRead} />
+              <NotificationRow key={item.id} item={item} onRead={markRead} onUnread={markUnread} />
             ))}
           </div>
         </ScrollArea>

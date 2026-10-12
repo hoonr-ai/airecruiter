@@ -253,6 +253,23 @@ def _mark_notification_read_sync(notification_id: int, email: str) -> bool:
     return updated is not None
 
 
+def _mark_notification_unread_sync(notification_id: int, email: str) -> bool:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE notifications
+                SET read_at = NULL
+                WHERE id = %s AND recipient_email = %s AND read_at IS NOT NULL
+                RETURNING id
+                """,
+                (notification_id, email),
+            )
+            updated = cur.fetchone()
+            conn.commit()
+    return updated is not None
+
+
 def _mark_all_notifications_read_sync(email: str) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -320,6 +337,17 @@ async def mark_notification_read(notification_id: int, user: UserIdentity = Depe
     if not email:
         raise HTTPException(status_code=401, detail="Authentication required")
     updated = await asyncio.to_thread(_mark_notification_read_sync, notification_id, email)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"success": True}
+
+
+@router.post("/{notification_id}/unread")
+async def mark_notification_unread(notification_id: int, user: UserIdentity = Depends(get_current_user)):
+    email = (user.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    updated = await asyncio.to_thread(_mark_notification_unread_sync, notification_id, email)
     if not updated:
         raise HTTPException(status_code=404, detail="Notification not found")
     return {"success": True}
