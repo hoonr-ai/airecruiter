@@ -13,6 +13,7 @@ import {
   failedRowsToCsv,
   findFullRow,
   isLaunchComplete,
+  isSettledForPolling,
   isTerminal,
   keysetBeforeCursors,
   lookupRetryDelay,
@@ -483,6 +484,9 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
     };
 
     void (async () => {
+      // Slower polling while the session waits on the recruiter or only
+      // JobDiva provisioning is left (lib/launch-session isSettledForPolling).
+      let settled = false;
       while (live && followIdRef.current === id) {
         let terminal = false;
         let again = false;
@@ -526,6 +530,7 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
             if (rows.changed) setRowsVersion((v) => v + 1);
             errors = rows.ok ? 0 : errors + 1;
             terminal = isTerminal(view);
+            settled = isSettledForPolling(view);
           }
         } catch {
           errors += 1;
@@ -539,6 +544,7 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
             hiddenMs: cfg?.hidden_poll_ms ?? 15000,
             hidden: document.visibilityState === "hidden",
             errors,
+            settled,
           }),
         );
       }
@@ -565,6 +571,12 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
+      if (!live) return;
+      // Nobody sees the banner in a hidden tab: skip the request, look again later.
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        timer = setTimeout(() => void tick(), OTHER_POLL_MS);
+        return;
+      }
       const res = await launchSessionsApi.get(otherId);
       if (!live) return;
       if (res.ok && res.data?.session) {

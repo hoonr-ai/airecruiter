@@ -317,6 +317,20 @@ describe("back-off", () => {
     assert.equal(ls.nextPollDelay({ baseMs: 10, hiddenMs: 15000, hidden: false, errors: 0 }), 500);
     assert.equal(ls.nextPollDelay({ baseMs: NaN, hiddenMs: NaN, hidden: true, errors: 0 }), 15000);
   });
+  test("poll delay: 10 s while settled, still backing off and still 15 s hidden", () => {
+    const base = { baseMs: 3000, hiddenMs: 15000, hidden: false, settled: true };
+    assert.deepEqual([0, 1, 2].map((errors) => ls.nextPollDelay({ ...base, errors })), [10000, 15000, 15000]);
+    assert.equal(ls.nextPollDelay({ ...base, hidden: true, errors: 0 }), 15000);
+    // A server poll_ms slower than the settled pace wins.
+    assert.equal(ls.nextPollDelay({ ...base, baseMs: 12000, errors: 0 }), 12000);
+  });
+  test("settled = waiting on the recruiter, or launched and only provisioning", () => {
+    assert.equal(ls.isSettledForPolling({ status: "awaiting_input", terminal: false, launch_complete: false, stage: "review" } as any), true);
+    assert.equal(ls.isSettledForPolling({ status: "running", terminal: false, launch_complete: true, stage: "provisioning" } as any), true);
+    assert.equal(ls.isSettledForPolling({ status: "running", terminal: false, launch_complete: false, stage: "sourcing" } as any), false);
+    assert.equal(ls.isSettledForPolling({ status: "succeeded", terminal: true, launch_complete: true, stage: "done" } as any), false);
+    assert.equal(ls.isSettledForPolling(null), false);
+  });
 });
 
 describe("config, reattach, hint", () => {

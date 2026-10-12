@@ -263,6 +263,7 @@ function PendingFeedbackModal({
                 <tr key={`${c.job_key}:${c.candidate_id}`} className="border-t border-slate-100 align-top">
                   <td className="px-3 py-2">
                     <Link
+                      prefetch={false} // per row: would prefetch every listed job
                       href={`/jobs/${encodeURIComponent(c.job_key)}/rankings`}
                       className="font-semibold text-primary hover:underline"
                     >

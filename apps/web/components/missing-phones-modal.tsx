@@ -85,45 +85,53 @@ export function MissingPhonesModal({
     candidates.length > 0 &&
     candidates.every((c) => countDigits(phones[c.candidate_id] || "") >= 7);
 
-  async function saveOne(cand: MissingPhoneCandidate, phone: string) {
-    if (countDigits(phone) < 7) {
-      setErrors((prev) => ({ ...prev, [cand.candidate_id]: "At least 7 digits required" }));
-      return false;
+  // One PATCH /candidates/bulk-contacts for the whole list (the same UPDATE
+  // the per-candidate route runs). One request per row went over nginx's 30
+  // writes a minute for the office once a list passed ~10 people, and the
+  // rest of the batch failed with 503s.
+  async function handleSubmit() {
+    const entries = candidates.map((c) => ({ cand: c, phone: (phones[c.candidate_id] || "").trim() }));
+    const invalid: Record<string, string> = {};
+    for (const { cand, phone } of entries) {
+      if (countDigits(phone) < 7) invalid[cand.candidate_id] = "At least 7 digits required";
     }
-    setErrors((prev) => {
-      const { [cand.candidate_id]: _omit, ...rest } = prev;
-      return rest;
-    });
-    if (!persist) return true;
-    setSaving((prev) => ({ ...prev, [cand.candidate_id]: true }));
+    setErrors(invalid);
+    if (Object.keys(invalid).length > 0) return;
+    if (!persist) {
+      onAllProvided(phones);
+      return;
+    }
+
+    const ids = entries.map(({ cand }) => cand.candidate_id);
+    setSaving(Object.fromEntries(ids.map((id) => [id, true])));
     try {
-      const res = await authFetch(`${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/phone`, {
+      const res = await authFetch(`${API_BASE}/candidates/bulk-contacts`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, jobdiva_id: cand.jobdiva_id }),
+        body: JSON.stringify({
+          updates: entries.map(({ cand, phone }) => ({
+            candidate_id: cand.candidate_id,
+            jobdiva_id: cand.jobdiva_id,
+            phone,
+          })),
+        }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        const msg = body?.detail || `Save failed (${res.status})`;
-        setErrors((prev) => ({ ...prev, [cand.candidate_id]: String(msg) }));
-        return false;
+        const msg = String(body?.detail || `Save failed (${res.status})`);
+        // The batch is all-or-nothing server-side, so every row failed.
+        setErrors(Object.fromEntries(ids.map((id) => [id, msg])));
+        return;
       }
-      setSavedAt((prev) => ({ ...prev, [cand.candidate_id]: Date.now() }));
-      return true;
-    } catch (e: any) {
-      logger.error("missing_phones.save.error", { candidateId: cand.candidate_id, message: e?.message });
-      setErrors((prev) => ({ ...prev, [cand.candidate_id]: e?.message || "Save failed" }));
-      return false;
-    } finally {
-      setSaving((prev) => ({ ...prev, [cand.candidate_id]: false }));
-    }
-  }
-
-  async function handleSubmit() {
-    const tasks = candidates.map((c) => saveOne(c, (phones[c.candidate_id] || "").trim()));
-    const results = await Promise.all(tasks);
-    if (results.every(Boolean)) {
+      const now = Date.now();
+      setSavedAt((prev) => ({ ...prev, ...Object.fromEntries(ids.map((id) => [id, now])) }));
       onAllProvided(phones);
+    } catch (e: any) {
+      logger.error("missing_phones.save.error", { count: ids.length, message: e?.message });
+      const msg = e?.message || "Save failed";
+      setErrors(Object.fromEntries(ids.map((id) => [id, msg])));
+    } finally {
+      setSaving({});
     }
   }
 
