@@ -1,5 +1,7 @@
 "use client";
 
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { useEffect, useState, useCallback, type ReactNode } from "react";
 import {
   Briefcase,
@@ -638,6 +640,7 @@ export default function AdminAnalyticsPage() {
     email,
     role,
   } = useUserRole();
+  useActiveTime({ surface: "analytics", enabled: isAdmin || isTeamLead });
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1006,6 +1009,7 @@ export default function AdminAnalyticsPage() {
     escapeCSV(value === null || value === undefined ? "" : String(value));
 
   const downloadCsv = (lines: string[], filename: string) => {
+    recordActivity("report_exported", { attrs: { report: "admin_analytics", rows: Math.max(0, lines.length - 1) } });
     // BOM so Excel reads the file as UTF-8 — the "—" placeholders turn into
     // mojibake otherwise.
     const blob = new Blob([UTF8_BOM + lines.join("\n")], {

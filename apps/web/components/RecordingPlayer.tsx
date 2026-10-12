@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pause, Play, RotateCcw } from "lucide-react";
 import { formatTimecode } from "@/lib/timecode";
+import { recordActivity } from "@/lib/activity";
 
 /**
  * Compact audio player for call recordings, with a loader in place of the
@@ -64,6 +65,25 @@ function PlayerInner({
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState<number | null>(null);
 
+  // Recruiter activity: seconds this player actually played (wall clock while
+  // playing), reported once when it goes away — one action per recording heard.
+  const listenedMs = useRef(0);
+  const playingSince = useRef<number | null>(null);
+  const stopListenClock = () => {
+    if (playingSince.current === null) return;
+    listenedMs.current += performance.now() - playingSince.current;
+    playingSince.current = null;
+  };
+  useEffect(
+    () => () => {
+      const since = playingSince.current;
+      const total = listenedMs.current + (since === null ? 0 : performance.now() - since);
+      const seconds = Math.round(total / 1000);
+      if (seconds >= 1) recordActivity("recording_played", { attrs: { seconds } });
+    },
+    [],
+  );
+
   const readDuration = (audio: HTMLAudioElement) =>
     setDuration(Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null);
 
@@ -117,11 +137,17 @@ function PlayerInner({
           setLoaded(true);
         }}
         onDurationChange={(e) => readDuration(e.currentTarget)}
-        onWaiting={() => setBuffering(true)}
+        onWaiting={() => {
+          setBuffering(true);
+          stopListenClock();
+        }}
         onSeeking={(e) => {
           if (!e.currentTarget.paused) setBuffering(true);
         }}
-        onPlaying={() => setBuffering(false)}
+        onPlaying={() => {
+          setBuffering(false);
+          if (playingSince.current === null) playingSince.current = performance.now();
+        }}
         onCanPlay={(e) => {
           if (e.currentTarget.paused) setBuffering(false);
         }}
@@ -135,10 +161,12 @@ function PlayerInner({
           // later canplay/playing event is guaranteed.
           setPlaying(false);
           setBuffering(false);
+          stopListenClock();
         }}
         onEnded={() => {
           setPlaying(false);
           setBuffering(false);
+          stopListenClock();
         }}
         // Whole seconds: React skips the re-render when the value is unchanged.
         onTimeUpdate={(e) => setCurrent(Math.floor(e.currentTarget.currentTime))}

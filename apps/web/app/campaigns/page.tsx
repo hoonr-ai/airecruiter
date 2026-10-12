@@ -1,5 +1,6 @@
 "use client";
 
+import { useActiveTime } from "@/hooks/use-active-time";
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Megaphone, Briefcase, AlertTriangle, Trash2 } from "lucide-react";
@@ -17,6 +18,7 @@ import { Campaign, listCampaigns, deleteCampaign, formatScreeningLevel } from "@
 
 export default function CampaignsPage() {
   const router = useRouter();
+  useActiveTime({ surface: "campaigns" });
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);

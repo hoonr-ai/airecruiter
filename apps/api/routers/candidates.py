@@ -1070,6 +1070,17 @@ async def iter_search_events(
             yield event
 
 
+def _record_recruiter_action(user: UserIdentity, action: str, job_ref: Any, **kwargs: Any) -> None:
+    """The recruiter's action, for the activity log (services/recruiter_activity).
+    Fire-and-forget; never affects the request."""
+    try:
+        from services.recruiter_activity import record_action_soon
+
+        record_action_soon(user.email, action, job_key=job_ref, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"activity {action} not recorded: {exc}")
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1091,6 +1102,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         return {"candidates": [], "message": "job_id required for candidate search"}
 
     _verify_job_access_by_id(str(request.job_id), user)
+    _record_recruiter_action(user, "search_run", request.job_id)
 
     resolved: Dict[str, Any] = {}
     try:
@@ -5589,6 +5601,13 @@ async def save_candidate_feedback(
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
         f"{request.feedback_type} (submission_type={submission_type}, by {user.email})"
+    )
+    _record_recruiter_action(
+        user,
+        {"submit": "feedback_submit", "reject": "feedback_reject", "unreachable": "feedback_unreachable"}.get(
+            str(request.feedback_type or "").strip().lower(), "feedback_other"),
+        job_id_or_ref, candidate_id=candidate_id,
+        attrs={"submission_type": submission_type} if request.feedback_type == "Submit" else None,
     )
 
     # 1. Map to JobDiva Action String

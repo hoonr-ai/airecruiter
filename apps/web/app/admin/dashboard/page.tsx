@@ -11,6 +11,7 @@
 // Scope: admins see every team or pick a Recruiting Manager (a team on the
 // Teams page); team leads are pinned to their own team by the backend.
 
+import { useActiveTime } from "@/hooks/use-active-time";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, BarChart3, Filter, Gauge, RefreshCw, ShieldAlert, TriangleAlert, UsersRound } from "lucide-react";
@@ -104,6 +105,7 @@ function coverageNote(coverage: JobDivaCoverage | undefined): string | null {
 export default function PairDashboardPage() {
   const { isAdmin, isTeamLead, teamName, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
+  useActiveTime({ surface: "admin_dashboard", enabled: canView });
 
   const [tab, setTab] = useState<Tab>(initialTab);
   const [teamId, setTeamId] = useState<string | null>(null);

@@ -1,0 +1,304 @@
+{
+  "name": "PAIR Recruiter Activity",
+  "description": "Where recruiters' time goes in PAIR and what they do (services/recruiter_activity.py). Recruiters appear as a pseudonymous NR id. Source of truth: docs/observability/newrelic/pair-recruiter-dashboard.json.",
+  "permissions": "PUBLIC_READ_WRITE",
+  "variables": [
+    {
+      "name": "api_app",
+      "title": "API",
+      "type": "ENUM",
+      "isMultiSelection": false,
+      "replacementStrategy": "STRING",
+      "items": [
+        {
+          "title": "QA",
+          "value": "PAIR API (QA)"
+        },
+        {
+          "title": "PROD",
+          "value": "PAIR API (PROD)"
+        },
+        {
+          "title": "local",
+          "value": "PAIR API (local)"
+        }
+      ],
+      "defaultValues": [
+        {
+          "value": {
+            "string": "PAIR API (QA)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "web_app",
+      "title": "Web",
+      "type": "ENUM",
+      "isMultiSelection": false,
+      "replacementStrategy": "STRING",
+      "items": [
+        {
+          "title": "QA",
+          "value": "PAIR Web (QA)"
+        },
+        {
+          "title": "PROD",
+          "value": "PAIR Web (PROD)"
+        },
+        {
+          "title": "local",
+          "value": "PAIR Web (local)"
+        }
+      ],
+      "defaultValues": [
+        {
+          "value": {
+            "string": "PAIR Web (QA)"
+          }
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "Where time goes",
+      "widgets": [
+        {
+          "title": "Active hours by surface",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT sum(active_ms) / 3.6e6 AS 'hours' FROM RecruiterActiveTime WHERE appName = {{api_app}} FACET surface SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "Tab visible + an interaction in the last 5 minutes (apps/web/lib/step-time.ts). wizard_step_N = the job wizard; rankings / candidate_detail / assess_modal = candidate review."
+        },
+        {
+          "title": "Active hours by recruiter (NR id)",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT sum(active_ms) / 3.6e6 AS 'hours' FROM RecruiterActiveTime WHERE appName = {{api_app}} FACET recruiter SINCE 7 days ago LIMIT 50"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "recruiter = sha256(email)[:12]; resolve it to a person on PAIR's Recruiter Analytics \u2192 Activity (NR id column)."
+        },
+        {
+          "title": "Active hours per day, by surface",
+          "visualization": {
+            "id": "viz.area"
+          },
+          "layout": {
+            "column": 1,
+            "row": 5,
+            "width": 12,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT sum(active_ms) / 3.6e6 FROM RecruiterActiveTime WHERE appName = {{api_app}} FACET surface TIMESERIES 1 day SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "What recruiters do",
+      "widgets": [
+        {
+          "title": "Actions by type",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM RecruiterAction WHERE appName = {{api_app}} FACET action SINCE 7 days ago LIMIT 30"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Actions per recruiter",
+          "visualization": {
+            "id": "viz.table"
+          },
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 4
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM RecruiterAction WHERE appName = {{api_app}} FACET recruiter, action SINCE 7 days ago LIMIT 100"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Searches per launch (7 d)",
+          "visualization": {
+            "id": "viz.billboard"
+          },
+          "layout": {
+            "column": 1,
+            "row": 5,
+            "width": 4,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT filter(count(*), WHERE action = 'search_run') / filter(count(*), WHERE action = 'launch_clicked') AS 'searches per launch' FROM RecruiterAction WHERE appName = {{api_app}} SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "How many Step 5 searches recruiters run per Source & Launch click."
+        },
+        {
+          "title": "Decisions per day",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 5,
+            "row": 5,
+            "width": 8,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM RecruiterAction WHERE appName = {{api_app}} AND action LIKE 'feedback_%' FACET action TIMESERIES 1 day SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Recordings listened (minutes, browser)",
+          "visualization": {
+            "id": "viz.line"
+          },
+          "layout": {
+            "column": 1,
+            "row": 8,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT sum(seconds) / 60 FROM PageAction WHERE appName = {{web_app}} AND actionName = 'recruiter_recording_played' TIMESERIES 1 day SINCE 30 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          },
+          "description": "Browser PageActions are dropped by ad blockers; the authoritative count is RecruiterAction (server-side copy of the same action)."
+        },
+        {
+          "title": "Browser recruiter actions",
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "layout": {
+            "column": 7,
+            "row": 8,
+            "width": 6,
+            "height": 3
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  7594453
+                ],
+                "query": "SELECT count(*) FROM PageAction WHERE appName = {{web_app}} AND actionName LIKE 'recruiter_%' FACET actionName SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

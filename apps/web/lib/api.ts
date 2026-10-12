@@ -540,6 +540,22 @@ export const api = {
         keepalive: true,
       }),
   },
+  // Recruiter activity (routers/recruiter_activity.py): active time on a
+  // surface (hooks/use-active-time.ts) and the actions only the page sees
+  // (lib/activity.ts). Under /api/ (no nginx allowlist); keepalive so the last
+  // flush outlives a closing tab.
+  activity: {
+    time: (
+      body: { surface: string; job_ref?: string; active_ms: number },
+      opts: { keepalive?: boolean } = {},
+    ) => req<{ status?: string }>(`/api/v1/activity/time`, { method: "POST", body, keepalive: opts.keepalive }),
+    actions: (body: { actions: unknown[] }, opts: { keepalive?: boolean } = {}) =>
+      req<{ status?: string; recorded?: number }>(`/api/v1/activity/actions`, {
+        method: "POST",
+        body,
+        keepalive: opts.keepalive,
+      }),
+  },
   candidates: {
     save: (body: unknown) =>
       req<any>(`/candidates/save`, { method: "POST", body }),
@@ -639,6 +655,28 @@ export const api = {
       // The page owns the payload type (app/admin/recruiter-analytics).
       return req<{ status?: string; data?: unknown; detail?: string }>(
         `/api/v1/admin/recruiter-analytics${suffix ? `?${suffix}` : ""}`,
+      );
+    },
+    // Recruiter activity (routers/recruiter_activity.py): active time by
+    // surface / day, actions, decision latency. Same scope rules; dates default
+    // server-side to the last 7 Eastern days.
+    activity: (opts?: {
+      startDate?: string | null;
+      endDate?: string | null;
+      teamId?: string | null;
+      recruiter?: string | null;
+    }) => {
+      const { startDate, endDate, teamId, recruiter } = opts ?? {};
+      const qs = new URLSearchParams();
+      if (startDate && endDate) {
+        qs.set("start_date", startDate);
+        qs.set("end_date", endDate);
+      }
+      if (teamId) qs.set("team_id", teamId);
+      if (recruiter) qs.set("recruiter", recruiter);
+      const suffix = qs.toString();
+      return req<{ status?: string; data?: unknown; detail?: string }>(
+        `/api/v1/admin/recruiter-activity${suffix ? `?${suffix}` : ""}`,
       );
     },
   },

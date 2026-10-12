@@ -98,6 +98,18 @@ def _record_sync(job_ref: str, step: int, email: str, active_ms: int) -> Optiona
         # happened to hold (the wizard can hold either one). That way the
         # reports' fetch_step_metrics joins on a single key.
         record_step_time(conn, job_id, step, email, active_ms)
+        # The same time in the recruiter-activity view (dated, per surface).
+        # Never fails the step-time write, which is already committed.
+        try:
+            from services.recruiter_activity import record_active_time
+
+            record_active_time(conn, email, f"wizard_step_{int(step)}", job_id, active_ms)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[JobStepTime] activity mirror failed for job {job_id}: {e}")
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
         return job_id
     finally:
         conn.close()
