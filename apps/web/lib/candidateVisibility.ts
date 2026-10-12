@@ -10,6 +10,10 @@ export type VisibilityContext = {
   // rows already saved for this job (the rank list hides them from Step 5).
   launchedKeys: ReadonlySet<string>;
   launchedIds: ReadonlySet<string>;
+  // Another candidate_id of a person already launched for this job (same
+  // email / phone / LinkedIn / JobDiva id — lib/launch-person-keys.ts). The
+  // launch claim refuses such a row, so it hides as "launched" too.
+  isLaunchedPerson?: (candidate: any) => boolean;
   // Non-empty exclusion reason (client employee / offer status) hides a row.
   isExcluded: (candidate: any) => boolean;
   // 0 disables the min-score filter.
@@ -35,6 +39,7 @@ export function candidateHiddenReason(
   if (ctx.launchedKeys.has(key) || ctx.launchedIds.has(String(candId))) {
     return "launched";
   }
+  if (ctx.isLaunchedPerson?.(c)) return "launched";
   if (ctx.isExcluded(c)) return "excluded";
   // Progressive rows (agent_result / details_loaded) bypass score &
   // location filters so they stay visible while shimmering. Once the

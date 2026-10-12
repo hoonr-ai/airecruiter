@@ -218,6 +218,49 @@ LAUNCHED_CANDIDATE_COUNT_SQL = _LAUNCHED_CTE_SQL + """
 """
 
 
+# The same population counted for EVERY job in one statement (no params): the
+# Jobs dashboard's monitored_jobs.candidates_launched column, written by the
+# startup backfill (routers/jobs._backfill_monitored_jobs_counters_sync) while
+# the per-job refresh uses count_launched_candidates. Launched = an audit
+# interview id under either job key, OR an interview id on the person's NEWEST
+# sourced row — exactly _LAUNCHED_CTE_SQL (drift-tested on Postgres in
+# tests/test_launched_candidates.py). The dashboard column used to count
+# distinct JSONB interview ids, which missed audit-only launches and counted a
+# person twice when their rows under the two job keys held different ids.
+LAUNCHED_COUNT_BY_JOB_SQL = """
+    WITH job_keys AS (
+        SELECT job_id, NULLIF(BTRIM(jobdiva_id), '') AS k FROM monitored_jobs
+        UNION
+        SELECT job_id, NULLIF(BTRIM(job_id::text), '') AS k FROM monitored_jobs
+    ),
+    audit_people AS (
+        SELECT DISTINCT jk.job_id, a.candidate_id
+        FROM job_keys jk
+        JOIN engage_interview_audit a ON a.jobdiva_id = jk.k
+        WHERE jk.k IS NOT NULL
+          AND COALESCE(NULLIF(a.interview_id, ''), '') <> ''
+          AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''
+    ),
+    latest_sourced AS (
+        SELECT DISTINCT ON (jk.job_id, sc.candidate_id)
+            jk.job_id, sc.candidate_id,
+            NULLIF(BTRIM(COALESCE(sc.data->>'engage_interview_id', '')), '') AS interview_id
+        FROM job_keys jk
+        JOIN sourced_candidates sc ON sc.jobdiva_id = jk.k
+        WHERE jk.k IS NOT NULL
+          AND COALESCE(NULLIF(sc.candidate_id, ''), '') <> ''
+        ORDER BY jk.job_id, sc.candidate_id, sc.id DESC
+    )
+    SELECT job_id, COUNT(*) AS launched
+    FROM (
+        SELECT job_id, candidate_id FROM audit_people
+        UNION
+        SELECT job_id, candidate_id FROM latest_sourced WHERE interview_id IS NOT NULL
+    ) people
+    GROUP BY job_id
+"""
+
+
 def _launched_params(keys: Sequence[str]) -> Tuple[str, str, str, str]:
     k1, k2 = key_pair(keys)
     return (k1, k2, k1, k2)

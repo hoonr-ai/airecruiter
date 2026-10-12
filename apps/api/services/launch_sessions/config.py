@@ -129,6 +129,21 @@ def housekeeping_s() -> int:
     return _int("PAIR_LAUNCH_HOUSEKEEPING_S", 60, 5)
 
 
+def legacy_settle_every_s() -> int:
+    """How often (per worker, on the housekeeping tick it wins) the sweep that
+    settles rows a launch outside a session left parked 'processing' runs
+    (routers.engagement.settle_parked_legacy_rows)."""
+    return _int("PAIR_LEGACY_SETTLE_EVERY_S", 600, 60)
+
+
+def max_reposts() -> int:
+    """How many times S7 may re-post one row Pairbot's by-job record shows as
+    missing after PAIR_LAUNCH_REPOST_AFTER_S; past that the row is
+    unconfirmed (parked, re-checked by housekeeping — never posted again).
+    0 = never re-post."""
+    return _int("PAIR_LAUNCH_MAX_REPOSTS", 1, 0)
+
+
 def max_attempts() -> int:
     """Failed stage runs (not shutdowns, not waits) before a session fails."""
     return _int("PAIR_LAUNCH_MAX_ATTEMPTS", 5, 1)

@@ -64,6 +64,12 @@ interface LaunchReportRow {
   total_candidates_sourced: number;
   pair_launch_at: string | null;
   total_candidates_launched: number;
+  /** People whose FIRST interview for this job falls in the report's range
+   *  (a person launched again later counts on their first day only). */
+  candidates_launched_in_period?: number;
+  /** False = the job first launched before the range: listed because a
+   *  relaunch in the range reached new people. */
+  first_launch_in_period?: boolean;
   time_to_launch_minutes: number | null;
   turn_around_time_minutes: number | null;
   /**
@@ -140,6 +146,9 @@ interface LaunchReportData {
     jobs: number;
     candidates_sourced: number;
     candidates_launched: number;
+    /** Rows whose job first launched in the range (the rest are relaunches). */
+    jobs_first_launched?: number;
+    candidates_launched_in_period?: number;
     outreach_detail_resolved: number;
     outreach_detail_expected: number;
   };
@@ -302,6 +311,25 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       // The Rankings page's "Candidates Launched": people, not interviews. The
       // Interview Status buckets below are computed over exactly this set.
       { key: "launched", label: "Launched", numeric: true, text: (r) => num(r.total_candidates_launched) },
+      // Relaunch work on the day it happened: people first launched for the
+      // job inside the selected dates. A relaunch-only row (job first
+      // launched earlier) is marked.
+      {
+        key: "launched_in_period",
+        label: "Launched in Period",
+        hint: "People whose first PAIR interview for this job falls in the selected dates. A person launched again later counts only on their first day. ‘relaunch’ = the job first launched before these dates.",
+        numeric: true,
+        text: (r) =>
+          `${num(r.candidates_launched_in_period ?? 0)}${r.first_launch_in_period === false ? " (relaunch)" : ""}`,
+        render: (r) => (
+          <span>
+            {num(r.candidates_launched_in_period ?? 0)}
+            {r.first_launch_in_period === false && (
+              <span className="ml-1 rounded bg-amber-50 px-1 text-[10px] font-semibold text-amber-700">relaunch</span>
+            )}
+          </span>
+        ),
+      },
       { key: "tt_launch", label: "Time to Launch", numeric: true, text: (r) => formatDuration(r.time_to_launch_minutes) },
       {
         key: "tat",
@@ -934,9 +962,25 @@ export default function LaunchReportPage() {
 
       {/* Summary tiles */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatTile label="Jobs Launched" value={num(data?.totals.jobs ?? 0)} />
+        <StatTile
+          label="Jobs Launched"
+          value={num(data?.totals.jobs_first_launched ?? data?.totals.jobs ?? 0)}
+          hint={
+            data && typeof data.totals.jobs_first_launched === "number" && data.totals.jobs > data.totals.jobs_first_launched
+              ? `+ ${num(data.totals.jobs - data.totals.jobs_first_launched)} relaunched`
+              : undefined
+          }
+        />
         <StatTile label="Candidates Sourced" value={num(data?.totals.candidates_sourced ?? 0)} />
-        <StatTile label="Candidates Launched" value={num(data?.totals.candidates_launched ?? 0)} />
+        <StatTile
+          label="Candidates Launched"
+          value={num(data?.totals.candidates_launched ?? 0)}
+          hint={
+            typeof data?.totals.candidates_launched_in_period === "number"
+              ? `${num(data.totals.candidates_launched_in_period)} new in these dates`
+              : undefined
+          }
+        />
         {/* Time as the value, date as the hint. (This used to split the
             formatted string on ", " — which it never contains — so the tile
             showed the whole date-time and repeated the date underneath.) */}

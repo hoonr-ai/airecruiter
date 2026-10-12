@@ -965,8 +965,16 @@ class FakeWorld:
     def _audit_iid(self, keys, cid):
         return self.store._audit_iid(cid, keys)
 
-    def claim_for_session(self, job_keys, ids, session_id):
+    async def settle_parked_legacy_rows(self):
+        self.legacy_settles = getattr(self, "legacy_settles", 0) + 1
+        return {"checked": 0}
+
+    def claim_for_session(self, job_keys, ids, session_id, duplicates=None):
         keys = [k for k in job_keys if k]
+        dup_of = dict(getattr(self, "person_duplicates", None) or {})
+        if duplicates is not None:
+            duplicates.update({c: v for c, v in dup_of.items() if c in {str(i) for i in ids}})
+        ids = [i for i in ids if str(i) not in dup_of]
         out = []
         with self.store.lock:
             for cid in dict.fromkeys(str(i) for i in ids):

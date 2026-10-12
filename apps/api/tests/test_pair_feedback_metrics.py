@@ -317,6 +317,7 @@ def _refresh_with(
     ext_subs: Optional[int],
     feedback: Optional[Dict[str, int]],
     resolve_numeric: bool = True,
+    counters_failed: bool = False,
 ):
     cursor = _RecordingCursor(("31920112", "26-25865"))
     monkeypatch.setattr(
@@ -338,7 +339,7 @@ def _refresh_with(
     monkeypatch.setattr(
         auto_assign_service,
         "_compute_candidate_counters",
-        lambda _job: {
+        lambda _job: None if counters_failed else {
             "candidates_sourced": 5,
             "candidates_launched": 4,
             "complete_submissions": 3,
@@ -502,3 +503,23 @@ def test_compute_candidate_counters_guard_in_sql(monkeypatch):
         "guard should appear in both complete_submissions and pass_submissions CASE WHEN blocks"
     )
 
+
+
+def test_failed_candidate_counters_keep_their_last_known_values(monkeypatch):
+    """_compute_candidate_counters answers None on a DB error / timeout: the
+    four counter columns are left alone (they used to be written as 0, so the
+    Jobs dashboard's Sourced / Launched flickered to zero)."""
+    updates = _refresh_with(
+        monkeypatch, ext_subs=2, feedback={"feedback_completed": 7, "pair_submits": 4}, counters_failed=True,
+    )
+    assert len(updates) == 1
+    for col in ("candidates_sourced", "candidates_launched", "complete_submissions", "pass_submissions"):
+        assert col not in updates[0], col
+    assert "time_to_first_pass = %s" in updates[0] and "pair_submits = %s" in updates[0]
+
+
+def test_compute_candidate_counters_answers_none_on_a_db_error(monkeypatch):
+    def broken():
+        raise RuntimeError("statement timeout")
+    monkeypatch.setattr(auto_assign_service, "_get_db_connection", broken)
+    assert auto_assign_service._compute_candidate_counters("26-1") is None

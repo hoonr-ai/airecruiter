@@ -179,7 +179,8 @@ def test_release_of_a_claim_made_before_the_restore_key_reads_blank(pg):
 
 def test_send_claim_takes_only_sendable_people(pg):
     _seed_claim_rows(pg)
-    claimed, with_rows = eng._claim_rows_for_send((JOB, REF), ALL + ["zz"], None)
+    claimed, with_rows, dups = eng._claim_rows_for_send((JOB, REF), ALL + ["zz"], None)
+    assert dups == {}
     assert claimed == ["a", "b", "j"]
     assert with_rows == set(ALL) - {"k"}                       # k is another job's; zz has no row
     assert _data(pg, "a")["engage_status"] == "sending"
@@ -696,7 +697,7 @@ def test_a_session_claim_blocks_a_concurrent_legacy_send_claim(pg_pair):
         (eng.claim_candidates_for_session, (JOB, REF), ["a"], "S-1"),
         (eng._claim_rows_for_send, (JOB, REF), ["a"], None),
     )
-    assert session == ["a"] and legacy == ([], {"a"})
+    assert session == ["a"] and legacy == ([], {"a"}, {})
     assert _status(admin, "a") == "queued"
 
 

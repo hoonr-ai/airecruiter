@@ -22,6 +22,7 @@ from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_A
 from services.job_attribution import SCHEMA_STATEMENTS as ATTRIBUTION_SCHEMA_STATEMENTS, stamp_job_posted_by
 from services.job_step_time import SCHEMA_STATEMENTS as STEP_TIME_SCHEMA_STATEMENTS
 from services.launch_timing import SCHEMA_STATEMENTS as LAUNCH_TIMING_SCHEMA_STATEMENTS
+from services.launch_effects_ledger import SCHEMA_STATEMENTS as LAUNCH_EFFECTS_SCHEMA_STATEMENTS
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
 from models import (
@@ -40,7 +41,7 @@ from routers._helpers import (
 )
 from core.auth import get_current_user, get_user_scope_emails, parse_recruiter_emails, UserIdentity
 from routers.launch_report import _fetch_all_outreach, summarise_launched_candidates
-from services.launched_candidates import fetch_launched_candidates, interview_id_of
+from services.launched_candidates import LAUNCHED_COUNT_BY_JOB_SQL, fetch_launched_candidates, interview_id_of
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -257,6 +258,9 @@ def _ensure_monitored_jobs_schema() -> None:
             # first_launch_at (T2). DDL only; the backfill is
             # launch_timing.backfill_once, a background task.
             *LAUNCH_TIMING_SCHEMA_STATEMENTS,
+            # Fire-once ledger of the first-launch side effects (applicant
+            # sync, job-posting email): services/launch_effects_ledger.py.
+            *LAUNCH_EFFECTS_SCHEMA_STATEMENTS,
 
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
@@ -384,8 +388,10 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             m.job_id,
                             m.jobdiva_id,
                             COUNT(DISTINCT sc.candidate_id) AS cs,
-                            -- Counts distinct interviews; ≤ candidates where two share an email (shared-email edge case).
-                            COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', '')) AS cl,
+                            -- The launched population every screen shares
+                            -- (services/launched_candidates.py), not distinct
+                            -- JSONB interview ids.
+                            COALESCE(MAX(lc.launched), 0) AS cl,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
@@ -405,6 +411,7 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                         FROM monitored_jobs m
                         LEFT JOIN sourced_candidates sc
                           ON (sc.jobdiva_id = m.jobdiva_id OR sc.jobdiva_id = m.job_id::text)
+                        LEFT JOIN (""" + LAUNCHED_COUNT_BY_JOB_SQL + """) lc ON lc.job_id = m.job_id
                         GROUP BY m.job_id, m.jobdiva_id
                     ) sub
                     WHERE mj.job_id = sub.job_id
@@ -1913,6 +1920,10 @@ def _create_job_version_sync(job_id_or_ref: str) -> dict:
                 # would make Added → Click negative or zero.
                 "first_launch_clicked_at": None,
                 "first_launch_at": None,
+                # The first-launch side effects (applicant sync, job-posting
+                # email) are this version's own (launch_effects_ledger).
+                "initial_launch_effects_at": None,
+                "job_posting_email_sent_at": None,
                 "outreach_stopped_at": None,
                 "candidates_sourced": 0,
                 "candidates_launched": 0,

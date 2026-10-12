@@ -23,6 +23,9 @@ row existence (SPEC-AMENDMENTS):
                     a launched row's data.jobdiva_candidate_id (the profile
                     PAIR created for it) counts as launched too (twins)
   in_flight         engage_status queued / processing / sending (and its twin)
+  launched_person   another candidate_id of a person already held for the job
+                    (same email / phone / LinkedIn / JobDiva id — the launch
+                    claims' person gate, services/launch_person_keys.py)
   blocked:<reason>  data.engage_block_reason (a Pairbot duplicate: never re-post)
   applicant_backlog never engaged ('' status) JobDiva applicant rows — the
                     auto-sync backlog stays blocked (applicant-backlog policy)
@@ -35,6 +38,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Iterable, List, Tuple
 
+from services import launch_person_keys
 from services.engage_status import LAUNCH_IN_FLIGHT_STATUSES
 from services.launch_sessions import rules
 from services.launch_sessions import schema as S
@@ -77,6 +81,23 @@ def launch_predicate(rows: Iterable[Dict[str, Any]]) -> Tuple[Dict[str, Any], Di
         if statuses <= {""} and any("applicant" in str(r.get("source") or "").lower() for r in group):
             blocked[cid] = "applicant_backlog"
     return rules.launched_sets_from_response(launched_items), blocked
+
+
+def person_owners(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """{person key: candidate_id} of every person held for the job (same
+    store.job_launch_state rows): the ``launched_person`` side of the
+    predicate — another id of a launched / in-flight person is skipped, as
+    the launch claims' person gate would refuse it anyway."""
+    return launch_person_keys.launched_person_keys(
+        {
+            "candidate_id": r.get("candidate_id"), "source": r.get("source"),
+            "email": r.get("email"), "phone": r.get("phone"), "profile_url": r.get("profile_url"),
+            "data": {"jobdiva_candidate_id": r.get("jobdiva_candidate_id")},
+            "engage_status": r.get("engage_status"),
+            "engage_interview_id": r.get("interview_id") or ("audit" if r.get("audit_launched") else ""),
+        }
+        for r in rows
+    )
 
 
 def _numeric(raw: Any) -> bool:
@@ -141,6 +162,8 @@ async def run(ctx: StageContext) -> StageResult:
     pool, table, absorbed, row_updates = await _pool(ctx)
     facts = await ctx.db(ctx.store.job_launch_state, ctx.job_keys)
     launched, blocked = launch_predicate(facts)
+    for cid, reason in launch_person_keys.launched_person_blocks(pool, person_owners(facts)).items():
+        blocked.setdefault(cid, reason)
     limit, floor = _limit(ctx, len(table)), _floor(ctx)
     sel = rules.compute_auto_launch_selection(
         pool, launched_keys=launched["keys"], launched_ids=launched["ids"],

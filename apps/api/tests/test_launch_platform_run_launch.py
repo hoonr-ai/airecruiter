@@ -133,7 +133,8 @@ def _install(monkeypatch) -> Dict[str, Any]:
         coro.close()
 
     def fake_email(**kw):
-        rec["emails"].append(kw)
+        # `relaunch` postdates the golden capture: recorded only when True.
+        rec["emails"].append({k: v for k, v in kw.items() if not (k == "relaunch" and v is False)})
 
         async def _noop():
             return None
@@ -152,6 +153,13 @@ def _install(monkeypatch) -> Dict[str, Any]:
     monkeypatch.setattr(eng, "_spawn_task", fake_spawn)
     monkeypatch.setattr(eng, "_send_pair_launch_email", fake_email)
     monkeypatch.setattr(eng, "auto_assign_service", _Sync())
+    # The fire-once ledger (services/launch_effects_ledger) is pinned in
+    # tests/test_launch_effects_ledger_pg.py; here every requested effect is
+    # this job's first launch.
+    def decide(job_id, *, is_initial_launch, send_job_posting_email, launch_started_at):
+        rec.setdefault("ledger", []).append((job_id, is_initial_launch, send_job_posting_email))
+        return is_initial_launch, send_job_posting_email, False
+    monkeypatch.setattr(eng, "_decide_launch_effects", decide)
     return rec
 
 

@@ -68,7 +68,7 @@ A row moves through these states:
 
 Skip reasons:
 
-- From selection: `launched`, `in_flight`, `applicant_backlog`, `blocked:<engage_block_reason>`, `exclusion:<reason>`, `no_contact`, `unscored`, `below_floor`, `over_limit`, `duplicate_id`, `identity_duplicate:<survivor>`.
+- From selection: `launched`, `launched_person`, `in_flight`, `applicant_backlog`, `blocked:<engage_block_reason>`, `exclusion:<reason>`, `no_contact`, `unscored`, `below_floor`, `over_limit`, `duplicate_id`, `identity_duplicate:<survivor>`.
 - From later stages: `dnc`, `hard_filter`, `client_conflict`, `review_removed`, `excluded:<core reason>`, `in_flight`, `claim_lost`, `duplicate_person_this_job`, `skipped_by_recruiter`.
 
 ## Parity decisions
@@ -80,6 +80,7 @@ Skip reasons:
 - **Already launched** is server truth, never mere row existence:
   - **Launched:** the row has an interview id (an audit row, or `data.engage_interview_id`) under either job key. Its `data.jobdiva_candidate_id` twin counts as launched too.
   - **In flight:** `queued`, `processing` or `sending`.
+  - **Launched person:** another `candidate_id` of a person already launched or in flight for the job — same email, phone, LinkedIn URL or JobDiva id (`services/launch_person_keys.py`). Skipped as `launched_person`, so the cap is never spent on a row the claim would refuse.
   - **Blocked:** never-engaged rows from JobDiva applicants (the backlog policy), and rows with `engage_block_reason`.
   - **Re-selectable:** rows with `engage_status = 'failed'`, and saved-but-never-engaged rows from other sources.
 - **Contacts.**
@@ -129,10 +130,12 @@ Skip reasons:
 
 ### S7: never post a person twice
 
+- **Person gate.** `candidate_id` is source-scoped, so one human can be several ids (JobDiva numeric, `exa_<url>`, a Unipile id, a manual upload). Both claims below first take a per-job advisory lock (`728199`, `hashtext(job key)`, every key in sorted order) and drop each requested id whose person keys (`services/launch_person_keys.py`: normalized email, last-10 phone digits, LinkedIn slug, JobDiva id; placeholders excluded) are held for the job by another id — an interview id, or `queued` / `sending` / `processing` / `sent` (a sibling merely `queued` by the same session does not count) — or by an earlier id of the same request (transitively). Nothing is written for a dropped id; the session records it `skipped/duplicate_person_this_job`, the legacy path reports it as an exclusion. The browser's Step 5 and S2 skip the same rows (`launched_person`, from `GET …/launched-candidate-keys` `person_keys`).
 - **Session claim.** Each pass claims its rows for the session (`queued` + `engage_session_id`). Legacy launch paths treat these rows as already sent.
 - **Send claim.** The D1 core moves each batch to `sending` right before its POST and posts only what it won.
 - **Before each POST.** The core calls the runner's `bulk_id_for(batch_idx, posted_ids)`. That hook asserts ownership, then records `checkpoint.s7.inflight[bulk_id] = {batch, attempt, ids, posted_at}` (fenced and committed), and returns the deterministic `uuid5(NS, "<session>:<launch_attempt>:<batch_idx>")`. Pairbot honours a client bulk_id. Each new pass uses a new `launch_attempt` and so a new bulk id: re-POSTing a bulk id would reset Pairbot's creation.
 - **After every batch.** The rows' engage state is re-read, because it is the ground truth. A batch that failed **before** its POST (nothing recorded in `inflight`, not our own stop) fails its rows (`launch_failed`, retryable by a retry-failed child) and hands their claims back: re-planning them would hit the same error forever. Every batch that did not complete (except our own stop) counts in `counts.failed_batches`. Three passes in one claim that leave the same rows plannable raise a counted failure (bounded by `PAIR_LAUNCH_MAX_ATTEMPTS`).
+- **Silent ≠ failed.** When Pairbot's 2xx creation answer neither lists a candidate in `data[]` nor names it in `failed_interviews`, the core parks the row `processing` (with its `engage_bulk_id`) instead of `failed`: its echo may not have matched an interview that exists, and a `failed` row is re-posted by every path. A session settles it like any posted row. Rows a launch OUTSIDE a session leaves parked (or `sending` > 30 min after a crash) are settled by the housekeeping sweep `routers.engagement.settle_parked_legacy_rows` (the worker that wins the housekeeping lock, every `PAIR_LEGACY_SETTLE_EVERY_S`; each row checked at most every 10 min): listed under its own id → `sent` + audit row + JobDiva provisioning; listed under another id → failed + blocked `duplicate_person_this_job`; missing → stays parked, then `failed` (retryable) after 24 h.
 - **Hand-back** (end of S7, and again at every finish — completed, cancelled or failed). Only claims the session **never posted** are released (`release_session_claims` with the ids). Rows that may be at Pairbot without a recorded outcome — posted (`inflight`) and left `queued` by D1's no-answer path, `unconfirmed`, or `launched/unrecorded` — are **parked**: `engage_status = 'processing'` with their `engage_bulk_id`, keeping `engage_session_id`. Every launch path then reads them as in flight, so nobody posts them again; the housekeeping re-check settles them. A hand-back error fails the finish, which is retried, so a terminal status never hides a leaked claim.
 - **Settling (resume).** Rows that may be at Pairbot (`processing`, `sending`, or `queued` and recorded in `inflight`) go through `reconcile_with_pairbot`:
 
@@ -141,7 +144,7 @@ Skip reasons:
 | listed under its own id (`sent`) | `launched/reconciled` (written through) |
 | proven, DB write failed (`unrecorded`) | `launched/unrecorded`; housekeeping re-reconciles to record it |
 | listed under another id (`duplicate_of`) | `skipped/duplicate_person_this_job`, never re-posted |
-| `missing`, posted ≥ `PAIR_LAUNCH_REPOST_AFTER_S` (600 s) ago or never posted | requeued (`queued`, removed from `inflight`) → posted again in a new pass |
+| `missing`, posted ≥ `PAIR_LAUNCH_REPOST_AFTER_S` (600 s) ago or never posted | requeued (`queued`, removed from `inflight`) → posted again in a new pass — at most `PAIR_LAUNCH_MAX_REPOSTS` (default 1) times per row (`checkpoint.s7.reposts`); past that `unconfirmed` (parked, re-checked), never posted again: "missing" is judged by the echoed `source_candidate_id` only |
 | `missing`, posted recently | wait (`RetryLater` until it is 10 min old) |
 | bulk still creating (`bulk_in_progress`, `own_bulks_creating`) | wait |
 | by-job `error` (Pairbot down) | wait; nothing is re-posted |
@@ -156,6 +159,8 @@ Side effects fire once per session, and only if this session launched someone:
 - Only rows the session itself launched count: `sent` / `reconciled` / `unrecorded`.
 - The guard is a conditional UPDATE of `side_effects_fired_at`, claimed before spawning. A spawn error resets it. The outcome is recorded in `checkpoint.fx` / `counts.side_effects`.
 - A completed launch fires them when S7 ends — the launch is over; JobDiva provisioning (S7b) follows, as legacy's inline provisioning ran in the background.
+
+The first-launch effects (applicant sync, the job-posting email) also pass the job's fire-once ledger (`services/launch_effects_ledger.py`, `monitored_jobs.initial_launch_effects_at` / `job_posting_email_sent_at`): they fire only for the launch that produced the job's first interview, once per job version, whatever `is_initial_launch` / `send_job_posting_email` say. Every launch path goes through it (`routers.engagement.fire_launch_side_effects`). The recruiter email still goes out for each launch that sent someone, worded as a relaunch when the job's first interview predates it.
 
 What fires depends on how the session ended:
 

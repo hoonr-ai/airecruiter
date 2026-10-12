@@ -211,7 +211,9 @@ def _compute_scoped_step_time(conn, scope: Optional[Dict[str, Any]] = None) -> D
     )
 
 
-_LAUNCH_TIMING_FIELDS = ("launch_clicked_at", "added_to_click_minutes", "click_to_launch_minutes")
+_LAUNCH_TIMING_FIELDS = (
+    "launch_clicked_at", "added_to_click_minutes", "click_to_launch_minutes", "first_launched_at",
+)
 
 
 def _timeline_launch_timings(conn, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -257,12 +259,35 @@ def _merge_launch_timings(rows: List[Dict[str, Any]], timings: Optional[Dict[str
     query stays one statement and can't multiply rows."""
     for row in rows:
         timing = (timings or {}).get(str(row.get("job_id") or ""))
+        if timings is not None:
+            # "Launched (PAIR)" is the job's first SUCCESSFUL launch (T2: the
+            # first interview created) and the Lag runs to it; the first
+            # attempt's save time stays in curate_launched_at ("Launch
+            # Attempted"). Without the timings read, the attempt-based lag
+            # computed with the row is kept (flagged unavailable).
+            first = (timing or {}).get("first_launch_at")
+            row["first_launched_at"] = _iso(first)
+            row["posted_to_launch_days"] = _lag_days(row.get("jobdiva_posted_on"), first)
         if timing:
             row.update({
                 "launch_clicked_at": _iso(timing.get("first_launch_clicked_at")),
                 "added_to_click_minutes": timing.get("added_to_click_minutes"),
                 "click_to_launch_minutes": timing.get("click_to_launch_minutes"),
             })
+
+
+def _lag_days(posted_on_iso: Any, launched_at: Any) -> Optional[float]:
+    """Days from the JobDiva posted date (midnight UTC) to ``launched_at``."""
+    if not posted_on_iso or launched_at is None:
+        return None
+    try:
+        posted_on = datetime.date.fromisoformat(str(posted_on_iso)[:10])
+        posted_ts = datetime.datetime.combine(posted_on, datetime.time.min, tzinfo=datetime.timezone.utc)
+        if getattr(launched_at, "tzinfo", None) is None:
+            launched_at = launched_at.replace(tzinfo=datetime.timezone.utc)
+        return round((launched_at - posted_ts).total_seconds() / 86400.0, 1)
+    except Exception:
+        return None
 
 
 def _compute_jobs_timeline(
@@ -429,21 +454,30 @@ def _compute_jobs_timeline(
 
 
 def _compute_launch_speed(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Posted→launched velocity across ALL jobs (not just the timeline page)."""
+    """Posted→launched velocity across ALL jobs (not just the timeline page).
+
+    "Launched" is the job's first SUCCESSFUL launch — monitored_jobs.
+    first_launch_at (T2, the first interview created; services/launch_timing,
+    backfilled from the audit log) — as on the Launch Report and Recruiter
+    Analytics. pair_launched_at (the first /candidates/save, written before
+    PAIR Bot is called and kept even when that attempt created nobody) is
+    reported as ``launch_attempted_jobs``.
+    """
     cond, params = _mj_filter(scope)
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT
-                COUNT(*) FILTER (WHERE pair_launched_at IS NOT NULL) AS launched_jobs,
-                COUNT(*) FILTER (WHERE pair_launched_at IS NULL
+                COUNT(*) FILTER (WHERE first_launch_at IS NOT NULL) AS launched_jobs,
+                COUNT(*) FILTER (WHERE first_launch_at IS NULL
                                  AND COALESCE(is_archived, FALSE) = FALSE) AS unlaunched_active_jobs,
-                COUNT(*) FILTER (WHERE pair_launched_at IS NULL
+                COUNT(*) FILTER (WHERE first_launch_at IS NULL
                                  AND COALESCE(is_archived, FALSE) = FALSE
-                                 AND {_ts_utc('created_at')} < NOW() - INTERVAL '7 days') AS aged_unlaunched_jobs
+                                 AND {_ts_utc('created_at')} < NOW() - INTERVAL '7 days') AS aged_unlaunched_jobs,
+                COUNT(*) FILTER (WHERE pair_launched_at IS NOT NULL) AS launch_attempted_jobs
             FROM monitored_jobs
             WHERE {cond}
         """, params)
-        launched_jobs, unlaunched_active, aged_unlaunched = cur.fetchone()
+        launched_jobs, unlaunched_active, aged_unlaunched, attempted = cur.fetchone()
 
         # Lag stats computed in Python — posted_date is unparseable-in-SQL
         # free text (see _parse_posted_date; SQL to_date raises on values
@@ -452,9 +486,9 @@ def _compute_launch_speed(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[
         # when JobDiva has nothing: admit [-1, 365] days, clamping the small
         # timezone-skew negatives to 0 so they count as same-day launches.
         cur.execute(f"""
-            SELECT posted_date, {_ts('pair_launched_at')} AS launched_ts
+            SELECT posted_date, (first_launch_at AT TIME ZONE 'UTC') AS launched_ts
             FROM monitored_jobs
-            WHERE pair_launched_at IS NOT NULL AND {cond}
+            WHERE first_launch_at IS NOT NULL AND {cond}
         """, params)
         lags = []
         for posted_raw, launched_ts in cur.fetchall():
@@ -471,6 +505,7 @@ def _compute_launch_speed(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[
 
     return {
         "launched_jobs": int(launched_jobs or 0),
+        "launch_attempted_jobs": int(attempted or 0),
         "unlaunched_active_jobs": int(unlaunched_active or 0),
         "aged_unlaunched_jobs": int(aged_unlaunched or 0),
         "avg_days_posted_to_launch": round(float(avg_lag), 1) if avg_lag is not None else None,
@@ -517,10 +552,12 @@ def _compute_weekly_trends(conn, scope: Optional[Dict[str, Any]] = None, weeks: 
               AND {mj_cond}
             GROUP BY 1
         """, mj_params),
+        # A job counts in the week of its first SUCCESSFUL launch (T2), not
+        # of its first save (pair_launched_at), which a failed attempt sets.
         "jobs_launched": series(f"""
-            SELECT date_trunc('week', {_ts('pair_launched_at')})::date, COUNT(*)
+            SELECT date_trunc('week', first_launch_at AT TIME ZONE 'UTC')::date, COUNT(*)
             FROM monitored_jobs
-            WHERE {_ts('pair_launched_at')} >= date_trunc('week', NOW()) - make_interval(weeks => %s)
+            WHERE (first_launch_at AT TIME ZONE 'UTC') >= date_trunc('week', NOW()) - make_interval(weeks => %s)
               AND {mj_cond}
             GROUP BY 1
         """, mj_params),
@@ -531,11 +568,24 @@ def _compute_weekly_trends(conn, scope: Optional[Dict[str, Any]] = None, weeks: 
               AND {sc_cond}
             GROUP BY 1
         """, sc_params),
+        # People newly launched that week: each (job, person) counts once, in
+        # the week of their FIRST interview. Counting distinct interview ids
+        # per week counted a relaunched person again in a later week.
         "candidates_launched": series(f"""
-            SELECT date_trunc('week', created_at)::date, COUNT(DISTINCT NULLIF(interview_id, ''))
-            FROM engage_interview_audit
-            WHERE created_at >= date_trunc('week', NOW()) - make_interval(weeks => %s)
-              AND {sc_cond}
+            WITH bounds AS (
+                -- first: series() passes the week count before extra params
+                SELECT date_trunc('week', NOW()) - make_interval(weeks => %s) AS since
+            )
+            SELECT date_trunc('week', people.first_at)::date, COUNT(*)
+            FROM (
+                SELECT jobdiva_id, candidate_id, MIN(created_at) AS first_at
+                FROM engage_interview_audit
+                WHERE COALESCE(NULLIF(interview_id, ''), '') <> ''
+                  AND COALESCE(NULLIF(candidate_id, ''), '') <> ''
+                  AND {sc_cond}
+                GROUP BY jobdiva_id, candidate_id
+            ) people, bounds
+            WHERE people.first_at >= bounds.since
             GROUP BY 1
         """, sc_params),
         # JobDiva-reported submittals, bucketed by the submittal date JobDiva
@@ -736,8 +786,29 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                 else:
                     active_jobs = count
 
-            # 2. Sourced candidates by effective funnel status
+            # 2. Sourced candidates by effective funnel status — one row per
+            # PERSON per job (a person stored under both job keys counted
+            # twice), and "launched" means launched for THAT job (the audit
+            # check had no job filter: someone launched on job A showed as
+            # launched on every job they were sourced for).
             cur.execute(f"""
+                WITH keyed AS (
+                    SELECT sc.id, sc.candidate_id, sc.status, sc.data, sc.jobdiva_id,
+                           COALESCE(m.job_id::text, sc.jobdiva_id) AS job_key,
+                           NULLIF(m.jobdiva_id, '') AS job_ref
+                    FROM sourced_candidates sc
+                    LEFT JOIN LATERAL (
+                        SELECT mj.job_id, mj.jobdiva_id FROM monitored_jobs mj
+                        WHERE mj.jobdiva_id = sc.jobdiva_id OR mj.job_id::text = sc.jobdiva_id
+                        LIMIT 1
+                    ) m ON TRUE
+                    WHERE {sc_cond}
+                ),
+                people AS (
+                    SELECT DISTINCT ON (job_key, candidate_id) *
+                    FROM keyed
+                    ORDER BY job_key, candidate_id, id DESC
+                )
                 SELECT
                     CASE
                         WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('pass', 'passed', 'qualified', 'shortlisted', 'hired', 'selected') THEN 'passed'
@@ -751,6 +822,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                              OR EXISTS (
                                  SELECT 1 FROM engage_interview_audit ea
                                  WHERE ea.candidate_id = sc.candidate_id
+                                   AND ea.jobdiva_id IN (sc.jobdiva_id, sc.job_key, sc.job_ref)
                                    AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
                              ) THEN 'launched'
                         WHEN LOWER(COALESCE(sc.status, '')) IN ('launched', 'submitted') THEN 'launched'
@@ -760,8 +832,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                         ELSE COALESCE(NULLIF(TRIM(sc.status), ''), 'pending')
                     END AS effective_status,
                     COUNT(*)
-                FROM sourced_candidates sc
-                WHERE {sc_cond}
+                FROM people sc
                 GROUP BY effective_status
             """, sc_params)
             status_rows = cur.fetchall()
@@ -1059,3 +1130,32 @@ async def get_admin_analytics(
     except Exception as e:
         logger.error(f"Failed to fetch admin analytics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch analytics: {str(e)}")
+
+
+@router.get("/admin/duplicate-launches")
+async def get_duplicate_launches(
+    limit: int = Query(default=200, ge=1, le=2000),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """People launched more than once for one job under different
+    candidate_ids (services/duplicate_launches.py) — the launches the person
+    gate now prevents, from before it existed. Admins only; read-only."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied. Admin access required.")
+    from services.duplicate_launches import find_duplicate_launches
+
+    def run() -> Dict[str, Any]:
+        conn = get_db_connection()
+        try:
+            return find_duplicate_launches(conn, limit=limit)
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
+    try:
+        return {"status": "success", "data": await asyncio.to_thread(run)}
+    except Exception as e:
+        logger.error(f"duplicate-launches diagnostic failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to compute duplicate launches.")

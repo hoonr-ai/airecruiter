@@ -86,10 +86,18 @@ class Effects:
             launch_id, job_id, requested_by=requested_by, launch_session_id=session_id,
         )
 
-    def claim_for_session(self, job_keys: Sequence[str], ids: Sequence[str], session_id: str) -> list:
+    def claim_for_session(
+        self, job_keys: Sequence[str], ids: Sequence[str], session_id: str,
+        duplicates: Optional[Dict[str, Any]] = None,
+    ) -> list:
+        """``duplicates`` (optional out-param) receives the person gate's
+        ``{id: (holder id, key kind)}``: ids not claimed because another id of
+        the same person is already held for the job."""
         from routers import engagement
 
-        return engagement.claim_candidates_for_session(tuple(job_keys), list(ids), session_id)
+        return engagement.claim_candidates_for_session(
+            tuple(job_keys), list(ids), session_id, duplicates=duplicates,
+        )
 
     def release_claims(self, session_id: str, job_keys: Sequence[str], ids: Sequence[str]) -> int:
         """Only the given ids — never "every queued row of the session": a
@@ -107,6 +115,11 @@ class Effects:
         return await engagement.reconcile_with_pairbot(
             list(job_keys), list(ids), session_id=session_id, own_bulk_ids=list(own_bulk_ids),
         )
+
+    async def settle_parked_legacy_rows(self) -> Dict[str, int]:
+        from routers import engagement
+
+        return await engagement.settle_parked_legacy_rows()
 
     # ── provisioning / side effects ────────────────────────────────────────
     def provisioning_enabled(self) -> bool:
