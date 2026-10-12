@@ -117,14 +117,20 @@ export default function NotificationsPage() {
             <BellRing className="h-4 w-4 shrink-0 text-slate-500" />
             Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front.
           </span>
-          <Button variant="outline" size="sm" className="h-7" onClick={requestNotificationPermission}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7"
+            onClick={requestNotificationPermission}
+            aria-label="Enable desktop notifications"
+          >
             Enable
           </Button>
         </div>
       )}
 
       {notificationPermission === "denied" && (
-        <div className="flex items-center gap-2 text-xs text-slate-400 mb-4">
+        <div className="flex items-center gap-2 text-xs text-slate-400 mb-4" role="status">
           <BellOff className="h-3.5 w-3.5 shrink-0" />
           Desktop alerts are blocked. Enable them in your browser&apos;s site settings to get them again.
         </div>

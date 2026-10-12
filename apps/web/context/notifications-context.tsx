@@ -3,11 +3,14 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { api, authFetch, type NotificationItem } from "@/lib/api";
+import {
+  type BrowserNotificationPermission,
+  normalizePermissionState,
+  notificationClickPath,
+  shouldShowBrowserPopup,
+} from "@/lib/browser-notifications";
 
-// "unsupported" covers SSR (no `window`) and browsers without the Notification
-// API (e.g. some mobile browsers) — treated like "denied" by the UI, just
-// without ever offering the opt-in control.
-export type BrowserNotificationPermission = NotificationPermission | "unsupported";
+export type { BrowserNotificationPermission };
 
 function currentNotificationPermission(): BrowserNotificationPermission {
   if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
@@ -67,6 +70,21 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // "now" and silently skip anything created in the gap — this client-side
   // watermark is authoritative regardless of which worker answers.
   const lastSeenIdRef = useRef<number>(0);
+  // Every id this tab has already applied a side effect for (unread bump +
+  // desktop popup) — checked and updated OUTSIDE the setNotifications
+  // updater (see handleRawSSEChunk below). React may invoke a state updater
+  // more than once for the same update (StrictMode, concurrent features), so
+  // an updater must stay pure; a side effect that ran from inside one could
+  // silently fire twice.
+  const notifiedIdsRef = useRef<Set<number>>(new Set());
+  // The App Router instance is stable in practice, but showBrowserNotification
+  // is created once and lives for the lifetime of the SSE connection (the
+  // mounting effect has a deliberately empty deps array) — reading `router`
+  // through a ref, refreshed every render, means a click always navigates
+  // with whatever router instance is current rather than whichever one
+  // existed when the popup was created.
+  const routerRef = useRef(router);
+  routerRef.current = router;
 
   // Browsers require a user gesture (or at least discourage auto-prompting
   // without one) before Notification.requestPermission() — calling it
@@ -79,37 +97,58 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       .catch((err) => console.error("Failed to request notification permission:", err));
   }, []);
 
+  // Keep notificationPermission in sync with a change made outside the app
+  // (the browser's own site settings) — without this, revoking or granting
+  // access there leaves the page showing a stale Enable/blocked banner until
+  // the next full reload. Not all browsers support querying this permission
+  // (Safari's support is recent/partial), so this is best-effort.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) return;
+    let status: PermissionStatus | null = null;
+    let cancelled = false;
+    navigator.permissions
+      .query({ name: "notifications" as PermissionName })
+      .then((result) => {
+        if (cancelled) return;
+        status = result;
+        setNotificationPermission(normalizePermissionState(result.state));
+        status.onchange = () => setNotificationPermission(normalizePermissionState(status!.state));
+      })
+      .catch(() => {
+        // Unsupported in this browser — requestNotificationPermission's own
+        // return value is still the source of truth after an explicit click.
+      });
+    return () => {
+      cancelled = true;
+      if (status) status.onchange = null;
+    };
+  }, []);
+
   // Native OS-level popup for a new notification, as a companion to the
-  // in-app badge/feed — only when permission is granted AND the tab isn't
-  // the one currently in front (if it is, the in-app feed already surfaced
-  // it; a second popup would just be noise). `tag` de-dupes at the OS level
-  // if this somehow fires twice for the same id.
-  const showBrowserNotification = useCallback(
-    (item: NotificationItem) => {
-      if (typeof window === "undefined" || !("Notification" in window)) return;
-      if (Notification.permission !== "granted") return;
-      if (document.visibilityState === "visible") return;
-      try {
-        const popup = new Notification(item.title, {
-          body: item.body ?? undefined,
-          tag: `pair-notification-${item.id}`,
-          icon: "/favicon.ico",
-        });
-        popup.onclick = () => {
-          window.focus();
-          if (item.jobdiva_id && item.candidate_id) {
-            router.push(
-              `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`
-            );
-          }
-          popup.close();
-        };
-      } catch (err) {
-        console.error("Failed to show browser notification:", err);
-      }
-    },
-    [router]
-  );
+  // in-app badge/feed — only when permission is granted and the user
+  // plausibly wouldn't already see the in-app update (see
+  // shouldShowBrowserPopup). `tag` de-dupes at the OS level if this somehow
+  // fires twice for the same id.
+  const showBrowserNotification = useCallback((item: NotificationItem) => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (!shouldShowBrowserPopup(Notification.permission, document.visibilityState === "visible", document.hasFocus())) {
+      return;
+    }
+    try {
+      const popup = new Notification(item.title, {
+        body: item.body ?? undefined,
+        tag: `pair-notification-${item.id}`,
+        icon: "/icon.png",
+      });
+      popup.onclick = () => {
+        window.focus();
+        routerRef.current.push(notificationClickPath(item));
+        popup.close();
+      };
+    } catch (err) {
+      console.error("Failed to show browser notification:", err);
+    }
+  }, []);
 
   // Truth-up fetch: initial load, and re-sync after any reconnect so nothing
   // dropped between a lost connection and the next one is lost for good.
@@ -121,6 +160,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setHasLoadError(false);
       for (const n of data.notifications) {
         if (n.id > lastSeenIdRef.current) lastSeenIdRef.current = n.id;
+        // Already surfaced via this fetch — an SSE push for the same id
+        // later (a reconnect replaying a bit of history) must not re-bump
+        // the unread count or re-pop a desktop notification.
+        notifiedIdsRef.current.add(n.id);
       }
     } catch (err) {
       console.error("Failed to fetch notifications:", err);
@@ -210,17 +253,22 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         try {
           const item: NotificationItem = JSON.parse(dataLines.join(""));
           if (item.id > lastSeenIdRef.current) lastSeenIdRef.current = item.id;
-          setNotifications((prev) => {
-            // Only bump the unread count the first time we see this id — a
-            // reconnect's truth-up refresh() may have already loaded it,
-            // and without this check that row would be counted twice.
-            const alreadyKnown = prev.some((n) => n.id === item.id);
-            if (!alreadyKnown && !item.read_at) {
-              setUnreadCount((count) => count + 1);
-              showBrowserNotification(item);
-            }
-            return [item, ...prev.filter((n) => n.id !== item.id)];
-          });
+
+          // Decided OUTSIDE the setNotifications updater, and only once per
+          // id (notifiedIdsRef), rather than inside it: a state updater can
+          // run more than once for the same update (React StrictMode,
+          // concurrent rendering), and a side effect — bumping a counter,
+          // popping a desktop notification — triggered from inside one would
+          // then fire however many times React happened to invoke it.
+          const isFirstSighting = !notifiedIdsRef.current.has(item.id);
+          notifiedIdsRef.current.add(item.id);
+
+          setNotifications((prev) => [item, ...prev.filter((n) => n.id !== item.id)]);
+
+          if (isFirstSighting && !item.read_at) {
+            setUnreadCount((count) => count + 1);
+            showBrowserNotification(item);
+          }
         } catch {
           console.debug("Ignored unparseable notification event:", dataLines.join(""));
         }
