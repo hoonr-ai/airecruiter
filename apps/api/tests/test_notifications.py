@@ -921,7 +921,11 @@ def test_create_daily_digest_notifications_skips_entirely_when_another_worker_ho
 def test_list_notifications_scopes_to_caller_email(monkeypatch):
     from routers.notifications import _list_notifications_sync
 
-    cur = FakeCursor(fetchall_results=[[]], fetchone_results=[(0,)])
+    # _list_notifications_sync's cursor is a RealDictCursor in production, so
+    # its unread-count fetchone() returns a dict-shaped row ({"count": N}),
+    # not a tuple — see test_unread_count_for_handles_both_cursor_row_shapes
+    # below for why that distinction matters.
+    cur = FakeCursor(fetchall_results=[[]], fetchone_results=[{"count": 0}])
     conn = FakeConn(cur)
     monkeypatch.setattr("routers.notifications.get_db_connection", lambda: conn)
 
@@ -930,6 +934,23 @@ def test_list_notifications_scopes_to_caller_email(monkeypatch):
     select_sql, params = cur.executed[0]
     assert "recipient_email = %s" in select_sql
     assert params[0] == "me@x.com"
+
+
+def test_unread_count_for_handles_both_cursor_row_shapes():
+    """Regression: _unread_count_for is shared by _get_unread_count_sync
+    (plain cursor, tuple rows) and _list_notifications_sync (RealDictCursor,
+    dict rows). `cur.fetchone()[0]` alone only works for the former — a
+    RealDictRow has no positional access and raises KeyError(0), which made
+    every GET /api/v1/notifications call 500 unconditionally (independent of
+    PR #805 and unrelated to any recent deploy — present since the
+    notifications table shipped) until this branch was added."""
+    from routers.notifications import _unread_count_for
+
+    tuple_cur = FakeCursor(fetchone_results=[(3,)])
+    assert _unread_count_for(tuple_cur, "me@x.com") == 3
+
+    dict_cur = FakeCursor(fetchone_results=[{"count": 5}])
+    assert _unread_count_for(dict_cur, "me@x.com") == 5
 
 
 def test_mark_notification_read_scopes_update_to_caller_email(monkeypatch):
@@ -1212,7 +1233,7 @@ def test_clear_notifications_endpoint_requires_authentication():
 def test_list_and_unread_count_exclude_cleared_notifications(monkeypatch):
     from routers.notifications import _list_notifications_sync, _get_unread_count_sync
 
-    list_cur = FakeCursor(fetchall_results=[[]], fetchone_results=[(0,)])
+    list_cur = FakeCursor(fetchall_results=[[]], fetchone_results=[{"count": 0}])
     monkeypatch.setattr("routers.notifications.get_db_connection", lambda: FakeConn(list_cur))
     _list_notifications_sync("me@x.com", 50, None, False)
     select_sql = list_cur.executed[0][0]
