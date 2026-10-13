@@ -642,13 +642,14 @@ export default function CandidateEvaluationReportPage() {
               variant="ghost"
               onClick={() => setRecordingsOpen((o) => !o)}
               aria-expanded={recordingsOpen}
+              aria-controls="engage-call-recordings"
               className="h-9 bg-white/15 hover:bg-white text-white hover:text-[#312e81] gap-2 font-bold text-[13px] px-5 border border-white/20 rounded-lg shadow-sm transition-all duration-200 group"
             >
               <Headphones className="w-4 h-4 text-white group-hover:text-[#4f46e5]" /> Call Recordings <ChevronDown className={cn("w-3.5 h-3.5 text-white/80 group-hover:text-[#4f46e5] transition-transform", recordingsOpen && "rotate-180")} />
             </Button>
           </div>
           {recordingsOpen && (
-            <div className="bg-white border-x border-[#e2e8f0] px-6 pt-5">
+            <div id="engage-call-recordings" className="bg-white border-x border-[#e2e8f0] px-6 pt-5">
               <CallRecordings
                 interviewId={scores.engage_interview_id || null}
                 open={recordingsOpen}

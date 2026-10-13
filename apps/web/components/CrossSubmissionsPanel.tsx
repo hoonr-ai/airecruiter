@@ -23,6 +23,7 @@ import { api, type CrossSubmission } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { getScoreBand, getScoreTone } from "@/lib/match-score";
 import { cn } from "@/lib/utils";
+import { RANKINGS_TABLE_MAX_HEIGHT } from "@/lib/table-layout";
 
 // These rows are scored by the same matrix as Step 5
 // (services/unified_candidate_search.apply_scoring_policy), so they are shown
@@ -203,7 +204,7 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
       </div>
 
       {open && (
-        <div className="border-t border-indigo-100 overflow-auto max-h-[calc(100vh-320px)]">
+        <div className="border-t border-indigo-100 overflow-auto" style={{ maxHeight: RANKINGS_TABLE_MAX_HEIGHT }}>
           <table className="w-full min-w-[900px] border-separate border-spacing-0 text-[12px]">
             <thead>
               <tr className="text-[10px] uppercase tracking-wide text-slate-500 [&>th]:sticky [&>th]:top-0 [&>th]:z-10 [&>th]:bg-indigo-50">
