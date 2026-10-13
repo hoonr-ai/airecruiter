@@ -514,8 +514,13 @@ export function LaunchPairProgressModal({
           )}
           <div className="flex gap-2">
             {!isDone && onHide && (
-              <Button type="button" variant="outline" onClick={onHide}>
-                Hide
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onHide}
+                title="The launch keeps running on the server. Track it in the bottom-right corner."
+              >
+                Minimize
               </Button>
             )}
             {!isDone && onCancel && (

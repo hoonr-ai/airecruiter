@@ -520,6 +520,16 @@ async def list_for_job(job_key: str, *, active: bool, needs_contact: bool, limit
     return [session_view(r) for r in rows]
 
 
+async def list_for_user(email: str, *, recent_hours: int, limit: int) -> List[Dict[str, Any]]:
+    """The launch tracker: the user's active and recently finished sessions,
+    each view with ``job_title`` added."""
+    store, _, _ = _deps()
+    rows = await asyncio.to_thread(
+        lambda: store.list_user_sessions(email, recent_hours=recent_hours, limit=limit)
+    )
+    return [dict(session_view(r), job_title=r.get("job_title")) for r in rows]
+
+
 async def events(session: Dict[str, Any], after_seq: int, limit: int) -> Dict[str, Any]:
     store, _, _ = _deps()
     rows = await asyncio.to_thread(store.events_after, session["id"], after_seq, limit)

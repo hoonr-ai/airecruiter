@@ -42,6 +42,7 @@ import {
   type LaunchSessionView,
   type RowCache,
 } from "@/lib/launch-session";
+import { LAUNCH_STARTED_EVENT } from "@/lib/launch-session";
 
 // Watches a server launch session for Step 5 (apps/api/routers/launch_sessions.py).
 // The rules — what to send, how to read answers, the back-off, the row merge,
@@ -693,11 +694,20 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
   // ── actions ─────────────────────────────────────────────────────────────
 
   /** POST create, re-sent with the SAME body (same idempotency key) on 429 / 5xx / network. */
+  // Wake the bottom-right launch tracker (components/layout/launch-tracker)
+  // once a new session exists, so it shows without waiting for its idle poll.
+  const announceCreated = (outcome: CreateOutcome): CreateOutcome => {
+    if (outcome.kind === "created" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event(LAUNCH_STARTED_EVENT));
+    }
+    return outcome;
+  };
+
   const create = useCallback(async (job: string, body: CreateSessionBody): Promise<CreateOutcome> => {
     let outcome: CreateOutcome = { kind: "transient", status: 0, retryAfterMs: null };
     for (let attempt = 1; attempt <= CREATE_ATTEMPTS; attempt++) {
       outcome = classifyCreateResponse(await launchSessionsApi.create(job, body));
-      if (outcome.kind !== "transient" || !mountedRef.current) return outcome;
+      if (outcome.kind !== "transient" || !mountedRef.current) return announceCreated(outcome);
       if (attempt < CREATE_ATTEMPTS) await delay(writeRetryDelay(attempt, outcome.retryAfterMs));
       if (!mountedRef.current) return outcome;
     }

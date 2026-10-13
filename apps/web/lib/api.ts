@@ -456,6 +456,8 @@ export const launchSessionsApi = {
     const q = qs.toString();
     return lsFetch<{ sessions: LaunchSessionView[] }>(`${lsJob(jobRef)}${q ? `?${q}` : ""}`);
   },
+  // The launch tracker: the signed-in user's active + recently finished sessions, every job.
+  mine: () => lsFetch<{ sessions: (LaunchSessionView & { job_title?: string | null })[] }>(`/api/v1/launch-sessions/mine`),
   get: (id: string) => lsFetch<{ session: LaunchSessionView }>(lsSession(id)),
   candidates: (id: string, q: CandidatesQuery = {}) =>
     lsFetch<LaunchSessionRowsPage>(`${lsSession(id)}/candidates${candidatesQueryString(q)}`),
