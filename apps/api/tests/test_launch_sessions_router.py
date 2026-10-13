@@ -413,6 +413,7 @@ def test_my_sessions_lists_only_the_callers_own_launches(env):
     mine = client().get("/api/v1/launch-sessions/mine").json()["sessions"]
     assert [(x["id"], x["job_title"]) for x in mine] == [(s["id"], "Java Developer")]
     assert client(OTHER).get("/api/v1/launch-sessions/mine").json()["sessions"] == []
+    assert client(UserIdentity(email="", role="recruiter")).get("/api/v1/launch-sessions/mine").json()["sessions"] == []
     client().post(f"/api/v1/launch-sessions/{s['id']}/cancel")
     # Finished recently: still listed so the tracker can show the result.
     assert [x["id"] for x in client().get("/api/v1/launch-sessions/mine").json()["sessions"]] == [s["id"]]

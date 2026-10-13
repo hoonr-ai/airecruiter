@@ -5,7 +5,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { CheckCircle2, ChevronDown, ChevronUp, Loader2, Rocket, X, XCircle } from "lucide-react";
 import { launchSessionsApi } from "@/lib/api";
-import type { LaunchSessionView } from "@/lib/launch-session";
+import { LAUNCH_STARTED_EVENT, type LaunchSessionView } from "@/lib/launch-session";
+import { sourceAndLaunchHref } from "@/lib/routes";
 
 // Bottom-right launch tracker (LinkedIn-style minimized dock). Source & Launch
 // runs server-side as a launch session (routers/launch_sessions.py), so the
@@ -16,6 +17,7 @@ type TrackedSession = LaunchSessionView & { job_title?: string | null };
 
 const ACTIVE_POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
+const AUTH_BACKOFF_MS = 5 * 60_000;
 const DISMISSED_KEY = "pair.launchTracker.dismissed";
 const COLLAPSED_KEY = "pair.launchTracker.collapsed";
 
@@ -97,8 +99,7 @@ function progressPct(s: TrackedSession): number | null {
 }
 
 function jobHref(s: TrackedSession): string {
-  const ref = s.jobdiva_ref || s.job_id;
-  return `/jobs/new?jobId=${encodeURIComponent(ref)}&mode=source&step=5`;
+  return sourceAndLaunchHref(s.jobdiva_ref || s.job_id);
 }
 
 export function LaunchTracker() {
@@ -108,32 +109,53 @@ export function LaunchTracker() {
   // and the dock renders nothing until the first poll lands anyway.
   const [dismissed, setDismissed] = useState<string[]>(() => readJson<string[]>(DISMISSED_KEY, []));
   const [collapsed, setCollapsed] = useState(() => readJson<boolean>(COLLAPSED_KEY, true));
+  // Ids of launches that finished while this tab watched: their rows (and the
+  // header) are highlighted instead of forcing the dock open.
+  const [fresh, setFresh] = useState<string[]>([]);
   const prevRunning = useRef<Set<string>>(new Set());
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pollRef = useRef<() => Promise<void>>(async () => {});
+  const mounted = useRef(true);
+  const inFlight = useRef(false);
+  const failures = useRef(0);
 
   const poll = useCallback(async () => {
+    // One request at a time: the timer, a tab becoming visible and a new
+    // launch can all ask for a poll at once.
+    if (inFlight.current || !mounted.current) return;
+    inFlight.current = true;
     clearTimeout(timer.current);
-    const res = await launchSessionsApi.mine();
-    let anyRunning = false;
-    if (res.ok && res.data) {
-      const list = res.data.sessions;
-      anyRunning = list.some(isRunning);
-      // A launch that just finished pops the dock open once.
-      const nowRunning = new Set(list.filter(isRunning).map((s) => s.id));
-      const justFinished = [...prevRunning.current].some((id) => !nowRunning.has(id));
-      prevRunning.current = nowRunning;
-      if (justFinished) setCollapsed(false);
-      setSessions(list);
+    let delay = IDLE_POLL_MS;
+    try {
+      const res = await launchSessionsApi.mine();
+      if (!mounted.current) return;
+      if (res.ok && res.data) {
+        failures.current = 0;
+        const list = res.data.sessions;
+        const nowRunning = new Set(list.filter(isRunning).map((s) => s.id));
+        const finished = [...prevRunning.current].filter((id) => !nowRunning.has(id));
+        prevRunning.current = nowRunning;
+        if (finished.length) setFresh((f) => [...f, ...finished]);
+        setSessions(list);
+        if (nowRunning.size > 0 && document.visibilityState === "visible") delay = ACTIVE_POLL_MS;
+      } else if (res.status === 401 || res.status === 403) {
+        // Signed out or token expired: the auth flow handles it; don't hammer.
+        delay = AUTH_BACKOFF_MS;
+      } else {
+        failures.current += 1;
+        delay = Math.min(IDLE_POLL_MS, ACTIVE_POLL_MS * 2 ** failures.current);
+      }
+    } finally {
+      inFlight.current = false;
     }
-    const delay = anyRunning && document.visibilityState === "visible" ? ACTIVE_POLL_MS : IDLE_POLL_MS;
-    timer.current = setTimeout(() => void pollRef.current(), delay);
+    if (mounted.current) timer.current = setTimeout(() => void pollRef.current(), delay);
   }, []);
   useEffect(() => {
     pollRef.current = poll;
   }, [poll]);
 
   useEffect(() => {
+    mounted.current = true;
     timer.current = setTimeout(() => void poll(), 0);
     const onVisible = () => {
       if (document.visibilityState === "visible") void poll();
@@ -141,16 +163,25 @@ export function LaunchTracker() {
     // The job page fires this right after it starts a session, so the dock
     // picks it up without waiting for the idle poll.
     const onStarted = () => void poll();
+    // Keep dismiss / collapse in step across tabs.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === DISMISSED_KEY) setDismissed(readJson<string[]>(DISMISSED_KEY, []));
+      if (e.key === COLLAPSED_KEY) setCollapsed(readJson<boolean>(COLLAPSED_KEY, true));
+    };
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("pair:launch-started", onStarted);
+    window.addEventListener(LAUNCH_STARTED_EVENT, onStarted);
+    window.addEventListener("storage", onStorage);
     return () => {
+      mounted.current = false;
       clearTimeout(timer.current);
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("pair:launch-started", onStarted);
+      window.removeEventListener(LAUNCH_STARTED_EVENT, onStarted);
+      window.removeEventListener("storage", onStorage);
     };
   }, [poll]);
 
   const toggle = () => {
+    setFresh([]); // seen
     setCollapsed((c) => {
       writeJson(COLLAPSED_KEY, !c);
       return !c;
@@ -160,6 +191,7 @@ export function LaunchTracker() {
   const dismiss = (id: string) => {
     setDismissed((d) => {
       const next = [...d, id].slice(-100);
+      setFresh((f) => f.filter((x) => x !== id));
       writeJson(DISMISSED_KEY, next);
       return next;
     });
@@ -169,18 +201,23 @@ export function LaunchTracker() {
   if (visible.length === 0) return null;
 
   const running = visible.filter(isRunning);
-  const header =
+  const newlyDone = visible.filter((s) => fresh.includes(s.id)).length;
+  let header =
     running.length > 0
       ? `${running.length} launch${running.length === 1 ? "" : "es"} running`
       : `${visible.length} launch${visible.length === 1 ? "" : "es"} finished`;
+  if (running.length > 0 && newlyDone > 0) header += ` · ${newlyDone} just finished`;
 
-  // TiraFab sits bottom-right; keep clear of it.
+  // TiraFab (56px, bottom-6 right-6) sits bottom-right: on wide screens the
+  // dock sits left of it; on narrow ones it goes full-width above it.
   return (
-    <div className="fixed bottom-0 right-24 z-40 w-80 rounded-t-lg border border-slate-200 bg-white shadow-xl">
+    <div className="fixed bottom-24 left-4 right-4 z-40 rounded-lg border border-slate-200 bg-white shadow-xl sm:bottom-0 sm:left-auto sm:right-24 sm:w-80 sm:rounded-b-none">
       <button
         type="button"
         onClick={toggle}
-        className="flex w-full items-center gap-2 rounded-t-lg bg-slate-900 px-3 py-2 text-left text-sm font-medium text-white"
+        className={`flex w-full items-center gap-2 rounded-t-lg px-3 py-2 text-left text-sm font-medium text-white ${
+          newlyDone > 0 ? "bg-emerald-700" : "bg-slate-900"
+        }`}
       >
         {running.length > 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
         <span className="flex-1">{header}</span>

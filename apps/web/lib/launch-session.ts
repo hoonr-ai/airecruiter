@@ -2121,3 +2121,7 @@ export function sessionEventProps(view: LaunchSessionView, jobRef: string): Reco
     trigger: String(view.trigger || ""),
   };
 }
+
+/** Window event fired when this tab creates a launch session; the launch
+ *  tracker (components/layout/launch-tracker) polls right away on it. */
+export const LAUNCH_STARTED_EVENT = "pair:launch-started";

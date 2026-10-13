@@ -289,7 +289,13 @@ class PgStore:
     def list_user_sessions(self, email: str, *, recent_hours: int = 24, limit: int = 10) -> List[Dict[str, Any]]:
         """The launch tracker's rows: this requester's top-level sessions that
         are active or finished within ``recent_hours``, newest first, each with
-        its job title (``job_title``; None when the job row is gone)."""
+        its job title (``job_title``; None when the job row is gone). Active
+        sessions sort first. An empty email matches nothing (system rows can
+        carry a blank requested_by)."""
+        email = (email or "").strip().lower()
+        if not email:
+            return []
+
         def run(cur):
             cur.execute(
                 "SELECT s.*, (SELECT mj.title FROM monitored_jobs mj "
@@ -298,8 +304,10 @@ class PgStore:
                 "WHERE s.requested_by = %(email)s AND s.status <> 'collecting' "
                 "AND (s.status = ANY(%(active)s) "
                 "     OR COALESCE(s.completed_at, s.updated_at) > now() - make_interval(hours => %(hours)s)) "
-                "ORDER BY s.created_at DESC LIMIT %(limit)s",
-                {"email": (email or "").strip().lower(), "active": list(S.ACTIVE_STATUSES),
+                # Running launches first, so a run of finished ones can never
+                # push a live launch past the LIMIT.
+                "ORDER BY (s.status = ANY(%(active)s)) DESC, s.created_at DESC LIMIT %(limit)s",
+                {"email": email, "active": list(S.ACTIVE_STATUSES),
                  "hours": max(1, int(recent_hours)), "limit": max(1, min(int(limit), 50))},
             )
             return [self._row(r) for r in cur.fetchall()]

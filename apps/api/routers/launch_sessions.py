@@ -194,8 +194,13 @@ async def list_my_launch_sessions(
 ):
     """The launch tracker (bottom-right dock): the caller's own active and
     recently finished sessions across every job. Scoped to requested_by, so
-    no job access check is needed — a user only ever sees their own launches."""
-    sessions = await control.list_for_user(user.email or "", recent_hours=recent_hours, limit=limit)
+    no job access check is needed — a user only ever sees their own launches
+    (job_title included: the recruiter started that launch themselves). A
+    caller without an email gets an empty list, never blank-requester rows."""
+    email = (user.email or "").strip().lower()
+    sessions = (
+        await control.list_for_user(email, recent_hours=recent_hours, limit=limit) if email else []
+    )
     _ignore_poll_transaction()
     return {"sessions": sessions}
 

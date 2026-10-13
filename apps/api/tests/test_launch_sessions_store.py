@@ -36,7 +36,7 @@ _DSN = (
 _PG_FIXTURE_SQL = """
 CREATE TABLE monitored_jobs (
   job_id TEXT PRIMARY KEY, jobdiva_id TEXT, recruiter_emails TEXT, outreach_stopped_at TIMESTAMPTZ,
-  pair_added_at TIMESTAMPTZ, first_launch_at TIMESTAMPTZ, customer_name TEXT, created_at TEXT);
+  pair_added_at TIMESTAMPTZ, first_launch_at TIMESTAMPTZ, customer_name TEXT, created_at TEXT, title TEXT);
 CREATE TABLE sourced_candidates (
   id SERIAL PRIMARY KEY, jobdiva_id TEXT, candidate_id TEXT, source TEXT,
   email TEXT, phone TEXT, profile_url TEXT, data JSONB,
@@ -54,7 +54,7 @@ class MemoryBackend:
         self.store = MemoryStore()
 
     def add_job(self, job_id: str = "1001", ref: str = "26-001") -> Dict[str, Any]:
-        return add_job(self.store, job_id=job_id, ref=ref)
+        return add_job(self.store, job_id=job_id, ref=ref, title=f"Job {job_id}")
 
     def expire_lease(self, sid: str) -> None:
         self.store.expire_lease(sid)
@@ -120,9 +120,9 @@ class PgBackend:
 
     def add_job(self, job_id: str = "1001", ref: str = "26-001") -> Dict[str, Any]:
         self._exec(
-            "INSERT INTO monitored_jobs (job_id, jobdiva_id, recruiter_emails, customer_name, created_at) "
-            "VALUES (%s, %s, %s, 'Acme', '2026-10-01 10:00:00')",
-            (job_id, ref, '["r@x.com"]'),
+            "INSERT INTO monitored_jobs (job_id, jobdiva_id, recruiter_emails, customer_name, created_at, title) "
+            "VALUES (%s, %s, %s, 'Acme', '2026-10-01 10:00:00', %s)",
+            (job_id, ref, '["r@x.com"]', f"Job {job_id}"),
         )
         return {"job_id": job_id, "jobdiva_id": ref}
 
@@ -209,6 +209,28 @@ def test_create_is_idempotent_and_one_session_is_active_per_job(be):
     be.store.cancel_session(f1["id"], "x")
     assert be.store.create_session(f2, [], None)["id"] == f2["id"]
     assert [e["seq"] for e in be.store.events_after(f1["id"])] == [1]
+
+
+def test_list_user_sessions_for_the_launch_tracker(be):
+    a, b, c = be.add_job("1001", "26-001"), be.add_job("2002", "26-002"), be.add_job("3003", "26-003")
+    running = new_session_fields(a, key="k1")
+    be.store.create_session(running, [], None)
+    done = new_session_fields(b, key="k2")
+    be.store.create_session(done, [], None)
+    be.store.cancel_session(done["id"], "x")
+    old = new_session_fields(c, key="k3")
+    be.store.create_session(old, [], None)
+    be.store.cancel_session(old["id"], "x")
+    be.age(old["id"], "updated_at", 3 * 3600)
+    be.age(old["id"], "completed_at", 3 * 3600)
+    be.store.create_session(new_session_fields(be.add_job("4004", "26-004"), key="k4", requested_by="o@x.com"), [], None)
+    be.store.create_session(new_session_fields(be.add_job("5005", "26-005"), key="k5", requested_by=""), [], None)
+
+    out = be.store.list_user_sessions("R@x.com", recent_hours=2, limit=10)
+    assert [(r["id"], r["job_title"]) for r in out] == [(running["id"], "Job 1001"), (done["id"], "Job 2002")]
+    # The active launch survives a LIMIT that a newer finished one would fill.
+    assert [r["id"] for r in be.store.list_user_sessions("r@x.com", recent_hours=2, limit=1)] == [running["id"]]
+    assert be.store.list_user_sessions("", recent_hours=2) == []
 
 
 # ── claims and leases ────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { sourceAndLaunchHref } from "@/lib/routes";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Search, Plus, FileText, ArrowUpDown, ArrowUp, ArrowDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive, Edit3 } from "lucide-react";
@@ -764,7 +765,7 @@ export default function DashboardPage() {
                         {activeTab !== "archived" && job.pairStatus === 'Active' && (
                           <>
                             <DropdownMenuItem asChild className="cursor-pointer bg-primary/5 text-primary font-bold">
-                              <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}&mode=source&step=5`} className="w-full">
+                              <Link prefetch={false} href={sourceAndLaunchHref(job.jobdiva_id || job.id)} className="w-full">
                                 Source Candidates
                               </Link>
                             </DropdownMenuItem>
