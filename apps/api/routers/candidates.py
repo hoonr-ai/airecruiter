@@ -40,8 +40,6 @@ from services.notifications_service import (
     create_candidate_submitted_notifications,
     create_candidate_rejected_notifications,
     create_zero_match_notification,
-    create_candidate_internal_review_requested_notification,
-    create_candidate_externally_submitted_notification,
 )
 from core.tasks import spawn as _spawn_task
 
@@ -5726,14 +5724,6 @@ async def save_candidate_feedback(
     candidate_name = "Candidate"
     job_title = "Job"
     customer_name = ""
-    # The candidate's feedback data as persisted by whatever came before
-    # THIS request's own step-3 merge (e.g. an earlier internal submission's
-    # "submission_type"/"submitted_by") — read here, before that merge
-    # overwrites it, so step 3.5 below can tell an external submission
-    # apart from one that's the resolution of a prior internal review
-    # request. Defaults to {} when the resolution lookup below fails or
-    # finds no row, rather than leaving the name undefined.
-    data_blob: Dict[str, Any] = {}
 
     try:
         _conn = get_db_connection()
@@ -5885,39 +5875,6 @@ async def save_candidate_feedback(
             candidate_id=jd_candidate_id,
             submitter_email=user.email,
         )
-        if submission_type == "internal":
-            # Distinct from the generic candidate_submitted above: the
-            # manager named here usually isn't one of the job's recruiters,
-            # so they'd never be in that notification's recipient list —
-            # and even if they were, its wording doesn't say "you're the
-            # one being asked to review this."
-            background_tasks.add_task(
-                create_candidate_internal_review_requested_notification,
-                job_id=str(app_job_ref or job_id_or_ref),
-                candidate_id=jd_candidate_id,
-                manager_email=manager_email,
-            )
-        elif submission_type == "external":
-            # data_blob reflects this candidate's feedback as it stood
-            # BEFORE step 3's merge above wrote this request's own values —
-            # i.e. the immediately-prior submission, if any. A prior
-            # "internal" submission means this external one is that
-            # review's resolution, so let the original requester know
-            # (skip if they're the one submitting externally themselves —
-            # nothing to tell them that they don't already know).
-            prior_submission_type = str(data_blob.get("submission_type") or "").strip().lower()
-            prior_submitted_by = str(data_blob.get("submitted_by") or "").strip()
-            if (
-                prior_submission_type == "internal"
-                and prior_submitted_by
-                and prior_submitted_by.lower() != user.email.strip().lower()
-            ):
-                background_tasks.add_task(
-                    create_candidate_externally_submitted_notification,
-                    job_id=str(app_job_ref or job_id_or_ref),
-                    candidate_id=jd_candidate_id,
-                    recipient_email=prior_submitted_by,
-                )
     elif request.feedback_type == "Reject":
         background_tasks.add_task(
             create_candidate_rejected_notifications,
