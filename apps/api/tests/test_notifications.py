@@ -47,6 +47,17 @@
   notifications, counting how many and across how many jobs. jobdiva_id is
   NULL (a digest spans every job), dedup is a daily-scale
   _job_level_duplicate_in_last_minute analog keyed on recipient_email alone.
+- create_candidate_internal_review_requested_notification /
+  create_candidate_externally_submitted_notification: the internal-
+  submission review loop. The first tells the named manager a review is
+  waiting; the second tells the original requester once the manager
+  externally submits the same candidate. Both candidate-level, single
+  specific recipient (not derived from recruiter_emails), sharing
+  _create_candidate_notification_for_recipient_sync. Deduped via
+  _candidate_level_duplicate_in_last_minute (a same-minute re-fire guard),
+  not the permanent uniq_notifications_recipient_candidate_job_type index
+  candidate_passed/submitted/rejected share — a genuine second review cycle
+  (reject, then resubmit internally) must still notify.
 """
 import asyncio
 import json
@@ -59,6 +70,7 @@ from services.notifications_service import (
     _parse_recruiter_emails,
     _insert_notification,
     _job_level_duplicate_in_last_minute,
+    _candidate_level_duplicate_in_last_minute,
     _CONFLICT_CANDIDATE_LEVEL,
     _CONFLICT_PAIR_INACTIVE,
     create_candidate_passed_notifications,
@@ -71,6 +83,8 @@ from services.notifications_service import (
     create_daily_digest_notifications,
     _digest_title,
     _recipient_already_digested_recently,
+    create_candidate_internal_review_requested_notification,
+    create_candidate_externally_submitted_notification,
     reconcile_missed_pass_notifications,
 )
 
@@ -1209,3 +1223,170 @@ def test_list_and_unread_count_exclude_cleared_notifications(monkeypatch):
     _get_unread_count_sync("me@x.com")
     count_sql = count_cur.executed[0][0]
     assert "cleared_at IS NULL" in count_sql
+
+
+# --- create_candidate_internal_review_requested_notification -----------------
+
+def test_create_internal_review_requested_notifies_the_manager(monkeypatch):
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {}}
+    # fetchone order: job row, candidate row, the same-minute dup check
+    # (None = not a duplicate), then the INSERT's own RETURNING id.
+    cur = FakeCursor(fetchone_results=[job_row, cand_row, None, {"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_internal_review_requested_notification(
+        job_id="J1", candidate_id="C1", manager_email="Manager@X.com",
+    ))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    sql, params = insert_calls[0]
+    assert params[0] == "manager@x.com"  # lowercased
+    assert params[1] == "candidate_internal_review_requested"
+    assert params[4] == "C1"  # candidate_id IS set (candidate-level)
+    assert "Jane Doe was internally submitted for Data Engineer" in params[5]
+    assert "has requested a review" in params[5]
+    assert conn.committed is True
+
+
+def test_create_internal_review_requested_noop_without_manager_email(monkeypatch):
+    def _fail():
+        raise AssertionError("must not touch the DB without manager_email")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_candidate_internal_review_requested_notification(
+        job_id="J1", candidate_id="C1", manager_email="",
+    ))
+
+
+def test_create_internal_review_requested_swallows_db_errors(monkeypatch):
+    def _boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
+
+    asyncio.run(create_candidate_internal_review_requested_notification(
+        job_id="J1", candidate_id="C1", manager_email="manager@x.com",
+    ))  # no exception raised = pass
+
+
+# --- create_candidate_externally_submitted_notification -----------------------
+
+def test_create_externally_submitted_notifies_the_original_requester(monkeypatch):
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {}}
+    cur = FakeCursor(fetchone_results=[job_row, cand_row, None, {"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_externally_submitted_notification(
+        job_id="J1", candidate_id="C1", recipient_email="Original.Recruiter@X.com",
+    ))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    sql, params = insert_calls[0]
+    assert params[0] == "original.recruiter@x.com"
+    assert params[1] == "candidate_externally_submitted"
+    assert params[4] == "C1"
+    assert "Jane Doe was externally submitted for Data Engineer" in params[5]
+    assert conn.committed is True
+
+
+def test_create_externally_submitted_noop_without_recipient(monkeypatch):
+    def _fail():
+        raise AssertionError("must not touch the DB without recipient_email")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_candidate_externally_submitted_notification(
+        job_id="J1", candidate_id="C1", recipient_email="",
+    ))
+
+
+def test_create_externally_submitted_swallows_db_errors(monkeypatch):
+    def _boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
+
+    asyncio.run(create_candidate_externally_submitted_notification(
+        job_id="J1", candidate_id="C1", recipient_email="a@x.com",
+    ))  # no exception raised = pass
+
+
+# --- _candidate_level_duplicate_in_last_minute -------------------------------
+
+def test_candidate_level_duplicate_in_last_minute_true_when_row_found():
+    cur = FakeCursor(fetchone_results=[{"1": 1}])
+    assert _candidate_level_duplicate_in_last_minute(
+        cur, "manager@x.com", "C1", "JD1", "candidate_internal_review_requested"
+    ) is True
+    sql, params = cur.executed[0]
+    assert "INTERVAL '1 minute'" in sql
+    assert params == ("manager@x.com", "C1", "JD1", "candidate_internal_review_requested")
+
+
+def test_candidate_level_duplicate_in_last_minute_false_when_no_row():
+    cur = FakeCursor(fetchone_results=[None])
+    assert _candidate_level_duplicate_in_last_minute(
+        cur, "manager@x.com", "C1", "JD1", "candidate_internal_review_requested"
+    ) is False
+
+
+def test_candidate_level_duplicate_in_last_minute_scopes_by_type():
+    """An externally_submitted row must not count as a duplicate for an
+    internal_review_requested check on the same recipient/candidate/job, so
+    the two review-loop types' race guards stay independent."""
+    cur = FakeCursor()
+    _candidate_level_duplicate_in_last_minute(cur, "manager@x.com", "C1", "JD1", "candidate_externally_submitted")
+    sql, params = cur.executed[0]
+    assert "type = %s" in sql
+    assert params == ("manager@x.com", "C1", "JD1", "candidate_externally_submitted")
+
+
+def test_internal_review_requested_and_externally_submitted_are_independently_dedupable():
+    """Different `type` values mean the manager's internal-review
+    notification and the requester's externally-submitted notification
+    never collide, even for the same candidate/job/recipient within the
+    same minute — each type's own duplicate check only ever looks at rows
+    of that same type (verified via _candidate_level_duplicate_in_last_minute's
+    SQL above), so one type existing never blocks the other from inserting."""
+    cur = FakeCursor(fetchone_results=[{"id": 1}, {"id": 2}])
+    for recipient, notification_type in (
+        ("manager@x.com", "candidate_internal_review_requested"),
+        ("manager@x.com", "candidate_externally_submitted"),
+    ):
+        inserted = _insert_notification(
+            cur,
+            notification_type=notification_type,
+            conflict_clause=None,
+            recipient_email=recipient,
+            job_id="J1",
+            jobdiva_id="JD1",
+            candidate_id="C1",
+            title="t",
+            body=None,
+            score=None,
+        )
+        assert inserted is True
+    types_inserted = [params[1] for _, params in cur.executed]
+    assert types_inserted == ["candidate_internal_review_requested", "candidate_externally_submitted"]
+
+
+def test_create_internal_review_requested_skips_recent_duplicate(monkeypatch):
+    """A genuine dedup-behavior test (PR review follow-up): simulates the
+    same-minute duplicate check actually firing and finding a match, and
+    asserts no INSERT is attempted — unlike the test above, which only
+    proves two DIFFERENT types don't collide."""
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {}}
+    # fetchone order: job row, candidate row, then the dup check finds a row.
+    cur = FakeCursor(fetchone_results=[job_row, cand_row, {"1": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_internal_review_requested_notification(
+        job_id="J1", candidate_id="C1", manager_email="manager@x.com",
+    ))
+
+    assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)

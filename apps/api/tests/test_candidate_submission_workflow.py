@@ -207,6 +207,18 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     assert notif_calls[0]["candidate_id"] == "21562841721070"
     assert notif_calls[0]["submitter_email"] == "ronak.jain@celsiortech.com"
 
+    review_calls = _queued_kwargs(
+        background_tasks, cand_module.create_candidate_internal_review_requested_notification
+    )
+    assert len(review_calls) == 1
+    assert review_calls[0]["job_id"] == "33087136"
+    assert review_calls[0]["candidate_id"] == "21562841721070"
+    assert review_calls[0]["manager_email"] == "Biswajit.Jena@celsiortech.com"
+
+    # Not the external-submission follow-through notification — this request
+    # itself is the internal submission, not a resolution of an earlier one.
+    assert _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification) == []
+
 
 @pytest.mark.anyio
 async def test_save_candidate_feedback_external_submit_route(monkeypatch):
@@ -260,6 +272,140 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
     assert notif_calls[0]["job_id"] == "33087136"
     assert notif_calls[0]["candidate_id"] == "21562841721070"
     assert notif_calls[0]["submitter_email"] == "recruiter@pyramidci.com"
+
+    # No prior feedback on this candidate (data={}) — a fresh external
+    # submission, not the resolution of an earlier internal one.
+    assert _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification) == []
+
+
+@pytest.mark.anyio
+async def test_save_candidate_feedback_external_submit_after_internal_notifies_original_requester(monkeypatch):
+    """The manager approves an internally-submitted candidate by externally
+    submitting it themselves — the recruiter who originally requested that
+    review should be told, per the enhancement requested after QA testing
+    the Submit/Reject flow end to end."""
+    from routers import candidates as cand_module
+    from services.jobdiva import jobdiva_service
+
+    monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
+
+    # This candidate's stored data reflects the PRIOR (internal) submission —
+    # exactly what save_candidate_feedback's own persist step would have
+    # left behind before this (external, by the manager) request runs.
+    fake_cand_row = (
+        55148489, "21562841721070", "26-12137",
+        {"submission_type": "internal", "internal_review_requested_by": "ronak.jain@celsiortech.com"},
+        "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    )
+    fake_conn = _FakeConnection(select_row=fake_cand_row)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
+
+    async def fake_create_note(**kwargs):
+        return {"status": "success"}
+    monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
+    monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
+
+    manager = UserIdentity(email="biswajit.jena@celsiortech.com", role="recruiter")
+    request = CandidateFeedbackRequest(feedback_type="Submit", submission_type="external")
+
+    background_tasks = BackgroundTasks()
+    res = await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=background_tasks, user=manager,
+    )
+
+    assert res["status"] == "success"
+    follow_through = _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification)
+    assert len(follow_through) == 1
+    assert follow_through[0]["job_id"] == "33087136"
+    assert follow_through[0]["candidate_id"] == "21562841721070"
+    assert follow_through[0]["recipient_email"] == "ronak.jain@celsiortech.com"
+
+
+@pytest.mark.anyio
+async def test_save_candidate_feedback_external_submit_skips_follow_through_when_submitter_is_the_same_person(monkeypatch):
+    """If the SAME recruiter who did the internal submission later submits
+    the same candidate externally themselves, there's nothing to tell them
+    that they don't already know — must not notify them about their own
+    action."""
+    from routers import candidates as cand_module
+    from services.jobdiva import jobdiva_service
+
+    monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
+
+    fake_cand_row = (
+        55148489, "21562841721070", "26-12137",
+        {"submission_type": "internal", "internal_review_requested_by": "ronak.jain@celsiortech.com"},
+        "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    )
+    fake_conn = _FakeConnection(select_row=fake_cand_row)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
+
+    async def fake_create_note(**kwargs):
+        return {"status": "success"}
+    monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
+    monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
+
+    same_recruiter = UserIdentity(email="Ronak.Jain@celsiortech.com", role="recruiter")
+    request = CandidateFeedbackRequest(feedback_type="Submit", submission_type="external")
+
+    background_tasks = BackgroundTasks()
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=background_tasks, user=same_recruiter,
+    )
+
+    assert _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification) == []
+
+
+@pytest.mark.anyio
+async def test_save_candidate_feedback_external_submit_after_internal_then_reject_still_notifies_original_requester(monkeypatch):
+    """Regression for a PR review finding: an intervening Reject by a
+    DIFFERENT person between the internal submission and its eventual
+    external resolution used to leave "submitted_by" pointing at the
+    rejecter, so the follow-through notification went to the wrong person.
+    internal_review_requested_by is set only by the internal Submit and
+    left untouched by Reject/Unreachable, so it still names the original
+    requester here even though submitted_by (and the stale submission_type
+    left over from the internal Submit) now reflect the rejecter's action."""
+    from routers import candidates as cand_module
+    from services.jobdiva import jobdiva_service
+
+    monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
+
+    fake_cand_row = (
+        55148489, "21562841721070", "26-12137",
+        {
+            "feedback_type": "Reject",
+            "feedback_reason": "Candidate withdrew interest",
+            "submitted_by": "other.recruiter@celsiortech.com",   # the rejecter, not the original requester
+            "submission_type": "internal",                        # stale leftover from the earlier internal Submit
+            "manager_email": "biswajit.jena@celsiortech.com",
+            "internal_review_requested_by": "ronak.jain@celsiortech.com",  # untouched by the Reject
+        },
+        "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    )
+    fake_conn = _FakeConnection(select_row=fake_cand_row)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
+
+    async def fake_create_note(**kwargs):
+        return {"status": "success"}
+    monkeypatch.setattr(jobdiva_service, "create_candidate_note", fake_create_note)
+    monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 1})
+
+    manager = UserIdentity(email="biswajit.jena@celsiortech.com", role="recruiter")
+    request = CandidateFeedbackRequest(feedback_type="Submit", submission_type="external")
+
+    background_tasks = BackgroundTasks()
+    res = await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=background_tasks, user=manager,
+    )
+
+    assert res["status"] == "success"
+    follow_through = _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification)
+    assert len(follow_through) == 1
+    assert follow_through[0]["recipient_email"] == "ronak.jain@celsiortech.com"
 
 
 @pytest.mark.anyio

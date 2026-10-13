@@ -145,6 +145,39 @@ def init_notifications_schema_sync() -> None:
                         ON notifications (recipient_email, candidate_id, jobdiva_id, type);
                     """
                 )
+                # Narrow the index above to exclude the internal-review-loop
+                # types: unlike candidate_passed/submitted/rejected, a second
+                # review cycle for the same (recipient, candidate, job) —
+                # reject, then internally resubmit — must still notify.
+                # "Once ever" would silently swallow that. Checked against
+                # pg_indexes first so the DROP+CREATE (and its lock) runs at
+                # most once, on the first boot after this shipped, same as
+                # the nullable-column ALTERs above.
+                cur.execute(
+                    "SELECT indexdef FROM pg_indexes WHERE indexname = 'uniq_notifications_recipient_candidate_job_type'"
+                )
+                idx = cur.fetchone()
+                if idx and "WHERE" not in idx[0]:
+                    cur.execute("DROP INDEX IF EXISTS uniq_notifications_recipient_candidate_job_type;")
+                    cur.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_recipient_candidate_job_type
+                            ON notifications (recipient_email, candidate_id, jobdiva_id, type)
+                            WHERE type NOT IN ('candidate_internal_review_requested', 'candidate_externally_submitted');
+                        """
+                    )
+                # Pre-insert existence check for the two review-loop types
+                # (_candidate_level_duplicate_in_last_minute in
+                # services/notifications_service.py) — same-minute re-fire
+                # guard, not a permanent dedup, so this just backs that
+                # lookup with an index instead of a sequential scan.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_notifications_candidate_review_loop_recent
+                        ON notifications (recipient_email, candidate_id, jobdiva_id, created_at)
+                        WHERE type IN ('candidate_internal_review_requested', 'candidate_externally_submitted');
+                    """
+                )
                 # Job-level dedup (candidate_id is NULL for these two types, so
                 # the index above never applies to them — see
                 # services/notifications_service.py's _insert_notification).

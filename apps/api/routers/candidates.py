@@ -40,6 +40,8 @@ from services.notifications_service import (
     create_candidate_submitted_notifications,
     create_candidate_rejected_notifications,
     create_zero_match_notification,
+    create_candidate_internal_review_requested_notification,
+    create_candidate_externally_submitted_notification,
 )
 from core.tasks import spawn as _spawn_task
 
@@ -5724,6 +5726,15 @@ async def save_candidate_feedback(
     candidate_name = "Candidate"
     job_title = "Job"
     customer_name = ""
+    # The candidate's feedback data as persisted by whatever came before
+    # THIS request's own step-3 merge — read here, before that merge
+    # overwrites it, so step 3.5 below can read its "internal_review_requested_by"
+    # (set by a prior internal submission, left untouched by any Reject/
+    # Unreachable in between) to tell an external submission apart from one
+    # that's the resolution of a pending internal review request. Defaults
+    # to {} when the resolution lookup below fails or finds no row, rather
+    # than leaving the name undefined.
+    data_blob: Dict[str, Any] = {}
 
     try:
         _conn = get_db_connection()
@@ -5802,6 +5813,13 @@ async def save_candidate_feedback(
                     jd_profile_id = jobdiva_profile_id_for(
                         row[8] if len(row) > 8 else None, sc_candidate_id, data_blob
                     )
+                else:
+                    logger.debug(
+                        "save_candidate_feedback: no sourced_candidates row resolved for "
+                        "candidate_id=%s job=%s — data_blob defaults to {} (prior-feedback "
+                        "fields like internal_review_requested_by will read as unset)",
+                        candidate_id, job_id_or_ref,
+                    )
         finally:
             _conn.close()
     except Exception as e:
@@ -5828,8 +5846,23 @@ async def save_candidate_feedback(
                 feedback_data["submission_type"] = submission_type
                 if submission_type == "internal":
                     feedback_data["manager_email"] = manager_email
+                    # Dedicated key for step 3.5 below, rather than overloading
+                    # "submitted_by" (which every feedback action — Reject,
+                    # Unreachable included — overwrites with the CURRENT
+                    # actor). A Reject/Unreachable in between an internal
+                    # submission and its eventual external resolution omits
+                    # this key from its own feedback_data entirely, so the
+                    # JSONB merge leaves it untouched; only Submit ever
+                    # touches it, here or in the "else" branch below.
+                    feedback_data["internal_review_requested_by"] = user.email
                     if request.recruiter_notes and request.recruiter_notes.strip():
                         feedback_data["recruiter_notes"] = request.recruiter_notes.strip()
+                else:
+                    # External submission resolves (or pre-empts) any pending
+                    # internal review request — clear the flag so a later,
+                    # unrelated external submission doesn't notify a stale
+                    # requester.
+                    feedback_data["internal_review_requested_by"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved
@@ -5875,6 +5908,43 @@ async def save_candidate_feedback(
             candidate_id=jd_candidate_id,
             submitter_email=user.email,
         )
+        if submission_type == "internal":
+            # Distinct from the generic candidate_submitted above: the
+            # manager named here usually isn't one of the job's recruiters,
+            # so they'd never be in that notification's recipient list —
+            # and even if they were, its wording doesn't say "you're the
+            # one being asked to review this."
+            background_tasks.add_task(
+                create_candidate_internal_review_requested_notification,
+                job_id=str(app_job_ref or job_id_or_ref),
+                candidate_id=jd_candidate_id,
+                manager_email=manager_email,
+            )
+        elif submission_type == "external":
+            # data_blob reflects this candidate's feedback as it stood
+            # BEFORE step 3's merge above wrote this request's own values.
+            # internal_review_requested_by is set only by an internal Submit
+            # and cleared only by an external one (see step 3 above), so it
+            # survives an intervening Reject/Unreachable by someone else
+            # untouched — unlike submission_type/submitted_by, which that
+            # intervening action DOES overwrite, which previously could
+            # misidentify who the "original requester" was. A value here
+            # means this external submission is that pending request's
+            # resolution, so let the original requester know (skip if
+            # they're the one submitting externally themselves — nothing to
+            # tell them that they don't already know).
+            prior_requested_by = str(data_blob.get("internal_review_requested_by") or "").strip()
+            if (
+                prior_requested_by
+                and _EMAIL_RE.match(prior_requested_by)
+                and prior_requested_by.lower() != user.email.strip().lower()
+            ):
+                background_tasks.add_task(
+                    create_candidate_externally_submitted_notification,
+                    job_id=str(app_job_ref or job_id_or_ref),
+                    candidate_id=jd_candidate_id,
+                    recipient_email=prior_requested_by,
+                )
     elif request.feedback_type == "Reject":
         background_tasks.add_task(
             create_candidate_rejected_notifications,
