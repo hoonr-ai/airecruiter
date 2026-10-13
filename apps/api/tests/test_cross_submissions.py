@@ -147,7 +147,7 @@ def test_only_responded_statuses_are_listed():
     rows = [
         _row(candidate_id="a", email="a@x.com", engage_status="passed"),
         _row(candidate_id="b", email="b@x.com", engage_status="in_progress"),
-        _row(candidate_id="c", email="c@x.com", engage_status="failed"),     # scored → a real Fail → never listed
+        _row(candidate_id="c", email="c@x.com", engage_status="failed"),     # scored → a real Fail, 80 < the 90 bar
         _row(candidate_id="d", email="d@x.com", engage_status="sent"),       # launched, never answered
         _row(candidate_id="e", email="e@x.com", engage_status="processing"),
         _row(candidate_id="f", email="f@x.com", engage_status=None),
@@ -158,29 +158,34 @@ def test_only_responded_statuses_are_listed():
 
 
 # ---------------------------------------------------------------------------
-# Who may be listed: a past Pass, or an undecided screen with a strong match
+# Who may be listed: a past Pass, a strong undecided match, or an exceptional failed one
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("result, score, expected", [
     ("Pass", 60, True), ("Pass", 59.9, False), ("Pass", 95, True),
     ("Pending", 79.9, False), ("Pending", 80, True), ("Pending", 100, True),
     ("In Progress", 79.9, False), ("In Progress", 80, True),
-    ("Fail", 100, False), ("Fail", 85, False),
-    ("Pass", None, False), ("Pending", None, False),   # Step-5 "N/A": no number to vouch with
+    ("Fail", 100, True), ("Fail", 90, True), ("Fail", 89.9, False), ("Fail", 85, False),
+    ("Pass", None, False), ("Pending", None, False), ("Fail", None, False),  # Step-5 "N/A": no number to vouch with
     ("Pass", "junk", False),
-    ("", 99, False), (None, 99, False),
+    ("", 99, False), (None, 99, False), ("Mystery", 99, False),
 ])
-def test_qualifies_for_list_is_a_past_pass_or_a_strong_undecided_match(result, score, expected):
-    assert cs.qualifies_for_list(result, score, min_score=60, undecided_min_score=80) is expected
+def test_qualifies_for_list_by_screen_outcome(result, score, expected):
+    assert cs.qualifies_for_list(result, score, min_score=60, undecided_min_score=80, failed_min_score=90) is expected
 
 
-def test_the_undecided_bar_is_never_below_the_floor():
-    # If the floor is tuned above the undecided bar, undecided must not be the looser of the two.
+def test_the_undecided_and_failed_bars_are_never_below_the_floor():
+    # If the floor is tuned above a bar, that outcome must not be the looser of the two.
     assert cs.qualifies_for_list("Pending", 85, min_score=90, undecided_min_score=80) is False
     assert cs.qualifies_for_list("Pending", 90, min_score=90, undecided_min_score=80) is True
+    assert cs.qualifies_for_list("Fail", 92, min_score=95, failed_min_score=90) is False
+    assert cs.qualifies_for_list("Fail", 95, min_score=95, failed_min_score=90) is True
 
 
-def test_pending_and_in_progress_need_a_strong_match_and_a_fail_is_never_listed():
-    scores = {"pass_lo": 60, "pass_below": 59, "pend_ok": 80, "pend_lo": 79, "prog_ok": 91, "prog_lo": 70, "fail_hi": 99}
+def test_each_screen_outcome_has_its_own_match_bar():
+    scores = {
+        "pass_lo": 60, "pass_below": 59, "pend_ok": 80, "pend_lo": 79, "prog_ok": 91, "prog_lo": 70,
+        "fail_hi": 99, "fail_edge": 90, "fail_lo": 89,
+    }
     rows = [
         _row(candidate_id="pass_lo", email="1@x.com", engage_status="passed"),
         _row(candidate_id="pass_below", email="2@x.com", engage_status="passed"),
@@ -189,22 +194,21 @@ def test_pending_and_in_progress_need_a_strong_match_and_a_fail_is_never_listed(
         _row(candidate_id="prog_ok", email="5@x.com", engage_status="in_progress"),
         _row(candidate_id="prog_lo", email="6@x.com", engage_status="in_progress"),
         _row(candidate_id="fail_hi", email="7@x.com", engage_status="failed", score=2, total=10),
+        _row(candidate_id="fail_edge", email="8@x.com", engage_status="failed", score=2, total=10),
+        _row(candidate_id="fail_lo", email="9@x.com", engage_status="failed", score=2, total=10),
     ]
-    scored = []
 
     def scorer(payload, criteria):
-        scored.append(payload["candidate_id"])
         return {"score": scores[payload["candidate_id"]]}
 
-    stats = {}
-    got = _select(rows, scorer=scorer, min_score=60, undecided_min_score=80, stats=stats)
+    got = _select(rows, scorer=scorer, min_score=60, undecided_min_score=80, failed_min_score=90)
     assert [(c["candidate_id"], c["screen_result"]) for c in got] == [
+        ("fail_hi", "Fail"),            # still labelled Fail — only listed because the match is exceptional
         ("prog_ok", "In Progress"),
+        ("fail_edge", "Fail"),
         ("pend_ok", "Pending"),
         ("pass_lo", "Pass"),
     ]
-    assert "fail_hi" not in scored                 # a Fail never costs a scoring slot
-    assert stats["screen_failed"] == 1
 
 
 def test_a_past_pass_beats_a_more_recent_undecided_screen():
@@ -226,21 +230,16 @@ def test_a_past_pass_beats_a_more_recent_fail():
 
 
 def test_without_a_pass_the_most_recent_screen_decides():
-    # An older undecided row must not resurrect someone whose latest screen was a Fail.
+    # An older undecided row must not resurrect someone whose latest screen was a
+    # Fail: at 80 the Fail misses its 90 bar, and the older 80%-qualifying row is not used instead.
     rows = [
         _row(candidate_id="old", email="p@x.com", prior_key="26-11111", engage_status="in_progress", days_ago=30),
         _row(candidate_id="new", email="p@x.com", prior_key="26-44444", engage_status="failed", score=2, days_ago=1),
     ]
     assert _select(rows) == []
-
-
-def test_failed_rows_do_not_consume_the_scoring_budget():
-    rows = [
-        _row(candidate_id="new-fail", email="f@x.com", engage_status="failed", score=2, days_ago=1),
-        _row(candidate_id="older-pass", email="o@x.com", engage_status="passed", days_ago=20),
-    ]
-    got = _select(rows, max_scored=1)
-    assert [c["candidate_id"] for c in got] == ["older-pass"]
+    # …and when the match is exceptional the person is listed as the Fail they last were.
+    (c,) = _select(rows, scorer=lambda p, crit: {"score": 95})
+    assert c["screen_result"] == "Fail" and c["prior_jobdiva_id"] == "26-44444"
 
 
 # ---------------------------------------------------------------------------
@@ -279,17 +278,20 @@ def _stored(id, result, status, match, *, eng_score=None):
             "engage_score": eng_score, "match_score": match}
 
 
-def test_list_for_job_shows_only_past_passes_and_strong_undecided_rows():
+def test_list_for_job_applies_the_per_outcome_match_bars():
     rows = _list_with([
         _stored(1, "Pass", "passed", 65, eng_score=8),
         _stored(2, "Fail", "failed", 91),                  # old row: really an outreach miss → Pending, 91 ≥ 80
         _stored(3, "Fail", "failed", 72),                  # …but at 72 not strong enough
-        _stored(4, "Fail", "failed", 99, eng_score=2),     # a real Fail: never shown
+        _stored(4, "Fail", "failed", 99, eng_score=2),     # a real Fail, exceptional match → shown as Fail
         _stored(5, "In Progress", "in_progress", 80),
         _stored(6, "In Progress", "in_progress", 79),
         _stored(7, "Pass", "passed", 50, eng_score=8),     # below the relevance floor
+        _stored(8, "Fail", "failed", 89, eng_score=2),     # a real Fail, but under the 90 bar
     ])
-    assert [(r["id"], r["screen_result"]) for r in rows] == [(1, "Pass"), (2, "Pending"), (5, "In Progress")]
+    assert [(r["id"], r["screen_result"]) for r in rows] == [
+        (1, "Pass"), (2, "Pending"), (4, "Fail"), (5, "In Progress"),
+    ]
 
 
 def test_a_pending_row_is_never_shown_as_failed_in_the_list():
@@ -468,7 +470,7 @@ def test_prescreen_runs_before_scoring_and_drops_rejected_rows():
     assert [c["candidate_id"] for c in got] == ["da"]
     assert scored == ["da"]  # rejected rows are never scored
     assert got[0]["role_match"] == "data analyst ~ senior data analyst"
-    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1, "screen_failed": 0}
+    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1}
 
 
 def test_prescreen_error_fails_closed_for_that_row_only():

@@ -19,10 +19,11 @@ Relevance is decided exactly the way Step 5 decides it, in the same order:
    function behind the Step-5 match % (scoring matrix v2, hard vetoes → 0).
 3. **Floor** — ``CROSS_SUBMISSIONS_MIN_SCORE``, defaulting to the Step-5
    pool floor (``sourcing_config.JOBDIVA_TALENTSEARCH_MIN_SCORE``).
-4. **Two kinds only** (``qualifies_for_list``) — a candidate who *passed* a
-   PAIR screen (floor above), or one whose screen is still undecided
+4. **Who is listed** (``qualifies_for_list``) — a candidate who *passed* a
+   PAIR screen (floor above); one whose screen is still undecided
    (Pending / In Progress) and who matches this job at
-   ``CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE`` (80). A Fail is never listed.
+   ``CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE`` (80); or one who *failed* a
+   screen but matches this job at ``CROSS_SUBMISSIONS_FAILED_MIN_SCORE`` (90).
    The screen label is the rank list's (``services.engage_status``): a raw
    ``failed`` with no score is an outreach miss — Pending, not Fail.
 
@@ -75,6 +76,7 @@ from core.config import (
     CROSS_SUBMISSIONS_LOOKBACK_DAYS,
     CROSS_SUBMISSIONS_MAX_LISTED,
     CROSS_SUBMISSIONS_MAX_SCORED,
+    CROSS_SUBMISSIONS_FAILED_MIN_SCORE,
     CROSS_SUBMISSIONS_MIN_SCORE,
     CROSS_SUBMISSIONS_THROTTLE_MINUTES,
     CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE,
@@ -257,15 +259,18 @@ def qualifies_for_list(
     *,
     min_score: float = CROSS_SUBMISSIONS_MIN_SCORE,
     undecided_min_score: float = CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE,
+    failed_min_score: float = CROSS_SUBMISSIONS_FAILED_MIN_SCORE,
 ) -> bool:
-    """The two kinds of candidate a cross-submissions list may carry.
+    """Which candidates a cross-submissions list may carry, by screen outcome.
 
     * **Passed** a PAIR screen for another job — listed at the relevance floor.
     * **Undecided** (Pending / In Progress) — no screen score to lean on, so
       only a very strong match to this job (``undecided_min_score``) is listed.
+    * **Failed** — listed only on an exceptional match (``failed_min_score``),
+      and still labelled Fail.
 
-    A Fail is never listed, and neither is a row with no match score (the
-    Step-5 "N/A" verdict). The undecided bar never drops below the floor.
+    A row with no match score (the Step-5 "N/A" verdict) is never listed. The
+    undecided / failed bars never drop below the floor.
     """
     try:
         score = float(match_score)
@@ -275,6 +280,8 @@ def qualifies_for_list(
         return score >= float(min_score)
     if screen_result in ("Pending", "In Progress"):
         return score >= max(float(min_score), float(undecided_min_score))
+    if screen_result == "Fail":
+        return score >= max(float(min_score), float(failed_min_score))
     return False
 
 
@@ -393,19 +400,20 @@ def select_candidates(
     warmer: Optional[Warmer] = None,
     min_score: float = CROSS_SUBMISSIONS_MIN_SCORE,
     undecided_min_score: float = CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE,
+    failed_min_score: float = CROSS_SUBMISSIONS_FAILED_MIN_SCORE,
     max_scored: int = CROSS_SUBMISSIONS_MAX_SCORED,
     max_listed: int = CROSS_SUBMISSIONS_MAX_LISTED,
     prescreen: Optional[Prescreen] = None,
     stats: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Filter → dedupe by person → drop Fails → role gate → score → rank.
+    """Filter → dedupe by person → role gate → score → rank.
 
-    Only two kinds of person are listed (``qualifies_for_list``): someone who
-    **passed** a PAIR screen (match ≥ ``min_score``), or someone whose screen is
-    still **undecided** — Pending / In Progress — and who matches this job at
-    ``undecided_min_score`` or better. A Fail is dropped before scoring. When a
-    person has several screens, a Pass beats everything (they have passed in
-    the past), otherwise the most recent screen wins.
+    What a person must score to be listed depends on their screen
+    (``qualifies_for_list``): **passed** — ``min_score``; still **undecided**
+    (Pending / In Progress) — ``undecided_min_score``; **failed** —
+    ``failed_min_score``. When a person has several screens, a Pass beats
+    everything (they have passed in the past), otherwise the most recent screen
+    wins.
 
     ``prior_rows`` are sourced_candidates rows (dicts) joined with their
     job's title/client. Rows for the same base job ref as the new job, rows
@@ -467,12 +475,9 @@ def select_candidates(
         if prev is None or _screen_rank(candidate) > _screen_rank(prev):
             by_person[key] = candidate
 
-    # A Fail can never be listed, so don't spend a role-gate / scoring slot on
-    # one. (Dedupe ran first: a Pass elsewhere already replaced it.)
-    survivors = [c for c in by_person.values() if c["screen_result"] != "Fail"]
     # Most recently screened first; the role gate runs on the whole pool, the
     # scoring budget only counts people who cleared it.
-    ordered = sorted(survivors, key=lambda c: c["screened_at"], reverse=True)
+    ordered = sorted(by_person.values(), key=lambda c: c["screened_at"], reverse=True)
     gated_reasons: Dict[str, int] = {}
     pool: List[Dict[str, Any]] = []
     budget = max(0, int(max_scored))
@@ -495,7 +500,6 @@ def select_candidates(
         stats["gated_out"] = sum(gated_reasons.values())
         stats["gated_reasons"] = gated_reasons
         stats["scored"] = len(pool)
-        stats["screen_failed"] = len(by_person) - len(survivors)
 
     payloads = [build_scoring_payload(c["_row"], c["_blob"]) for c in pool]
     if warmer is not None and criteria is not None and payloads:
@@ -537,7 +541,8 @@ def select_candidates(
             )
             continue
         if qualifies_for_list(
-            cand["screen_result"], score, min_score=min_score, undecided_min_score=undecided_min_score,
+            cand["screen_result"], score,
+            min_score=min_score, undecided_min_score=undecided_min_score, failed_min_score=failed_min_score,
         ):
             selected.append(cand)
 
@@ -760,7 +765,7 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
                     pass
         r["screen_result"] = effective_screen_result(r.get("screen_result"), r.get("engage_status"), r.get("engage_score"))
     # Rows are stored once and never rewritten, so rows from before this rule
-    # (a Fail-labelled outreach miss, a 65% Pending) are filtered here, at read
+    # (a Fail-labelled outreach miss, a 65% Pending, an 80% Fail) are filtered here, at read
     # time, with the same rule the scan applies when it inserts.
     return [r for r in rows if qualifies_for_list(r["screen_result"], r.get("match_score"))]
 
@@ -971,7 +976,7 @@ def run_for_job(
     """
     summary: Dict[str, Any] = {
         "job_ref": job_ref, "ran": False, "skipped_reason": None,
-        "scanned": 0, "screen_failed": 0, "gated_out": 0, "gated_reasons": {}, "scored": 0,
+        "scanned": 0, "gated_out": 0, "gated_reasons": {}, "scored": 0,
         "selected": 0, "new": 0, "emailed": False, "candidates": [],
     }
     if not CROSS_SUBMISSIONS_ENABLED and not force:
@@ -1013,7 +1018,6 @@ def run_for_job(
                 stats=gate_stats,
                 warmer=warmer,
             )
-            summary["screen_failed"] = int(gate_stats.get("screen_failed") or 0)
             summary["gated_out"] = int(gate_stats.get("gated_out") or 0)
             summary["gated_reasons"] = dict(gate_stats.get("gated_reasons") or {})
             summary["scored"] = int(gate_stats.get("scored") or 0)
@@ -1045,8 +1049,8 @@ def run_for_job(
                     mark_notified(cur, [c["id"] for c in new_rows if c.get("id")])
                     conn.commit()
         logger.info(
-            "cross_submissions: job=%s scanned=%s screen_failed=%s gated_out=%s (%s) scored=%s selected=%s new=%s emailed=%s",
-            job_ref, summary["scanned"], summary["screen_failed"], summary["gated_out"], summary["gated_reasons"], summary["scored"],
+            "cross_submissions: job=%s scanned=%s gated_out=%s (%s) scored=%s selected=%s new=%s emailed=%s",
+            job_ref, summary["scanned"], summary["gated_out"], summary["gated_reasons"], summary["scored"],
             summary["selected"], summary["new"], summary["emailed"],
         )
         return summary

@@ -192,7 +192,7 @@ def test_qa_lead_scores_high_but_is_no_longer_a_data_analyst_cross_submission():
     assert [c["candidate_id"] for c in gated] == ["da"]
     assert gated[0]["match_score"] >= cs.CROSS_SUBMISSIONS_MIN_SCORE
     assert gated[0]["role_match"] == "data analyst ~ senior data analyst"
-    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1, "screen_failed": 0}
+    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1}
 
 
 def test_cross_submission_floor_is_the_step5_pool_floor():

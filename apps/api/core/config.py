@@ -236,9 +236,14 @@ CROSS_SUBMISSIONS_MIN_SCORE = float(
 )
 # A candidate who PASSED a PAIR screen is listed at the floor above. One whose
 # screen is still undecided (Pending / In Progress) has no screen score to vouch
-# for them, so only a very strong match to THIS job gets listed. A Fail is never listed.
+# for them, so only a very strong match to THIS job gets listed. A scored Fail is
+# listed only on a stronger match still: a screen this job's recruiter may want to
+# overrule, not one to resurface on a so-so résumé.
 CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE = float(
     get_env_with_default("CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE", "80")
+)
+CROSS_SUBMISSIONS_FAILED_MIN_SCORE = float(
+    get_env_with_default("CROSS_SUBMISSIONS_FAILED_MIN_SCORE", "90")
 )
 # Scoring is deterministic (no LLM) but bounded anyway: most-recent first.
 CROSS_SUBMISSIONS_MAX_SCORED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_SCORED", "500"))
