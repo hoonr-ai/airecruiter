@@ -7,6 +7,7 @@ browser only creates it and watches it.
   GET  /api/v1/launch-sessions/config
   POST /api/v1/jobs/{job_id}/launch-sessions
   GET  /api/v1/jobs/{job_id}/launch-sessions?active=&needs_contact=&limit=
+  GET  /api/v1/launch-sessions/mine?recent_hours=&limit=   (launch tracker)
   GET  /api/v1/launch-sessions/{id}
   GET  /api/v1/launch-sessions/{id}/events?after_seq=N
   GET  /api/v1/launch-sessions/{id}/candidates?state=&view=&after_rev=&after_id=&ids=
@@ -181,6 +182,20 @@ async def list_job_launch_sessions(
     any); ``needs_contact=true`` → finished sessions with parked rows."""
     await _job_access(job_id, user)
     sessions = await control.list_for_job(job_id, active=active, needs_contact=needs_contact, limit=limit)
+    _ignore_poll_transaction()
+    return {"sessions": sessions}
+
+
+@router.get("/launch-sessions/mine")
+async def list_my_launch_sessions(
+    recent_hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(10, ge=1, le=50),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """The launch tracker (bottom-right dock): the caller's own active and
+    recently finished sessions across every job. Scoped to requested_by, so
+    no job access check is needed — a user only ever sees their own launches."""
+    sessions = await control.list_for_user(user.email or "", recent_hours=recent_hours, limit=limit)
     _ignore_poll_transaction()
     return {"sessions": sessions}
 

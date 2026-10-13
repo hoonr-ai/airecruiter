@@ -697,6 +697,10 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
     let outcome: CreateOutcome = { kind: "transient", status: 0, retryAfterMs: null };
     for (let attempt = 1; attempt <= CREATE_ATTEMPTS; attempt++) {
       outcome = classifyCreateResponse(await launchSessionsApi.create(job, body));
+      // Wake the bottom-right launch tracker (components/layout/launch-tracker).
+      if (outcome.kind === "created" && typeof window !== "undefined") {
+        window.dispatchEvent(new Event("pair:launch-started"));
+      }
       if (outcome.kind !== "transient" || !mountedRef.current) return outcome;
       if (attempt < CREATE_ATTEMPTS) await delay(writeRetryDelay(attempt, outcome.retryAfterMs));
       if (!mountedRef.current) return outcome;

@@ -188,6 +188,17 @@ class MemoryStore:
             out.sort(key=lambda s: s["created_at"], reverse=True)
             return _deep(out[:limit])
 
+    def list_user_sessions(self, email, *, recent_hours=24, limit=10):
+        with self.lock:
+            cutoff = self.t - dt.timedelta(hours=recent_hours)
+            out = [dict(s, job_title=(self.jobs.get(s["job_id"]) or {}).get("title"))
+                   for s in self.sessions.values()
+                   if s.get("requested_by") == (email or "").strip().lower() and s["status"] != S.STATUS_COLLECTING
+                   and (s["status"] in S.ACTIVE_STATUSES
+                        or (s.get("completed_at") or s.get("updated_at") or s["created_at"]) > cutoff)]
+            out.sort(key=lambda s: s["created_at"], reverse=True)
+            return _deep(out[:limit])
+
     def children(self, session_id):
         with self.lock:
             out = [s for s in self.sessions.values() if s.get("parent_session_id") == session_id]

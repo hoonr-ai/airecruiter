@@ -9,6 +9,7 @@ import { MsalProviderWrapper } from "@/components/auth/MsalProviderWrapper";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { TiraChat } from "@/components/ai/tira-chat";
 import { TiraFab } from "@/components/ai/tira-fab";
+import { LaunchTracker } from "@/components/layout/launch-tracker";
 import { TelemetryBootstrap } from "@/components/TelemetryBootstrap";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
@@ -39,6 +40,7 @@ export default function RootLayout({
                 </div>
                 <TiraChat />
                 <TiraFab />
+                <LaunchTracker />
               </NotificationsProvider>
             </AIProvider>
           </AuthGuard>

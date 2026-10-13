@@ -62,6 +62,7 @@ def _routes() -> List[Dict[str, Any]]:
 def test_route_inventory():
     assert {(r["method"], r["path"]) for r in _routes()} == {
         ("GET", "/launch-sessions/config"),
+        ("GET", "/launch-sessions/mine"),
         ("POST", "/jobs/{job_id}/launch-sessions"),
         ("GET", "/jobs/{job_id}/launch-sessions"),
         ("GET", "/launch-sessions/{session_id}"),
@@ -79,7 +80,7 @@ def test_route_inventory():
 def test_every_route_requires_a_user_and_every_scoped_route_checks_access():
     for r in _routes():
         assert r["authenticated"], f"{r['method']} {r['path']} must take Depends(get_current_user)"
-        if r["path"] != "/launch-sessions/config":
+        if r["path"] not in ("/launch-sessions/config", "/launch-sessions/mine"):
             assert r["access_checked"], f"{r['method']} {r['path']} must check job / session access"
 
 
@@ -404,6 +405,17 @@ def test_list_job_sessions_for_reattach(env):
     assert [x["id"] for x in out] == [s["id"]]
     c.post(f"/api/v1/launch-sessions/{s['id']}/cancel")
     assert c.get("/api/v1/jobs/1001/launch-sessions?active=true").json()["sessions"] == []
+
+
+def test_my_sessions_lists_only_the_callers_own_launches(env):
+    env["store"].jobs["1001"]["title"] = "Java Developer"
+    s = client().post("/api/v1/jobs/1001/launch-sessions", json=_full_body()).json()["session"]
+    mine = client().get("/api/v1/launch-sessions/mine").json()["sessions"]
+    assert [(x["id"], x["job_title"]) for x in mine] == [(s["id"], "Java Developer")]
+    assert client(OTHER).get("/api/v1/launch-sessions/mine").json()["sessions"] == []
+    client().post(f"/api/v1/launch-sessions/{s['id']}/cancel")
+    # Finished recently: still listed so the tracker can show the result.
+    assert [x["id"] for x in client().get("/api/v1/launch-sessions/mine").json()["sessions"]] == [s["id"]]
 
 
 def test_polls_drop_their_transaction(env, monkeypatch):
