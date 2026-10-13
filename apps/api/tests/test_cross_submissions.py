@@ -99,11 +99,32 @@ def test_base_job_ref_strips_version_suffix():
 
 def test_screen_result_label_matches_rank_list_vocabulary():
     assert cs.screen_result_label("passed") == "Pass"
-    assert cs.screen_result_label("failed") == "Fail"
+    assert cs.screen_result_label("failed", None, 3) == "Fail"       # a scored screen that failed
     assert cs.screen_result_label("in_progress") == "In Progress"
     assert cs.screen_result_label("completed", "passed") == "Pass"
     assert cs.screen_result_label("completed", "failed") == "Fail"
     assert cs.screen_result_label("sent") == "Pending"
+
+
+@pytest.mark.parametrize("raw", ["failed", "fail", "rejected", "FAILED", " failed "])
+def test_a_failed_outreach_with_no_score_is_pending_not_fail(raw):
+    # Pairbot only writes a score for a screen that was completed. A raw
+    # "failed" with none is an outreach miss — the rank list reads it Pending,
+    # and so must this list (it used to say Fail).
+    assert cs.screen_result_label(raw) == "Pending"
+    assert cs.screen_result_label(raw, None, None) == "Pending"
+    assert cs.screen_result_label(raw, None, "") == "Pending"
+    assert cs.screen_result_label(raw, None, 0) == "Fail"            # a 0 IS a score
+
+
+def test_label_never_drifts_from_the_shared_rank_list_rule():
+    from services.engage_status import format_engage_status
+
+    for raw in (*cs.RESPONDED_STATUSES, "sent", "processing", "queued", "", None):
+        for score in (None, 0, 3.5):
+            for hf in (None, "", "passed", "failed"):
+                expected = format_engage_status(str(raw or "").strip().lower(), None if score is None else float(score), hf or "")
+                assert cs.screen_result_label(raw, hf, score) == expected, (raw, score, hf)
 
 
 def test_parse_ts_handles_iso_z_and_naive():
@@ -126,13 +147,159 @@ def test_only_responded_statuses_are_listed():
     rows = [
         _row(candidate_id="a", email="a@x.com", engage_status="passed"),
         _row(candidate_id="b", email="b@x.com", engage_status="in_progress"),
-        _row(candidate_id="c", email="c@x.com", engage_status="failed"),
+        _row(candidate_id="c", email="c@x.com", engage_status="failed"),     # scored → a real Fail → never listed
         _row(candidate_id="d", email="d@x.com", engage_status="sent"),       # launched, never answered
         _row(candidate_id="e", email="e@x.com", engage_status="processing"),
         _row(candidate_id="f", email="f@x.com", engage_status=None),
+        _row(candidate_id="g", email="g@x.com", engage_status="failed", score=None, total=None),  # outreach miss
     ]
     got = {c["candidate_id"]: c["screen_result"] for c in _select(rows)}
-    assert got == {"a": "Pass", "b": "In Progress", "c": "Fail"}
+    assert got == {"a": "Pass", "b": "In Progress", "g": "Pending"}
+
+
+# ---------------------------------------------------------------------------
+# Who may be listed: a past Pass, or an undecided screen with a strong match
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("result, score, expected", [
+    ("Pass", 60, True), ("Pass", 59.9, False), ("Pass", 95, True),
+    ("Pending", 79.9, False), ("Pending", 80, True), ("Pending", 100, True),
+    ("In Progress", 79.9, False), ("In Progress", 80, True),
+    ("Fail", 100, False), ("Fail", 85, False),
+    ("Pass", None, False), ("Pending", None, False),   # Step-5 "N/A": no number to vouch with
+    ("Pass", "junk", False),
+    ("", 99, False), (None, 99, False),
+])
+def test_qualifies_for_list_is_a_past_pass_or_a_strong_undecided_match(result, score, expected):
+    assert cs.qualifies_for_list(result, score, min_score=60, undecided_min_score=80) is expected
+
+
+def test_the_undecided_bar_is_never_below_the_floor():
+    # If the floor is tuned above the undecided bar, undecided must not be the looser of the two.
+    assert cs.qualifies_for_list("Pending", 85, min_score=90, undecided_min_score=80) is False
+    assert cs.qualifies_for_list("Pending", 90, min_score=90, undecided_min_score=80) is True
+
+
+def test_pending_and_in_progress_need_a_strong_match_and_a_fail_is_never_listed():
+    scores = {"pass_lo": 60, "pass_below": 59, "pend_ok": 80, "pend_lo": 79, "prog_ok": 91, "prog_lo": 70, "fail_hi": 99}
+    rows = [
+        _row(candidate_id="pass_lo", email="1@x.com", engage_status="passed"),
+        _row(candidate_id="pass_below", email="2@x.com", engage_status="passed"),
+        _row(candidate_id="pend_ok", email="3@x.com", engage_status="failed", score=None, total=None),
+        _row(candidate_id="pend_lo", email="4@x.com", engage_status="failed", score=None, total=None),
+        _row(candidate_id="prog_ok", email="5@x.com", engage_status="in_progress"),
+        _row(candidate_id="prog_lo", email="6@x.com", engage_status="in_progress"),
+        _row(candidate_id="fail_hi", email="7@x.com", engage_status="failed", score=2, total=10),
+    ]
+    scored = []
+
+    def scorer(payload, criteria):
+        scored.append(payload["candidate_id"])
+        return {"score": scores[payload["candidate_id"]]}
+
+    stats = {}
+    got = _select(rows, scorer=scorer, min_score=60, undecided_min_score=80, stats=stats)
+    assert [(c["candidate_id"], c["screen_result"]) for c in got] == [
+        ("prog_ok", "In Progress"),
+        ("pend_ok", "Pending"),
+        ("pass_lo", "Pass"),
+    ]
+    assert "fail_hi" not in scored                 # a Fail never costs a scoring slot
+    assert stats["screen_failed"] == 1
+
+
+def test_a_past_pass_beats_a_more_recent_undecided_screen():
+    rows = [
+        _row(candidate_id="old", email="p@x.com", prior_key="26-11111", engage_status="passed", days_ago=40),
+        _row(candidate_id="new", email="p@x.com", prior_key="26-44444", engage_status="in_progress", days_ago=2),
+    ]
+    (c,) = _select(rows)
+    assert c["screen_result"] == "Pass" and c["prior_jobdiva_id"] == "26-11111"
+
+
+def test_a_past_pass_beats_a_more_recent_fail():
+    rows = [
+        _row(candidate_id="old", email="p@x.com", prior_key="26-11111", engage_status="passed", days_ago=40),
+        _row(candidate_id="new", email="p@x.com", prior_key="26-44444", engage_status="failed", score=2, days_ago=1),
+    ]
+    (c,) = _select(rows)
+    assert c["screen_result"] == "Pass"
+
+
+def test_without_a_pass_the_most_recent_screen_decides():
+    # An older undecided row must not resurrect someone whose latest screen was a Fail.
+    rows = [
+        _row(candidate_id="old", email="p@x.com", prior_key="26-11111", engage_status="in_progress", days_ago=30),
+        _row(candidate_id="new", email="p@x.com", prior_key="26-44444", engage_status="failed", score=2, days_ago=1),
+    ]
+    assert _select(rows) == []
+
+
+def test_failed_rows_do_not_consume_the_scoring_budget():
+    rows = [
+        _row(candidate_id="new-fail", email="f@x.com", engage_status="failed", score=2, days_ago=1),
+        _row(candidate_id="older-pass", email="o@x.com", engage_status="passed", days_ago=20),
+    ]
+    got = _select(rows, max_scored=1)
+    assert [c["candidate_id"] for c in got] == ["older-pass"]
+
+
+# ---------------------------------------------------------------------------
+# Rows already stored (the label + eligibility are re-applied on read)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("stored, status, score, expected", [
+    ("Fail", "failed", None, "Pending"),      # the bug: an outreach miss stamped Fail
+    ("Fail", "fail", None, "Pending"),
+    ("Fail", "rejected", "", "Pending"),
+    ("Fail", "failed", 3, "Fail"),            # a scored Fail stays a Fail
+    ("Fail", "failed", 0, "Fail"),
+    ("Fail", "completed", None, "Fail"),      # hard-filter fail: not re-derivable, never touched
+    ("Pass", "passed", 8, "Pass"),
+    ("In Progress", "in_progress", None, "In Progress"),
+    ("Pending", "sent", None, "Pending"),
+    (None, None, None, "Pending"),
+    ("", "failed", None, "Pending"),
+])
+def test_effective_screen_result_corrects_a_stored_outreach_miss(stored, status, score, expected):
+    assert cs.effective_screen_result(stored, status, score) == expected
+
+
+def _list_with(rows):
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.fetchone.return_value = JOB
+    cur.fetchall.return_value = rows
+    with patch.object(cs, "get_db_connection", return_value=conn):
+        return cs.list_for_job("26-22222")
+
+
+def _stored(id, result, status, match, *, eng_score=None):
+    return {"id": id, "candidate_id": f"c{id}", "source": "JobDiva", "prior_jobdiva_candidate_id": None,
+            "screened_at": NOW, "screen_result": result, "engage_status": status,
+            "engage_score": eng_score, "match_score": match}
+
+
+def test_list_for_job_shows_only_past_passes_and_strong_undecided_rows():
+    rows = _list_with([
+        _stored(1, "Pass", "passed", 65, eng_score=8),
+        _stored(2, "Fail", "failed", 91),                  # old row: really an outreach miss → Pending, 91 ≥ 80
+        _stored(3, "Fail", "failed", 72),                  # …but at 72 not strong enough
+        _stored(4, "Fail", "failed", 99, eng_score=2),     # a real Fail: never shown
+        _stored(5, "In Progress", "in_progress", 80),
+        _stored(6, "In Progress", "in_progress", 79),
+        _stored(7, "Pass", "passed", 50, eng_score=8),     # below the relevance floor
+    ])
+    assert [(r["id"], r["screen_result"]) for r in rows] == [(1, "Pass"), (2, "Pending"), (5, "In Progress")]
+
+
+def test_a_pending_row_is_never_shown_as_failed_in_the_list():
+    rows = _list_with([_stored(i, "Fail", "failed", 85 + i) for i in range(5)])
+    assert rows and {r["screen_result"] for r in rows} == {"Pending"}
+
+
+def test_added_blob_records_the_corrected_screen_result():
+    row = {**CS_ROW, "screen_result": "Fail", "engage_status": "failed", "engage_score": None}
+    assert cs.build_added_blob({}, row)["cross_submission"]["screen_result"] == "Pending"
 
 
 def test_rows_outside_lookback_window_are_dropped():
@@ -221,9 +388,9 @@ def test_list_for_job_reads_jobdiva_profile_id_from_the_prior_row():
     cur.fetchone.return_value = JOB
     cur.fetchall.return_value = [
         {"id": 1, "candidate_id": "exa_x", "source": "LinkedIn-Exa", "prior_jobdiva_candidate_id": "555",
-         "screened_at": NOW, "match_score": 80},
+         "screened_at": NOW, "screen_result": "Pass", "match_score": 80},
         {"id": 2, "candidate_id": "321", "source": "JobDiva", "prior_jobdiva_candidate_id": None,
-         "screened_at": NOW, "match_score": 70},  # prior row gone: a JobDiva row's own id still works
+         "screened_at": NOW, "screen_result": "Pass", "match_score": 70},  # prior row gone: a JobDiva row's own id still works
     ]
     with patch.object(cs, "get_db_connection", return_value=conn):
         rows = cs.list_for_job("26-22222")
@@ -301,7 +468,7 @@ def test_prescreen_runs_before_scoring_and_drops_rejected_rows():
     assert [c["candidate_id"] for c in got] == ["da"]
     assert scored == ["da"]  # rejected rows are never scored
     assert got[0]["role_match"] == "data analyst ~ senior data analyst"
-    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1}
+    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1, "screen_failed": 0}
 
 
 def test_prescreen_error_fails_closed_for_that_row_only():

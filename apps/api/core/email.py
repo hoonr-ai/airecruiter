@@ -1279,7 +1279,8 @@ def notify_cross_submissions(
     </div>
     <p style="margin:16px 0 0;font-size:12px;color:#64748b;line-height:1.6;">
       "Screen result" is the outcome of the PAIR phone screen for the <em>previous</em> job
-      (In Progress = partially completed). "Match" is the résumé match against <em>this</em> job's
+      (In Progress = partially completed, Pending = not screened yet). Only candidates who passed, or
+      who are a very strong match for this job, are listed. "Match" is the résumé match against <em>this</em> job's
       Step&nbsp;5 criteria. These candidates are not on this job's candidate list yet — add them from
       Step&nbsp;5 or reach out directly.
     </p>
@@ -1293,7 +1294,8 @@ def notify_cross_submissions(
         f"While sourcing {job_title or 'this job'}{(' at ' + customer_name) if customer_name else ''} ({jobdiva_id}; {jobdiva_link}), "
         f"PAIR found {n} candidate(s) it already phone-screened for other jobs in the last {int(lookback_days)} days "
         f"who also match this role:\n\n" + "\n".join(plain_rows) + "\n\n"
-        "Screen result is the outcome of the PAIR phone screen for the previous job (In Progress = partially completed). "
+        "Screen result is the outcome of the PAIR phone screen for the previous job (In Progress = partially completed, "
+        "Pending = not screened yet). Only candidates who passed, or who are a very strong match for this job, are listed. "
         "Match is the resume match against this job's Step 5 criteria.\n"
     )
     return _send(to_list, subject, _base_html(content), plain)

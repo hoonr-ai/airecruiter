@@ -139,9 +139,9 @@ NOW = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
 def _prior_row(candidate_id, title, *, location="Charlotte, NC"):
     blob = {
-        "engage_status": "failed",
+        "engage_status": "passed",
         "engage_updated_at": (NOW - timedelta(days=8)).isoformat(),
-        "engage_score": 3, "engage_total_score": 10,
+        "engage_score": 8, "engage_total_score": 10,
         "title": title,
         "skills": [{"skill": "SQL"}, {"skill": "Excel"}, {"skill": "Tableau"}, {"skill": "Python"}],
         "enhanced_info": {
@@ -192,7 +192,7 @@ def test_qa_lead_scores_high_but_is_no_longer_a_data_analyst_cross_submission():
     assert [c["candidate_id"] for c in gated] == ["da"]
     assert gated[0]["match_score"] >= cs.CROSS_SUBMISSIONS_MIN_SCORE
     assert gated[0]["role_match"] == "data analyst ~ senior data analyst"
-    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1}
+    assert stats == {"gated_out": 1, "gated_reasons": {"title_mismatch": 1}, "scored": 1, "screen_failed": 0}
 
 
 def test_cross_submission_floor_is_the_step5_pool_floor():

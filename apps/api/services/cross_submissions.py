@@ -19,6 +19,12 @@ Relevance is decided exactly the way Step 5 decides it, in the same order:
    function behind the Step-5 match % (scoring matrix v2, hard vetoes → 0).
 3. **Floor** — ``CROSS_SUBMISSIONS_MIN_SCORE``, defaulting to the Step-5
    pool floor (``sourcing_config.JOBDIVA_TALENTSEARCH_MIN_SCORE``).
+4. **Two kinds only** (``qualifies_for_list``) — a candidate who *passed* a
+   PAIR screen (floor above), or one whose screen is still undecided
+   (Pending / In Progress) and who matches this job at
+   ``CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE`` (80). A Fail is never listed.
+   The screen label is the rank list's (``services.engage_status``): a raw
+   ``failed`` with no score is an outreach miss — Pending, not Fail.
 
 Data model this reads (nothing new is captured — it all already exists):
 
@@ -71,9 +77,11 @@ from core.config import (
     CROSS_SUBMISSIONS_MAX_SCORED,
     CROSS_SUBMISSIONS_MIN_SCORE,
     CROSS_SUBMISSIONS_THROTTLE_MINUTES,
+    CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE,
     CROSS_SUBMISSIONS_WARM_TIMEOUT_SECONDS,
 )
 from core.db import get_db_connection
+from services.engage_status import FAIL_STATUSES, format_engage_status, parse_engage_score
 
 logger = logging.getLogger(__name__)
 
@@ -206,19 +214,68 @@ def person_keys_for(email: Any, phone: Any, source: Any = "", candidate_id: Any 
     return keys
 
 
-def screen_result_label(engage_status: Any, hard_filter_status: Any = None) -> str:
-    """Pass / Fail / In Progress — same mapping as the rank list."""
-    s = str(engage_status or "").strip().lower()
-    if s in ("passed", "pass", "hired"):
-        return "Pass"
-    if s in ("failed", "fail", "rejected"):
-        return "Fail"
-    if s in ("in_progress", "in progress"):
-        return "In Progress"
-    if s == "completed":
-        hf = str(hard_filter_status or "").strip().lower()
-        return "Pass" if hf in ("", "pass", "passed", "not_hard_filter") else "Fail"
-    return "Pending"
+def screen_result_label(engage_status: Any, hard_filter_status: Any = None, engage_score: Any = None) -> str:
+    """Pass / Fail / In Progress / Pending — the rank list's own rule.
+
+    Delegates to ``services.engage_status.format_engage_status`` so this list
+    can never disagree with the rank list, the launch report or the dashboard.
+    The one that matters here: a raw ``failed`` with NO score is an outreach
+    miss (the candidate never completed a screen), i.e. **Pending**, not a Fail
+    — a screen only fails once it has a score. Pairbot writes scores solely for
+    terminal outcomes, so ``engage_score`` is what separates the two.
+    """
+    return format_engage_status(
+        str(engage_status or "").strip().lower(),
+        parse_engage_score(engage_score),
+        str(hard_filter_status or "").strip().lower(),
+    )
+
+
+def effective_screen_result(stored: Any, engage_status: Any, engage_score: Any) -> str:
+    """The label to show for a row stored in ``cross_submissions``.
+
+    Rows written before ``screen_result_label`` followed the rank list carry
+    "Fail" for an outreach miss (raw ``failed``, no score). The label is
+    stored at insert time, so correct that one case on read rather than
+    trusting the stamp; every other stored label is already right (the
+    hard-filter status that decides ``completed`` isn't stored, so it can't be
+    re-derived here and must not be).
+    """
+    label = str(stored or "").strip() or "Pending"
+    if (
+        label == "Fail"
+        and str(engage_status or "").strip().lower() in FAIL_STATUSES
+        and parse_engage_score(engage_score) is None
+    ):
+        return "Pending"
+    return label
+
+
+def qualifies_for_list(
+    screen_result: Any,
+    match_score: Any,
+    *,
+    min_score: float = CROSS_SUBMISSIONS_MIN_SCORE,
+    undecided_min_score: float = CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE,
+) -> bool:
+    """The two kinds of candidate a cross-submissions list may carry.
+
+    * **Passed** a PAIR screen for another job — listed at the relevance floor.
+    * **Undecided** (Pending / In Progress) — no screen score to lean on, so
+      only a very strong match to this job (``undecided_min_score``) is listed.
+
+    A Fail is never listed, and neither is a row with no match score (the
+    Step-5 "N/A" verdict). The undecided bar never drops below the floor.
+    """
+    try:
+        score = float(match_score)
+    except (TypeError, ValueError):
+        return False
+    if screen_result == "Pass":
+        return score >= float(min_score)
+    if screen_result in ("Pending", "In Progress"):
+        return score >= max(float(min_score), float(undecided_min_score))
+    return False
 
 
 def has_responded(engage_status: Any) -> bool:
@@ -320,6 +377,11 @@ def comparable_scoring_criteria(criteria: Any) -> Any:
     return criteria
 
 
+def _screen_rank(candidate: Dict[str, Any]) -> Tuple[bool, datetime]:
+    """Which of one person's screens represents them: a Pass first, then the latest."""
+    return (candidate["screen_result"] == "Pass", candidate["screened_at"])
+
+
 def select_candidates(
     prior_rows: Iterable[Dict[str, Any]],
     *,
@@ -330,12 +392,20 @@ def select_candidates(
     criteria: Any,
     warmer: Optional[Warmer] = None,
     min_score: float = CROSS_SUBMISSIONS_MIN_SCORE,
+    undecided_min_score: float = CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE,
     max_scored: int = CROSS_SUBMISSIONS_MAX_SCORED,
     max_listed: int = CROSS_SUBMISSIONS_MAX_LISTED,
     prescreen: Optional[Prescreen] = None,
     stats: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Filter → dedupe by person (most recent screen wins) → role gate → score → rank.
+    """Filter → dedupe by person → drop Fails → role gate → score → rank.
+
+    Only two kinds of person are listed (``qualifies_for_list``): someone who
+    **passed** a PAIR screen (match ≥ ``min_score``), or someone whose screen is
+    still **undecided** — Pending / In Progress — and who matches this job at
+    ``undecided_min_score`` or better. A Fail is dropped before scoring. When a
+    person has several screens, a Pass beats everything (they have passed in
+    the past), otherwise the most recent screen wins.
 
     ``prior_rows`` are sourced_candidates rows (dicts) joined with their
     job's title/client. Rows for the same base job ref as the new job, rows
@@ -383,7 +453,9 @@ def select_candidates(
             "prior_job_title": row.get("prior_title") or row.get("prior_enhanced_title") or "",
             "prior_customer_name": row.get("prior_customer_name") or "",
             "engage_status": str(blob.get("engage_status") or ""),
-            "screen_result": screen_result_label(blob.get("engage_status"), blob.get("engage_hard_filter_status")),
+            "screen_result": screen_result_label(
+                blob.get("engage_status"), blob.get("engage_hard_filter_status"), blob.get("engage_score"),
+            ),
             "engage_score": blob.get("engage_score"),
             "engage_total_score": blob.get("engage_total_score"),
             "screen_score_display": format_screen_score(blob.get("engage_score"), blob.get("engage_total_score")),
@@ -392,12 +464,15 @@ def select_candidates(
             "_blob": blob,
         }
         prev = by_person.get(key)
-        if prev is None or candidate["screened_at"] > prev["screened_at"]:
+        if prev is None or _screen_rank(candidate) > _screen_rank(prev):
             by_person[key] = candidate
 
+    # A Fail can never be listed, so don't spend a role-gate / scoring slot on
+    # one. (Dedupe ran first: a Pass elsewhere already replaced it.)
+    survivors = [c for c in by_person.values() if c["screen_result"] != "Fail"]
     # Most recently screened first; the role gate runs on the whole pool, the
     # scoring budget only counts people who cleared it.
-    ordered = sorted(by_person.values(), key=lambda c: c["screened_at"], reverse=True)
+    ordered = sorted(survivors, key=lambda c: c["screened_at"], reverse=True)
     gated_reasons: Dict[str, int] = {}
     pool: List[Dict[str, Any]] = []
     budget = max(0, int(max_scored))
@@ -420,6 +495,7 @@ def select_candidates(
         stats["gated_out"] = sum(gated_reasons.values())
         stats["gated_reasons"] = gated_reasons
         stats["scored"] = len(pool)
+        stats["screen_failed"] = len(by_person) - len(survivors)
 
     payloads = [build_scoring_payload(c["_row"], c["_blob"]) for c in pool]
     if warmer is not None and criteria is not None and payloads:
@@ -460,7 +536,9 @@ def select_candidates(
                 "cross_submissions: skipping %s — %s", cand.get("candidate_id"), blocked
             )
             continue
-        if score is not None and score >= float(min_score):
+        if qualifies_for_list(
+            cand["screen_result"], score, min_score=min_score, undecided_min_score=undecided_min_score,
+        ):
             selected.append(cand)
 
     selected.sort(key=lambda c: (c["match_score"] or 0.0, c["screened_at"]), reverse=True)
@@ -680,7 +758,11 @@ def list_for_job(job_ref: str) -> List[Dict[str, Any]]:
                     r[k] = float(r[k])
                 except (TypeError, ValueError):
                     pass
-    return rows
+        r["screen_result"] = effective_screen_result(r.get("screen_result"), r.get("engage_status"), r.get("engage_score"))
+    # Rows are stored once and never rewritten, so rows from before this rule
+    # (a Fail-labelled outreach miss, a 65% Pending) are filtered here, at read
+    # time, with the same rule the scan applies when it inserts.
+    return [r for r in rows if qualifies_for_list(r["screen_result"], r.get("match_score"))]
 
 
 def jobs_sharing_screen_report(prior_ref: str, candidate_id: str, limit: int = 10) -> List[str]:
@@ -757,7 +839,9 @@ def build_added_blob(prior_blob: Dict[str, Any], cs_row: Dict[str, Any]) -> Dict
         "from_jobdiva_id": cs_row.get("prior_jobdiva_id"),
         "from_job_title": cs_row.get("prior_job_title"),
         "from_customer_name": cs_row.get("prior_customer_name"),
-        "screen_result": cs_row.get("screen_result"),
+        "screen_result": effective_screen_result(
+            cs_row.get("screen_result"), cs_row.get("engage_status"), cs_row.get("engage_score"),
+        ),
         "screened_at": screened_at.isoformat() if isinstance(screened_at, datetime) else screened_at,
         "added_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -887,7 +971,7 @@ def run_for_job(
     """
     summary: Dict[str, Any] = {
         "job_ref": job_ref, "ran": False, "skipped_reason": None,
-        "scanned": 0, "gated_out": 0, "gated_reasons": {}, "scored": 0,
+        "scanned": 0, "screen_failed": 0, "gated_out": 0, "gated_reasons": {}, "scored": 0,
         "selected": 0, "new": 0, "emailed": False, "candidates": [],
     }
     if not CROSS_SUBMISSIONS_ENABLED and not force:
@@ -929,6 +1013,7 @@ def run_for_job(
                 stats=gate_stats,
                 warmer=warmer,
             )
+            summary["screen_failed"] = int(gate_stats.get("screen_failed") or 0)
             summary["gated_out"] = int(gate_stats.get("gated_out") or 0)
             summary["gated_reasons"] = dict(gate_stats.get("gated_reasons") or {})
             summary["scored"] = int(gate_stats.get("scored") or 0)
@@ -960,8 +1045,8 @@ def run_for_job(
                     mark_notified(cur, [c["id"] for c in new_rows if c.get("id")])
                     conn.commit()
         logger.info(
-            "cross_submissions: job=%s scanned=%s gated_out=%s (%s) scored=%s selected=%s new=%s emailed=%s",
-            job_ref, summary["scanned"], summary["gated_out"], summary["gated_reasons"], summary["scored"],
+            "cross_submissions: job=%s scanned=%s screen_failed=%s gated_out=%s (%s) scored=%s selected=%s new=%s emailed=%s",
+            job_ref, summary["scanned"], summary["screen_failed"], summary["gated_out"], summary["gated_reasons"], summary["scored"],
             summary["selected"], summary["new"], summary["emailed"],
         )
         return summary

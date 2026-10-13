@@ -234,6 +234,12 @@ from core.sourcing_config import JOBDIVA_TALENTSEARCH_MIN_SCORE as _STEP5_POOL_M
 CROSS_SUBMISSIONS_MIN_SCORE = float(
     get_env_with_default("CROSS_SUBMISSIONS_MIN_SCORE", str(_STEP5_POOL_MIN_SCORE))
 )
+# A candidate who PASSED a PAIR screen is listed at the floor above. One whose
+# screen is still undecided (Pending / In Progress) has no screen score to vouch
+# for them, so only a very strong match to THIS job gets listed. A Fail is never listed.
+CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE = float(
+    get_env_with_default("CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE", "80")
+)
 # Scoring is deterministic (no LLM) but bounded anyway: most-recent first.
 CROSS_SUBMISSIONS_MAX_SCORED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_SCORED", "500"))
 CROSS_SUBMISSIONS_MAX_LISTED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_LISTED", "25"))
