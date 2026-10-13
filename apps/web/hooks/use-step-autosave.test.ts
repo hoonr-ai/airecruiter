@@ -68,18 +68,20 @@ describe('useStepAutosave (mounted)', () => {
     });
 
     const STEP = 5;
-    type Props = { currentStep: number; data: unknown };
+    type Props = { currentStep: number; data: unknown; saveResult?: { ok: boolean, skipped?: boolean } };
     type Call = { render: number; params: Parameters<SaveJobDraft>[0] };
     let root: Root;
     let renders: number;
     let calls: Call[];
 
     // Like page.tsx, every render hands the hook a brand-new saveJobDraft.
-    function Harness({ currentStep, data }: Props) {
+    // saveResult lets a test simulate a failed or skipped save (PR #809
+    // review follow-up: a non-ok flush must not silently drop the edit).
+    function Harness({ currentStep, data, saveResult }: Props) {
         const render = ++renders;
         const saveJobDraft: SaveJobDraft = async (params) => {
             calls.push({ render, params });
-            return { ok: true };
+            return saveResult ?? { ok: true };
         };
         useStepAutosave(currentStep, STEP, false, true, saveJobDraft, [data]);
         return null;
@@ -153,5 +155,43 @@ describe('useStepAutosave (mounted)', () => {
         assert.strictEqual(calls.length, 1);
         assert.deepStrictEqual(calls[0].params, { currentStep: STEP, saveType: 'auto', skipToast: true, keepalive: true });
         assert.strictEqual(calls[0].render, renders);
+    });
+
+    it('a step-change flush that is skipped (an explicit save was already in flight) restores the dirty flag, so a later step change retries it', async () => {
+        // First flush: skipped (saveJobDraft bailed out — see
+        // lib/job-draft-save-dispatch.ts's "skip" action). Without
+        // restoring dirtyRef on a non-ok result, this edit would be lost
+        // for good — the PR #809 review's medium finding.
+        await render({ currentStep: STEP, data: 'edited' });
+        mock.timers.tick(200);
+        // The render that changes currentStep is the one whose saveJobDraft
+        // closure the flush effect actually calls (useEffectEvent always
+        // reads the latest one) — the failing result belongs here.
+        await render({ currentStep: STEP - 1, data: 'edited', saveResult: { ok: false, skipped: true } });
+        assert.strictEqual(calls.length, 1, 'first flush attempted (and skipped)');
+        // Let the first flush's `.then(...)` (which restores dirtyRef on a
+        // non-ok result) actually run before triggering the next flush.
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // currentStep changes again; this hook instance's own effect
+        // (targetStep === STEP) re-runs on every currentStep change, so a
+        // still-dirty flag from the skipped flush retries here.
+        await render({ currentStep: STEP - 2, data: 'edited', saveResult: { ok: true } });
+        assert.strictEqual(calls.length, 2, 'the restored dirty flag retried the flush');
+    });
+
+    it('a tab-hide flush that fails restores the dirty flag, so a later hide retries it', async () => {
+        await render({ currentStep: STEP, data: 'edited', saveResult: { ok: false } });
+        fakeDocument.visibilityState = 'hidden';
+        fakeDocument.dispatchEvent(new Event('visibilitychange'));
+        assert.strictEqual(calls.length, 1, 'first flush attempted (and failed)');
+
+        fakeDocument.visibilityState = 'visible';
+        fakeDocument.dispatchEvent(new Event('visibilitychange'));
+        await render({ currentStep: STEP, data: 'edited', saveResult: { ok: true } });
+        fakeDocument.visibilityState = 'hidden';
+        fakeDocument.dispatchEvent(new Event('visibilitychange'));
+        assert.strictEqual(calls.length, 2, 'the restored dirty flag retried the flush on the next hide');
     });
 });
