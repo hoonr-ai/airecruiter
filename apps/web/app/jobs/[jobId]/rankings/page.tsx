@@ -326,6 +326,15 @@ interface Candidate {
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
 type ToastState = { type: "info" | "error" | "success" | "warning"; message: string } | null;
 
+function isPlaceholderEmail(e?: string): boolean {
+  const n = String(e || "").trim().toLowerCase();
+  if (!n || !n.includes("@")) return true;
+  const domain = n.split("@").pop() || "";
+  if (domain === "jobdiva.com") return true;
+  if (n.endsWith("@noemail.pair.ai")) return true;
+  return false;
+}
+
 function ResumeScreeningHoverCard({
   candidate,
   open,
@@ -1416,15 +1425,6 @@ export default function CandidateRankingsPage() {
     const timer = setTimeout(() => setToast(null), 2500);
     return () => clearTimeout(timer);
   }, [toast]);
-
-  const isPlaceholderEmail = (e?: string) => {
-    const n = String(e || "").trim().toLowerCase();
-    if (!n || !n.includes("@")) return true;
-    const domain = n.split("@").pop() || "";
-    if (domain === "jobdiva.com") return true;
-    if (n.endsWith("@noemail.pair.ai")) return true;
-    return false;
-  };
 
   const normalizeCandidateRows = useCallback((rows: any[]): Candidate[] => {
     // A row is JobDiva when its source says so, an entry in its merged

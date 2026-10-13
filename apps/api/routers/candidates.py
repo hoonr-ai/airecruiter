@@ -123,7 +123,10 @@ from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_ro
 
 
 from services.engage_status import format_engage_status as _format_engage_status
-from services.engage_status import engage_display_sql, select_engage_status
+from services.engage_status import engage_display_sql, select_engage_status, PASS_STATUSES, FAIL_STATUSES, COMPLETED_STATUSES
+
+# SQL IN-list for auto-email visibility: show the row only when the interview reached a terminal state.
+_TERMINAL_STATUSES_SQL = ", ".join(f"'{s}'" for s in PASS_STATUSES + FAIL_STATUSES + COMPLETED_STATUSES)
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
@@ -1674,11 +1677,7 @@ async def get_job_candidates(
                           OR (
                               -- Show auto-email candidates only when they have completed the interview
                               COALESCE(NULLIF(BTRIM(sc.data->>'engage_interview_id'), ''), '') <> ''
-                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) IN (
-                                  'passed', 'hired', 'pass', 'qualified', 'shortlisted', 'selected',
-                                  'failed', 'rejected', 'fail', 'disqualified', 'declined',
-                                  'completed', 'complete'
-                              )
+                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) IN ({_TERMINAL_STATUSES_SQL})
                           )
                       )
                       AND NOT (
@@ -1758,11 +1757,7 @@ async def get_job_candidates(
                               OR (
                                   -- Show auto-email candidates only when they have completed the interview
                                   COALESCE(NULLIF(BTRIM(data->>'engage_interview_id'), ''), '') <> ''
-                                  AND LOWER(COALESCE(data->>'engage_status', '')) IN (
-                                      'passed', 'hired', 'pass', 'qualified', 'shortlisted', 'selected',
-                                      'failed', 'rejected', 'fail', 'disqualified', 'declined',
-                                      'completed', 'complete'
-                                  )
+                                  AND LOWER(COALESCE(data->>'engage_status', '')) IN ({_TERMINAL_STATUSES_SQL})
                               )
                           )
                           AND NOT (
