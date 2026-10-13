@@ -2890,7 +2890,12 @@ function NewJobPageContent() {
     });
   };
 
-  const saveAbortControllerRef = useRef<AbortController | null>(null);
+  // Split in two (rather than one shared ref) so a background auto-save
+  // firing a moment after an explicit save (Next / Save & Exit) started can
+  // no longer cancel it out from under it — see saveJobDraft below for the
+  // race this fixes.
+  const explicitSaveAbortControllerRef = useRef<AbortController | null>(null);
+  const autoSaveAbortControllerRef = useRef<AbortController | null>(null);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
@@ -2917,12 +2922,38 @@ function NewJobPageContent() {
       return { ok: false };
     }
 
-    // Abort any in-flight save request to ensure latest wins and prevent race conditions
-    if (saveAbortControllerRef.current) {
-      saveAbortControllerRef.current.abort();
+    // A background auto-save (saveType === "auto", from useStepAutosave's
+    // debounce/flush/beforeunload paths) must never cancel a save the user
+    // is actively waiting on (Next / Save & Exit) — doing so used to abort
+    // the explicit save and surface "Save timed out — please retry" even
+    // though nothing timed out; it was just pre-empted by a same-job
+    // background save firing a moment later. An explicit save, conversely,
+    // always supersedes whatever's in flight (auto or explicit) since it
+    // reflects the most current data and the user is waiting on its result.
+    const isAutoSave = stepData.saveType === "auto";
+    if (isAutoSave) {
+      if (explicitSaveAbortControllerRef.current) {
+        // An explicit save is already in flight for this same job — it will
+        // persist data at least as current as this auto-save's, so skip
+        // rather than race it. The caller (useStepAutosave) leaves its dirty
+        // flag set on a non-ok result, so this edit isn't lost — the next
+        // debounce tick or step-change flush will retry it.
+        return { ok: false, message: "Skipped — a save is already in progress." };
+      }
+      if (autoSaveAbortControllerRef.current) {
+        autoSaveAbortControllerRef.current.abort();
+      }
+    } else {
+      if (autoSaveAbortControllerRef.current) {
+        autoSaveAbortControllerRef.current.abort();
+      }
+      if (explicitSaveAbortControllerRef.current) {
+        explicitSaveAbortControllerRef.current.abort();
+      }
     }
     const saveController = new AbortController();
-    saveAbortControllerRef.current = saveController;
+    const saveControllerRef = isAutoSave ? autoSaveAbortControllerRef : explicitSaveAbortControllerRef;
+    saveControllerRef.current = saveController;
 
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
@@ -3012,6 +3043,12 @@ function NewJobPageContent() {
       return { ok: false, message: errorMsg };
     } finally {
       clearTimeout(saveTimeoutId);
+      // Only clear if this call's controller is still the current one — a
+      // newer call (which already replaced it above) must not have its own
+      // in-progress controller wiped out by this older call settling late.
+      if (saveControllerRef.current === saveController) {
+        saveControllerRef.current = null;
+      }
     }
   };
 
