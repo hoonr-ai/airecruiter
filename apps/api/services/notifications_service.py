@@ -100,19 +100,21 @@ existing email notifications. Ten types today:
   "X was submitted for Y" with no sense that THEY are the one being asked
   to act). When that manager later submits the SAME candidate externally,
   candidate_externally_submitted tells the ORIGINAL requester their review
-  request resolved — save_candidate_feedback reads the candidate's
-  immediately-prior feedback (submission_type/submitted_by, read before
-  this request's own persist overwrites them) to recognize "this external
-  submission is that internal request's follow-through" and to know who to
-  notify, rather than relying on the requester happening to also be a
-  recipient of the generic candidate_submitted notification (which
-  excludes whoever is submitting right now — here, the manager — but has
-  no way to single out the original requester specifically, and would
-  reach nobody at all if that requester is the job's only recruiter).
-  Both share _create_candidate_notification_for_recipient_sync (candidate-
-  level, same dedup index as candidate_passed/submitted/rejected, but a
-  single specific recipient rather than a list derived from the job's
-  recruiter_emails).
+  request resolved — save_candidate_feedback reads a dedicated
+  `internal_review_requested_by` field off the candidate's immediately-prior
+  state (set on an internal submission, cleared on the next external one,
+  untouched by an intervening Reject/Unreachable) to recognize "this
+  external submission is that internal request's follow-through" and to
+  know who to notify, rather than relying on the requester happening to
+  also be a recipient of the generic candidate_submitted notification
+  (which excludes whoever is submitting right now — here, the manager —
+  and would reach nobody at all if that requester is the job's only
+  recruiter). Both share _create_candidate_notification_for_recipient_sync
+  (candidate-level, single specific recipient rather than a list derived
+  from recruiter_emails) but — unlike candidate_passed/submitted/rejected —
+  dedupe via a same-minute pre-insert check
+  (_candidate_level_duplicate_in_last_minute), not a permanent index: a
+  genuine second review cycle must still notify.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -580,6 +582,30 @@ def _job_level_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_id: s
     return cur.fetchone() is not None
 
 
+def _candidate_level_duplicate_in_last_minute(
+    cur, recipient_email: str, candidate_id: str, jobdiva_id: str, notification_type: str
+) -> bool:
+    """Candidate-level counterpart to _job_level_duplicate_in_last_minute
+    above, for candidate_internal_review_requested /
+    candidate_externally_submitted. Those two are deliberately excluded from
+    uniq_notifications_recipient_candidate_job_type (see
+    routers/notifications.py) because a genuine second review cycle — a
+    manager rejects, the recruiter resubmits internally — must still notify;
+    "once ever" would silently swallow that. This only guards against the
+    same request firing twice within a moment (a retry, a double-click),
+    backed by idx_notifications_candidate_review_loop_recent."""
+    cur.execute(
+        """
+        SELECT 1 FROM notifications
+        WHERE recipient_email = %s AND candidate_id = %s AND jobdiva_id = %s AND type = %s
+          AND created_at >= now() - INTERVAL '1 minute'
+        LIMIT 1
+        """,
+        (recipient_email, candidate_id, jobdiva_id, notification_type),
+    )
+    return cur.fetchone() is not None
+
+
 def _create_pair_launched_notification_sync(
     job_id: str, jobdiva_id: str, job_title: str, candidate_count: int, recipients: List[str]
 ) -> None:
@@ -997,17 +1023,22 @@ async def create_daily_digest_notifications() -> None:
         await lock.release()
 
 
+_TITLE_INTERNAL_REVIEW_REQUESTED = "{candidate_name} was internally submitted for {job_title} and has requested a review."
+_TITLE_EXTERNALLY_SUBMITTED = "{candidate_name} was externally submitted for {job_title}."
+
+
 def _create_candidate_notification_for_recipient_sync(
     job_id: str, candidate_id: str, recipient_email: str, notification_type: str, title_template: str
 ) -> None:
     """Shared by create_candidate_internal_review_requested_notification and
-    create_candidate_externally_submitted_notification: candidate-level,
-    same dedup index as candidate_passed/submitted/rejected
-    (_CONFLICT_CANDIDATE_LEVEL), but — unlike those three, which notify
-    every recruiter on the job minus the actor — a single, specific
-    recipient the caller already knows (the manager on an internal
-    submission; the original requester on its external follow-through),
-    not derived from the job's recruiter_emails at all."""
+    create_candidate_externally_submitted_notification: candidate-level, but
+    for a single specific recipient the caller already knows (the manager on
+    an internal submission; the original requester on its external
+    follow-through), not derived from the job's recruiter_emails at all.
+    Dedup is _candidate_level_duplicate_in_last_minute, not the permanent
+    uniq_notifications_recipient_candidate_job_type index candidate_passed/
+    submitted/rejected share — a later, genuine review cycle must still
+    notify."""
     recipient = (recipient_email or "").strip().lower()
     if not recipient:
         return
@@ -1025,10 +1056,13 @@ def _create_candidate_notification_for_recipient_sync(
             jobdiva_id = job_row.get("jobdiva_id") or job_id
             app_job_id = job_row.get("job_id") or job_id
 
+            if _candidate_level_duplicate_in_last_minute(cur, recipient, candidate_id, jobdiva_id, notification_type):
+                return
+
             inserted = _insert_notification(
                 cur,
                 notification_type=notification_type,
-                conflict_clause=_CONFLICT_CANDIDATE_LEVEL,
+                conflict_clause=None,
                 recipient_email=recipient,
                 job_id=app_job_id,
                 jobdiva_id=jobdiva_id,
@@ -1050,19 +1084,12 @@ def _create_candidate_notification_for_recipient_sync(
 async def create_candidate_internal_review_requested_notification(
     *, job_id: str, candidate_id: str, manager_email: str
 ) -> None:
-    """Fire an in-app notification to the manager a recruiter named on an
-    internal submission — called from routers/candidates.py's
-    save_candidate_feedback when feedback_type == "Submit" and
-    submission_type == "internal", alongside (independently of) the
-    existing notify_internal_submission_to_manager email.
-
-    Distinct from candidate_submitted (which goes to the job's OTHER
-    recruiters, not the manager — the manager usually isn't one) so the
-    manager sees a message that actually matches what's being asked of
-    them ("...has requested a review"), not the generic co-recruiter
-    wording. Candidate-level, deduped once ever per (manager, candidate,
-    job) the same way candidate_passed/submitted/rejected are.
-    """
+    """Notify the manager named on an internal submission that a review is
+    waiting — called from save_candidate_feedback alongside (independently
+    of) the existing notify_internal_submission_to_manager email. Distinct
+    from candidate_submitted (goes to the job's OTHER recruiters, not the
+    manager, who usually isn't one) so the wording matches what's actually
+    being asked of them."""
     try:
         if not job_id or not candidate_id or not manager_email:
             return
@@ -1070,7 +1097,7 @@ async def create_candidate_internal_review_requested_notification(
             _create_candidate_notification_for_recipient_sync,
             job_id, candidate_id, manager_email,
             "candidate_internal_review_requested",
-            "{candidate_name} was internally submitted for {job_title} and has requested a review.",
+            _TITLE_INTERNAL_REVIEW_REQUESTED,
         )
     except Exception as e:  # noqa: BLE001 - must never raise into the feedback endpoint
         logger.error(
@@ -1082,22 +1109,13 @@ async def create_candidate_internal_review_requested_notification(
 async def create_candidate_externally_submitted_notification(
     *, job_id: str, candidate_id: str, recipient_email: str
 ) -> None:
-    """Fire an in-app notification to the recruiter who originally
-    requested an internal review, once that review resolves in an external
-    submission — called from routers/candidates.py's save_candidate_feedback
-    when THIS submission is external and the candidate's immediately-prior
-    feedback (read before this request's own persist overwrites it) was an
-    internal one, i.e. this is that request's resolution, not an unrelated
-    fresh submission.
-
-    Without this, the only notification the original requester has any
-    chance of getting is candidate_submitted (every OTHER recruiter on the
-    job minus whoever just submitted) — which excludes the requester
-    entirely if they're the only recruiter on the job, and either way
-    doesn't say "the internal review you asked for just went external."
-    Candidate-level, deduped once ever per (requester, candidate, job),
-    same as the other candidate-level types.
-    """
+    """Notify the original internal-review requester once that review
+    resolves in an external submission — called from save_candidate_feedback
+    when this submission is external and the candidate's immediately-prior
+    state shows a still-pending internal request. Without this the
+    requester's only chance at a notification is candidate_submitted (every
+    OTHER recruiter on the job), which excludes them outright if they're the
+    only recruiter on it."""
     try:
         if not job_id or not candidate_id or not recipient_email:
             return
@@ -1105,7 +1123,7 @@ async def create_candidate_externally_submitted_notification(
             _create_candidate_notification_for_recipient_sync,
             job_id, candidate_id, recipient_email,
             "candidate_externally_submitted",
-            "{candidate_name} was externally submitted for {job_title}.",
+            _TITLE_EXTERNALLY_SUBMITTED,
         )
     except Exception as e:  # noqa: BLE001 - must never raise into the feedback endpoint
         logger.error(
