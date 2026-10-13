@@ -5,7 +5,7 @@ export type SaveJobDraft = (params: {
   saveType?: string;
   skipToast?: boolean;
   keepalive?: boolean;
-}) => Promise<{ ok: boolean, message?: string }>;
+}) => Promise<{ ok: boolean, message?: string, skipped?: boolean, superseded?: boolean }>;
 
 // Pulled out of the effect so it can be unit tested without a DOM/React renderer.
 export function haveDepsChanged(deps: readonly unknown[], prevDeps: readonly unknown[]): boolean {
@@ -76,7 +76,15 @@ export function useStepAutosave(
     if (!isHydrated) return;
 
     dirtyRef.current = false;
-    save({ currentStep: targetStep, saveType: "auto", skipToast: true });
+    // Restore the flag on a non-ok result (a genuine failure, or this save
+    // being skipped because an explicit save for the same job was already
+    // in flight — see job-draft-save-dispatch.ts) so the edit isn't
+    // silently dropped. It's picked up again by a later debounce tick,
+    // this same effect re-running on a subsequent step change, or a
+    // tab-hide flush.
+    save({ currentStep: targetStep, saveType: "auto", skipToast: true }).then((result) => {
+      if (!result.ok) dirtyRef.current = true;
+    });
   }, [currentStep, targetStep, isReadOnly, isHydrated]);
 
   // 4. Tab close / refresh / backgrounding: warn while dirty, and best-effort
@@ -90,7 +98,11 @@ export function useStepAutosave(
     const flush = () => {
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
-      save({ currentStep: targetStep, saveType: "auto", skipToast: true, keepalive: true });
+      // See the step-change flush above: restore on a non-ok result so a
+      // skipped/failed flush doesn't silently drop the edit.
+      save({ currentStep: targetStep, saveType: "auto", skipToast: true, keepalive: true }).then((result) => {
+        if (!result.ok) dirtyRef.current = true;
+      });
     };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (dirtyRef.current) {

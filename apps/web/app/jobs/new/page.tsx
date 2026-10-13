@@ -12,6 +12,7 @@ import {
 } from "@/lib/location-propagation";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
+import { decideSaveDispatch, clearIfCurrent } from "@/lib/job-draft-save-dispatch";
 import {
   DEFAULT_SEARCH_SOURCES,
   DISABLED_SEARCH_SOURCE_IDS,
@@ -2909,7 +2910,7 @@ function NewJobPageContent() {
     resumeMatchFiltersOverride?: typeof resumeMatchFilters,
     screenQuestionsOverride?: typeof screenQuestions,
     rubricDataOverride?: any,
-  }): Promise<{ ok: boolean, message?: string }> => {
+  }): Promise<{ ok: boolean, message?: string, skipped?: boolean, superseded?: boolean }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
       // entirely. Falsely returning true keeps the Next button flow intact
@@ -2922,34 +2923,36 @@ function NewJobPageContent() {
       return { ok: false };
     }
 
-    // A background auto-save (saveType === "auto", from useStepAutosave's
+    // decideSaveDispatch (lib/job-draft-save-dispatch.ts) is the pure
+    // decision behind the explicit-vs-auto-save controller split: a
+    // background auto-save (saveType === "auto", from useStepAutosave's
     // debounce/flush/beforeunload paths) must never cancel a save the user
-    // is actively waiting on (Next / Save & Exit) — doing so used to abort
-    // the explicit save and surface "Save timed out — please retry" even
-    // though nothing timed out; it was just pre-empted by a same-job
-    // background save firing a moment later. An explicit save, conversely,
-    // always supersedes whatever's in flight (auto or explicit) since it
-    // reflects the most current data and the user is waiting on its result.
+    // is actively waiting on — doing so used to abort the explicit save and
+    // surface "Save timed out — please retry" even though nothing timed
+    // out; it was just pre-empted by a same-job background save firing a
+    // moment later. An explicit save, conversely, always supersedes
+    // whatever's in flight (auto or explicit) since it reflects the most
+    // current data and the user is waiting on its result.
     const isAutoSave = stepData.saveType === "auto";
-    if (isAutoSave) {
-      if (explicitSaveAbortControllerRef.current) {
-        // An explicit save is already in flight for this same job — it will
-        // persist data at least as current as this auto-save's, so skip
-        // rather than race it. The caller (useStepAutosave) leaves its dirty
-        // flag set on a non-ok result, so this edit isn't lost — the next
-        // debounce tick or step-change flush will retry it.
-        return { ok: false, message: "Skipped — a save is already in progress." };
-      }
-      if (autoSaveAbortControllerRef.current) {
-        autoSaveAbortControllerRef.current.abort();
-      }
-    } else {
-      if (autoSaveAbortControllerRef.current) {
-        autoSaveAbortControllerRef.current.abort();
-      }
-      if (explicitSaveAbortControllerRef.current) {
-        explicitSaveAbortControllerRef.current.abort();
-      }
+    const dispatch = decideSaveDispatch(isAutoSave ? "auto" : "explicit", {
+      explicitInFlight: explicitSaveAbortControllerRef.current !== null,
+      autoInFlight: autoSaveAbortControllerRef.current !== null,
+    });
+    if (dispatch.action === "skip") {
+      // An explicit save is already in flight for this same job — it will
+      // persist data at least as current as this auto-save's, so skip
+      // rather than race it. The caller (useStepAutosave) restores its
+      // dirty flag on a non-ok result, so this edit isn't lost — it's
+      // retried on the next debounce tick, step change, or tab-hide flush.
+      return { ok: false, skipped: true };
+    }
+    for (const kind of dispatch.abort) {
+      const ref = kind === "auto" ? autoSaveAbortControllerRef : explicitSaveAbortControllerRef;
+      // "superseded" (not the default undefined reason) lets the catch
+      // block below tell "cancelled because a newer save took over" apart
+      // from "genuinely timed out" — the former isn't a failure worth
+      // showing the user, since the newer save reports its own outcome.
+      ref.current?.abort("superseded");
     }
     const saveController = new AbortController();
     const saveControllerRef = isAutoSave ? autoSaveAbortControllerRef : explicitSaveAbortControllerRef;
@@ -2960,7 +2963,7 @@ function NewJobPageContent() {
     // gives the server a comfortable window to either succeed or return a
     // 500 with a real error. Without this, a hung backend (e.g. row-lock
     // contention pre-fix) left the user staring at a silent spinner.
-    const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
+    const saveTimeoutId = setTimeout(() => saveController.abort("timeout"), 20000);
     try {
       const apiUrl = API_BASE;
       // Use the new endpoint that saves directly to monitored_jobs
@@ -3032,8 +3035,14 @@ function NewJobPageContent() {
       }
       return { ok: true };
     } catch (error) {
-      console.error("Error saving job to monitored jobs:", error);
       const isAbort = error instanceof DOMException && error.name === "AbortError";
+      if (isAbort && saveController.signal.reason === "superseded") {
+        // A newer save (auto or explicit) already took over before this one
+        // finished — nothing actually failed, so stay quiet. The caller
+        // that triggered the newer save sees and reports ITS OWN outcome.
+        return { ok: false, superseded: true };
+      }
+      console.error("Error saving job to monitored jobs:", error);
       const errorMsg = isAbort
         ? "Save timed out — please retry."
         : error instanceof Error ? error.message : "Failed to save. Please try again.";
@@ -3043,12 +3052,7 @@ function NewJobPageContent() {
       return { ok: false, message: errorMsg };
     } finally {
       clearTimeout(saveTimeoutId);
-      // Only clear if this call's controller is still the current one — a
-      // newer call (which already replaced it above) must not have its own
-      // in-progress controller wiped out by this older call settling late.
-      if (saveControllerRef.current === saveController) {
-        saveControllerRef.current = null;
-      }
+      clearIfCurrent(saveControllerRef, saveController);
     }
   };
 
@@ -11599,7 +11603,12 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 1 data. Please try again.", "error");
+                    // A newer save (e.g. a second Next click) already
+                    // superseded this one — that newer call reports its own
+                    // outcome, so showing this one's would be misleading.
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 1 data. Please try again.", "error");
+                    }
                     return;
                   }
                   trackStepAdvance(1, 2, { via: "next_button" });
@@ -11618,7 +11627,9 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 2 data. Please try again.", "error");
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 2 data. Please try again.", "error");
+                    }
                     return;
                   }
 
@@ -11686,7 +11697,9 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 3 data. Please try again.", "error");
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 3 data. Please try again.", "error");
+                    }
                     return;
                   }
                   // If the rubric (titles/skills/total_years) has been
@@ -11713,7 +11726,9 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 4 data. Please try again.", "error");
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 4 data. Please try again.", "error");
+                    }
                     return;
                   }
                   const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
