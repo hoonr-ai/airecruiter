@@ -71,6 +71,7 @@ import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { useActiveTime } from "@/hooks/use-active-time";
 import { recordActivity } from "@/lib/activity";
+import { RANKINGS_TABLE_MAX_HEIGHT } from "@/lib/table-layout";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -1622,12 +1623,20 @@ export default function CandidateRankingsPage() {
     return sorted as Candidate[];
   }, []);
 
-  const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean) => {
+  // Guards async responses against overwriting state for a job the page has
+  // since navigated away from (or a newer fetchData run for the same job).
+  const activeJobIdRef = useRef(jobId);
+  useEffect(() => { activeJobIdRef.current = jobId; }, [jobId]);
+  const loadSeqRef = useRef(0);
+  const lastLoadedJobIdRef = useRef<typeof jobId | null>(null);
+
+  const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean, isStale?: () => boolean) => {
     const query = new URLSearchParams({
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
     const candData = await api.jobs.getCandidates(jobId as string, query.toString());
+    if (activeJobIdRef.current !== jobId || isStale?.()) return;
 
     if (candData.status !== "success" || !Array.isArray(candData.candidates)) return;
 
@@ -1704,6 +1713,15 @@ export default function CandidateRankingsPage() {
   }, [candidateOffset, fetchCandidatesPage, hasMoreCandidates, isLoading, isLoadingMore, jobId]);
 
   const fetchData = async () => {
+    const seq = ++loadSeqRef.current;
+    const isStale = () => seq !== loadSeqRef.current;
+    // Job-scoped panels are cleared only when switching jobs; a same-job
+    // background refresh keeps them so they don't flash empty.
+    if (lastLoadedJobIdRef.current !== jobId) {
+      lastLoadedJobIdRef.current = jobId;
+      setCriteriaList([]);
+      setAppliedFilters(null);
+    }
     setIsLoading(true);
     setIsLoadingMore(false);
     setCandidates([]);
@@ -1718,72 +1736,86 @@ export default function CandidateRankingsPage() {
     setOutreachStats(null);
     setStatsLoaded(false);
     try {
-      const apiBase = API_BASE;
+      // All four requests are independent, so start them together. The
+      // candidate list used to wait behind job details, outreach stats (slow
+      // pair-bot calls) and criteria in sequence, which delayed the table.
+      const jobTask = (async () => {
+        const jobData = await api.jobs.getMonitoredData(jobId as string);
+        if (isStale()) return;
 
-      // Fetch job details
-      const jobData = await api.jobs.getMonitoredData(jobId as string);
+        // Handle both { data: { ... } } and flat { ... } structures
+        const data = jobData.data || jobData;
 
-      // Handle both { data: { ... } } and flat { ... } structures
-      const data = jobData.data || jobData;
-
-      if (data) {
-        setJob({
-          job_id: jobId as string,
-          jobdiva_id: data.jobdiva_id,
-          jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
-          title: data.enhanced_title || data.title || `Job ${jobId}`,
-          customer_name: data.customer_name,
-          openings: data.openings,
-          max_allowed_submittals: data.max_allowed_submittals,
-          screening_level: data.screening_level,
-        });
-        // B5: surface step-5 sourcing filters on this page.
-        const sf = data.sourcing_filters || {};
-        if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
-          setAppliedFilters({
-            titles: Array.isArray(sf.titles) ? sf.titles : [],
-            skills: Array.isArray(sf.skills) ? sf.skills : [],
-            locations: Array.isArray(sf.locations) ? sf.locations : [],
-            companies: Array.isArray(sf.companies) ? sf.companies : [],
-            keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+        if (data) {
+          setJob({
+            job_id: jobId as string,
+            jobdiva_id: data.jobdiva_id,
+            jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
+            title: data.enhanced_title || data.title || `Job ${jobId}`,
+            customer_name: data.customer_name,
+            openings: data.openings,
+            max_allowed_submittals: data.max_allowed_submittals,
+            screening_level: data.screening_level,
           });
-        } else {
-          setAppliedFilters(null);
+          // B5: surface step-5 sourcing filters on this page.
+          const sf = data.sourcing_filters || {};
+          if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
+            setAppliedFilters({
+              titles: Array.isArray(sf.titles) ? sf.titles : [],
+              skills: Array.isArray(sf.skills) ? sf.skills : [],
+              locations: Array.isArray(sf.locations) ? sf.locations : [],
+              companies: Array.isArray(sf.companies) ? sf.companies : [],
+              keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+            });
+          } else {
+            setAppliedFilters(null);
+          }
         }
-      }
+      })().catch((e) => {
+        console.error("Error fetching job details:", e);
+        if (!isStale()) pushToast("Couldn't load job details — title and filters may be missing.", "error");
+      });
 
-      // Parallel fetch outreach stats (non-blocking — slow pair-bot calls won't delay the main list)
-      try {
-        const statsData = await api.jobs.getOutreachStats(jobId as string);
-        if (statsData) {
-          setOutreachStats(statsData);
+      // Outreach stats: non-blocking — slow pair-bot calls won't delay the main list
+      const statsTask = (async () => {
+        try {
+          const statsData = await api.jobs.getOutreachStats(jobId as string);
+          if (isStale()) return;
+          if (statsData) {
+            setOutreachStats(statsData);
+          }
+        } catch (e) {
+          console.warn("Failed to fetch outreach stats:", e);
+        } finally {
+          if (!isStale()) setStatsLoaded(true);
         }
-      } catch (e) {
-        console.warn("Failed to fetch outreach stats:", e);
-      } finally {
-        setStatsLoaded(true);
-      }
+      })();
 
-      // B5: parallel fetch step-3 criteria so the applied-filters panel can
-      // render priority + required/preferred chips next to sourcing filters.
-      try {
-        const critData = await api.jobs.getCriteria(jobId as string);
-        if (critData && Array.isArray(critData.criteria)) {
-          setCriteriaList(critData.criteria);
+      // B5: step-3 criteria so the applied-filters panel can render
+      // priority + required/preferred chips next to sourcing filters.
+      const criteriaTask = (async () => {
+        try {
+          const critData = await api.jobs.getCriteria(jobId as string);
+          if (isStale()) return;
+          if (critData && Array.isArray(critData.criteria)) {
+            setCriteriaList(critData.criteria);
+          }
+        } catch (e) {
+          // Non-fatal: panel just hides the criteria column when unavailable.
+          console.warn("Failed to fetch job criteria:", e);
         }
-      } catch (e) {
-        // Non-fatal: panel just hides the criteria column when unavailable.
-        console.warn("Failed to fetch job criteria:", e);
-      }
+      })();
 
-      await fetchCandidatesPage(0, true);
+      // The table's loading state only waits on the job + candidate list;
+      // statsTask and criteriaTask settle on their own (each catches its own
+      // errors) and fill their panels when they arrive.
+      await Promise.all([jobTask, fetchCandidatesPage(0, true, isStale)]);
     } catch (error) {
       console.error("Error fetching ranking data:", error);
+      if (!isStale()) pushToast("Couldn't load candidates. Please refresh.", "error");
     } finally {
-      setIsLoading(false);
-      // Guarantee the stats skeleton is never stuck, even if an earlier call threw
-      // before the inner stats try/finally had a chance to run.
-      setStatsLoaded(true);
+      if (!isStale()) setIsLoading(false);
+      // statsLoaded is set by statsTask's own finally, which always runs.
     }
   };
 
@@ -2392,7 +2424,7 @@ export default function CandidateRankingsPage() {
           <div
             ref={tableScrollRef}
             className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
-            style={{ maxHeight: 'calc(100vh - 320px)' }}
+            style={{ maxHeight: RANKINGS_TABLE_MAX_HEIGHT }}
           >
             <table className="table-fixed min-w-[1200px] w-full border-separate border-spacing-0">
               <TableHeader className="z-30 shadow-sm bg-slate-50">
