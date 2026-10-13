@@ -1718,72 +1718,79 @@ export default function CandidateRankingsPage() {
     setOutreachStats(null);
     setStatsLoaded(false);
     try {
-      const apiBase = API_BASE;
+      // All four requests are independent, so start them together. The
+      // candidate list used to wait behind job details, outreach stats (slow
+      // pair-bot calls) and criteria in sequence, which delayed the table.
+      const jobTask = (async () => {
+        const jobData = await api.jobs.getMonitoredData(jobId as string);
 
-      // Fetch job details
-      const jobData = await api.jobs.getMonitoredData(jobId as string);
+        // Handle both { data: { ... } } and flat { ... } structures
+        const data = jobData.data || jobData;
 
-      // Handle both { data: { ... } } and flat { ... } structures
-      const data = jobData.data || jobData;
-
-      if (data) {
-        setJob({
-          job_id: jobId as string,
-          jobdiva_id: data.jobdiva_id,
-          jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
-          title: data.enhanced_title || data.title || `Job ${jobId}`,
-          customer_name: data.customer_name,
-          openings: data.openings,
-          max_allowed_submittals: data.max_allowed_submittals,
-          screening_level: data.screening_level,
-        });
-        // B5: surface step-5 sourcing filters on this page.
-        const sf = data.sourcing_filters || {};
-        if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
-          setAppliedFilters({
-            titles: Array.isArray(sf.titles) ? sf.titles : [],
-            skills: Array.isArray(sf.skills) ? sf.skills : [],
-            locations: Array.isArray(sf.locations) ? sf.locations : [],
-            companies: Array.isArray(sf.companies) ? sf.companies : [],
-            keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+        if (data) {
+          setJob({
+            job_id: jobId as string,
+            jobdiva_id: data.jobdiva_id,
+            jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
+            title: data.enhanced_title || data.title || `Job ${jobId}`,
+            customer_name: data.customer_name,
+            openings: data.openings,
+            max_allowed_submittals: data.max_allowed_submittals,
+            screening_level: data.screening_level,
           });
-        } else {
-          setAppliedFilters(null);
+          // B5: surface step-5 sourcing filters on this page.
+          const sf = data.sourcing_filters || {};
+          if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
+            setAppliedFilters({
+              titles: Array.isArray(sf.titles) ? sf.titles : [],
+              skills: Array.isArray(sf.skills) ? sf.skills : [],
+              locations: Array.isArray(sf.locations) ? sf.locations : [],
+              companies: Array.isArray(sf.companies) ? sf.companies : [],
+              keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+            });
+          } else {
+            setAppliedFilters(null);
+          }
         }
-      }
+      })().catch((e) => console.error("Error fetching job details:", e));
 
-      // Parallel fetch outreach stats (non-blocking — slow pair-bot calls won't delay the main list)
-      try {
-        const statsData = await api.jobs.getOutreachStats(jobId as string);
-        if (statsData) {
-          setOutreachStats(statsData);
+      // Outreach stats: non-blocking — slow pair-bot calls won't delay the main list
+      const statsTask = (async () => {
+        try {
+          const statsData = await api.jobs.getOutreachStats(jobId as string);
+          if (statsData) {
+            setOutreachStats(statsData);
+          }
+        } catch (e) {
+          console.warn("Failed to fetch outreach stats:", e);
+        } finally {
+          setStatsLoaded(true);
         }
-      } catch (e) {
-        console.warn("Failed to fetch outreach stats:", e);
-      } finally {
-        setStatsLoaded(true);
-      }
+      })();
 
-      // B5: parallel fetch step-3 criteria so the applied-filters panel can
-      // render priority + required/preferred chips next to sourcing filters.
-      try {
-        const critData = await api.jobs.getCriteria(jobId as string);
-        if (critData && Array.isArray(critData.criteria)) {
-          setCriteriaList(critData.criteria);
+      // B5: step-3 criteria so the applied-filters panel can render
+      // priority + required/preferred chips next to sourcing filters.
+      const criteriaTask = (async () => {
+        try {
+          const critData = await api.jobs.getCriteria(jobId as string);
+          if (critData && Array.isArray(critData.criteria)) {
+            setCriteriaList(critData.criteria);
+          }
+        } catch (e) {
+          // Non-fatal: panel just hides the criteria column when unavailable.
+          console.warn("Failed to fetch job criteria:", e);
         }
-      } catch (e) {
-        // Non-fatal: panel just hides the criteria column when unavailable.
-        console.warn("Failed to fetch job criteria:", e);
-      }
+      })();
 
-      await fetchCandidatesPage(0, true);
+      // The table's loading state only waits on the job + candidate list.
+      await Promise.all([jobTask, fetchCandidatesPage(0, true)]);
+      void statsTask;
+      void criteriaTask;
     } catch (error) {
       console.error("Error fetching ranking data:", error);
     } finally {
       setIsLoading(false);
-      // Guarantee the stats skeleton is never stuck, even if an earlier call threw
-      // before the inner stats try/finally had a chance to run.
-      setStatsLoaded(true);
+      // statsLoaded is set by statsTask's own finally, which always runs.
     }
   };
 

@@ -203,10 +203,10 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
       </div>
 
       {open && (
-        <div className="border-t border-indigo-100 overflow-x-auto">
+        <div className="border-t border-indigo-100 overflow-auto max-h-[calc(100vh-320px)]">
           <table className="w-full min-w-[900px] border-separate border-spacing-0 text-[12px]">
             <thead>
-              <tr className="bg-indigo-50/60 text-[10px] uppercase tracking-wide text-slate-500">
+              <tr className="text-[10px] uppercase tracking-wide text-slate-500 [&>th]:sticky [&>th]:top-0 [&>th]:z-10 [&>th]:bg-indigo-50">
                 <th className="text-left font-semibold px-4 py-2">Candidate</th>
                 <th className="text-left font-semibold px-3 py-2">Contact</th>
                 <th className="text-left font-semibold px-3 py-2">Screened for</th>
