@@ -374,7 +374,7 @@ function ResumeScreeningHoverCard({
             {yearsStr}
           </span>
         )}
-        {candidate.email && (
+        {candidate.email && !isPlaceholderEmail(candidate.email) && (
           <span className="inline-flex items-center gap-1 break-all" title={candidate.email}>
             <Mail className="h-3 w-3 shrink-0 text-slate-400" />
             <span>{candidate.email}</span>
@@ -1417,6 +1417,15 @@ export default function CandidateRankingsPage() {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  const isPlaceholderEmail = (e?: string) => {
+    const n = String(e || "").trim().toLowerCase();
+    if (!n || !n.includes("@")) return true;
+    const domain = n.split("@").pop() || "";
+    if (domain === "jobdiva.com") return true;
+    if (n.endsWith("@noemail.pair.ai")) return true;
+    return false;
+  };
+
   const normalizeCandidateRows = useCallback((rows: any[]): Candidate[] => {
     // A row is JobDiva when its source says so, an entry in its merged
     // `sources` list says so, or it carries a JobDiva candidate id. (The API
@@ -1429,14 +1438,6 @@ export default function CandidateRankingsPage() {
       const srcs = Array.isArray(c.sources) ? c.sources : [];
       if (srcs.some((x: any) => String(x || "").toLowerCase().includes("jobdiva"))) return true;
       return Boolean(String(c.data?.jobdiva_candidate_id || "").trim());
-    };
-    const isPlaceholderEmail = (e?: string) => {
-      const n = String(e || "").trim().toLowerCase();
-      if (!n || !n.includes("@")) return true;
-      const domain = n.split("@").pop() || "";
-      if (domain === "jobdiva.com") return true;
-      if (n.endsWith("@noemail.pair.ai")) return true;
-      return false;
     };
 
     const getCanonicalCandidateKey = (c: any) => {
@@ -2717,7 +2718,7 @@ export default function CandidateRankingsPage() {
                             </span>
                           )}
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center px-1 break-all whitespace-normal" title={candidate.email}>
-                            <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
+                            <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {(candidate.email && !isPlaceholderEmail(candidate.email)) ? candidate.email : <span className="font-normal opacity-50">—</span>}
                           </span>
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}

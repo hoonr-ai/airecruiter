@@ -1668,7 +1668,19 @@ async def get_job_candidates(
                         ) AS invalid_contact_count
                     FROM sourced_candidates sc
                     WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
-                      AND (sc.email IS NULL OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                      AND (
+                          sc.email IS NULL
+                          OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!'
+                          OR (
+                              -- Show auto-email candidates only when they have completed the interview
+                              COALESCE(NULLIF(BTRIM(sc.data->>'engage_interview_id'), ''), '') <> ''
+                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) IN (
+                                  'passed', 'hired', 'pass', 'qualified', 'shortlisted', 'selected',
+                                  'failed', 'rejected', 'fail', 'disqualified', 'declined',
+                                  'completed', 'complete'
+                              )
+                          )
+                      )
                       AND NOT (
                           -- Hide jobdiva.local candidates with no verified phone in the DB.
                           -- The number embedded in pair-XXXX@no-email.jobdiva.local is unverified
@@ -1740,7 +1752,19 @@ async def get_job_candidates(
                             *
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                          AND (
+                              email IS NULL
+                              OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!'
+                              OR (
+                                  -- Show auto-email candidates only when they have completed the interview
+                                  COALESCE(NULLIF(BTRIM(data->>'engage_interview_id'), ''), '') <> ''
+                                  AND LOWER(COALESCE(data->>'engage_status', '')) IN (
+                                      'passed', 'hired', 'pass', 'qualified', 'shortlisted', 'selected',
+                                      'failed', 'rejected', 'fail', 'disqualified', 'declined',
+                                      'completed', 'complete'
+                                  )
+                              )
+                          )
                           AND NOT (
                               -- Hide jobdiva.local candidates with no verified phone in the DB.
                               email ILIKE '%%jobdiva.local%%'
