@@ -292,18 +292,13 @@ def _row_to_item(row) -> NotificationItem:
 
 
 def _unread_count_for(cur, email: str) -> int:
-    """Shared by _get_unread_count_sync (plain cursor, tuple rows) and
-    _list_notifications_sync (RealDictCursor, dict rows) — `cur.fetchone()[0]`
-    only works for the former; a RealDictRow has no positional access and
-    raises KeyError(0), which made every GET /api/v1/notifications call 500
-    unconditionally since this table shipped. Aliasing the column and
-    branching on the row type handles both cursor kinds."""
+    """cur must be a RealDictCursor (both callers below use one) — a plain
+    cursor's tuple row has no "unread_count" key to look up."""
     cur.execute(
-        "SELECT COUNT(*) AS count FROM notifications WHERE recipient_email = %s AND read_at IS NULL AND cleared_at IS NULL",
+        "SELECT COUNT(*) AS unread_count FROM notifications WHERE recipient_email = %s AND read_at IS NULL AND cleared_at IS NULL",
         (email,),
     )
-    row = cur.fetchone()
-    return row["count"] if isinstance(row, dict) else row[0]
+    return cur.fetchone()["unread_count"]
 
 
 def _list_notifications_sync(
@@ -342,7 +337,7 @@ def _list_notifications_sync(
 
 def _get_unread_count_sync(email: str) -> int:
     with get_db_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             return _unread_count_for(cur, email)
 
 

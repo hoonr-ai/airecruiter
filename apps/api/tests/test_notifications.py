@@ -63,6 +63,7 @@ import asyncio
 import json
 from unittest.mock import Mock
 
+import psycopg2.extras
 import pytest
 from fastapi import HTTPException
 
@@ -922,10 +923,10 @@ def test_list_notifications_scopes_to_caller_email(monkeypatch):
     from routers.notifications import _list_notifications_sync
 
     # _list_notifications_sync's cursor is a RealDictCursor in production, so
-    # its unread-count fetchone() returns a dict-shaped row ({"count": N}),
-    # not a tuple — see test_unread_count_for_handles_both_cursor_row_shapes
-    # below for why that distinction matters.
-    cur = FakeCursor(fetchall_results=[[]], fetchone_results=[{"count": 0}])
+    # its unread-count fetchone() returns a dict-shaped row keyed by the
+    # SELECT's own "unread_count" alias — see
+    # test_unread_count_for_reads_a_real_dict_cursor_row below.
+    cur = FakeCursor(fetchall_results=[[]], fetchone_results=[{"unread_count": 0}])
     conn = FakeConn(cur)
     monkeypatch.setattr("routers.notifications.get_db_connection", lambda: conn)
 
@@ -936,21 +937,17 @@ def test_list_notifications_scopes_to_caller_email(monkeypatch):
     assert params[0] == "me@x.com"
 
 
-def test_unread_count_for_handles_both_cursor_row_shapes():
-    """Regression: _unread_count_for is shared by _get_unread_count_sync
-    (plain cursor, tuple rows) and _list_notifications_sync (RealDictCursor,
-    dict rows). `cur.fetchone()[0]` alone only works for the former — a
-    RealDictRow has no positional access and raises KeyError(0), which made
-    every GET /api/v1/notifications call 500 unconditionally (independent of
-    PR #805 and unrelated to any recent deploy — present since the
-    notifications table shipped) until this branch was added."""
+def test_unread_count_for_reads_a_real_dict_cursor_row():
+    """Regression (PR #806): fed a genuine psycopg2.extras.RealDictRow — not
+    a plain dict a test could pass even if the real cursor returned a tuple
+    — so this can't silently drift from what RealDictCursor actually hands
+    back the way the original fetchone()[0] bug did."""
     from routers.notifications import _unread_count_for
 
-    tuple_cur = FakeCursor(fetchone_results=[(3,)])
-    assert _unread_count_for(tuple_cur, "me@x.com") == 3
-
-    dict_cur = FakeCursor(fetchone_results=[{"count": 5}])
-    assert _unread_count_for(dict_cur, "me@x.com") == 5
+    row = psycopg2.extras.RealDictRow()
+    row["unread_count"] = 5
+    cur = FakeCursor(fetchone_results=[row])
+    assert _unread_count_for(cur, "me@x.com") == 5
 
 
 def test_mark_notification_read_scopes_update_to_caller_email(monkeypatch):
@@ -1233,13 +1230,15 @@ def test_clear_notifications_endpoint_requires_authentication():
 def test_list_and_unread_count_exclude_cleared_notifications(monkeypatch):
     from routers.notifications import _list_notifications_sync, _get_unread_count_sync
 
-    list_cur = FakeCursor(fetchall_results=[[]], fetchone_results=[{"count": 0}])
+    list_cur = FakeCursor(fetchall_results=[[]], fetchone_results=[{"unread_count": 0}])
     monkeypatch.setattr("routers.notifications.get_db_connection", lambda: FakeConn(list_cur))
     _list_notifications_sync("me@x.com", 50, None, False)
     select_sql = list_cur.executed[0][0]
     assert "cleared_at IS NULL" in select_sql
 
-    count_cur = FakeCursor(fetchone_results=[(0,)])
+    # _get_unread_count_sync also uses a RealDictCursor now (PR #806) — same
+    # row shape as the list path above, not a tuple.
+    count_cur = FakeCursor(fetchone_results=[{"unread_count": 0}])
     monkeypatch.setattr("routers.notifications.get_db_connection", lambda: FakeConn(count_cur))
     _get_unread_count_sync("me@x.com")
     count_sql = count_cur.executed[0][0]
