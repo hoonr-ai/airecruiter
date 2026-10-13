@@ -315,8 +315,9 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
             </tbody>
           </table>
           <div className="px-4 py-2 text-[11px] text-slate-500 border-t border-slate-100">
-            "Screen result" is the PAIR phone-screen outcome for the <em>previous</em> job (In Progress = partially completed).
-            "Match" is the résumé match against <em>this</em> job's Step 5 criteria. Adding a candidate does not start outreach.
+            "Screen result" is the PAIR phone-screen outcome for the <em>previous</em> job (In Progress = partially completed,
+            Pending = not screened yet). Listed: candidates who passed, plus Pending / In Progress / Failed ones that are a very strong match
+            for this job. "Match" is the résumé match against <em>this</em> job's Step 5 criteria. Adding a candidate does not start outreach.
           </div>
         </div>
       )}

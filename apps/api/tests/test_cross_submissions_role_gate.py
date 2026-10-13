@@ -139,9 +139,9 @@ NOW = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
 def _prior_row(candidate_id, title, *, location="Charlotte, NC"):
     blob = {
-        "engage_status": "failed",
+        "engage_status": "passed",
         "engage_updated_at": (NOW - timedelta(days=8)).isoformat(),
-        "engage_score": 3, "engage_total_score": 10,
+        "engage_score": 8, "engage_total_score": 10,
         "title": title,
         "skills": [{"skill": "SQL"}, {"skill": "Excel"}, {"skill": "Tableau"}, {"skill": "Python"}],
         "enhanced_info": {
