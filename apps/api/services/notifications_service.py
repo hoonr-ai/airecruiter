@@ -146,7 +146,27 @@ logger = logging.getLogger(__name__)
 # candidate_rejected) — `type` is part of the unique index this targets
 # (uniq_notifications_recipient_candidate_job_type), so each type gets its own
 # independent dedup slot for the same (recipient, candidate, job).
-_CONFLICT_CANDIDATE_LEVEL = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
+#
+# The WHERE clause here is not optional: that index is partial (narrowed in
+# PR #805 to exclude candidate_internal_review_requested /
+# candidate_externally_submitted, which need repeat-cycle dedup instead of
+# "once ever" — see _candidate_level_duplicate_in_last_minute below). A bare
+# `ON CONFLICT (columns) DO NOTHING` with no predicate can only ever be
+# inferred against a FULL (non-partial) unique index — Postgres refuses to
+# match it to a partial one. Without this WHERE clause (regression:
+# introduced by that same PR05 index change, not caught because the test
+# suite mocks the cursor rather than executing against real Postgres), every
+# INSERT using this conflict clause raised "there is no unique or exclusion
+# constraint matching the ON CONFLICT specification" — silently caught by
+# each caller's own top-level try/except, so candidate_passed and
+# candidate_rejected stopped creating notifications entirely, with nothing
+# but a server-side log line to show for it. Verified against a real
+# Postgres instance (not just the mocked test suite) before this fix landed.
+_CONFLICT_CANDIDATE_LEVEL = (
+    "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) "
+    "WHERE type NOT IN ('candidate_internal_review_requested', 'candidate_externally_submitted') "
+    "DO NOTHING"
+)
 # Job-level dedup, matching the partial unique index of the same name in
 # routers/notifications.py's init_notifications_schema_sync — the column
 # list and WHERE clause must match an existing index exactly for Postgres to
