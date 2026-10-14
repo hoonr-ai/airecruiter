@@ -123,7 +123,10 @@ from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_ro
 
 
 from services.engage_status import format_engage_status as _format_engage_status
-from services.engage_status import engage_display_sql, select_engage_status
+from services.engage_status import engage_display_sql, select_engage_status, PASS_STATUSES, FAIL_STATUSES, COMPLETED_STATUSES
+
+# SQL IN-list for auto-email visibility: show the row only when the interview reached a terminal state.
+_TERMINAL_STATUSES_SQL = ", ".join(f"'{s}'" for s in PASS_STATUSES + FAIL_STATUSES + COMPLETED_STATUSES)
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
@@ -1668,7 +1671,15 @@ async def get_job_candidates(
                         ) AS invalid_contact_count
                     FROM sourced_candidates sc
                     WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
-                      AND (sc.email IS NULL OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                      AND (
+                          sc.email IS NULL
+                          OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!'
+                          OR (
+                              -- Show auto-email candidates only when they have completed the interview
+                              COALESCE(NULLIF(BTRIM(sc.data->>'engage_interview_id'), ''), '') <> ''
+                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) IN ({_TERMINAL_STATUSES_SQL})
+                          )
+                      )
                       AND NOT (
                           -- Hide jobdiva.local candidates with no verified phone in the DB.
                           -- The number embedded in pair-XXXX@no-email.jobdiva.local is unverified
@@ -1740,7 +1751,15 @@ async def get_job_candidates(
                             *
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                          AND (
+                              email IS NULL
+                              OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!'
+                              OR (
+                                  -- Show auto-email candidates only when they have completed the interview
+                                  COALESCE(NULLIF(BTRIM(data->>'engage_interview_id'), ''), '') <> ''
+                                  AND LOWER(COALESCE(data->>'engage_status', '')) IN ({_TERMINAL_STATUSES_SQL})
+                              )
+                          )
                           AND NOT (
                               -- Hide jobdiva.local candidates with no verified phone in the DB.
                               email ILIKE '%%jobdiva.local%%'

@@ -140,17 +140,39 @@ def _squash(text: str) -> str:
 
 
 def test_sourced_visibility_fragment_is_the_rank_lists_own_where_clause():
-    """The launch report's "Sourced" applies exactly the rows the rank list
-    hides (Auto_ synthetic emails, phone-less jobdiva.local rows and their
-    phone-duplicates). Pin the fragment to the rank list query's text so a
-    change to either side fails here instead of drifting quietly."""
+    """The rank list applies the same jobdiva.local rules as sourced_visibility_sql.
+
+    The auto-email rule (Auto_*@jobdiva.com) is intentionally more permissive in
+    the rank list: auto-email candidates whose interview reached a terminal state
+    are shown (they passed/failed but have no real email). The jobdiva.local rules
+    (unreachable phone-less rows and phone-duplicates) are unchanged and must still
+    appear verbatim.
+    """
     from routers.candidates import get_job_candidates
 
-    # The rank list writes the regex as '\\D' inside a plain triple-quoted
-    # string; the evaluated fragment holds a single backslash. Compare values.
     rank_list_sql = _squash(inspect.getsource(get_job_candidates)).replace("\\\\", "\\")
-    fragment = _squash(lc.sourced_visibility_sql("sc"))
-    assert fragment in rank_list_sql, "rank list counts query no longer matches sourced_visibility_sql('sc')"
+
+    # The auto-email base filter is still present inside the OR expansion.
+    assert "Auto!_%%@jobdiva.com" in rank_list_sql, \
+        "rank list no longer filters Auto!_*@jobdiva.com rows"
+
+    # The completed-interview exception must also be present.
+    assert "engage_interview_id" in rank_list_sql and "engage_status" in rank_list_sql, \
+        "rank list no longer applies the completed-interview exception for auto-email rows"
+
+    # The jobdiva.local phone-less and phone-duplicate rules are unchanged.
+    local_no_phone = _squash(
+        "sc.email ILIKE '%%jobdiva.local%%' AND REGEXP_REPLACE(COALESCE(sc.phone, ''), '\\D', '', 'g') = ''"
+    )
+    assert local_no_phone in rank_list_sql, \
+        "rank list no longer hides phone-less jobdiva.local rows"
+
+    local_phone_dup = _squash(
+        "sc.email ILIKE '%%jobdiva.local%%' AND REGEXP_REPLACE(SPLIT_PART(COALESCE(sc.email, ''), '@', 1), '\\D', '', 'g') <> ''"
+    )
+    assert local_phone_dup in rank_list_sql, \
+        "rank list no longer hides phone-duplicate jobdiva.local rows"
+
     assert lc.sourced_visibility_sql("sc").count("%s") == 2
     assert lc.SOURCED_CANDIDATES_SQL.count("%s") == 4
     # The sourced population feeds only Sourced / Time to Source: it must not
