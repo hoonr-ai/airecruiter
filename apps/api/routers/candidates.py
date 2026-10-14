@@ -1648,7 +1648,7 @@ async def get_job_candidates(
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) AS total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
