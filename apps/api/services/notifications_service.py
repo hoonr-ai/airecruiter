@@ -123,6 +123,7 @@ synchronous — calling it directly from an `async def` body blocks the event
 loop for every other request on this worker for the duration of the
 round-trip(s).
 """
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import asyncio
 import json
@@ -529,6 +530,97 @@ async def reconcile_missed_pass_notifications() -> None:
         await asyncio.to_thread(_reconcile_missed_pass_notifications_sync)
     except Exception as e:  # noqa: BLE001 - scheduler job must never crash the loop
         logger.error("reconcile_missed_pass_notifications_failed: %s", e, exc_info=True)
+
+
+def _reconcile_missed_rejection_notifications_sync() -> None:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # feedback_at is an ISO-8601 string written by save_candidate_feedback
+            # (datetime.now(timezone.utc).isoformat()) — lexicographic comparison
+            # against another ISO string sorts/filters correctly without a
+            # timestamptz cast, so a malformed/missing value just fails the
+            # inequality instead of raising and losing the whole run.
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=RECONCILIATION_LOOKBACK_HOURS)).isoformat()
+            cur.execute(
+                """
+                SELECT sc.candidate_id, sc.name, sc.data,
+                       mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title,
+                       mj.recruiter_emails
+                FROM sourced_candidates sc
+                JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id
+                WHERE LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%%'
+                  AND sc.data->>'feedback_at' >= %s
+                ORDER BY sc.data->>'feedback_at' DESC
+                LIMIT %s
+                """,
+                (cutoff, RECONCILIATION_MAX_ROWS),
+            )
+            rows = cur.fetchall()
+            if len(rows) >= RECONCILIATION_MAX_ROWS:
+                logger.warning(
+                    "notifications_reconciliation_rejected hit RECONCILIATION_MAX_ROWS=%d; "
+                    "a backlog may exist beyond this run's window",
+                    RECONCILIATION_MAX_ROWS,
+                )
+
+            backfilled = 0
+            for row in rows:
+                data = row.get("data") or {}
+                actor = str(data.get("submitted_by") or "").strip().lower()
+                recipients = [
+                    e for e in _parse_recruiter_emails(row.get("recruiter_emails")) if e != actor
+                ]
+                if not recipients:
+                    continue
+                candidate_name = row.get("name") or "A candidate"
+                job_title = _resolve_job_title(row, row.get("job_id") or "")
+                title = f"{candidate_name} was rejected for {job_title}"
+                for recipient in recipients:
+                    if _insert_notification(
+                        cur,
+                        notification_type="candidate_rejected",
+                        conflict_clause=_CONFLICT_CANDIDATE_LEVEL,
+                        recipient_email=recipient,
+                        job_id=row.get("job_id"),
+                        jobdiva_id=row.get("jobdiva_id"),
+                        candidate_id=row.get("candidate_id"),
+                        title=title,
+                        body=None,
+                        score=None,
+                    ):
+                        backfilled += 1
+            conn.commit()
+            if backfilled:
+                logger.info("notifications_reconciliation_rejected backfilled=%d", backfilled)
+    finally:
+        conn.close()
+
+
+async def reconcile_missed_rejection_notifications() -> None:
+    """Safety-net scheduler job: backfill Rejected notifications that
+    create_candidate_rejected_notifications missed (a crashed worker, a
+    transient DB error — the exact class of bug that silently broke both
+    candidate_passed and candidate_rejected before; see
+    _CONFLICT_CANDIDATE_LEVEL's docstring). Mirrors
+    reconcile_missed_pass_notifications, except the source of truth for "this
+    candidate was rejected, by whom, and when" is sourced_candidates.data's
+    own feedback_type/feedback_at/submitted_by fields — how
+    routers/candidates.py's save_candidate_feedback records a Reject —
+    rather than engage_display_sql, since a rejection is explicit recruiter
+    feedback, not an interview engagement result.
+
+    Same dedup guarantee as the Pass job: every matching row in the lookback
+    window is re-evaluated on each run, relying entirely on
+    `_insert_notification`'s `ON CONFLICT DO NOTHING` (an index-only no-op
+    for a recipient already notified) rather than a pre-insert existence
+    check, so a recruiter added to a job's recruiter_emails after the
+    rejection already fired still gets backfilled.
+    """
+    try:
+        await asyncio.to_thread(_reconcile_missed_rejection_notifications_sync)
+    except Exception as e:  # noqa: BLE001 - scheduler job must never crash the loop
+        logger.error("reconcile_missed_rejection_notifications_failed: %s", e, exc_info=True)
 
 
 def _job_level_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_id: str, notification_type: str) -> bool:

@@ -413,6 +413,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.error(f"notifications_reconciliation_schedule_failed: {e}; continuing")
 
+    # Same safety net, for candidate_rejected: save_candidate_feedback queues
+    # create_candidate_rejected_notifications via BackgroundTasks, which is
+    # just as vulnerable to a crashed worker or a transient DB error as the
+    # webhook-triggered Pass path above — and until now had no reconciliation
+    # job to recover from it.
+    try:
+        from services.notifications_service import reconcile_missed_rejection_notifications
+        scheduler.add_job(
+            reconcile_missed_rejection_notifications,
+            "interval",
+            minutes=10,
+            id="notifications_reconciliation_rejected",
+            replace_existing=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"notifications_reconciliation_rejected_schedule_failed: {e}; continuing")
+
     # Morning digest: one in-app summary per recruiter, for anyone with at
     # least one unread candidate_passed notification. Scheduled at 19:00
     # Asia/Kolkata rather than a US timezone because India has no DST, so

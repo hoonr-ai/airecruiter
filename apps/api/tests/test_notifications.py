@@ -88,6 +88,7 @@ from services.notifications_service import (
     create_candidate_internal_review_requested_notification,
     create_candidate_externally_submitted_notification,
     reconcile_missed_pass_notifications,
+    reconcile_missed_rejection_notifications,
 )
 
 
@@ -396,6 +397,70 @@ def test_reconcile_backfills_new_recipient_for_already_notified_candidate(monkey
     insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
     assert len(insert_calls) == 1
     assert insert_calls[0][1][0] == "new-recruiter@x.com"
+
+
+# --- reconcile_missed_rejection_notifications --------------------------------
+# Mirrors reconcile_missed_pass_notifications — candidate_rejected had no
+# equivalent safety net until this was added, despite sharing the exact same
+# dedup clause (and the exact same failure mode: _CONFLICT_CANDIDATE_LEVEL's
+# ON CONFLICT/partial-index mismatch silently broke both types identically).
+
+def test_reject_reconcile_filters_by_feedback_type_not_not_exists(monkeypatch):
+    cur = FakeCursor(fetchall_results=[[]])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(reconcile_missed_rejection_notifications())
+
+    select_sql, params = cur.executed[0]
+    assert "NOT EXISTS" not in select_sql
+    assert "feedback_type" in select_sql
+    assert "reject" in select_sql.lower()
+    # The lookback cutoff is a bound parameter (an ISO timestamp string
+    # computed in Python), not interpolated into the SQL text.
+    assert "feedback_at" in select_sql
+    assert "LIMIT %s" in select_sql
+    assert params[-1] > 0  # row cap
+
+
+def test_reject_reconcile_backfills_new_recipient_for_already_notified_candidate(monkeypatch):
+    row = {
+        "candidate_id": "C1", "name": "Jane Doe",
+        "data": {"feedback_type": "Reject", "submitted_by": "rejecter@x.com"},
+        "job_id": "J1", "jobdiva_id": "JD1", "title": "Data Engineer", "enhanced_title": None,
+        "recruiter_emails": json.dumps(["new-recruiter@x.com"]),
+    }
+    cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 42}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(reconcile_missed_rejection_notifications())
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    assert insert_calls[0][1][0] == "new-recruiter@x.com"
+    assert insert_calls[0][1][1] == "candidate_rejected"
+
+
+def test_reject_reconcile_excludes_the_rejecter_from_recipients(monkeypatch):
+    """Mirrors create_candidate_rejected_notifications's own exclusion of the
+    acting recruiter — a backfill run must not notify someone of their own
+    rejection just because it re-evaluates every row in the window."""
+    row = {
+        "candidate_id": "C1", "name": "Jane Doe",
+        "data": {"feedback_type": "Reject", "submitted_by": "rejecter@x.com"},
+        "job_id": "J1", "jobdiva_id": "JD1", "title": "Data Engineer", "enhanced_title": None,
+        "recruiter_emails": json.dumps(["rejecter@x.com", "other@x.com"]),
+    }
+    cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 42}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(reconcile_missed_rejection_notifications())
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    assert insert_calls[0][1][0] == "other@x.com"
 
 
 # --- _job_level_duplicate_in_last_minute -------------------------------------
