@@ -39,7 +39,7 @@ export interface DesktopNotificationTypeInfo {
 
 // Mirrors the `type` column services/notifications_service.py writes, minus
 // candidate_submitted — see DESKTOP_DISABLED_BY_DEFAULT below for why that
-// one has no row here. Keep in sync with that module's "Ten types today"
+// one has no row here. Keep in sync with that module's "Nine types today"
 // docstring if a new type ships — an unlisted type still defaults to
 // enabled (see isDesktopTypeEnabled below), it just won't have its own row
 // in the preferences panel until added here.
@@ -74,12 +74,14 @@ export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
 // Types that no longer have a row in the panel above and must not pop a
 // desktop alert, regardless of any stored preference — distinct from an
 // unlisted FUTURE type (which defaults to enabled; see isDesktopTypeEnabled
-// below). candidate_submitted: superseded for desktop purposes by the more
-// specific candidate_internal_review_requested / candidate_externally_
-// submitted notifications once submissions split into internal/external;
-// it still fires normally and shows in the in-app feed as before — this
-// only turns off its desktop popup, permanently, since there's no longer a
-// toggle anywhere for a recruiter to turn it back on.
+// below). candidate_submitted is retired entirely: routers/candidates.py no
+// longer creates new rows of this type (see services/notifications_service.py),
+// superseded by the more specific candidate_internal_review_requested /
+// candidate_externally_submitted notifications now that submissions split
+// into internal/external. This entry only matters for any legacy rows
+// already in a recipient's feed from before the retirement — it keeps them
+// from popping a desktop alert, since there's no toggle anywhere for a
+// recruiter to turn one back on.
 const DESKTOP_DISABLED_BY_DEFAULT: ReadonlySet<string> = new Set(["candidate_submitted"]);
 
 function readDisabledTypes(storage: SafeStorage | null | undefined): Set<string> {

@@ -203,7 +203,8 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     assert email_calls[0]["jobdiva_candidate_id"] == "21562841721070"
 
     # No generic candidate_submitted notification — an internal Submit's
-    # co-recruiter-facing notification is the more specific one below.
+    # own notification is the more specific one below, to the named manager
+    # (not every other co-recruiter on the job).
     review_calls = _queued_kwargs(
         background_tasks, cand_module.create_candidate_internal_review_requested_notification
     )
@@ -266,8 +267,14 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
 
     # No prior feedback on this candidate (data={}) — a fresh external
     # submission, not the resolution of an earlier internal one, and no
-    # generic candidate_submitted notification exists to fall back on.
+    # generic candidate_submitted notification exists to fall back on. This
+    # path queues no candidate-level notification at all (PR #812 review
+    # follow-up — a plain external Submit with no pending internal review
+    # to resolve notifies nobody, which is the intended, acknowledged
+    # behavior change from retiring candidate_submitted).
     assert _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification) == []
+    assert _queued_kwargs(background_tasks, cand_module.create_candidate_internal_review_requested_notification) == []
+    assert _queued_kwargs(background_tasks, cand_module.create_candidate_rejected_notifications) == []
 
 
 @pytest.mark.anyio
