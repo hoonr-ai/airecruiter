@@ -67,14 +67,13 @@ export function localCalendarDayDiff(from: Date, to: Date): number {
   return Math.round((toUTC - fromUTC) / 86_400_000);
 }
 
-/** "just now" / "5m ago" / "Yesterday" / "3d ago" / a formatted date for a
- * single notification row, relative to `now`. Exported (moved from
+/** "just now" / "5m ago" / "1d ago" / a formatted date for a single
+ * notification row, relative to `now`. Exported (moved from
  * app/notifications/page.tsx) for unit coverage with a fixed `now`.
  *
  * Requires BOTH localCalendarDayDiff >= 1 AND >= 24 real elapsed hours
- * before switching to calendar-day text — a 2-minute-old notification just
- * after local midnight has a day diff of 1 but should still read "2m ago",
- * not "Yesterday". */
+ * before switching to day-count text — a 2-minute-old notification just
+ * after local midnight has a day diff of 1 but should still read "2m ago". */
 export function formatRelativeTime(iso: string, now: Date = new Date()): string {
   const created = new Date(iso);
   if (Number.isNaN(created.getTime())) return "Earlier";
@@ -91,7 +90,6 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
     return `${Math.floor(diffMin / 60)}h ago`;
   }
 
-  if (diffDays === 1) return "Yesterday";
   if (diffDays < 7) return `${diffDays}d ago`;
   return created.toLocaleDateString();
 }

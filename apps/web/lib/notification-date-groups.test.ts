@@ -113,16 +113,16 @@ describe("formatRelativeTime", () => {
 
   it("keeps sub-day text for a notification under 24h old even if it has crossed local midnight", () => {
     // Regression for PR #817's own review: a 2-minute-old notification just
-    // after local midnight has a calendar day diff of 1 (same as
-    // "Yesterday"), but should still read as "2m ago", not "Yesterday" —
-    // it would look wrong next to "just now"/"5m ago" elsewhere in the feed.
+    // after local midnight has a calendar day diff of 1 (same as a 1-day-old
+    // item), but should still read as "2m ago", not "1d ago" — it would
+    // look wrong next to "just now"/"5m ago" elsewhere in the feed.
     const justAfterMidnight = new Date(2026, 9, 15, 0, 1);
     const createdJustBefore = new Date(2026, 9, 14, 23, 59).toISOString();
     assert.equal(formatRelativeTime(createdJustBefore, justAfterMidnight), "2m ago");
   });
 
-  it("switches to \"Yesterday\" once a 1-calendar-day-old notification is also at least 24h old", () => {
-    assert.equal(formatRelativeTime(at(2026, 9, 14, 10), NOW), "Yesterday");
+  it("switches to day-count text once a 1-calendar-day-old notification is also at least 24h old", () => {
+    assert.equal(formatRelativeTime(at(2026, 9, 14, 10), NOW), "1d ago");
   });
 
   it("shows a calendar-day count for anything older, agreeing with dateGroupLabel", () => {
