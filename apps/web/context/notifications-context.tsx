@@ -11,6 +11,8 @@ import {
 } from "@/lib/browser-notifications";
 import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotifications } from "@/lib/notifications-cache";
 import { playNotificationChime, unlockNotificationSound } from "@/lib/notification-sound";
+import { isDesktopTypeEnabled } from "@/lib/desktop-notification-preferences";
+import { getSafeLocalStorage } from "@/lib/safe-local-storage";
 
 export type { BrowserNotificationPermission };
 
@@ -196,6 +198,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     if (!shouldShowBrowserPopup(Notification.permission, document.visibilityState === "visible", document.hasFocus())) {
       return;
     }
+    // In-app stays on for every type regardless (this function is only ever
+    // reached for the desktop popup path) — this is the recruiter's own
+    // per-type opt-out from the Notifications page's preferences panel.
+    if (!isDesktopTypeEnabled(getSafeLocalStorage(), item.type)) return;
     try {
       const popup = new Notification(item.title, {
         body: item.body ?? undefined,

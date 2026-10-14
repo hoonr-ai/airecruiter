@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff, Volume2, VolumeX } from "lucide-react";
+import { Bell, CheckCheck, Trash2, AlertCircle, BellRing, BellOff, Volume2, VolumeX, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -14,6 +15,12 @@ import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
 import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
+import {
+  DESKTOP_NOTIFICATION_PREFS_KEY,
+  DESKTOP_NOTIFICATION_TYPES,
+  getDisabledDesktopTypes,
+  setDesktopTypeEnabled,
+} from "@/lib/desktop-notification-preferences";
 import { cn } from "@/lib/utils";
 
 function emptyFilterMessage(filter: NotificationFilter): string {
@@ -198,6 +205,37 @@ export default function NotificationsPage() {
     if (!next) unlockNotificationSound();
   };
 
+  // Desktop-notification type preferences (in-app is unaffected — every
+  // type always shows in the feed regardless of this). Same hydration-safe
+  // pattern as soundMuted above: starts empty (nothing disabled, matching
+  // what a fresh/never-configured browser already behaves like) and is only
+  // corrected from localStorage after mount.
+  const [desktopPrefsOpen, setDesktopPrefsOpen] = useState(false);
+  const [disabledDesktopTypes, setDisabledDesktopTypes] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setDisabledDesktopTypes(getDisabledDesktopTypes(getSafeStorage()));
+  }, []);
+
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === DESKTOP_NOTIFICATION_PREFS_KEY) {
+        setDisabledDesktopTypes(getDisabledDesktopTypes(getSafeStorage()));
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
+
+  const handleToggleDesktopType = (type: string, enabled: boolean) => {
+    setDesktopTypeEnabled(getSafeStorage(), type, enabled);
+    setDisabledDesktopTypes((prev) => {
+      const next = new Set(prev);
+      if (enabled) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
   const handleConfirmClear = () => {
     setConfirmingClear(false);
     clearAll();
@@ -265,6 +303,18 @@ export default function NotificationsPage() {
               {soundMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
             </Button>
           )}
+          {notificationPermission === "granted" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 text-slate-400 hover:text-slate-700"
+              onClick={() => setDesktopPrefsOpen(true)}
+              aria-label="Desktop notification preferences"
+              title="Choose which notifications show a desktop alert"
+            >
+              <Settings2 className="h-4 w-4" />
+            </Button>
+          )}
           {unreadCount > 0 && (
             <Button variant="outline" size="sm" onClick={markAllRead}>
               <CheckCheck className="h-4 w-4 mr-1.5" />
@@ -303,11 +353,51 @@ export default function NotificationsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={desktopPrefsOpen} onOpenChange={setDesktopPrefsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Desktop notification preferences</DialogTitle>
+            <DialogDescription>
+              Every notification always shows here in your feed. Choose which ones should also pop up a desktop
+              alert.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1 -mr-1">
+            {DESKTOP_NOTIFICATION_TYPES.map((t) => {
+              const enabled = !disabledDesktopTypes.has(t.type);
+              return (
+                <label
+                  key={t.type}
+                  className="flex items-start gap-3 rounded-lg border border-slate-200 px-3 py-2.5 cursor-pointer hover:bg-slate-50"
+                >
+                  <Checkbox
+                    checked={enabled}
+                    onCheckedChange={(checked) => handleToggleDesktopType(t.type, checked === true)}
+                    className="mt-0.5"
+                    aria-label={`Desktop alert for ${t.label}`}
+                  />
+                  <span>
+                    <span className="block text-sm font-medium text-slate-800">{t.label}</span>
+                    <span className="block text-xs text-slate-400 mt-0.5">{t.description}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="flex justify-end pt-2">
+            <Button variant="outline" size="sm" onClick={() => setDesktopPrefsOpen(false)}>
+              Done
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {notificationPermission === "default" && (
         <div className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 mb-4">
           <span className="flex items-center gap-2">
             <BellRing className="h-4 w-4 shrink-0 text-slate-500" />
-            Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front.
+            Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front. You can
+            choose which notifications alert you once enabled.
           </span>
           <Button
             variant="outline"

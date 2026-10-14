@@ -24,7 +24,15 @@ export const NOTIFICATION_SOUND_MUTED_KEY = "pair.notificationSoundMuted.v1";
  * in some environments — blocked third-party storage, certain privacy
  * modes, sandboxed iframes, disabled cookies. Every call site in this file
  * and in app/notifications/page.tsx goes through this instead of touching
- * `window.localStorage` directly. */
+ * `window.localStorage` directly.
+ *
+ * Structurally identical to lib/safe-local-storage.ts's getSafeLocalStorage
+ * (used by lib/desktop-notification-preferences.ts) — kept as its own copy
+ * here rather than importing that module, because this file's value-level
+ * import would need an explicit `.ts` specifier for `node --test` to
+ * resolve it directly, which this project's tsconfig (moduleResolution:
+ * "bundler", no allowImportingTsExtensions) doesn't permit in application
+ * source. Not worth a project-wide tsconfig change for a 6-line function. */
 export function getSafeStorage(): SoundStorage | null {
   if (typeof window === "undefined") return null;
   try {
