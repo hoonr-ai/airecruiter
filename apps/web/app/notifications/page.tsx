@@ -14,6 +14,7 @@ import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
+import { groupNotificationsByDate } from "@/lib/notification-date-groups";
 import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
 import {
   DESKTOP_NOTIFICATION_PREFS_KEY,
@@ -277,6 +278,15 @@ export default function NotificationsPage() {
     [notifications, filter, stickyIds]
   );
 
+  // Today / Yesterday / the actual date — without this, a backlog nobody
+  // clears renders as one endless list of "3d ago", "4d ago", ... with no
+  // sense of where one day ends and the next begins. Deliberately not
+  // memoized: grouping is O(n) over an already-small list, and memoizing on
+  // `filteredNotifications` alone would freeze the Today/Yesterday boundary
+  // at whatever it was when that array last changed — including across
+  // midnight on a tab left open overnight with no new notifications.
+  const dateGroups = groupNotificationsByDate(filteredNotifications);
+
   return (
     <div className="max-w-3xl mx-auto h-[calc(100vh-180px)] flex flex-col">
       <div className="flex items-center justify-between mb-6">
@@ -465,9 +475,22 @@ export default function NotificationsPage() {
           // banners/tabs above it leave over inside the outer flex column —
           // no magic-number height to keep in sync as those grow or shrink.
           <ScrollArea className="flex-1 min-h-0">
-            <div className="space-y-3 pr-2">
-              {filteredNotifications.map((item) => (
-                <NotificationRow key={item.id} item={item} onRead={handleRead} onUnread={handleUnread} />
+            <div className="space-y-4 pr-2">
+              {dateGroups.map((group) => (
+                <div key={`${group.label}-${group.items[0].id}`}>
+                  <p
+                    role="heading"
+                    aria-level={3}
+                    className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-1 mb-2"
+                  >
+                    {group.label}
+                  </p>
+                  <div className="space-y-3">
+                    {group.items.map((item) => (
+                      <NotificationRow key={item.id} item={item} onRead={handleRead} onUnread={handleUnread} />
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </ScrollArea>
