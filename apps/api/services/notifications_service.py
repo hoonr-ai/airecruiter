@@ -141,12 +141,30 @@ from services.engage_status import (
 
 logger = logging.getLogger(__name__)
 
+# Types with repeat-cycle dedup (_candidate_level_duplicate_in_last_minute)
+# instead of the permanent "once ever" index below — a second review cycle
+# (reject, then internally resubmit) must still notify. Single source of
+# truth for the matching predicate everywhere it's needed: the index DDL in
+# routers/notifications.py (both the narrowed unique index and its own
+# review-loop lookup index) imports this, so the two can't drift apart.
+REVIEW_LOOP_TYPES = ("candidate_internal_review_requested", "candidate_externally_submitted")
+_REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
 # Shared by every candidate-level "once ever" type (candidate_passed,
 # candidate_rejected) — `type` is part of the unique index this targets
 # (uniq_notifications_recipient_candidate_job_type), so each type gets its own
 # independent dedup slot for the same (recipient, candidate, job).
-_CONFLICT_CANDIDATE_LEVEL = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
+#
+# The WHERE clause must match that index's own predicate exactly — it's a
+# partial index, and Postgres can only infer a partial index for an
+# ON CONFLICT target whose predicate matches (see _CONFLICT_PAIR_INACTIVE
+# below for the same rule applied to a different partial index).
+_CONFLICT_CANDIDATE_LEVEL = (
+    "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) "
+    f"WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL}) "
+    "DO NOTHING"
+)
 # Job-level dedup, matching the partial unique index of the same name in
 # routers/notifications.py's init_notifications_schema_sync — the column
 # list and WHERE clause must match an existing index exactly for Postgres to

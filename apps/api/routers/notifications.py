@@ -41,6 +41,7 @@ from fastapi.responses import StreamingResponse
 from core.auth import UserIdentity, get_current_user
 from core.db import get_db_connection
 from models import NotificationItem, NotificationListResponse, UnreadCountResponse
+from services.notifications_service import REVIEW_LOOP_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -146,13 +147,20 @@ def init_notifications_schema_sync() -> None:
                     """
                 )
                 # Narrow the index above to exclude the internal-review-loop
-                # types: unlike candidate_passed/submitted/rejected, a second
-                # review cycle for the same (recipient, candidate, job) —
-                # reject, then internally resubmit — must still notify.
-                # "Once ever" would silently swallow that. Checked against
-                # pg_indexes first so the DROP+CREATE (and its lock) runs at
-                # most once, on the first boot after this shipped, same as
-                # the nullable-column ALTERs above.
+                # types (REVIEW_LOOP_TYPES): unlike candidate_passed/rejected,
+                # a second review cycle for the same (recipient, candidate,
+                # job) — reject, then internally resubmit — must still
+                # notify. "Once ever" would silently swallow that. Checked
+                # against pg_indexes first so the DROP+CREATE (and its lock)
+                # runs at most once, on the first boot after this shipped,
+                # same as the nullable-column ALTERs above.
+                #
+                # Built from REVIEW_LOOP_TYPES (not a hardcoded literal list)
+                # so this can't drift from _CONFLICT_CANDIDATE_LEVEL's own
+                # predicate in services/notifications_service.py — exactly
+                # that kind of drift broke candidate_passed/rejected entirely
+                # once already (see that module's docstring).
+                review_loop_types_sql = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
                 cur.execute(
                     "SELECT indexdef FROM pg_indexes WHERE indexname = 'uniq_notifications_recipient_candidate_job_type'"
                 )
@@ -160,10 +168,10 @@ def init_notifications_schema_sync() -> None:
                 if idx and "WHERE" not in idx[0]:
                     cur.execute("DROP INDEX IF EXISTS uniq_notifications_recipient_candidate_job_type;")
                     cur.execute(
-                        """
+                        f"""
                         CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_recipient_candidate_job_type
                             ON notifications (recipient_email, candidate_id, jobdiva_id, type)
-                            WHERE type NOT IN ('candidate_internal_review_requested', 'candidate_externally_submitted');
+                            WHERE type NOT IN ({review_loop_types_sql});
                         """
                     )
                 # Pre-insert existence check for the two review-loop types
@@ -172,10 +180,10 @@ def init_notifications_schema_sync() -> None:
                 # guard, not a permanent dedup, so this just backs that
                 # lookup with an index instead of a sequential scan.
                 cur.execute(
-                    """
+                    f"""
                     CREATE INDEX IF NOT EXISTS idx_notifications_candidate_review_loop_recent
                         ON notifications (recipient_email, candidate_id, jobdiva_id, created_at)
-                        WHERE type IN ('candidate_internal_review_requested', 'candidate_externally_submitted');
+                        WHERE type IN ({review_loop_types_sql});
                     """
                 )
                 # Job-level dedup (candidate_id is NULL for these two types, so
