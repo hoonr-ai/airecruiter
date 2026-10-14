@@ -118,8 +118,9 @@ class _FakeConnection:
 
 
 def _queued_kwargs(background_tasks: BackgroundTasks, func) -> list:
-    """save_candidate_feedback queues the candidate_submitted/rejected
-    notification via background_tasks.add_task rather than awaiting it
+    """save_candidate_feedback queues its notification helpers (rejected,
+    internal-review-requested, externally-submitted) via
+    background_tasks.add_task rather than awaiting them
     (PR review follow-up — keeps the response fast; the notification
     helpers already swallow their own errors). Pulls out the kwargs of
     every queued call to `func` without actually running it."""
@@ -201,12 +202,8 @@ async def test_save_candidate_feedback_internal_submit_route(monkeypatch):
     # The manager email links the same JobDiva profile the panel/rank list open.
     assert email_calls[0]["jobdiva_candidate_id"] == "21562841721070"
 
-    notif_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications)
-    assert len(notif_calls) == 1
-    assert notif_calls[0]["job_id"] == "33087136"
-    assert notif_calls[0]["candidate_id"] == "21562841721070"
-    assert notif_calls[0]["submitter_email"] == "ronak.jain@celsiortech.com"
-
+    # No generic candidate_submitted notification — an internal Submit's
+    # co-recruiter-facing notification is the more specific one below.
     review_calls = _queued_kwargs(
         background_tasks, cand_module.create_candidate_internal_review_requested_notification
     )
@@ -267,14 +264,9 @@ async def test_save_candidate_feedback_external_submit_route(monkeypatch):
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR External Submission"
 
-    notif_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications)
-    assert len(notif_calls) == 1
-    assert notif_calls[0]["job_id"] == "33087136"
-    assert notif_calls[0]["candidate_id"] == "21562841721070"
-    assert notif_calls[0]["submitter_email"] == "recruiter@pyramidci.com"
-
     # No prior feedback on this candidate (data={}) — a fresh external
-    # submission, not the resolution of an earlier internal one.
+    # submission, not the resolution of an earlier internal one, and no
+    # generic candidate_submitted notification exists to fall back on.
     assert _queued_kwargs(background_tasks, cand_module.create_candidate_externally_submitted_notification) == []
 
 
@@ -454,9 +446,6 @@ async def test_save_candidate_feedback_rejection_route(monkeypatch):
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
 
-    # candidate_submitted must not fire on Reject.
-    assert _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications) == []
-
     rejected_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_rejected_notifications)
     assert len(rejected_calls) == 1
     assert rejected_calls[0]["job_id"] == "33087136"
@@ -560,10 +549,7 @@ async def test_save_candidate_feedback_with_numeric_candidate_id_string(monkeypa
     assert jobdiva_calls[0]["candidate_id"] == "21574563071254"
     assert jobdiva_calls[0]["job_id"] == "32163479"
     assert jobdiva_calls[0]["action"] == "PAIR External Submission"
-
-    notif_calls = _queued_kwargs(background_tasks, cand_module.create_candidate_submitted_notifications)
-    assert len(notif_calls) == 1
-    assert notif_calls[0]["job_id"] == "32163479"
-    assert notif_calls[0]["candidate_id"] == "21574563071254"
-    assert notif_calls[0]["submitter_email"] == "recruiter@pyramidci.com"
+    # No prior internal review and no generic candidate_submitted
+    # notification to fall back on — nothing to queue on this path; ID
+    # resolution is already verified via jobdiva_calls/res above.
 

@@ -19,15 +19,19 @@ function memoryStorage(): DesktopPrefsStorage & { map: Map<string, string> } {
 }
 
 // Frozen snapshot of the `type` strings services/notifications_service.py's
-// module docstring documents as "Ten types today" — independent of
+// module docstring documents as "Nine types today" — independent of
 // DESKTOP_NOTIFICATION_TYPES itself, so an accidental edit to that list
 // (typo, dropped entry) fails this test rather than silently shipping.
 // This can only catch drift in ONE direction: a backend contributor adding
-// an 11th type still has to remember to update this list by hand (PR #811
+// a 10th type still has to remember to update this list by hand (PR #811
 // review follow-up — no automated cross-language sync exists here).
+//
+// candidate_submitted is NOT in this list: it's fully retired backend-side
+// (routers/candidates.py no longer calls anything that creates one) — every
+// real Submit is internal or external, each with its own more specific
+// notification, so there was never a need for a generic third one.
 const BACKEND_TYPES_SNAPSHOT = [
   "candidate_passed",
-  "candidate_submitted",
   "candidate_rejected",
   "pair_launched",
   "pair_inactive",
@@ -91,6 +95,20 @@ describe("isDesktopTypeEnabled", () => {
 
     storage.map.set(DESKTOP_NOTIFICATION_PREFS_KEY, JSON.stringify({ not: "an array" }));
     assert.equal(isDesktopTypeEnabled(storage, "candidate_passed"), true);
+  });
+
+  it("candidate_submitted is permanently disabled, with nothing stored", () => {
+    const storage = memoryStorage();
+    assert.equal(isDesktopTypeEnabled(storage, "candidate_submitted"), false);
+  });
+
+  it("candidate_submitted stays disabled even if something stores it as explicitly enabled", () => {
+    // There's no UI path that does this (it has no row in
+    // DESKTOP_NOTIFICATION_TYPES), but the hard-coded block must win over
+    // the stored set regardless, not just over the "nothing stored" case.
+    const storage = memoryStorage();
+    setDesktopTypeEnabled(storage, "candidate_submitted", true);
+    assert.equal(isDesktopTypeEnabled(storage, "candidate_submitted"), false);
   });
 });
 

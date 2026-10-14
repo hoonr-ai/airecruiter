@@ -37,29 +37,29 @@ export interface DesktopNotificationTypeInfo {
   description: string;
 }
 
-// Mirrors the `type` column services/notifications_service.py writes.
-// Keep in sync with that module's "Ten types today" docstring if a new type
-// ships — an unlisted type still defaults to enabled (see
-// isDesktopTypeEnabled below), it just won't have its own row in the
-// preferences panel until added here.
+// Mirrors the `type` column services/notifications_service.py writes, minus
+// candidate_submitted — see DESKTOP_DISABLED_BY_DEFAULT below for why that
+// one has no row here. Keep in sync with that module's "Ten types today"
+// docstring if a new type ships — an unlisted type still defaults to
+// enabled (see isDesktopTypeEnabled below), it just won't have its own row
+// in the preferences panel until added here.
 export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
   { type: "candidate_passed", label: "Candidate Passed", description: "A candidate reaches Pass status." },
-  { type: "candidate_submitted", label: "Candidate Submitted", description: "A co-recruiter submits a candidate." },
-  { type: "candidate_rejected", label: "Candidate Rejected", description: "A co-recruiter rejects a candidate." },
   {
     type: "candidate_internal_review_requested",
-    label: "Internal Review Requested",
+    label: "Candidate Internally Submitted",
     description: "A recruiter asks you, as the named manager, to review an internally submitted candidate.",
   },
   {
     // Label matches this type's own naming convention (Candidate
-    // Passed/Submitted/Rejected above) and its generated title text
+    // Passed/Internally Submitted/Rejected) and its generated title text
     // ("X was externally submitted for Y") — there's no separate type-name
     // label shown anywhere in the feed itself to otherwise match against.
     type: "candidate_externally_submitted",
     label: "Candidate Externally Submitted",
     description: "A candidate you flagged for internal review is later submitted externally.",
   },
+  { type: "candidate_rejected", label: "Candidate Rejected", description: "A co-recruiter rejects a candidate." },
   { type: "pair_launched", label: "PAIR Launched", description: "PAIR launches or relaunches candidates for a job." },
   {
     type: "pair_inactive",
@@ -70,6 +70,17 @@ export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
   { type: "zero_match_warning", label: "Zero Match Warning", description: "A full search you ran finishes with 0 matches." },
   { type: "daily_digest", label: "Daily Digest", description: "Your scheduled daily summary of unread Pass notifications." },
 ];
+
+// Types that no longer have a row in the panel above and must not pop a
+// desktop alert, regardless of any stored preference — distinct from an
+// unlisted FUTURE type (which defaults to enabled; see isDesktopTypeEnabled
+// below). candidate_submitted: superseded for desktop purposes by the more
+// specific candidate_internal_review_requested / candidate_externally_
+// submitted notifications once submissions split into internal/external;
+// it still fires normally and shows in the in-app feed as before — this
+// only turns off its desktop popup, permanently, since there's no longer a
+// toggle anywhere for a recruiter to turn it back on.
+const DESKTOP_DISABLED_BY_DEFAULT: ReadonlySet<string> = new Set(["candidate_submitted"]);
 
 function readDisabledTypes(storage: SafeStorage | null | undefined): Set<string> {
   if (!storage) return new Set();
@@ -100,10 +111,12 @@ export function getDisabledDesktopTypes(storage: SafeStorage | null | undefined)
   return readDisabledTypes(storage);
 }
 
-/** True unless this type has been explicitly disabled. An unrecognized or
- * not-yet-listed type (see DESKTOP_NOTIFICATION_TYPES) defaults to enabled,
- * same as every other type before the recruiter has touched this setting. */
+/** True unless this type has been explicitly disabled, or is permanently
+ * off regardless of storage (DESKTOP_DISABLED_BY_DEFAULT). An unrecognized
+ * or not-yet-listed FUTURE type defaults to enabled, same as every other
+ * type before the recruiter has touched this setting. */
 export function isDesktopTypeEnabled(storage: SafeStorage | null | undefined, type: string): boolean {
+  if (DESKTOP_DISABLED_BY_DEFAULT.has(type)) return false;
   return !readDisabledTypes(storage).has(type);
 }
 
