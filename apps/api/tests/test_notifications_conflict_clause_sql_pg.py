@@ -19,8 +19,10 @@ ON CONFLICT target actually resolves to an index. Only a real database can
 raise (or not raise) this specific error, hence this separate test, modeled
 on test_launch_platform_sql_pg.py's "unit D1" pattern.
 
-Skipped when no Postgres is reachable: set NOTIFICATIONS_TEST_DSN (falls
-back to LAUNCH_REPORT_TEST_DSN, then "dbname=postgres").
+Skipped unless NOTIFICATIONS_TEST_DSN is explicitly set — no fallback to a
+shared/dev DSN. (Safe either way: everything here runs in a TEMP table
+inside a transaction that's always rolled back, but an explicit opt-in costs
+nothing and rules out ever touching a database nobody meant this to touch.)
 """
 import os
 
@@ -30,16 +32,21 @@ psycopg2 = pytest.importorskip("psycopg2")
 import psycopg2.extras  # noqa: E402
 
 from services.notifications_service import (  # noqa: E402
+    REVIEW_LOOP_TYPES,
     _CONFLICT_CANDIDATE_LEVEL,
     _insert_notification,
 )
 
-_DSN = os.getenv("NOTIFICATIONS_TEST_DSN") or os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
+_DSN = os.getenv("NOTIFICATIONS_TEST_DSN")
 
 # Mirrors the real table + the real (narrowed, partial) unique index exactly
 # as routers/notifications.py's init_notifications_schema_sync creates them —
-# the partiality is the entire point of this test.
-_FIXTURE_SQL = """
+# the partiality is the entire point of this test. Built from
+# REVIEW_LOOP_TYPES (the same source _CONFLICT_CANDIDATE_LEVEL itself uses)
+# rather than its own hardcoded copy, so this fixture can't drift from the
+# real predicate either.
+_REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+_FIXTURE_SQL = f"""
 CREATE TEMP TABLE notifications (
     id BIGSERIAL PRIMARY KEY,
     recipient_email TEXT NOT NULL,
@@ -56,12 +63,14 @@ CREATE TEMP TABLE notifications (
 );
 CREATE UNIQUE INDEX uniq_notifications_recipient_candidate_job_type
     ON notifications (recipient_email, candidate_id, jobdiva_id, type)
-    WHERE type NOT IN ('candidate_internal_review_requested', 'candidate_externally_submitted');
+    WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL});
 """
 
 
 @pytest.fixture()
 def pg_cursor():
+    if not _DSN:
+        pytest.skip("NOTIFICATIONS_TEST_DSN not set")
     try:
         conn = psycopg2.connect(_DSN, connect_timeout=3)
     except psycopg2.OperationalError as exc:
@@ -123,5 +132,6 @@ def test_review_loop_types_still_insert_fine_without_on_conflict(pg_cursor):
     an excluded type isn't blocked by the unique index in some unexpected
     way (e.g. two such rows for the very same tuple would NOT conflict,
     since the index's WHERE excludes them)."""
-    assert _insert(pg_cursor, notification_type="candidate_internal_review_requested", conflict_clause=None) is True
-    assert _insert(pg_cursor, notification_type="candidate_internal_review_requested", conflict_clause=None) is True
+    review_type = REVIEW_LOOP_TYPES[0]
+    assert _insert(pg_cursor, notification_type=review_type, conflict_clause=None) is True
+    assert _insert(pg_cursor, notification_type=review_type, conflict_clause=None) is True

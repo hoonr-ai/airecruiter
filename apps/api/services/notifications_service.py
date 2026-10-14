@@ -141,30 +141,28 @@ from services.engage_status import (
 
 logger = logging.getLogger(__name__)
 
+# Types with repeat-cycle dedup (_candidate_level_duplicate_in_last_minute)
+# instead of the permanent "once ever" index below — a second review cycle
+# (reject, then internally resubmit) must still notify. Single source of
+# truth for the matching predicate everywhere it's needed: the index DDL in
+# routers/notifications.py (both the narrowed unique index and its own
+# review-loop lookup index) imports this, so the two can't drift apart.
+REVIEW_LOOP_TYPES = ("candidate_internal_review_requested", "candidate_externally_submitted")
+_REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
 # Shared by every candidate-level "once ever" type (candidate_passed,
 # candidate_rejected) — `type` is part of the unique index this targets
 # (uniq_notifications_recipient_candidate_job_type), so each type gets its own
 # independent dedup slot for the same (recipient, candidate, job).
 #
-# The WHERE clause here is not optional: that index is partial (narrowed in
-# PR #805 to exclude candidate_internal_review_requested /
-# candidate_externally_submitted, which need repeat-cycle dedup instead of
-# "once ever" — see _candidate_level_duplicate_in_last_minute below). A bare
-# `ON CONFLICT (columns) DO NOTHING` with no predicate can only ever be
-# inferred against a FULL (non-partial) unique index — Postgres refuses to
-# match it to a partial one. Without this WHERE clause (regression:
-# introduced by that same PR05 index change, not caught because the test
-# suite mocks the cursor rather than executing against real Postgres), every
-# INSERT using this conflict clause raised "there is no unique or exclusion
-# constraint matching the ON CONFLICT specification" — silently caught by
-# each caller's own top-level try/except, so candidate_passed and
-# candidate_rejected stopped creating notifications entirely, with nothing
-# but a server-side log line to show for it. Verified against a real
-# Postgres instance (not just the mocked test suite) before this fix landed.
+# The WHERE clause must match that index's own predicate exactly — it's a
+# partial index, and Postgres can only infer a partial index for an
+# ON CONFLICT target whose predicate matches (see _CONFLICT_PAIR_INACTIVE
+# below for the same rule applied to a different partial index).
 _CONFLICT_CANDIDATE_LEVEL = (
     "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) "
-    "WHERE type NOT IN ('candidate_internal_review_requested', 'candidate_externally_submitted') "
+    f"WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL}) "
     "DO NOTHING"
 )
 # Job-level dedup, matching the partial unique index of the same name in
