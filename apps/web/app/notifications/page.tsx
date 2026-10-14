@@ -280,12 +280,12 @@ export default function NotificationsPage() {
 
   // Today / Yesterday / the actual date — without this, a backlog nobody
   // clears renders as one endless list of "3d ago", "4d ago", ... with no
-  // sense of where one day ends and the next begins. Recomputed on every
-  // render (not memoized on a timer) so the Today/Yesterday boundary is
-  // never stale by more than however long it's been since the last
-  // unrelated re-render — not worth a dedicated midnight-rollover timer for
-  // a feed that already re-renders on nearly every notification event.
-  const dateGroups = useMemo(() => groupNotificationsByDate(filteredNotifications), [filteredNotifications]);
+  // sense of where one day ends and the next begins. Deliberately not
+  // memoized: grouping is O(n) over an already-small list, and memoizing on
+  // `filteredNotifications` alone would freeze the Today/Yesterday boundary
+  // at whatever it was when that array last changed — including across
+  // midnight on a tab left open overnight with no new notifications.
+  const dateGroups = groupNotificationsByDate(filteredNotifications);
 
   return (
     <div className="max-w-3xl mx-auto h-[calc(100vh-180px)] flex flex-col">
@@ -477,8 +477,12 @@ export default function NotificationsPage() {
           <ScrollArea className="flex-1 min-h-0">
             <div className="space-y-4 pr-2">
               {dateGroups.map((group) => (
-                <div key={group.label}>
-                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-1 mb-2">
+                <div key={`${group.label}-${group.items[0].id}`}>
+                  <p
+                    role="heading"
+                    aria-level={3}
+                    className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-1 mb-2"
+                  >
                     {group.label}
                   </p>
                   <div className="space-y-3">

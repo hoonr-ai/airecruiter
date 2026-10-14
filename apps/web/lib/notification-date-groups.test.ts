@@ -22,12 +22,29 @@ describe("dateGroupLabel", () => {
   });
 
   it("labels anything older with a formatted date", () => {
-    assert.equal(dateGroupLabel(at(2026, 9, 12), NOW), "Oct 12, 2026");
-    assert.equal(dateGroupLabel(at(2025, 11, 25), NOW), "Dec 25, 2025");
+    // Explicit locale: toLocaleDateString(undefined, ...) — the production
+    // default — follows the runtime's own locale, which would make this
+    // assertion flaky on a non-en-US CI/dev machine. The page itself still
+    // calls this with no locale, so real users still see their own locale.
+    assert.equal(dateGroupLabel(at(2026, 9, 12), NOW, "en-US"), "Oct 12, 2026");
+    assert.equal(dateGroupLabel(at(2025, 11, 25), NOW, "en-US"), "Dec 25, 2025");
   });
 
   it("labels a future date (clock skew) with a formatted date, not a negative day count", () => {
-    assert.equal(dateGroupLabel(at(2026, 9, 20), NOW), "Oct 20, 2026");
+    assert.equal(dateGroupLabel(at(2026, 9, 20), NOW, "en-US"), "Oct 20, 2026");
+  });
+
+  it("falls back to a non-crashing label for an unparsable date instead of 'Invalid Date'", () => {
+    assert.equal(dateGroupLabel("not-a-real-date", NOW), "Earlier");
+  });
+
+  it("is unaffected by a local day that isn't exactly 24h (a DST transition)", () => {
+    // Spring-forward in the US: 2026-03-08 is 23 wall-clock hours in
+    // America-style DST. Comparing calendar fields (not timestamp / 86.4M
+    // ms) means this day's shorter length can't throw the day-diff off.
+    const dstNow = new Date(2026, 2, 9, 10, 0); // 2026-03-09, the day after
+    assert.equal(dateGroupLabel(at(2026, 2, 8, 10), dstNow), "Yesterday");
+    assert.equal(dateGroupLabel(at(2026, 2, 7, 10), dstNow, "en-US"), "Mar 7, 2026");
   });
 
   it("uses the LOCAL calendar day, not a UTC one — 11pm and 1am on either side of local midnight land in different groups", () => {
@@ -46,7 +63,7 @@ describe("groupNotificationsByDate", () => {
       { id: 3, created_at: at(2026, 9, 14, 20) },
       { id: 4, created_at: at(2026, 9, 12, 8) },
     ];
-    const groups = groupNotificationsByDate(items, NOW);
+    const groups = groupNotificationsByDate(items, NOW, "en-US");
     assert.deepEqual(
       groups.map((g) => g.label),
       ["Today", "Yesterday", "Oct 12, 2026"]
