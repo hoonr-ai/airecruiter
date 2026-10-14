@@ -124,8 +124,9 @@ from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_ro
 from services.engage_status import format_engage_status as _format_engage_status
 from services.engage_status import engage_display_sql, select_engage_status, PASS_STATUSES, FAIL_STATUSES, COMPLETED_STATUSES
 
-# SQL IN-list for auto-email visibility: show the row only when the interview reached a terminal state.
-_TERMINAL_STATUSES_SQL = ", ".join(f"'{s}'" for s in PASS_STATUSES + FAIL_STATUSES + COMPLETED_STATUSES)
+# Auto-email visibility: show the row only when the interview reached a terminal
+# state. Passed as a bind param (`= ANY(%s)`), never interpolated into the SQL text.
+_TERMINAL_STATUSES = list(PASS_STATUSES + FAIL_STATUSES + COMPLETED_STATUSES)
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
@@ -1648,7 +1649,7 @@ async def get_job_candidates(
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    f"""
+                    """
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) AS total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
@@ -1676,7 +1677,7 @@ async def get_job_candidates(
                           OR (
                               -- Show auto-email candidates only when they have completed the interview
                               COALESCE(NULLIF(BTRIM(sc.data->>'engage_interview_id'), ''), '') <> ''
-                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) IN ({_TERMINAL_STATUSES_SQL})
+                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) = ANY(%s)
                           )
                       )
                       AND NOT (
@@ -1703,6 +1704,7 @@ async def get_job_candidates(
                     """,
                     (resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id),
+                     _TERMINAL_STATUSES,
                      resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
@@ -1723,6 +1725,7 @@ async def get_job_candidates(
                     str(resolved_numeric_job_id),
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
+                    _TERMINAL_STATUSES,
                     # Extra params for the duplicate-detection EXISTS sub-query
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
@@ -1756,7 +1759,7 @@ async def get_job_candidates(
                               OR (
                                   -- Show auto-email candidates only when they have completed the interview
                                   COALESCE(NULLIF(BTRIM(data->>'engage_interview_id'), ''), '') <> ''
-                                  AND LOWER(COALESCE(data->>'engage_status', '')) IN ({_TERMINAL_STATUSES_SQL})
+                                  AND LOWER(COALESCE(data->>'engage_status', '')) = ANY(%s)
                               )
                           )
                           AND NOT (
