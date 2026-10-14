@@ -13,6 +13,21 @@
 // "in-app is default; desktop is opt-out per type" means a brand-new
 // notification type this app ships later must default to enabled without
 // requiring a migration of every existing user's stored preference.
+//
+// isDesktopTypeEnabled re-parses storage on every call rather than caching
+// the disabled set in memory. It's called once per incoming notification —
+// cheap at that volume — and a cache would need its own cross-tab
+// invalidation (a `storage` event listener) to stay correct, which isn't
+// worth the complexity unless notification frequency grows enough to matter.
+
+import type { SafeStorage } from "./safe-local-storage";
+
+export type { SafeStorage as DesktopPrefsStorage };
+// Callers get the shared accessor straight from safe-local-storage.ts
+// (getSafeLocalStorage) — not re-exported here under another name, so
+// there's exactly one getSafeStorage-shaped function in scope wherever a
+// caller also needs lib/notification-sound.ts's (PR #811 review
+// follow-up: this used to need an import alias to avoid that collision).
 
 export const DESKTOP_NOTIFICATION_PREFS_KEY = "pair.desktopNotificationDisabledTypes.v1";
 
@@ -37,8 +52,12 @@ export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
     description: "A recruiter asks you, as the named manager, to review an internally submitted candidate.",
   },
   {
+    // Label matches this type's own naming convention (Candidate
+    // Passed/Submitted/Rejected above) and its generated title text
+    // ("X was externally submitted for Y") — there's no separate type-name
+    // label shown anywhere in the feed itself to otherwise match against.
     type: "candidate_externally_submitted",
-    label: "Internal Review Resolved",
+    label: "Candidate Externally Submitted",
     description: "A candidate you flagged for internal review is later submitted externally.",
   },
   { type: "pair_launched", label: "PAIR Launched", description: "PAIR launches or relaunches candidates for a job." },
@@ -52,25 +71,7 @@ export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
   { type: "daily_digest", label: "Daily Digest", description: "Your scheduled daily summary of unread Pass notifications." },
 ];
 
-export interface DesktopPrefsStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
-/** `window.localStorage` wrapped in a try/catch — mirrors
- * lib/notification-sound.ts's getSafeStorage: merely evaluating
- * `window.localStorage` can throw in some environments (blocked
- * third-party storage, certain privacy modes, sandboxed iframes). */
-export function getSafeStorage(): DesktopPrefsStorage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function readDisabledTypes(storage: DesktopPrefsStorage | null | undefined): Set<string> {
+function readDisabledTypes(storage: SafeStorage | null | undefined): Set<string> {
   if (!storage) return new Set();
   try {
     const raw = storage.getItem(DESKTOP_NOTIFICATION_PREFS_KEY);
@@ -83,7 +84,7 @@ function readDisabledTypes(storage: DesktopPrefsStorage | null | undefined): Set
   }
 }
 
-function writeDisabledTypes(storage: DesktopPrefsStorage | null | undefined, disabled: Set<string>): void {
+function writeDisabledTypes(storage: SafeStorage | null | undefined, disabled: Set<string>): void {
   if (!storage) return;
   try {
     storage.setItem(DESKTOP_NOTIFICATION_PREFS_KEY, JSON.stringify(Array.from(disabled)));
@@ -95,19 +96,19 @@ function writeDisabledTypes(storage: DesktopPrefsStorage | null | undefined, dis
 /** All currently-disabled types, for rendering the preferences panel's
  * toggle states in one read rather than one readDisabledTypes call per
  * row. */
-export function getDisabledDesktopTypes(storage: DesktopPrefsStorage | null | undefined): Set<string> {
+export function getDisabledDesktopTypes(storage: SafeStorage | null | undefined): Set<string> {
   return readDisabledTypes(storage);
 }
 
 /** True unless this type has been explicitly disabled. An unrecognized or
  * not-yet-listed type (see DESKTOP_NOTIFICATION_TYPES) defaults to enabled,
  * same as every other type before the recruiter has touched this setting. */
-export function isDesktopTypeEnabled(storage: DesktopPrefsStorage | null | undefined, type: string): boolean {
+export function isDesktopTypeEnabled(storage: SafeStorage | null | undefined, type: string): boolean {
   return !readDisabledTypes(storage).has(type);
 }
 
 export function setDesktopTypeEnabled(
-  storage: DesktopPrefsStorage | null | undefined,
+  storage: SafeStorage | null | undefined,
   type: string,
   enabled: boolean
 ): void {

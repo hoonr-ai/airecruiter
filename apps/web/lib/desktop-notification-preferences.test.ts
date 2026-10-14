@@ -18,14 +18,35 @@ function memoryStorage(): DesktopPrefsStorage & { map: Map<string, string> } {
   };
 }
 
+// Frozen snapshot of the `type` strings services/notifications_service.py's
+// module docstring documents as "Ten types today" — independent of
+// DESKTOP_NOTIFICATION_TYPES itself, so an accidental edit to that list
+// (typo, dropped entry) fails this test rather than silently shipping.
+// This can only catch drift in ONE direction: a backend contributor adding
+// an 11th type still has to remember to update this list by hand (PR #811
+// review follow-up — no automated cross-language sync exists here).
+const BACKEND_TYPES_SNAPSHOT = [
+  "candidate_passed",
+  "candidate_submitted",
+  "candidate_rejected",
+  "pair_launched",
+  "pair_inactive",
+  "recruiter_assigned",
+  "zero_match_warning",
+  "daily_digest",
+  "candidate_internal_review_requested",
+  "candidate_externally_submitted",
+];
+
 describe("DESKTOP_NOTIFICATION_TYPES", () => {
-  it("lists every type the service currently writes, with no duplicates", () => {
+  it("has no duplicate type entries", () => {
     const types = DESKTOP_NOTIFICATION_TYPES.map((t) => t.type);
     assert.equal(new Set(types).size, types.length);
-    assert.ok(types.includes("candidate_passed"));
-    assert.ok(types.includes("candidate_internal_review_requested"));
-    assert.ok(types.includes("candidate_externally_submitted"));
-    assert.ok(types.includes("daily_digest"));
+  });
+
+  it("matches the backend's current type list exactly (see BACKEND_TYPES_SNAPSHOT above)", () => {
+    const types = DESKTOP_NOTIFICATION_TYPES.map((t) => t.type).sort();
+    assert.deepEqual(types, [...BACKEND_TYPES_SNAPSHOT].sort());
   });
 });
 
@@ -93,10 +114,10 @@ describe("setDesktopTypeEnabled", () => {
     assert.doesNotThrow(() => setDesktopTypeEnabled(null, "candidate_passed", false));
   });
 
-  it("persists across separate reads against the same storage", () => {
+  it("persists to the underlying storage, not just an in-memory artifact of this call", () => {
     const storage = memoryStorage();
     setDesktopTypeEnabled(storage, "recruiter_assigned", false);
-    assert.equal(isDesktopTypeEnabled(storage, "recruiter_assigned"), false);
+    assert.deepEqual(JSON.parse(storage.map.get(DESKTOP_NOTIFICATION_PREFS_KEY) as string), ["recruiter_assigned"]);
     assert.equal(isDesktopTypeEnabled(storage, "recruiter_assigned"), false);
   });
 });

@@ -19,7 +19,6 @@ import {
   DESKTOP_NOTIFICATION_PREFS_KEY,
   DESKTOP_NOTIFICATION_TYPES,
   getDisabledDesktopTypes,
-  getSafeStorage as getSafeDesktopPrefsStorage,
   setDesktopTypeEnabled,
 } from "@/lib/desktop-notification-preferences";
 import { cn } from "@/lib/utils";
@@ -214,13 +213,13 @@ export default function NotificationsPage() {
   const [desktopPrefsOpen, setDesktopPrefsOpen] = useState(false);
   const [disabledDesktopTypes, setDisabledDesktopTypes] = useState<Set<string>>(new Set());
   useEffect(() => {
-    setDisabledDesktopTypes(getDisabledDesktopTypes(getSafeDesktopPrefsStorage()));
+    setDisabledDesktopTypes(getDisabledDesktopTypes(getSafeStorage()));
   }, []);
 
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
       if (e.key === DESKTOP_NOTIFICATION_PREFS_KEY) {
-        setDisabledDesktopTypes(getDisabledDesktopTypes(getSafeDesktopPrefsStorage()));
+        setDisabledDesktopTypes(getDisabledDesktopTypes(getSafeStorage()));
       }
     };
     window.addEventListener("storage", handleStorage);
@@ -228,7 +227,7 @@ export default function NotificationsPage() {
   }, []);
 
   const handleToggleDesktopType = (type: string, enabled: boolean) => {
-    setDesktopTypeEnabled(getSafeDesktopPrefsStorage(), type, enabled);
+    setDesktopTypeEnabled(getSafeStorage(), type, enabled);
     setDisabledDesktopTypes((prev) => {
       const next = new Set(prev);
       if (enabled) next.delete(type);
@@ -397,7 +396,8 @@ export default function NotificationsPage() {
         <div className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 mb-4">
           <span className="flex items-center gap-2">
             <BellRing className="h-4 w-4 shrink-0 text-slate-500" />
-            Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front.
+            Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front. You can
+            choose which notifications alert you once enabled.
           </span>
           <Button
             variant="outline"
