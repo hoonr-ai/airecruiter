@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { dateGroupLabel, groupNotificationsByDate } from "./notification-date-groups.ts";
+import { dateGroupLabel, groupNotificationsByDate, localCalendarDayDiff } from "./notification-date-groups.ts";
 
 // A fixed "now" so every test is deterministic regardless of when it runs.
 // Thursday, 2026-10-15, 14:30 local time.
@@ -52,6 +52,28 @@ describe("dateGroupLabel", () => {
     const justAfterMidnight = new Date(2026, 9, 15, 0, 1).toISOString();
     assert.equal(dateGroupLabel(justBeforeMidnight, NOW), "Yesterday");
     assert.equal(dateGroupLabel(justAfterMidnight, NOW), "Today");
+  });
+});
+
+describe("localCalendarDayDiff", () => {
+  it("is 0 for the same local calendar day, regardless of time of day", () => {
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 15, 0, 1), NOW), 0);
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 15, 23, 59), NOW), 0);
+  });
+
+  it("is 1 for yesterday, 2+ for further back", () => {
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 14, 10), NOW), 1);
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 12, 10), NOW), 3);
+  });
+
+  it("is negative for a future date (clock skew)", () => {
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 16, 10), NOW), -1);
+  });
+
+  it("is unaffected by a local day that isn't exactly 24h (a DST transition)", () => {
+    const dstNow = new Date(2026, 2, 9, 10, 0); // 2026-03-09
+    assert.equal(localCalendarDayDiff(new Date(2026, 2, 8, 10), dstNow), 1);
+    assert.equal(localCalendarDayDiff(new Date(2026, 2, 7, 10), dstNow), 2);
   });
 });
 

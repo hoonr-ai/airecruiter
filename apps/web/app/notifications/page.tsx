@@ -14,7 +14,7 @@ import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
-import { groupNotificationsByDate } from "@/lib/notification-date-groups";
+import { groupNotificationsByDate, localCalendarDayDiff } from "@/lib/notification-date-groups";
 import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
 import {
   DESKTOP_NOTIFICATION_PREFS_KEY,
@@ -41,17 +41,38 @@ function emptyFilterMessage(filter: NotificationFilter): string {
   }
 }
 
-function formatRelativeTime(iso: string): string {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
-  if (diffSec < 60) return "just now";
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 7) return `${diffDay}d ago`;
-  return new Date(iso).toLocaleDateString();
+function formatRelativeTime(iso: string, now: Date = new Date()): string {
+  const created = new Date(iso);
+  // localCalendarDayDiff (shared with the date-group headers above each
+  // row — see notification-date-groups.ts) is what decides whether this
+  // moves to day-level granularity at all; diffDays <= 0 covers both "still
+  // today" and a future/clock-skewed timestamp, both of which read better
+  // as sub-day text than as a day count.
+  const diffDays = localCalendarDayDiff(created, now);
+
+  if (diffDays <= 0) {
+    const diffMs = now.getTime() - created.getTime();
+    const diffSec = Math.max(0, Math.floor(diffMs / 1000));
+    if (diffSec < 60) return "just now";
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    return `${diffHr}h ago`;
+  }
+
+  // Once it's not "today" anymore, age is expressed in the SAME local
+  // calendar days the date-group header uses — not elapsed real hours (the
+  // old `floor(elapsedHours / 24)` math here). A notification created just
+  // before local midnight, viewed just after the FOLLOWING midnight, is
+  // under 48 real hours old but has already crossed two local midnights;
+  // the old math called that "1d ago" while the header above it (grouped by
+  // calendar day) already showed the actual two-days-ago date — a visible
+  // contradiction on the same row. "Yesterday" is spelled out to match the
+  // header's own wording exactly, rather than risk "1d ago" meaning two
+  // different things in two places.
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return created.toLocaleDateString();
 }
 
 function NotificationRow({

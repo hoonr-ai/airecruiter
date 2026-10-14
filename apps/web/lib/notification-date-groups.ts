@@ -39,10 +39,9 @@ export function dateGroupLabel(iso: string, now: Date = new Date(), locale?: str
   const item = new Date(iso);
   if (Number.isNaN(item.getTime())) return "Earlier";
 
-  if (sameLocalDay(item, now)) return "Today";
-
-  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  if (sameLocalDay(item, yesterday)) return "Yesterday";
+  const diffDays = localCalendarDayDiff(item, now);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
 
   return new Date(item.getFullYear(), item.getMonth(), item.getDate()).toLocaleDateString(locale, {
     month: "short",
@@ -51,8 +50,21 @@ export function dateGroupLabel(iso: string, now: Date = new Date(), locale?: str
   });
 }
 
-function sameLocalDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+/** How many LOCAL calendar days `to` is after `from` (0 = same day, 1 =
+ * `from` was yesterday relative to `to`, negative = `from` is in the
+ * future). Built from `Date.UTC` on each side's own Y/M/D fields rather than
+ * subtracting the two Dates' real timestamps — that would divide by a fixed
+ * 86,400,000ms and misfire across a DST transition, where a local day isn't
+ * exactly 24h. Normalizing both sides to a UTC midnight first makes the
+ * subtraction an exact day count regardless of either side's real-world
+ * length. Exported so any other "age of this timestamp" display (e.g. the
+ * per-row relative-time text in app/notifications/page.tsx) can match this
+ * module's own definition of a day instead of computing its own, which
+ * risks disagreeing with the date-group header a row sits under. */
+export function localCalendarDayDiff(from: Date, to: Date): number {
+  const fromUTC = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const toUTC = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((toUTC - fromUTC) / 86_400_000);
 }
 
 /** Buckets `items` (already newest-first) into consecutive same-label runs,
