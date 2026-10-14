@@ -183,6 +183,20 @@ def _ensure_sourced_candidates_schema() -> None:
                 # its own — see services/cross_submissions.fetch_prior_rows.
                 "CREATE INDEX IF NOT EXISTS idx_sc_engage_status_global "
                 "ON sourced_candidates (((data->>'engage_status')))",
+                # Backs services.notifications_service's
+                # reconcile_missed_rejection_notifications, which runs every
+                # 10 minutes and would otherwise seq-scan this whole table on
+                # every tick as it grows. A partial index: most rows were
+                # never rejected, so indexing only the ones that were keeps
+                # it small. The predicate's text (LOWER(TRIM(...)) LIKE
+                # 'reject%') and the indexed expression (data->>'feedback_at')
+                # must stay byte-for-byte identical to that query's own WHERE
+                # clause — Postgres only recognizes a partial index as
+                # usable when it can match the query's predicate this way,
+                # not merely imply it from a different-looking one.
+                "CREATE INDEX IF NOT EXISTS idx_sc_reject_feedback_at "
+                "ON sourced_candidates ((data->>'feedback_at')) "
+                "WHERE LOWER(TRIM(data->>'feedback_type')) LIKE 'reject%'",
             ):
                 try:
                     conn.execute(text(stmt))

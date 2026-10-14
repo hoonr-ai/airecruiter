@@ -63,6 +63,7 @@
 """
 import asyncio
 import json
+from datetime import datetime
 from unittest.mock import Mock
 
 import psycopg2.extras
@@ -421,6 +422,67 @@ def test_reject_reconcile_filters_by_feedback_type_not_not_exists(monkeypatch):
     assert "feedback_at" in select_sql
     assert "LIMIT %s" in select_sql
     assert params[-1] > 0  # row cap
+    # The cutoff must be a real, parseable ISO timestamp — this is the value
+    # that gets lexicographically compared against the stored feedback_at
+    # string, so a malformed cutoff would silently mis-filter every row.
+    cutoff = datetime.fromisoformat(params[0])
+    assert cutoff.tzinfo is not None
+
+
+def test_reject_reconcile_skips_candidate_with_no_recruiter_emails(monkeypatch):
+    row = {
+        "candidate_id": "C1", "name": "Jane Doe",
+        "data": {"feedback_type": "Reject", "submitted_by": "rejecter@x.com"},
+        "job_id": "J1", "jobdiva_id": "JD1", "title": "Data Engineer", "enhanced_title": None,
+        "recruiter_emails": None,
+    }
+    cur = FakeCursor(fetchall_results=[[row]])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(reconcile_missed_rejection_notifications())
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert insert_calls == []
+    assert conn.committed is True  # still commits the (no-op) transaction cleanly
+
+
+def test_reject_reconcile_notifies_everyone_when_submitted_by_is_missing(monkeypatch):
+    """A row with no submitted_by (legacy data, or a write that predates the
+    field) must not crash or silently drop every recipient — `actor` just
+    ends up as "", which matches no real email, so nobody is excluded."""
+    row = {
+        "candidate_id": "C1", "name": "Jane Doe",
+        "data": {"feedback_type": "Reject"},
+        "job_id": "J1", "jobdiva_id": "JD1", "title": "Data Engineer", "enhanced_title": None,
+        "recruiter_emails": json.dumps(["a@x.com", "b@x.com"]),
+    }
+    cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 1}, {"id": 2}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(reconcile_missed_rejection_notifications())
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert [c[1][0] for c in insert_calls] == ["a@x.com", "b@x.com"]
+
+
+def test_reject_reconcile_warns_when_max_rows_cap_is_hit(monkeypatch, caplog):
+    monkeypatch.setattr("services.notifications_service.RECONCILIATION_MAX_ROWS", 1)
+    row = {
+        "candidate_id": "C1", "name": "Jane Doe",
+        "data": {"feedback_type": "Reject", "submitted_by": "rejecter@x.com"},
+        "job_id": "J1", "jobdiva_id": "JD1", "title": "Data Engineer", "enhanced_title": None,
+        "recruiter_emails": json.dumps(["other@x.com"]),
+    }
+    cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    with caplog.at_level("WARNING", logger="services.notifications_service"):
+        asyncio.run(reconcile_missed_rejection_notifications())
+
+    assert any("RECONCILIATION_MAX_ROWS" in r.message for r in caplog.records)
 
 
 def test_reject_reconcile_backfills_new_recipient_for_already_notified_candidate(monkeypatch):

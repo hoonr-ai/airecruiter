@@ -347,6 +347,14 @@ async def create_candidate_passed_notifications(
         )
 
 
+# Single source of truth for the Rejected title wording — shared by the live
+# path (create_candidate_rejected_notifications) and the reconciliation
+# backfill (_reconcile_missed_rejection_notifications_sync) below, so a
+# missed-then-backfilled notification reads identically to one that fired
+# live instead of risking the two wordings drifting apart over time.
+_REJECTED_TITLE_TEMPLATE = "{candidate_name} was rejected for {job_title}"
+
+
 def _create_candidate_feedback_notifications_sync(
     job_id: str, candidate_id: str, actor_email: str, notification_type: str, title_template: str
 ) -> None:
@@ -434,7 +442,7 @@ async def create_candidate_rejected_notifications(
         await asyncio.to_thread(
             _create_candidate_feedback_notifications_sync,
             job_id, candidate_id, rejecter_email,
-            "candidate_rejected", "{candidate_name} was rejected for {job_title}",
+            "candidate_rejected", _REJECTED_TITLE_TEMPLATE,
         )
     except Exception as e:  # noqa: BLE001 - must never raise into the feedback endpoint
         logger.error(
@@ -537,10 +545,26 @@ def _reconcile_missed_rejection_notifications_sync() -> None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # feedback_at is an ISO-8601 string written by save_candidate_feedback
-            # (datetime.now(timezone.utc).isoformat()) — lexicographic comparison
-            # against another ISO string sorts/filters correctly without a
-            # timestamptz cast, so a malformed/missing value just fails the
-            # inequality instead of raising and losing the whole run.
+            # via `datetime.now(timezone.utc).isoformat()` — the ONLY writer of
+            # this field anywhere in the app, always producing a fixed-width,
+            # UTC ("+00:00"), microsecond-precision string. `cutoff` below is
+            # built with that exact same call, so a plain lexicographic
+            # string compare sorts/filters identically to a timestamptz
+            # compare without needing a cast — a cast's own failure mode (an
+            # unparsable value aborting the whole statement) is worse than
+            # this approach's: a malformed/missing value just fails the
+            # inequality and is silently skipped for this run instead of
+            # losing every row. This guarantee would break if feedback_at
+            # ever gained a second writer using a different format (e.g. a
+            # bare "Z" suffix) — see test_notifications.py's pinned-format
+            # regression test.
+            #
+            # The WHERE clause's exact text (both the LOWER(TRIM(...)) LIKE
+            # predicate and the bare feedback_at expression) matches
+            # idx_sc_reject_feedback_at's own definition in
+            # sourced_candidates_storage.py, so Postgres can use that partial
+            # index instead of a sequential scan here — see that index's own
+            # comment for why the two must stay textually identical.
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=RECONCILIATION_LOOKBACK_HOURS)).isoformat()
             cur.execute(
                 """
@@ -575,7 +599,7 @@ def _reconcile_missed_rejection_notifications_sync() -> None:
                     continue
                 candidate_name = row.get("name") or "A candidate"
                 job_title = _resolve_job_title(row, row.get("job_id") or "")
-                title = f"{candidate_name} was rejected for {job_title}"
+                title = _REJECTED_TITLE_TEMPLATE.format(candidate_name=candidate_name, job_title=job_title)
                 for recipient in recipients:
                     if _insert_notification(
                         cur,
@@ -616,6 +640,13 @@ async def reconcile_missed_rejection_notifications() -> None:
     for a recipient already notified) rather than a pre-insert existence
     check, so a recruiter added to a job's recruiter_emails after the
     rejection already fired still gets backfilled.
+
+    Same accepted backlog caveat as the Pass job: a run only ever looks at
+    the newest RECONCILIATION_MAX_ROWS rows (ORDER BY ... DESC), so if a
+    backlog ever exceeds that cap, older missed rejections in it aren't
+    recovered until they naturally fall back inside it on a later run — the
+    RECONCILIATION_MAX_ROWS warning log is the signal something beyond
+    normal operation (e.g. extended downtime) needs attention.
     """
     try:
         await asyncio.to_thread(_reconcile_missed_rejection_notifications_sync)

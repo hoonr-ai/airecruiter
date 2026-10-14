@@ -396,39 +396,36 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
 
-    # Safety net for the webhook-triggered in-app notification (a crashed
-    # worker loses an asyncio.create_task before it completes, or a status
-    # changes outside the webhook path). Backfills anything the webhook path
-    # missed; dedup is the notifications table's own unique index, so this
-    # can never double-insert.
+    # Safety net for the webhook/BackgroundTasks-triggered in-app
+    # notifications (a crashed worker loses an asyncio.create_task or
+    # BackgroundTasks call before it completes, or a status changes outside
+    # the normal trigger path). Backfills anything the live path missed;
+    # dedup is the notifications table's own unique index, so this can never
+    # double-insert. One add_job call per type, each in its own try/except,
+    # so a scheduling failure for one can't prevent the other from
+    # registering.
     try:
-        from services.notifications_service import reconcile_missed_pass_notifications
-        scheduler.add_job(
+        from services.notifications_service import (
             reconcile_missed_pass_notifications,
-            "interval",
-            minutes=10,
-            id="notifications_reconciliation",
-            replace_existing=True,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"notifications_reconciliation_schedule_failed: {e}; continuing")
-
-    # Same safety net, for candidate_rejected: save_candidate_feedback queues
-    # create_candidate_rejected_notifications via BackgroundTasks, which is
-    # just as vulnerable to a crashed worker or a transient DB error as the
-    # webhook-triggered Pass path above — and until now had no reconciliation
-    # job to recover from it.
-    try:
-        from services.notifications_service import reconcile_missed_rejection_notifications
-        scheduler.add_job(
             reconcile_missed_rejection_notifications,
-            "interval",
-            minutes=10,
-            id="notifications_reconciliation_rejected",
-            replace_existing=True,
         )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"notifications_reconciliation_rejected_schedule_failed: {e}; continuing")
+    except Exception as e:  # noqa: BLE001 - startup must survive even if this module can't import
+        logger.error(f"notifications_reconciliation_import_failed: {e}; reconciliation jobs not scheduled")
+    else:
+        for reconcile_fn, reconcile_job_id in (
+            (reconcile_missed_pass_notifications, "notifications_reconciliation"),
+            (reconcile_missed_rejection_notifications, "notifications_reconciliation_rejected"),
+        ):
+            try:
+                scheduler.add_job(
+                    reconcile_fn,
+                    "interval",
+                    minutes=10,
+                    id=reconcile_job_id,
+                    replace_existing=True,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"{reconcile_job_id}_schedule_failed: {e}; continuing")
 
     # Morning digest: one in-app summary per recruiter, for anyone with at
     # least one unread candidate_passed notification. Scheduled at 19:00
