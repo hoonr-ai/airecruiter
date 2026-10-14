@@ -39,10 +39,9 @@ export function dateGroupLabel(iso: string, now: Date = new Date(), locale?: str
   const item = new Date(iso);
   if (Number.isNaN(item.getTime())) return "Earlier";
 
-  if (sameLocalDay(item, now)) return "Today";
-
-  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  if (sameLocalDay(item, yesterday)) return "Yesterday";
+  const diffDays = localCalendarDayDiff(item, now);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
 
   return new Date(item.getFullYear(), item.getMonth(), item.getDate()).toLocaleDateString(locale, {
     month: "short",
@@ -51,8 +50,50 @@ export function dateGroupLabel(iso: string, now: Date = new Date(), locale?: str
   });
 }
 
-function sameLocalDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+/** How many LOCAL calendar days `to` is after `from` (0 = same day, 1 =
+ * `from` was yesterday relative to `to`, negative = `from` is in the
+ * future). Built from `Date.UTC` on each side's own Y/M/D fields rather than
+ * subtracting the two Dates' real timestamps — that would divide by a fixed
+ * 86,400,000ms and misfire across a DST transition, where a local day isn't
+ * exactly 24h. Normalizing both sides to a UTC midnight first makes the
+ * subtraction an exact day count regardless of either side's real-world
+ * length. Exported so any other "age of this timestamp" display (e.g. the
+ * per-row relative-time text in app/notifications/page.tsx) can match this
+ * module's own definition of a day instead of computing its own, which
+ * risks disagreeing with the date-group header a row sits under. */
+export function localCalendarDayDiff(from: Date, to: Date): number {
+  const fromUTC = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const toUTC = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((toUTC - fromUTC) / 86_400_000);
+}
+
+/** "just now" / "5m ago" / "Yesterday" / "3d ago" / a formatted date for a
+ * single notification row, relative to `now`. Exported (moved from
+ * app/notifications/page.tsx) for unit coverage with a fixed `now`.
+ *
+ * Requires BOTH localCalendarDayDiff >= 1 AND >= 24 real elapsed hours
+ * before switching to calendar-day text — a 2-minute-old notification just
+ * after local midnight has a day diff of 1 but should still read "2m ago",
+ * not "Yesterday". */
+export function formatRelativeTime(iso: string, now: Date = new Date()): string {
+  const created = new Date(iso);
+  if (Number.isNaN(created.getTime())) return "Earlier";
+
+  const diffMs = now.getTime() - created.getTime();
+  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
+  const diffDays = localCalendarDayDiff(created, now);
+  const stillSubDay = diffDays <= 0 || (diffDays === 1 && diffSec < 86_400);
+
+  if (stillSubDay) {
+    if (diffSec < 60) return "just now";
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    return `${Math.floor(diffMin / 60)}h ago`;
+  }
+
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return created.toLocaleDateString();
 }
 
 /** Buckets `items` (already newest-first) into consecutive same-label runs,

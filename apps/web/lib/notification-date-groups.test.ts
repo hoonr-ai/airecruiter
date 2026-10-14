@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { dateGroupLabel, groupNotificationsByDate } from "./notification-date-groups.ts";
+import {
+  dateGroupLabel,
+  groupNotificationsByDate,
+  localCalendarDayDiff,
+  formatRelativeTime,
+} from "./notification-date-groups.ts";
 
 // A fixed "now" so every test is deterministic regardless of when it runs.
 // Thursday, 2026-10-15, 14:30 local time.
@@ -8,6 +13,22 @@ const NOW = new Date(2026, 9, 15, 14, 30, 0);
 
 function at(year: number, month: number, day: number, hour = 12): string {
   return new Date(year, month, day, hour).toISOString();
+}
+
+// Pins process.env.TZ for the duration of `fn`, so a DST-transition test
+// actually exercises one regardless of the machine/CI running it — without
+// this, a runner whose own local TZ doesn't observe DST (e.g. UTC, or most
+// of India) would pass the assertion trivially without ever hitting the
+// edge case it's meant to guard.
+function withTZ<T>(tz: string, fn: () => T): T {
+  const original = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return fn();
+  } finally {
+    if (original === undefined) delete process.env.TZ;
+    else process.env.TZ = original;
+  }
 }
 
 describe("dateGroupLabel", () => {
@@ -42,9 +63,13 @@ describe("dateGroupLabel", () => {
     // Spring-forward in the US: 2026-03-08 is 23 wall-clock hours in
     // America-style DST. Comparing calendar fields (not timestamp / 86.4M
     // ms) means this day's shorter length can't throw the day-diff off.
-    const dstNow = new Date(2026, 2, 9, 10, 0); // 2026-03-09, the day after
-    assert.equal(dateGroupLabel(at(2026, 2, 8, 10), dstNow), "Yesterday");
-    assert.equal(dateGroupLabel(at(2026, 2, 7, 10), dstNow, "en-US"), "Mar 7, 2026");
+    // Pinned to a DST-observing zone so this actually exercises the
+    // transition regardless of the runner's own local timezone.
+    withTZ("America/New_York", () => {
+      const dstNow = new Date(2026, 2, 9, 10, 0); // 2026-03-09, the day after
+      assert.equal(dateGroupLabel(at(2026, 2, 8, 10), dstNow), "Yesterday");
+      assert.equal(dateGroupLabel(at(2026, 2, 7, 10), dstNow, "en-US"), "Mar 7, 2026");
+    });
   });
 
   it("uses the LOCAL calendar day, not a UTC one — 11pm and 1am on either side of local midnight land in different groups", () => {
@@ -52,6 +77,70 @@ describe("dateGroupLabel", () => {
     const justAfterMidnight = new Date(2026, 9, 15, 0, 1).toISOString();
     assert.equal(dateGroupLabel(justBeforeMidnight, NOW), "Yesterday");
     assert.equal(dateGroupLabel(justAfterMidnight, NOW), "Today");
+  });
+});
+
+describe("localCalendarDayDiff", () => {
+  it("is 0 for the same local calendar day, regardless of time of day", () => {
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 15, 0, 1), NOW), 0);
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 15, 23, 59), NOW), 0);
+  });
+
+  it("is 1 for yesterday, 2+ for further back", () => {
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 14, 10), NOW), 1);
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 12, 10), NOW), 3);
+  });
+
+  it("is negative for a future date (clock skew)", () => {
+    assert.equal(localCalendarDayDiff(new Date(2026, 9, 16, 10), NOW), -1);
+  });
+
+  it("is unaffected by a local day that isn't exactly 24h (a DST transition)", () => {
+    withTZ("America/New_York", () => {
+      const dstNow = new Date(2026, 2, 9, 10, 0); // 2026-03-09
+      assert.equal(localCalendarDayDiff(new Date(2026, 2, 8, 10), dstNow), 1);
+      assert.equal(localCalendarDayDiff(new Date(2026, 2, 7, 10), dstNow), 2);
+    });
+  });
+});
+
+describe("formatRelativeTime", () => {
+  it("shows sub-minute/sub-hour granularity within today", () => {
+    assert.equal(formatRelativeTime(new Date(2026, 9, 15, 14, 29, 50).toISOString(), NOW), "just now");
+    assert.equal(formatRelativeTime(new Date(2026, 9, 15, 14, 0).toISOString(), NOW), "30m ago");
+    assert.equal(formatRelativeTime(new Date(2026, 9, 15, 2, 30).toISOString(), NOW), "12h ago");
+  });
+
+  it("keeps sub-day text for a notification under 24h old even if it has crossed local midnight", () => {
+    // Regression for PR #817's own review: a 2-minute-old notification just
+    // after local midnight has a calendar day diff of 1 (same as
+    // "Yesterday"), but should still read as "2m ago", not "Yesterday" —
+    // it would look wrong next to "just now"/"5m ago" elsewhere in the feed.
+    const justAfterMidnight = new Date(2026, 9, 15, 0, 1);
+    const createdJustBefore = new Date(2026, 9, 14, 23, 59).toISOString();
+    assert.equal(formatRelativeTime(createdJustBefore, justAfterMidnight), "2m ago");
+  });
+
+  it("switches to \"Yesterday\" once a 1-calendar-day-old notification is also at least 24h old", () => {
+    assert.equal(formatRelativeTime(at(2026, 9, 14, 10), NOW), "Yesterday");
+  });
+
+  it("shows a calendar-day count for anything older, agreeing with dateGroupLabel", () => {
+    const iso = at(2026, 9, 12, 8);
+    assert.equal(formatRelativeTime(iso, NOW), "3d ago");
+    assert.equal(dateGroupLabel(iso, NOW, "en-US"), "Oct 12, 2026");
+  });
+
+  it("falls back to an absolute date at 7+ days", () => {
+    assert.equal(formatRelativeTime(at(2026, 9, 1, 8), NOW), new Date(2026, 9, 1, 8).toLocaleDateString());
+  });
+
+  it("treats a future timestamp (clock skew) as \"just now\" rather than a negative count", () => {
+    assert.equal(formatRelativeTime(new Date(2026, 9, 15, 14, 35).toISOString(), NOW), "just now");
+  });
+
+  it("falls back to a non-crashing label for an unparsable date", () => {
+    assert.equal(formatRelativeTime("not-a-real-date", NOW), "Earlier");
   });
 });
 

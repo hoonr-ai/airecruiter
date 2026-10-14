@@ -14,7 +14,7 @@ import { useNotificationsStream } from "@/context/notifications-context";
 import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
-import { groupNotificationsByDate } from "@/lib/notification-date-groups";
+import { groupNotificationsByDate, formatRelativeTime } from "@/lib/notification-date-groups";
 import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
 import {
   DESKTOP_NOTIFICATION_PREFS_KEY,
@@ -39,19 +39,6 @@ function emptyFilterMessage(filter: NotificationFilter): string {
       // that invariant ever changes.
       return "No notifications match this filter.";
   }
-}
-
-function formatRelativeTime(iso: string): string {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
-  if (diffSec < 60) return "just now";
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 7) return `${diffDay}d ago`;
-  return new Date(iso).toLocaleDateString();
 }
 
 function NotificationRow({
