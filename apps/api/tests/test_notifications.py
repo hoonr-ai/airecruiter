@@ -26,13 +26,15 @@
   (_job_level_duplicate_in_last_minute) rather than an index-backed
   ON CONFLICT, since a per-minute window isn't something Postgres will
   index.
-- create_candidate_submitted_notifications / create_candidate_rejected_notifications:
-  fired from routers/candidates.py's save_candidate_feedback on "Submit" /
-  "Reject" respectively. Both exclude the acting recruiter from the
-  recipient list, and share candidate_passed's dedup index (via
+- create_candidate_rejected_notifications: fired from routers/candidates.py's
+  save_candidate_feedback on "Reject". Excludes the acting recruiter from
+  the recipient list, and shares candidate_passed's dedup index (via
   _CONFLICT_CANDIDATE_LEVEL) but keyed independently by `type`, so a
-  resubmission/re-rejection is a no-op without affecting candidate_passed's
-  (or each other's) own dedup for the same candidate/job/recipient.
+  re-rejection is a no-op without affecting candidate_passed's own dedup
+  for the same candidate/job/recipient. There is no generic
+  candidate_submitted counterpart (retired — every Submit is already
+  covered more specifically by the internal/external types below, or by
+  neither).
 - create_recruiter_assigned_notifications: fired from routers/jobs.py's job
   wizard save endpoints when a recruiter_emails diff shows someone newly
   added. Job-level (candidate_id=NULL) like pair_launched, and shares its
@@ -56,7 +58,7 @@
   _create_candidate_notification_for_recipient_sync. Deduped via
   _candidate_level_duplicate_in_last_minute (a same-minute re-fire guard),
   not the permanent uniq_notifications_recipient_candidate_job_type index
-  candidate_passed/submitted/rejected share — a genuine second review cycle
+  candidate_passed/rejected share — a genuine second review cycle
   (reject, then resubmit internally) must still notify.
 """
 import asyncio
@@ -75,7 +77,6 @@ from services.notifications_service import (
     _CONFLICT_CANDIDATE_LEVEL,
     _CONFLICT_PAIR_INACTIVE,
     create_candidate_passed_notifications,
-    create_candidate_submitted_notifications,
     create_candidate_rejected_notifications,
     create_pair_launched_notification,
     create_pair_inactive_notification,
@@ -293,107 +294,6 @@ def test_create_notifications_noop_without_recruiter_emails(monkeypatch):
     assert not any("INSERT INTO notifications" in c[0] for c in cur.executed)
 
 
-# --- create_candidate_submitted_notifications --------------------------------
-
-def test_create_submitted_notifications_excludes_submitter(monkeypatch):
-    job_row = {
-        "job_id": "J1", "title": "Data Engineer", "enhanced_title": None,
-        "recruiter_emails": json.dumps(["a@x.com", "b@x.com"]), "jobdiva_id": "JD1",
-    }
-    cand_row = {"name": "Jane Doe", "data": {}}
-    # fetchone order: job_row, cand_row, then one insert per non-submitter recipient.
-    cur = FakeCursor(fetchone_results=[job_row, cand_row, {"id": 1}])
-    conn = FakeConn(cur)
-    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
-
-    asyncio.run(create_candidate_submitted_notifications("J1", "C1", "a@x.com"))
-
-    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
-    assert len(insert_calls) == 1
-    sql, params = insert_calls[0]
-    assert params[0] == "b@x.com"  # the submitter (a@x.com) is excluded
-    assert params[1] == "candidate_submitted"
-    assert params[4] == "C1"  # candidate_id IS set (candidate-level, unlike pair_*)
-    assert "Jane Doe was submitted for Data Engineer" in params[5]
-    assert conn.committed is True
-
-
-def test_create_submitted_notifications_noop_when_only_submitter_assigned(monkeypatch):
-    """A job with exactly one recruiter (the submitter) has no one left to
-    notify — must not touch INSERT at all, not insert a 0-recipient no-op."""
-    job_row = {
-        "job_id": "J1", "title": "Data Engineer", "enhanced_title": None,
-        "recruiter_emails": json.dumps(["solo@x.com"]), "jobdiva_id": "JD1",
-    }
-    cand_row = {"name": "Jane Doe", "data": {}}
-    cur = FakeCursor(fetchone_results=[job_row, cand_row])
-    conn = FakeConn(cur)
-    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
-
-    asyncio.run(create_candidate_submitted_notifications("J1", "C1", "solo@x.com"))
-
-    assert not any("INSERT INTO notifications" in c[0] for c in cur.executed)
-
-
-def test_create_submitted_notifications_submitter_match_is_case_insensitive(monkeypatch):
-    job_row = {
-        "job_id": "J1", "title": "Data Engineer", "enhanced_title": None,
-        "recruiter_emails": json.dumps(["Submitter@X.com", "b@x.com"]), "jobdiva_id": "JD1",
-    }
-    cand_row = {"name": "Jane Doe", "data": {}}
-    cur = FakeCursor(fetchone_results=[job_row, cand_row, {"id": 1}])
-    conn = FakeConn(cur)
-    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
-
-    asyncio.run(create_candidate_submitted_notifications("J1", "C1", "submitter@x.com"))
-
-    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
-    assert len(insert_calls) == 1
-    assert insert_calls[0][1][0] == "b@x.com"
-
-
-def test_create_submitted_notifications_swallows_db_errors(monkeypatch):
-    """Must never raise into the feedback endpoint's response."""
-    def _boom():
-        raise RuntimeError("db unavailable")
-    monkeypatch.setattr("services.notifications_service.get_db_connection", _boom)
-
-    asyncio.run(create_candidate_submitted_notifications("J1", "C1", "a@x.com"))  # no exception = pass
-
-
-def test_create_submitted_notifications_noop_without_job_or_candidate_id(monkeypatch):
-    def _fail():
-        raise AssertionError("must not touch the DB without job_id/candidate_id")
-    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
-
-    asyncio.run(create_candidate_submitted_notifications("", "C1", "a@x.com"))
-    asyncio.run(create_candidate_submitted_notifications("J1", "", "a@x.com"))
-
-
-def test_insert_notification_candidate_submitted_shares_candidate_level_conflict_clause():
-    """candidate_submitted reuses _CONFLICT_CANDIDATE_LEVEL (the same clause
-    candidate_passed uses) — `type` is part of the unique index, so the two
-    types get independent dedup slots for the same (recipient, candidate,
-    job) rather than colliding or needing a separate index."""
-    cur = FakeCursor(fetchone_results=[{"id": 1}])
-    inserted = _insert_notification(
-        cur,
-        notification_type="candidate_submitted",
-        conflict_clause=_CONFLICT_CANDIDATE_LEVEL,
-        recipient_email="a@x.com",
-        job_id="J1",
-        jobdiva_id="JD1",
-        candidate_id="C1",
-        title="t",
-        body=None,
-        score=None,
-    )
-    assert inserted is True
-    sql, params = cur.executed[0]
-    assert "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING" in sql
-    assert params[1] == "candidate_submitted"
-
-
 # --- create_candidate_rejected_notifications ---------------------------------
 
 def test_create_rejected_notifications_excludes_rejecter(monkeypatch):
@@ -435,13 +335,13 @@ def test_create_rejected_notifications_noop_without_job_or_candidate_id(monkeypa
     asyncio.run(create_candidate_rejected_notifications("J1", "", "a@x.com"))
 
 
-def test_submitted_and_rejected_are_independently_dedupable():
-    """Different `type` values mean a candidate_submitted row never blocks
-    (or is blocked by) a candidate_rejected row for the same recipient,
+def test_passed_and_rejected_are_independently_dedupable():
+    """Different `type` values mean a candidate_passed row never blocks (or
+    is blocked by) a candidate_rejected row for the same recipient,
     candidate and job — confirmed via the conflict clause/SQL shape alone,
     since the real uniqueness guarantee lives in Postgres's own index."""
     cur = FakeCursor(fetchone_results=[{"id": 1}, {"id": 2}])
-    for notification_type in ("candidate_submitted", "candidate_rejected"):
+    for notification_type in ("candidate_passed", "candidate_rejected"):
         inserted = _insert_notification(
             cur,
             notification_type=notification_type,
@@ -456,7 +356,7 @@ def test_submitted_and_rejected_are_independently_dedupable():
         )
         assert inserted is True
     types_inserted = [params[1] for _, params in cur.executed]
-    assert types_inserted == ["candidate_submitted", "candidate_rejected"]
+    assert types_inserted == ["candidate_passed", "candidate_rejected"]
 
 
 # --- reconcile_missed_pass_notifications ------------------------------------

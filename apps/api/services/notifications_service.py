@@ -1,5 +1,5 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Ten types today:
+existing email notifications. Nine types today:
 
 - candidate_passed (create_candidate_passed_notifications): a candidate's
   interview result. Independent of the pass-email trigger in
@@ -13,19 +13,18 @@ existing email notifications. Ten types today:
   candidate_id, jobdiva_id, type) dedupes a repeat trigger for the same
   candidate/job/recipient.
 
-- candidate_submitted / candidate_rejected (create_candidate_submitted_notifications
-  / create_candidate_rejected_notifications): fired from
+- candidate_rejected (create_candidate_rejected_notifications): fired from
   routers/candidates.py's save_candidate_feedback on feedback_type ==
-  "Submit" / "Reject" respectively (not "Unreachable" — neither fires for
-  that), to every OTHER recruiter on the job (the acting recruiter is
-  excluded from their own notification). Both share
-  _create_candidate_feedback_notifications_sync (same shape, different
-  type/title) and candidate_passed's conflict clause/index — `type` keeps
-  every one of these three dedup spaces independent, so the same candidate
-  can be Passed AND Submitted AND (later) Rejected without any of them
-  blocking another, but a resubmission or re-rejection (feedback can be
-  edited and resaved — see save_candidate_feedback's docstring) only ever
-  notifies once per (recipient, candidate, job, type).
+  "Reject" (not "Submit" or "Unreachable"), to every OTHER recruiter on the
+  job (the rejecter is excluded from their own notification). Uses
+  _create_candidate_feedback_notifications_sync and candidate_passed's
+  conflict clause/index — `type` keeps the two dedup spaces independent, so
+  the same candidate can be Passed and (later) Rejected without either
+  blocking the other, but a re-rejection (feedback can be edited and
+  resaved — see save_candidate_feedback's docstring) only ever notifies once
+  per (recipient, candidate, job, type). There is no generic
+  candidate_submitted counterpart — see
+  create_candidate_rejected_notifications's own docstring for why.
 
 - pair_launched / pair_inactive (create_pair_launched_notification /
   create_pair_inactive_notification): job-level events with no single
@@ -94,24 +93,20 @@ existing email notifications. Ten types today:
   (to a named manager for review, rather than out to JobDiva) via
   routers/candidates.py's save_candidate_feedback
   (submission_type == "internal"); candidate_internal_review_requested
-  tells that manager, by name, that a review is waiting — distinct from
-  candidate_submitted (which goes to the job's OTHER recruiters, not the
-  manager, who usually isn't one, and who'd otherwise see only the generic
-  "X was submitted for Y" with no sense that THEY are the one being asked
-  to act). When that manager later submits the SAME candidate externally,
-  candidate_externally_submitted tells the ORIGINAL requester their review
-  request resolved — save_candidate_feedback reads a dedicated
-  `internal_review_requested_by` field off the candidate's immediately-prior
-  state (set on an internal submission, cleared on the next external one,
-  untouched by an intervening Reject/Unreachable) to recognize "this
-  external submission is that internal request's follow-through" and to
-  know who to notify, rather than relying on the requester happening to
-  also be a recipient of the generic candidate_submitted notification
-  (which excludes whoever is submitting right now — here, the manager —
-  and would reach nobody at all if that requester is the job's only
-  recruiter). Both share _create_candidate_notification_for_recipient_sync
+  tells that manager, by name, that a review is waiting — the manager
+  usually isn't one of the job's other recruiters, so nothing else would
+  have reached them, and even a generic "X was submitted for Y" wouldn't
+  say THEY are the one being asked to act. When that manager later submits
+  the SAME candidate externally, candidate_externally_submitted tells the
+  ORIGINAL requester their review request resolved — save_candidate_feedback
+  reads a dedicated `internal_review_requested_by` field off the
+  candidate's immediately-prior state (set on an internal submission,
+  cleared on the next external one, untouched by an intervening
+  Reject/Unreachable) to recognize "this external submission is that
+  internal request's follow-through" and to know who to notify. Both share
+  _create_candidate_notification_for_recipient_sync
   (candidate-level, single specific recipient rather than a list derived
-  from recruiter_emails) but — unlike candidate_passed/submitted/rejected —
+  from recruiter_emails) but — unlike candidate_passed/rejected —
   dedupe via a same-minute pre-insert check
   (_candidate_level_duplicate_in_last_minute), not a permanent index: a
   genuine second review cycle must still notify.
@@ -147,8 +142,8 @@ from services.engage_status import (
 logger = logging.getLogger(__name__)
 
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
-# Shared by every candidate-level type (candidate_passed, candidate_submitted)
-# — `type` is part of the unique index this targets
+# Shared by every candidate-level "once ever" type (candidate_passed,
+# candidate_rejected) — `type` is part of the unique index this targets
 # (uniq_notifications_recipient_candidate_job_type), so each type gets its own
 # independent dedup slot for the same (recipient, candidate, job).
 _CONFLICT_CANDIDATE_LEVEL = "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) DO NOTHING"
@@ -336,9 +331,12 @@ async def create_candidate_passed_notifications(
 def _create_candidate_feedback_notifications_sync(
     job_id: str, candidate_id: str, actor_email: str, notification_type: str, title_template: str
 ) -> None:
-    """Shared by candidate_submitted and candidate_rejected — same shape,
-    different type/title: notify every OTHER recruiter on the job (the
-    recruiter who just acted is excluded from their own notification)."""
+    """Used by create_candidate_rejected_notifications: notify every OTHER
+    recruiter on the job (the recruiter who just acted is excluded from
+    their own notification). Generic enough to share with another
+    feedback-outcome type later if one comes along — notification_type and
+    title_template are the only per-type pieces. Previously also shared
+    with the now-retired candidate_submitted."""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -384,55 +382,32 @@ def _create_candidate_feedback_notifications_sync(
         conn.close()
 
 
-async def create_candidate_submitted_notifications(
-    job_id: str,
-    candidate_id: str,
-    submitter_email: str,
-) -> None:
-    """Fire in-app "candidate submitted" notifications for every OTHER
-    recruiter on `job_id` — the submitter is excluded so they don't get
-    notified for their own action.
-
-    Called from routers/candidates.py's save_candidate_feedback only when
-    feedback_type == "Submit" (not Unreachable): the point is letting
-    co-recruiters on a shared requisition know a candidate has already been
-    submitted, so they don't duplicate the work.
-
-    Safe to call unconditionally (including on a resubmission — feedback can
-    be edited and resaved, see save_candidate_feedback's docstring): dedup is
-    the same (recipient_email, candidate_id, jobdiva_id, type) unique index
-    candidate_passed uses, so a resubmission's repeat call is a no-op rather
-    than a second notification. All failures are caught and logged here,
-    never raised back into the feedback endpoint's response.
-    """
-    try:
-        if not job_id or not candidate_id:
-            return
-        await asyncio.to_thread(
-            _create_candidate_feedback_notifications_sync,
-            job_id, candidate_id, submitter_email,
-            "candidate_submitted", "{candidate_name} was submitted for {job_title}",
-        )
-    except Exception as e:  # noqa: BLE001 - must never raise into the feedback endpoint
-        logger.error(
-            "create_candidate_submitted_notifications_failed candidate=%s job=%s: %s",
-            candidate_id, job_id, e, exc_info=True,
-        )
-
-
 async def create_candidate_rejected_notifications(
     job_id: str,
     candidate_id: str,
     rejecter_email: str,
 ) -> None:
     """Fire in-app "candidate rejected" notifications for every OTHER
-    recruiter on `job_id` — mirrors create_candidate_submitted_notifications
-    exactly (see its docstring), just the Reject counterpart: called from
-    save_candidate_feedback when feedback_type == "Reject". A distinct
-    `candidate_rejected` type (not reusing candidate_submitted) gives it its
-    own independent dedup slot, since a candidate could plausibly be
-    rejected and later resubmitted (or vice versa) and each should be able
-    to notify once in its own right.
+    recruiter on `job_id` — the rejecter is excluded so they don't get
+    notified for their own action. Called from routers/candidates.py's
+    save_candidate_feedback when feedback_type == "Reject".
+
+    There is no generic "candidate submitted" counterpart: a Submit is
+    always either internal or external, and each already has its own
+    specific notification (create_candidate_internal_review_requested_notification
+    for the named manager; create_candidate_externally_submitted_notification
+    for the original requester once an internal review resolves). A prior
+    `candidate_submitted` type existed here and was retired for exactly that
+    reason — every Submit it could have fired for was already covered more
+    specifically by one of those two, or by neither (a plain external Submit
+    with no pending internal review to resolve).
+
+    Safe to call unconditionally (including on a re-rejection — feedback can
+    be edited and resaved, see save_candidate_feedback's docstring): dedup is
+    the same (recipient_email, candidate_id, jobdiva_id, type) unique index
+    candidate_passed uses, so a repeat call is a no-op rather than a second
+    notification. All failures are caught and logged here, never raised back
+    into the feedback endpoint's response.
     """
     try:
         if not job_id or not candidate_id:
@@ -1086,10 +1061,10 @@ async def create_candidate_internal_review_requested_notification(
 ) -> None:
     """Notify the manager named on an internal submission that a review is
     waiting — called from save_candidate_feedback alongside (independently
-    of) the existing notify_internal_submission_to_manager email. Distinct
-    from candidate_submitted (goes to the job's OTHER recruiters, not the
-    manager, who usually isn't one) so the wording matches what's actually
-    being asked of them."""
+    of) the existing notify_internal_submission_to_manager email. The
+    manager usually isn't one of the job's other recruiters, so nothing
+    else would reach them, and this wording says what's actually being
+    asked of them rather than a generic "X was submitted for Y"."""
     try:
         if not job_id or not candidate_id or not manager_email:
             return
@@ -1113,9 +1088,9 @@ async def create_candidate_externally_submitted_notification(
     resolves in an external submission — called from save_candidate_feedback
     when this submission is external and the candidate's immediately-prior
     state shows a still-pending internal request. Without this the
-    requester's only chance at a notification is candidate_submitted (every
-    OTHER recruiter on the job), which excludes them outright if they're the
-    only recruiter on it."""
+    requester would have no notification at all for that resolution — there
+    is no generic "candidate submitted" notification to fall back on; see
+    create_candidate_rejected_notifications's docstring for why."""
     try:
         if not job_id or not candidate_id or not recipient_email:
             return

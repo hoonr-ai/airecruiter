@@ -37,7 +37,6 @@ from routers._helpers import _verify_job_access_by_id, _get_job_draft_sync
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
 from services.notifications_service import (
-    create_candidate_submitted_notifications,
     create_candidate_rejected_notifications,
     create_zero_match_notification,
     create_candidate_internal_review_requested_notification,
@@ -5920,19 +5919,21 @@ async def save_candidate_feedback(
     #      below: co-recruiters should know regardless of whether that sync
     #      succeeds. Both calls exclude the acting recruiter from the
     #      recipient list.
+    #
+    #      A Submit is never generically "candidate_submitted" — it's
+    #      always either internal or external, and each already has its own
+    #      specific notification below (the manager on internal; the
+    #      original requester on an external that resolves one). The
+    #      generic candidate_submitted type/UI row has been retired; no
+    #      notification fires here for a plain external Submit with no
+    #      pending internal review to resolve.
     if request.feedback_type == "Submit":
-        background_tasks.add_task(
-            create_candidate_submitted_notifications,
-            job_id=str(app_job_ref or job_id_or_ref),
-            candidate_id=jd_candidate_id,
-            submitter_email=user.email,
-        )
         if submission_type == "internal":
-            # Distinct from the generic candidate_submitted above: the
-            # manager named here usually isn't one of the job's recruiters,
-            # so they'd never be in that notification's recipient list —
-            # and even if they were, its wording doesn't say "you're the
-            # one being asked to review this."
+            # The manager named here usually isn't one of the job's
+            # recruiters, so a generic "every other recruiter" notification
+            # would never reach them anyway — and even if it did, its
+            # wording wouldn't say "you're the one being asked to review
+            # this."
             background_tasks.add_task(
                 create_candidate_internal_review_requested_notification,
                 job_id=str(app_job_ref or job_id_or_ref),

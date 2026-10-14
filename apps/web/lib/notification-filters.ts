@@ -18,9 +18,12 @@ export const NOTIFICATION_FILTERS: { value: NotificationFilter; label: string }[
 // services/notifications_service.py's module docstring): candidate_id is
 // NULL for job-level types (pair_launched, pair_inactive,
 // recruiter_assigned, zero_match_warning) and set for candidate-level ones
-// (candidate_passed, candidate_submitted, candidate_rejected). Filtering on
-// that field instead of a hardcoded type list means a future type is
-// automatically sorted into the right tab with no change here.
+// (candidate_passed, candidate_rejected, candidate_internal_review_requested,
+// candidate_externally_submitted — and any legacy candidate_submitted rows
+// still in a recipient's feed from before that type was retired). Filtering
+// on that field instead of a hardcoded type list means a future type (or a
+// retired one) is automatically sorted into the right tab with no change
+// here.
 export function matchesNotificationFilter(
   item: Pick<NotificationItem, "read_at" | "candidate_id">,
   filter: NotificationFilter
