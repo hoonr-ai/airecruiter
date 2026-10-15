@@ -510,6 +510,7 @@ async def launch_pass(ctx: StageContext, ids: List[str]) -> None:
     async with contextlib.aclosing(ctx.fx.run_launch(
         request, launch_id=launch_id, run_id=ctx.sid, fire_side_effects=False, should_stop=ctx.should_stop,
         provision_inline=False, claimed_session_id=ctx.sid, bulk_id_for=record_bulk,
+        recruiter_email=(ctx.session.get("requested_by") or None),
     )) as events:
         async for evt in events:
             kind = evt.get("type")

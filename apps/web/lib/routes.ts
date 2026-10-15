@@ -7,3 +7,8 @@ export const SOURCE_AND_LAUNCH_STEP = 5;
 export function sourceAndLaunchHref(jobRef: string | number): string {
   return `/jobs/new?jobId=${encodeURIComponent(String(jobRef))}&mode=source&step=${SOURCE_AND_LAUNCH_STEP}`;
 }
+
+/** A job's rankings page: where a finished launch's results live. */
+export function jobRankingsHref(jobRef: string | number): string {
+  return `/jobs/${encodeURIComponent(String(jobRef))}/rankings`;
+}

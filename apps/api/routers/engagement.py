@@ -3516,6 +3516,7 @@ async def _send_bulk_interview_core(
     claimed_session_id: Optional[str] = None,
     provision_inline: bool = True,
     bulk_id_for: Optional[Callable[..., Any]] = None,
+    recruiter_email: Optional[str] = None,
 ):
     """
     Send the (potentially edited) interview payload to the PAIR bulk-interviews API.
@@ -4069,6 +4070,10 @@ async def _send_bulk_interview_core(
                         client_bulk_id = str(_forced_bulk_id)
                 if isinstance(payload_obj, dict):
                     payload_obj["bulk_id"] = client_bulk_id
+                    # Server-resolved recruiter only (never a request field,
+                    # so /engage/send-bulk-interview callers cannot set it).
+                    if recruiter_email:
+                        payload_obj["recruiter_email"] = recruiter_email
                 logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
                 async with _trace_span("pairbot_post", batch_idx=batch_idx):
@@ -5365,6 +5370,7 @@ async def _run_one_batch(
     claimed_session_id: Optional[str] = None,
     provision_inline: bool = True,
     bulk_id_for: Optional[Callable[..., Any]] = None,
+    recruiter_email: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one launch batch and RETURN its outcome; never mutates shared
     launch state (only the consumer aggregates). Keys:
@@ -5498,6 +5504,8 @@ async def _run_one_batch(
             session_kwargs["provision_inline"] = False
         if bulk_id_for is not None:
             session_kwargs["bulk_id_for"] = bulk_id_for
+        if recruiter_email:
+            session_kwargs["recruiter_email"] = recruiter_email
         if launch_id is not None or bulk_id_for is not None:
             res = await _send_bulk_interview_core(
                 send_req, precomputed_signals=precomputed_signals,
@@ -5608,6 +5616,7 @@ async def run_launch(
     provision_inline: bool = True,
     claimed_session_id: Optional[str] = None,
     bulk_id_for: Optional[Callable[..., Any]] = None,
+    recruiter_email: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """The launch pipeline behind /engage/launch, as an async generator of
     event dicts: ``start`` → ``batch``* (completion order) → optional
@@ -5742,6 +5751,8 @@ async def run_launch(
         batch_kwargs["provision_inline"] = False
     if bulk_id_for is not None:
         batch_kwargs["bulk_id_for"] = bulk_id_for
+    if recruiter_email:
+        batch_kwargs["recruiter_email"] = recruiter_email
 
     try:
         yield {**start_evt, "_internal": {"batches": [list(b) for b in batches]}}
@@ -5903,9 +5914,23 @@ async def launch_bulk_interviews(request: LaunchRequest, http_request: Request =
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json.dumps(obj)}\n\n"
 
+    # The recruiter on the Pairbot payload comes from the auth token only.
+    requested_by: Optional[str] = None
+    if http_request is not None:
+        try:
+            _user = await asyncio.to_thread(get_current_user, http_request, None)
+            requested_by = (_user.email or "").strip().lower() or None
+        except HTTPException as exc:
+            logger.warning(
+                "launch: no authenticated requester (status=%s); Pairbot payload will omit recruiter_email",
+                exc.status_code,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("launch: could not resolve requester: %s", exc)
+
     async def _work(launch_id: Optional[str] = None, run_id: Optional[str] = None):
         async with contextlib.aclosing(
-            run_launch(request, launch_id=launch_id, run_id=run_id)
+            run_launch(request, launch_id=launch_id, run_id=run_id, recruiter_email=requested_by)
         ) as events:
             async for evt in events:
                 yield _sse(_strip_internal(evt))
@@ -5914,15 +5939,6 @@ async def launch_bulk_interviews(request: LaunchRequest, http_request: Request =
     if request.async_launch and _launch_flag("LAUNCH_ASYNC", False):
         launch_id = str(uuid.uuid4())
         run_id = _trace_new_run(request.job_id)
-        requested_by: Optional[str] = None
-        if http_request is not None:
-            try:
-                _user = await asyncio.to_thread(get_current_user, http_request, None)
-                requested_by = (_user.email or "").strip().lower() or None
-            except HTTPException:
-                requested_by = None
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("async launch: could not resolve requester: %s", exc)
         try:
             # Lazy safety net for runs whose worker died without a final write.
             await asyncio.to_thread(_sweep_stale_launch_runs)
