@@ -1336,6 +1336,118 @@ def test_register_subscriber_ignores_a_second_tabs_since_id_when_ahead_of_shared
         _clear_subscriber_state(notif, email)
 
 
+def test_register_subscriber_reorders_backfill_ahead_of_a_concurrent_live_push(monkeypatch):
+    """Regression for PR #822 review: the connecting queue is added to
+    _subscribers before its gap fetch completes, so a broadcaster tick
+    mid-fetch can land a newer row in it first. The older backfill must
+    still end up ahead of that row for a client treating ids as a
+    monotonic, in-order stream."""
+    import routers.notifications as notif
+
+    email = "reorder-race@x.com"
+    _clear_subscriber_state(notif, email)
+    monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(notif, "_max_id_sync", Mock(return_value=100))
+
+    try:
+        async def scenario():
+            queue1 = asyncio.Queue()
+            await notif._register_subscriber(email, queue1)
+            assert notif._last_seen_id[email] == 100
+
+            queue2 = asyncio.Queue()
+
+            def fake_fetch_gap(email_arg, since_id, up_to_id):
+                # Stands in for the broadcaster pushing a newer live row into
+                # queue2 while this (threaded) fetch is "in flight".
+                queue2.put_nowait({"id": 999})
+                return [_fake_notification_row(51), _fake_notification_row(52)]
+
+            monkeypatch.setattr(notif, "_fetch_gap_sync", Mock(side_effect=fake_fetch_gap))
+
+            await notif._register_subscriber(email, queue2, since_id=50)
+
+            ordered_ids = []
+            while not queue2.empty():
+                ordered_ids.append(queue2.get_nowait()["id"])
+            assert ordered_ids == [51, 52, 999]
+
+            await notif._unregister_subscriber(email, queue1)
+            await notif._unregister_subscriber(email, queue2)
+
+        asyncio.run(scenario())
+    finally:
+        _clear_subscriber_state(notif, email)
+
+
+def test_register_subscriber_backfill_handles_a_full_queue_without_crashing(monkeypatch, caplog):
+    import routers.notifications as notif
+
+    email = "backfill-queue-full@x.com"
+    _clear_subscriber_state(notif, email)
+    monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(notif, "_max_id_sync", Mock(return_value=100))
+    monkeypatch.setattr(
+        notif, "_fetch_gap_sync",
+        Mock(return_value=[_fake_notification_row(51), _fake_notification_row(52)]),
+    )
+
+    try:
+        async def scenario():
+            queue1 = asyncio.Queue()
+            await notif._register_subscriber(email, queue1)
+
+            queue2 = asyncio.Queue(maxsize=1)  # too small for both backfilled rows
+            with caplog.at_level("WARNING", logger="routers.notifications"):
+                await notif._register_subscriber(email, queue2, since_id=50)  # must not raise
+
+            assert any("notifications_stream_queue_full_on_backfill" in r.message for r in caplog.records)
+
+            await notif._unregister_subscriber(email, queue1)
+            await notif._unregister_subscriber(email, queue2)
+
+        asyncio.run(scenario())
+    finally:
+        _clear_subscriber_state(notif, email)
+
+
+def test_fetch_gap_sync_pages_through_multiple_batches(monkeypatch):
+    """Regression for PR #822 review: a single bounded query used to drop
+    the remainder of a large gap silently. Paging combines every batch
+    until the real result is exhausted."""
+    import routers.notifications as notif
+
+    monkeypatch.setattr(notif, "_GAP_BACKFILL_PAGE_SIZE", 2)
+    monkeypatch.setattr(notif, "_GAP_BACKFILL_MAX_ROWS", 100)
+    page1 = [_fake_notification_row(1), _fake_notification_row(2)]
+    page2 = [_fake_notification_row(3)]
+    cur = FakeCursor(fetchall_results=[page1, page2, []])
+    conn = FakeConn(cur)
+    monkeypatch.setattr(notif, "get_db_connection", lambda: conn)
+
+    rows = notif._fetch_gap_sync("a@x.com", 0, 10)
+
+    assert [r["id"] for r in rows] == [1, 2, 3]
+
+
+def test_fetch_gap_sync_caps_and_warns_when_the_gap_exceeds_the_limit(monkeypatch, caplog):
+    import routers.notifications as notif
+
+    monkeypatch.setattr(notif, "_GAP_BACKFILL_PAGE_SIZE", 2)
+    monkeypatch.setattr(notif, "_GAP_BACKFILL_MAX_ROWS", 3)
+    page1 = [_fake_notification_row(1), _fake_notification_row(2)]
+    page2 = [_fake_notification_row(3), _fake_notification_row(4)]
+    cur = FakeCursor(fetchall_results=[page1, page2])
+    conn = FakeConn(cur)
+    monkeypatch.setattr(notif, "get_db_connection", lambda: conn)
+
+    with caplog.at_level("WARNING", logger="routers.notifications"):
+        rows = notif._fetch_gap_sync("a@x.com", 0, 100)
+
+    assert [r["id"] for r in rows] == [1, 2, 3, 4]
+    assert any("notifications_stream_gap_backfill_truncated" in r.message for r in caplog.records)
+
+
 # --- clear: scoped delete ----------------------------------------------------
 
 def test_clear_notifications_soft_deletes_scoped_to_caller_email(monkeypatch):

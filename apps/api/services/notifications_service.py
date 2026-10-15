@@ -462,11 +462,11 @@ RECONCILIATION_MAX_ROWS = 1000
 
 # Every uvicorn worker schedules both reconciliation jobs, so (like
 # _DAILY_DIGEST_LOCK_KEY above) each takes its own cross-worker advisory lock
-# first — PR #821 review: correctness never depended on this (dedup is the
-# table's own unique index via ON CONFLICT DO NOTHING, unlike the digest's
-# unindexed check-then-insert), but every worker otherwise re-runs the same
-# lookback scan on every tick for no benefit. 728198/728199 are the next free
-# keys after _DAILY_DIGEST_LOCK_KEY (728197) in that registry.
+# first. Correctness never depends on this — dedup is the table's own unique
+# index via ON CONFLICT DO NOTHING, unlike the digest's unindexed
+# check-then-insert — but every worker otherwise re-runs the same lookback
+# scan on every tick for no benefit. 728198/728199 are the next free keys
+# after _DAILY_DIGEST_LOCK_KEY (728197) in that registry.
 _PASS_RECONCILIATION_LOCK_KEY = 728198
 _REJECTION_RECONCILIATION_LOCK_KEY = 728199
 
@@ -550,7 +550,7 @@ async def reconcile_missed_pass_notifications() -> None:
     """
     lock = AdvisoryLock(_PASS_RECONCILIATION_LOCK_KEY, "PassReconciliation")
     if not await lock.try_acquire():
-        logger.info("PassReconciliation: another worker is running this cycle; skipping.")
+        logger.debug("PassReconciliation: another worker is running this cycle; skipping.")
         return
     try:
         await asyncio.to_thread(_reconcile_missed_pass_notifications_sync)
@@ -674,7 +674,7 @@ async def reconcile_missed_rejection_notifications() -> None:
     """
     lock = AdvisoryLock(_REJECTION_RECONCILIATION_LOCK_KEY, "RejectionReconciliation")
     if not await lock.try_acquire():
-        logger.info("RejectionReconciliation: another worker is running this cycle; skipping.")
+        logger.debug("RejectionReconciliation: another worker is running this cycle; skipping.")
         return
     try:
         await asyncio.to_thread(_reconcile_missed_rejection_notifications_sync)
@@ -1159,7 +1159,7 @@ async def create_daily_digest_notifications() -> None:
     """
     lock = AdvisoryLock(_DAILY_DIGEST_LOCK_KEY, "DailyDigest")
     if not await lock.try_acquire():
-        logger.info("DailyDigest: another worker is running this cycle; skipping.")
+        logger.debug("DailyDigest: another worker is running this cycle; skipping.")
         return
     try:
         await asyncio.to_thread(_create_daily_digest_notifications_sync)

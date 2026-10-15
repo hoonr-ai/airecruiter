@@ -705,19 +705,29 @@ async def api_health():
             logger.warning(f"api_health: redis check failed: {type(exc).__name__}: {exc}")
             checks["redis"] = "error"
 
-    # PR #821 review: a failed notifications schema init used to be visible
-    # only as a log line — the app boots fine with no table/indexes, and
-    # every insert then fails silently into its own try/except. Surfacing it
-    # here means a health-check monitor actually catches the next one.
+    # A failed notifications schema init used to be visible only as a log
+    # line — the app boots fine with no table/indexes, and every insert then
+    # fails silently into its own try/except. Surfacing it here means a
+    # health-check monitor can actually catch it — though only one watching
+    # the RESPONSE BODY, not just the status code: this reports "degraded"
+    # with a 200, same as a Redis outage, not a 5xx. _schema_init_ok is also
+    # never retried after a transient boot failure; it stays "error" until
+    # the process restarts, since init only ever runs once at startup.
+    #
     # notifications_router (module-level, see _safe_import above) is None if
-    # that router itself failed to import — status is "pending" either way,
-    # same as "the init step hasn't run/reported yet".
-    schema_ok = notifications_router.notifications_schema_status() if notifications_router else None
-    checks["notifications_schema"] = "pending" if schema_ok is None else ("ok" if schema_ok else "error")
+    # that router itself failed to import — reported as "unavailable" (there
+    # is no init function to have even attempted), distinct from "pending"
+    # (the router imported fine, but init_notifications_schema_sync hasn't
+    # run/reported yet).
+    if notifications_router is None:
+        checks["notifications_schema"] = "unavailable"
+    else:
+        schema_ok = notifications_router.notifications_schema_status()
+        checks["notifications_schema"] = "pending" if schema_ok is None else ("ok" if schema_ok else "error")
 
     if checks["db"] != "ok":
         status, code = "down", 503
-    elif checks["redis"] != "ok" or checks["notifications_schema"] == "error":
+    elif checks["redis"] != "ok" or checks["notifications_schema"] in ("error", "unavailable"):
         status, code = "degraded", 200
     else:
         status, code = "ok", 200

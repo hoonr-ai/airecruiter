@@ -72,8 +72,8 @@ def test_db_down_is_503(monkeypatch):
 
 
 def test_notifications_schema_failure_is_degraded_not_failing(monkeypatch):
-    """PR #821 review: a failed notifications schema init must be visible on
-    this endpoint instead of only a log line nobody watches."""
+    """A failed notifications schema init must be visible on this endpoint
+    instead of only a log line nobody watches."""
     monkeypatch.setattr(main, "get_db_connection", lambda: _Conn())
     monkeypatch.setattr(main.jobdiva_rate_limit, "_get_redis", lambda: _Redis())
     monkeypatch.setattr(main, "notifications_router", _FakeNotificationsRouter(False))
@@ -87,6 +87,17 @@ def test_notifications_schema_pending_before_init_has_run(monkeypatch):
     monkeypatch.setattr(main, "notifications_router", _FakeNotificationsRouter(None))
     code, body = _call()
     assert code == 200 and body["status"] == "ok" and body["checks"]["notifications_schema"] == "pending"
+
+
+def test_notifications_schema_unavailable_when_router_failed_to_import(monkeypatch):
+    """Distinct from "pending": the router itself never imported, so there's
+    no init function to have even attempted — this must also degrade
+    overall status, same as a schema-init failure would."""
+    monkeypatch.setattr(main, "get_db_connection", lambda: _Conn())
+    monkeypatch.setattr(main.jobdiva_rate_limit, "_get_redis", lambda: _Redis())
+    monkeypatch.setattr(main, "notifications_router", None)
+    code, body = _call()
+    assert code == 200 and body["status"] == "degraded" and body["checks"]["notifications_schema"] == "unavailable"
 
 
 def test_health_route_is_registered():
