@@ -3487,7 +3487,10 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     #    ~$0.14-0.21 a run). User 2026-09-29: "if we are not able to get it then
     #    we do deep search ... get the contact details at the end", "add fiber
     #    in the deep search".
-    exa_fields = _to_look_up() if contact_enrichment.lookup_provider_enabled("exa") else ()
+    # Final misses come off only after the reachability rule below, which is
+    # about the contact the candidate holds: one with neither an email nor a
+    # phone is not reachable just because a search found no phone lately.
+    exa_fields = _missing_contact() if contact_enrichment.lookup_provider_enabled("exa") else ()
     if (
         apollo_phone_state == "timeout"
         and "phone" in exa_fields
@@ -3512,6 +3515,7 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
             candidate_id, ",".join(exa_fields),
         )
         exa_fields = ()
+    exa_fields = tuple(f for f in exa_fields if f not in final_missed)
     # A recent normal-run miss goes straight to the deep search (final misses
     # are not in exa_fields at all).
     deep_first: Tuple[str, ...] = ()
@@ -3548,6 +3552,7 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     # 3b. Exa deep search for what the normal run did not find.
     deep_fields: Tuple[str, ...] = ()
     deep_answered = False
+    deep_still_going: Tuple[str, ...] = ()
     exa_deep_contributed = False
     exa_deep_outcome = "-"
     if EXA_CONTACT_ENRICH_ENABLED and deep_follows and not exa_stop:
@@ -3561,6 +3566,8 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         deep_answered = bool(_deep.get("ok"))
         # Still going after EXA_CONTACT_DEEP_TIMEOUT_S: what it finds is kept
         # for the next Launch / phone click instead of being thrown away.
+        if _deep.get("run_id"):
+            deep_still_going = deep_fields
         contact_enrichment.watch_late_exa_run(
             str(_deep.get("run_id") or ""), linkedin_url, fields=deep_fields, provider="exa_deep", **_late
         )
@@ -3656,6 +3663,10 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         contact_enrichment.rebuy_estimate_usd(tuple(final_missed_fields), "deep" if deep_possible else "normal")
         if final_missed_fields else None
     )
+    # Still missing while an Exa run for them (normal or deep) is still going.
+    in_progress_fields = [
+        f for f in _missing_contact() if f in normal_still_going or f in deep_still_going
+    ]
 
     # Remember what the providers found (not the cache's own values, which
     # would keep extending their TTL) and what a clean Exa answer lacked.
@@ -3759,16 +3770,25 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         "final_missed_fields": final_missed_fields,
         "checked_at": checked_at,
         "est_usd": est_usd,
+        "in_progress_fields": in_progress_fields,
     }
-    # A click that comes back with none of what it asked for because that is a
-    # final miss: 200 "skipped" (never an error, so a stale page still reads
-    # "No phone found"); the page offers "Searched <date>, nothing found —
-    # Search again". Launch PAIR always gets "success" (no contact found, not
-    # "not eligible").
+    # A click that comes back with none of what it asked for: 200, never an
+    # error, so a stale page still reads "No phone found". "in_progress" when
+    # an Exa run for it was still going when we stopped waiting (it is watched
+    # in the background and its answer lands in the contact cache, so the page
+    # says "check again in a few minutes" rather than inviting a re-click that
+    # buys a second run); "skipped" when it is a final miss (the page offers
+    # "Searched <date>, nothing found — Search again"). Launch PAIR always gets
+    # "success" (no contact found, not "not eligible").
     found_requested = ("phone" in requested_fields and bool(enriched_phone)) or (
         "email" in requested_fields and bool(enriched_email)
     )
-    if final_missed_fields and not is_launch and not found_requested:
+    if in_progress_fields and not is_launch and not found_requested:
+        answer.update({
+            "status": "in_progress",
+            "message": "Still being looked up: " + " and ".join(in_progress_fields) + "; check again in a few minutes",
+        })
+    elif final_missed_fields and not is_launch and not found_requested:
         answer.update({
             "status": "skipped",
             "reason": "recent_deep_miss",

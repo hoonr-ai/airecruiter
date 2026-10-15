@@ -364,11 +364,14 @@ def test_sourcing_refunds_the_caps_when_the_breaker_opens_while_queued(contact_e
     monkeypatch.setattr(contact_cache, "record", _record)
 
     class _TripsWhileQueued:
-        async def __aenter__(self):
-            await vl.EXA.trip_no_credits("NO_MORE_CREDITS")
+        released = 0
 
-        async def __aexit__(self, *exc):
-            return False
+        async def acquire(self):
+            await vl.EXA.trip_no_credits("NO_MORE_CREDITS")
+            return True
+
+        def release(self):
+            _TripsWhileQueued.released += 1
 
     monkeypatch.setattr(ce, "_exa_semaphore", _TripsWhileQueued)
     ce.reset_job_counter("job-q", include_lifetime=True)
@@ -382,6 +385,7 @@ def test_sourcing_refunds_the_caps_when_the_breaker_opens_while_queued(contact_e
     assert _Client.posts == []
     assert ce._JOB_EXA_COUNTERS.get("job-q", 0) == 0 and ce._JOB_EXA_LIFETIME["job-q"] == 7
     assert recorded and all(not kw.get("missed") for kw in recorded)
+    assert _TripsWhileQueued.released == 1                     # the slot is given back once
     ce.reset_job_counter("job-q", include_lifetime=True)
 
 

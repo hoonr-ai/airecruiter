@@ -322,3 +322,212 @@ def test_a_sourcing_breaker_skip_records_nothing_and_gives_the_slots_back(monkey
     assert asyncio.run(_sourcing_call()) == {}
     assert ce._JOB_EXA_LIFETIME.get("job-s", 0) == 0
     assert all(not r.get("missed") for r in records)
+
+
+def _queued_env(monkeypatch, bought):
+    """Sourcing with one Exa slot and a cache that holds what the runs found.
+    ``bought`` collects the URL of every run created; each run waits on
+    ``gate`` (set it to let runs finish)."""
+    store = {}
+    gate = asyncio.Event()
+
+    async def _exa(label, url, full_name="", company="", fields=ce.EXA_CONTACT_FIELDS):
+        bought.append(url)
+        await gate.wait()
+        return {"ok": True, "fields": _fields(workEmail=f"{url.rsplit('/', 1)[-1]}@acme.com")}
+
+    _sourcing_env(monkeypatch, _exa, [])
+
+    async def _cache_get(url):
+        return {**contact_cache.empty(), **store.get(url, {})}
+
+    async def _record(url, **kw):
+        if kw.get("email"):
+            store.setdefault(url, {}).update(email=kw["email"], email_provider=kw.get("email_provider", ""))
+        for f in kw.get("missed") or ():
+            if not kw.get(f):
+                store.setdefault(url, {})[f"{f}_missed"] = True
+
+    monkeypatch.setattr(contact_cache, "get", _cache_get)
+    monkeypatch.setattr(contact_cache, "record", _record)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", 1)
+    ce.reset_job_counter("job-o", include_lifetime=True)
+    return store, gate
+
+
+async def _until(predicate):
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never met")
+
+
+def _lookup(url, job="job-s"):
+    return ce.enrich_contact_for_sourcing(url, job, full_name="Jane Doe", include_exa=True, want_phone=False)
+
+
+OTHER = "https://www.linkedin.com/in/someone-else"
+
+
+def test_a_sourcing_lookup_cancelled_while_queued_for_a_slot_buys_nothing(monkeypatch):
+    bought = []
+    _store, gate = _queued_env(monkeypatch, bought)
+
+    async def _go():
+        other = asyncio.ensure_future(_lookup(OTHER, "job-o"))   # holds the only slot
+        await _until(lambda: bought == [OTHER])
+        queued = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: ce._JOB_EXA_COUNTERS.get("job-s") == 1)
+        for _ in range(5):
+            await asyncio.sleep(0)                              # parked on the semaphore
+        queued.cancel()                                         # the Step-5 stream closed
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        assert ce._JOB_EXA_COUNTERS.get("job-s", 0) == 0        # cap slots given back
+        assert ce._JOB_EXA_LIFETIME.get("job-s", 0) == 0
+        gate.set()
+        await other
+        await asyncio.gather(*list(ce._SOURCING_EXA_TASKS))
+        return ce._exa_semaphore()._value
+
+    assert asyncio.run(_go()) == 1                              # no slot leaked
+    assert bought == [OTHER]                                    # Jane was never bought
+
+
+def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch):
+    # Search 1's lookup of Jane runs (billed) and the stream closes; the
+    # re-search's lookup of Jane misses the cache, queues for the slot, and
+    # finds Jane's answer there once the first run gives the slot back.
+    bought = []
+    _store, gate = _queued_env(monkeypatch, bought)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        ce.reset_job_counter("job-s")                           # the re-search
+        second = asyncio.ensure_future(_lookup(LINKEDIN))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gate.set()
+        return await second
+
+    res = asyncio.run(_go())
+
+    assert bought == [LINKEDIN]                                 # one run, not two
+    assert res["provider_used"] == "cache" and res["workEmail"] == "jane-doe@acme.com"
+    assert ce._JOB_EXA_COUNTERS.get("job-s", 0) == 0            # the reuse cost no cap slot
+
+
+def test_a_queued_lookup_does_not_rebuy_a_miss_recorded_while_it_waited(monkeypatch):
+    bought = []
+    store, gate = _queued_env(monkeypatch, bought)
+
+    async def _go():
+        other = asyncio.ensure_future(_lookup(OTHER, "job-o"))
+        await _until(lambda: bought == [OTHER])
+        queued = asyncio.ensure_future(_lookup(LINKEDIN))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        store[LINKEDIN] = {"email_missed": True}                # another worker's run found none
+        gate.set()
+        await other
+        return await queued
+
+    assert asyncio.run(_go()) == {}
+    assert bought == [OTHER]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (PR 3a)
+# ---------------------------------------------------------------------------
+
+def test_only_when_no_contact_still_buys_the_email_of_someone_with_no_contact(monkeypatch):
+    # No email and no phone, the phone a final miss: not reachable, so the
+    # cost switch still lets Exa look for the email.
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", True)
+    chain = _Chain(cached=DEEP_MISSED_PHONE, exa={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
+
+    res = _on_demand(monkeypatch, chain, **LAUNCH)
+
+    assert chain.calls() == ["apollo", ("exa", ("email",))]
+    assert res["email"] == "jane@acme.com"
+
+
+def test_only_when_no_contact_still_skips_a_reachable_candidate(monkeypatch):
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", True)
+    chain = _Chain(cached={"email": "jane@acme.com"})
+
+    _on_demand(monkeypatch, chain, **LAUNCH)
+
+    assert chain.calls() == ["apollo"]
+
+
+def test_a_click_whose_run_is_still_going_says_so(monkeypatch):
+    monkeypatch.setattr(ce, "watch_late_exa_run", lambda *a, **kw: None)
+    still_going = {"ok": False, "message": "Exa run timed out", "run_id": "run-normal"}
+
+    chain = _Chain(exa=still_going)
+    res = _on_demand(monkeypatch, chain, fields=["phone"])     # the phone button
+    assert chain.calls() == ["apollo", ("exa", ("phone",))]    # no deep run while it may answer
+    assert res["status"] == "in_progress" and res["in_progress_fields"] == ["phone"]
+
+    # A deep run still going counts too.
+    chain = _Chain(cached={"phone_missed": True},
+                   deep={"ok": False, "message": "Exa run timed out", "run_id": "run-deep"})
+    res = _on_demand(monkeypatch, chain, fields=["phone"])
+    assert chain.calls() == ["apollo", ("exa_deep", ("phone",))]
+    assert res["status"] == "in_progress" and res["in_progress_fields"] == ["phone"]
+
+    # Launch PAIR always gets "success".
+    chain = _Chain(exa=still_going)
+    res = _on_demand(monkeypatch, chain, **LAUNCH)
+    assert res["status"] == "success" and res["in_progress_fields"] == ["email", "phone"]
+
+    # A click that got what it asked for is a success.
+    chain = _Chain(apollo={"ok": True, "fields": _fields(workEmail="jane@acme.com")}, exa=still_going)
+    res = _on_demand(monkeypatch, chain)
+    assert res["status"] == "success" and res["email"] == "jane@acme.com"
+    assert res["in_progress_fields"] == ["phone"]
+
+
+def test_a_late_sourcing_result_never_logs_the_linkedin_url(monkeypatch, caplog):
+    import logging
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "run-7", "status": "completed",
+                    "output": {"structured": {"contact": {"email": "jane@acme.com"}}}}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            return _Resp()
+
+    async def _record(url, **kw):
+        pass
+
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(ce, "_EXA_LATE_POLL_S", 0)
+    monkeypatch.setattr(ce, "EXA_LATE_RESULT_WAIT_S", 60)
+    monkeypatch.setattr(contact_cache, "record", _record)
+
+    with caplog.at_level(logging.DEBUG, logger=ce.logger.name):
+        got = asyncio.run(ce.keep_late_exa_result("run-7", LINKEDIN, fields=("email",), provider="exa"))
+
+    assert got["email"] == "jane@acme.com"
+    assert any("run-7" in r.getMessage() for r in caplog.records)
+    assert not any("linkedin" in r.getMessage().lower() for r in caplog.records)

@@ -163,11 +163,13 @@ export function finalMissNotice(
 }
 
 /**
- * Whether the answer is `status: "in_progress"`: another lookup of the same
- * person (another tab, Launch PAIR) is already buying this contact, so nothing
- * was bought twice and nothing is known yet; its result lands in the contact
- * cache, so look again in a few minutes. (Sent once lookups of one person are
- * single-flight across workers; until then never.)
+ * Whether the answer is `status: "in_progress"`: a click got none of what it
+ * asked for because an Exa run for it (`in_progress_fields`) was still going
+ * when the server stopped waiting. The run is watched in the background and
+ * its result lands in the contact cache, so look again in a few minutes
+ * rather than re-clicking, which would buy a second run. (Once lookups of one
+ * person are single-flight across workers, also sent when another lookup of
+ * the same person is already buying it.) Never sent to Launch PAIR.
  */
 export function inProgress(answer: unknown): boolean {
   const status = answer && typeof answer === "object" ? (answer as { status?: unknown }).status : "";
