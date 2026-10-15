@@ -570,6 +570,10 @@ def merge_best_of(dst: dict, src: dict) -> dict:
         not d_email or (is_placeholder_email_ui(d_email) and not is_placeholder_email_ui(s_email))
     ):
         dst["email"] = s_email
+        # Where an adopted email came from ("jobdiva" | "other"), carried
+        # through later merges: get_candidate_seed_email never sends one a
+        # JobDiva survivor took from a LinkedIn / Dice row as held.
+        dst["email_source"] = _or(src.get("email_source"), "jobdiva" if cand_is_jobdiva_ui(src) else "other")
 
     def bad_resume(r: Any) -> bool:
         text = _s(r)
@@ -1166,8 +1170,12 @@ def resolve_linkedin_url(c: Any) -> str:
 def get_candidate_seed_email(c: Any) -> str:
     """The email a Launch lookup is told the candidate already has: the
     TOP-LEVEL email of a JobDiva row when it is a real launch email, else ""
-    (LinkedIn / Dice / Unipile emails are extracted, so unreliable)."""
+    (LinkedIn / Dice / Unipile emails are extracted, so unreliable; so is
+    one such row's email a JobDiva row took on a merge: ``email_source``)."""
     if not cand_is_jobdiva_ui(c):
+        return ""
+    email_source = _get(c, "email_source")
+    if _truthy(email_source) and email_source != "jobdiva":
         return ""
     email = _js_trim(_s(_get(c, "email"))).lower()
     return email if is_valid_launch_email(email) else ""

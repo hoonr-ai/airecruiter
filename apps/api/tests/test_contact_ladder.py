@@ -11,7 +11,9 @@ Kipplo and ZoomInfo stay off unless listed in CONTACT_LOOKUP_PROVIDERS. These
 tests run with the production defaults; conftest lists every provider and
 turns the deep search off for the older chain tests.
 """
+import ast
 import asyncio
+import inspect
 import json
 
 import pytest
@@ -701,14 +703,29 @@ def test_holdout_buckets_are_pinned_per_person():
 
 
 def test_holdout_pct_is_parsed_guarded_and_clamped(monkeypatch):
-    for raw, want in (("", 50), ("abc", 50), ("12.5", 50), ("30", 30), (" 70 ", 70), ("150", 100), ("-5", 0)):
+    for raw, want in (("", 0), ("abc", 0), ("12.5", 0), ("30", 30), (" 70 ", 70), ("150", 100), ("-5", 0)):
         monkeypatch.setenv("EXA_DEEP_SKIP_REACHABLE_PCT", raw)
-        assert sourcing_config._env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 50) == want, raw
+        assert sourcing_config._env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0) == want, raw
     monkeypatch.delenv("EXA_DEEP_SKIP_REACHABLE_PCT")
-    assert sourcing_config._env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 50) == 50
-    for value, want in (("garbage", 50), (None, 50), (250, 100), (-1, 0), (25, 25)):
+    assert sourcing_config._env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0) == 0
+    for value, want in (("garbage", 0), (None, 0), (250, 100), (-1, 0), (25, 25)):
         monkeypatch.setattr(sourcing_config, "EXA_DEEP_SKIP_REACHABLE_PCT", value)
         assert ce.deep_skip_reachable_pct() == want, value
+
+
+def test_the_holdout_is_off_in_code_until_it_starts():
+    """0 in code (review of PR 4): the deploy must not start the holdout
+    before the email-start field exists, and CI writes no EXA_* values, so
+    the code default is what QA and PROD run. Read from the source: the
+    module's value reflects whatever .env this machine has."""
+    tree = ast.parse(inspect.getsource(sourcing_config))
+    defaults = [
+        node.value.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(getattr(t, "id", "") == "EXA_DEEP_SKIP_REACHABLE_PCT" for t in node.targets)
+    ]
+    assert defaults == [0]
 
 
 def test_skip_arm_drops_the_deep_email_run_once_a_phone_is_held(monkeypatch, holdout, events):

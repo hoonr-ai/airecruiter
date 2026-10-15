@@ -1,5 +1,5 @@
 {
   "source": "apps/web/lib/launch-rules.ts",
-  "sha256": "b476e44b437cc86b99a2c78a5ecc2641636423a8f7f9765559e017150206cba8",
+  "sha256": "b42607f9b87165ffd0ce55ec10f64cd56b673b4bb0d90f53af97ff8552d10ad7",
   "regenerate": "cd apps/web && LAUNCH_RULES_WRITE_FIXTURES=1 node --experimental-strip-types --test lib/launch-rules.test.ts"
 }

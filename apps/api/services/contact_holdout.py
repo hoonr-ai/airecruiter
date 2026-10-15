@@ -31,6 +31,7 @@ lookup goes on as decided.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -110,6 +111,13 @@ def _run_sync(sql: str, params: Dict[str, Any]) -> int:
         conn.close()
 
 
+def _slug_ref(slug: str) -> str:
+    """A log handle for the person: never the slug itself, since WARNING
+    lines reach New Relic Logs on PROD and its PII scrubber does not mask
+    slugs (same hashed-id style as RecruiterAction)."""
+    return hashlib.sha256(slug.encode("utf-8")).hexdigest()[:12]
+
+
 def _text(value: Any, limit: int = 64) -> Optional[str]:
     text = str(value or "").strip()[:limit]
     return text or None
@@ -140,7 +148,7 @@ async def record_decision(
     try:
         return await asyncio.to_thread(_run_sync, DECISION_SQL, params) > 0
     except Exception as e:
-        logger.warning("contact_holdout: decision not recorded for %s: %s", slug, e)
+        logger.warning("contact_holdout: decision not recorded for person %s: %s", _slug_ref(slug), type(e).__name__)
         return None
 
 
@@ -153,4 +161,6 @@ async def record_deep_outcome(linkedin_url: Any, outcome: str) -> None:
     try:
         await asyncio.to_thread(_run_sync, DEEP_OUTCOME_SQL, {"slug": slug, "outcome": outcome})
     except Exception as e:
-        logger.warning("contact_holdout: deep outcome not recorded for %s: %s", slug, e)
+        logger.warning(
+            "contact_holdout: deep outcome not recorded for person %s: %s", _slug_ref(slug), type(e).__name__,
+        )

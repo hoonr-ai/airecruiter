@@ -265,6 +265,23 @@ test("page.tsx runSearchStream and applyStreamEvent handle the same events", () 
   }
 });
 
+// A JobDiva row with an Auto_* (or no) email takes a LinkedIn row's extracted
+// email on a merge: Launch still looks the email up, and a found one replaces it.
+test("a merged JobDiva row never seeds another source's email", () => {
+  const li = "https://www.linkedin.com/in/jane-doe";
+  const [jd] = rules.deduplicateCandidatesUI([
+    { candidate_id: "jd", source: "JobDiva-TalentSearch", email: "Auto_77@jobdiva.com", profile_url: li },
+    { candidate_id: "li", source: "LinkedIn-Exa", email: "jane.extracted@acme.com", profile_url: li },
+  ]);
+  assert.equal(jd.email, "jane.extracted@acme.com");
+  assert.equal(rules.getCandidateSeedEmail(jd), "");
+  assert.equal(rules.buildEnrichRequest(jd, "jd", li, "26-1").email, undefined);
+  const found = { status: "success", email: "jane@found.test", phone: "+15125550100" };
+  assert.deepStrictEqual(rules.interpretEnrichAnswer(found, true, rules.getCandidateSeedEmail(jd)).override, {
+    phone: "+15125550100", email: "jane@found.test",
+  });
+});
+
 // Last: the fixtures were generated from THIS launch-rules.ts.
 test("fixtures are stamped with this launch-rules.ts", () => {
   const sha256 = rulesSha256();

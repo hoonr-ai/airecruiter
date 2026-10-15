@@ -147,6 +147,32 @@
         "full_name": "Sam Lee",
         "company_name": "Initech"
       }
+    },
+    {
+      "name": "JobDiva row with a LinkedIn email from a merge: no email seed",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-TalentSearch",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn-Exa"
+          ],
+          "email": "jane.extracted@acme.com",
+          "email_source": "other",
+          "name": "Jane Doe"
+        },
+        "candidateId": "jd",
+        "linkedinUrl": "https://www.linkedin.com/in/jane-doe",
+        "jobdivaId": "26-1"
+      },
+      "expected": {
+        "candidate_id": "jd",
+        "jobdiva_id": "26-1",
+        "source": "JobDiva-TalentSearch",
+        "linkedin_url": "https://www.linkedin.com/in/jane-doe",
+        "trigger": "launch",
+        "full_name": "Jane Doe"
+      }
     }
   ]
 }

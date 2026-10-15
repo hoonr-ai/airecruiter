@@ -125,7 +125,9 @@ def test_nothing_is_logged_without_a_slug_or_an_arm(pgs):
 
 def test_a_database_problem_never_fails_the_lookup(monkeypatch, caplog):
     def _down():
-        raise RuntimeError("db down")
+        # A driver error can quote the row it failed on (DETAIL: Failing row
+        # contains ...): only its type is logged.
+        raise RuntimeError("db down: Failing row contains (jane-doe, skip, 50)")
 
     monkeypatch.setattr(contact_holdout, "_connect", _down)
     monkeypatch.setattr(contact_holdout, "_table_ready", False)
@@ -137,4 +139,10 @@ def test_a_database_problem_never_fails_the_lookup(monkeypatch, caplog):
 
     with caplog.at_level(logging.WARNING, logger="services.contact_holdout"):
         assert asyncio.run(_go()) is None
-    assert sum("contact_holdout" in r.getMessage() for r in caplog.records) == 2
+    messages = [r.getMessage() for r in caplog.records if "contact_holdout" in r.getMessage()]
+    assert len(messages) == 2
+    # WARNING lines reach New Relic Logs on PROD, whose scrubber does not
+    # mask slugs: the person is a hash of the slug, the error only its type.
+    ref = contact_holdout._slug_ref("jane-doe")
+    assert len(ref) == 12 and all(f"person {ref}: RuntimeError" in m for m in messages)
+    assert not any("jane" in m.lower() for m in messages)

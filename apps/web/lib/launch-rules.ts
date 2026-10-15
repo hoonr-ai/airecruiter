@@ -285,6 +285,11 @@ export const deduplicateCandidatesUI = (candidatesList: any[]) => {
     const sEmail = String(src.email || "");
     if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmailUI(dEmail) && !isPlaceholderEmailUI(sEmail)))) {
       dst.email = sEmail;
+      // Where an adopted email came from ("jobdiva" | "other"), carried
+      // through later merges: a JobDiva survivor with an empty or Auto_*
+      // email takes a LinkedIn / Dice row's extracted one, which
+      // getCandidateSeedEmail must not send as held.
+      dst.email_source = src.email_source || (candIsJobDivaUI(src) ? "jobdiva" : "other");
     }
     const badResume = (r: any) => { const s = String(r || ""); return !s.trim() || s.includes("Resume content unavailable"); };
     const dR = String(dst.resume_text || "");
@@ -781,9 +786,11 @@ export function resolveLinkedInUrl(c: any): string {
 // lookup then buys only the phone, and the candidate keeps their own address.
 // Emails on LinkedIn / Dice / Unipile rows are regex- or LLM-extracted
 // (unreliable: apps/api/services/contact_cache.py), and ones a provider found
-// are reused through the contact cache anyway.
+// are reused through the contact cache anyway. That holds for one such row's
+// email a JobDiva row took on a merge too (email_source, deduplicateCandidatesUI).
 export function getCandidateSeedEmail(c: any): string {
   if (!candIsJobDivaUI(c)) return "";
+  if (c.email_source && c.email_source !== "jobdiva") return "";
   const email = String(c?.email || "").trim().toLowerCase();
   return isValidLaunchEmail(email) ? email : "";
 }

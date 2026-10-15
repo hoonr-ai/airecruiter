@@ -106,10 +106,10 @@ def _contact_chain_with_every_provider(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_deep_skip_holdout(monkeypatch):
-    """The Launch deep-email holdout (EXA_DEEP_SKIP_REACHABLE_PCT, default 50)
-    would put half the test slugs in its skip arm, and its decision log is a
-    table: off here, and its writes are no-ops. tests/test_contact_ladder.py
-    turns it on."""
+    """The Launch deep-email holdout (EXA_DEEP_SKIP_REACHABLE_PCT, 0 in code
+    until it starts; a local .env may set it) would put test slugs in its
+    skip arm, and its decision log is a table: off here, and its writes are
+    no-ops. tests/test_contact_ladder.py turns it on."""
     from core import sourcing_config
     from services import contact_holdout
 

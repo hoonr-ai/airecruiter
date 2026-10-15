@@ -93,6 +93,43 @@
       "expected": ""
     },
     {
+      "name": "JobDiva row holding another source's email from a merge",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-TalentSearch",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn-Exa"
+          ],
+          "email": "jane.extracted@acme.com",
+          "email_source": "other"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva row holding another JobDiva row's email from a merge",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "jane@acme.com",
+          "email_source": "jobdiva"
+        }
+      },
+      "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva row, email_source not a string",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "jane@acme.com",
+          "email_source": 1
+        }
+      },
+      "expected": ""
+    },
+    {
       "name": "Dice row",
       "input": {
         "candidate": {

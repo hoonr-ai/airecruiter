@@ -438,3 +438,27 @@ def test_selection_reasons_and_no_floor_on_python_values():
         pool, launched_keys=set(), launched_ids=set(), limit=10, min_score=None,
     )
     assert quick["ids"] == ["a", "c", "b", "d"]
+
+
+def test_a_merged_jobdiva_row_never_seeds_another_sources_email():
+    """Review of PR 4: a JobDiva row with an Auto_* (or no) email takes a
+    LinkedIn row's extracted email on a merge; Launch must still look the
+    email up (no seed), and a found one replaces it, as before seeds."""
+    li = "https://www.linkedin.com/in/jane-doe"
+    [jd] = rules.deduplicate_candidates_ui([
+        {"candidate_id": "jd", "source": "JobDiva-TalentSearch", "email": "Auto_77@jobdiva.com", "profile_url": li},
+        {"candidate_id": "li", "source": "LinkedIn-Exa", "email": "jane.extracted@acme.com", "profile_url": li},
+    ])
+    assert jd["candidate_id"] == "jd" and jd["email"] == "jane.extracted@acme.com"
+    assert rules.get_candidate_seed_email(jd) == ""
+    assert "email" not in rules.build_enrich_request(jd, "jd", li, "26-1")
+    found = {"status": "success", "email": "jane@found.test", "phone": "+15125550100"}
+    assert rules.interpret_enrich_answer(found, True, rules.get_candidate_seed_email(jd))["override"] == {
+        "phone": "+15125550100", "email": "jane@found.test",
+    }
+    # The JobDiva row's own email is still the seed.
+    [own] = rules.deduplicate_candidates_ui([
+        {"candidate_id": "jd", "source": "JobDiva-TalentSearch", "email": "jane@acme.com", "profile_url": li},
+        {"candidate_id": "li", "source": "LinkedIn-Exa", "email": "other@acme.com", "profile_url": li},
+    ])
+    assert rules.get_candidate_seed_email(own) == "jane@acme.com"

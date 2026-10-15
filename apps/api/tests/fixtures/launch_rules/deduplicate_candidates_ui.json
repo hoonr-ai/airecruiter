@@ -357,7 +357,8 @@
           "sources": [
             "JobDiva-Applicants",
             "LinkedIn"
-          ]
+          ],
+          "email_source": "other"
         }
       ]
     },
@@ -500,6 +501,110 @@
             "Exa",
             "Dice"
           ]
+        }
+      ]
+    },
+    {
+      "name": "a JobDiva placeholder takes a LinkedIn email: where it came from is kept",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "jd",
+            "source": "JobDiva-TalentSearch",
+            "email": "Auto_77@jobdiva.com",
+            "profile_url": "https://www.linkedin.com/in/jane-doe"
+          },
+          {
+            "candidate_id": "li",
+            "source": "LinkedIn-Exa",
+            "email": "jane.extracted@acme.com",
+            "profile_url": "https://www.linkedin.com/in/jane-doe/"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "jd",
+          "source": "JobDiva-TalentSearch",
+          "email": "jane.extracted@acme.com",
+          "profile_url": "https://www.linkedin.com/in/jane-doe",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn-Exa"
+          ],
+          "email_source": "other"
+        }
+      ]
+    },
+    {
+      "name": "an adopted email's source survives a later JobDiva survivor",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "jd-ts",
+            "source": "JobDiva-TalentSearch",
+            "email": "",
+            "profile_url": "https://www.linkedin.com/in/jane-doe"
+          },
+          {
+            "candidate_id": "li",
+            "source": "LinkedIn-Unipile",
+            "email": "jane@acme.com",
+            "profile_url": "https://www.linkedin.com/in/jane-doe"
+          },
+          {
+            "candidate_id": "jd-app",
+            "source": "JobDiva-Applicants",
+            "profile_url": "https://www.linkedin.com/in/jane-doe"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "jd-app",
+          "source": "JobDiva-Applicants",
+          "profile_url": "https://www.linkedin.com/in/jane-doe",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch",
+            "LinkedIn-Unipile"
+          ],
+          "email": "jane@acme.com",
+          "email_source": "other"
+        }
+      ]
+    },
+    {
+      "name": "an email taken from another JobDiva row is a JobDiva email",
+      "input": {
+        "candidates": [
+          {
+            "candidate_id": "jd-ts",
+            "source": "JobDiva-TalentSearch",
+            "email": "jane@acme.com",
+            "profile_url": "https://www.linkedin.com/in/jane-doe"
+          },
+          {
+            "candidate_id": "jd-app",
+            "jobdiva_candidate_id": "77",
+            "source": "JobDiva-Applicants",
+            "email": "Auto_77@jobdiva.com",
+            "profile_url": "https://www.linkedin.com/in/jane-doe"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "candidate_id": "jd-app",
+          "jobdiva_candidate_id": "77",
+          "source": "JobDiva-Applicants",
+          "email": "jane@acme.com",
+          "profile_url": "https://www.linkedin.com/in/jane-doe",
+          "sources": [
+            "JobDiva-Applicants",
+            "JobDiva-TalentSearch"
+          ],
+          "email_source": "jobdiva"
         }
       ]
     },
@@ -984,7 +1089,8 @@
             "JobDiva-TalentSearch",
             "Dice"
           ],
-          "client_conflict": true
+          "client_conflict": true,
+          "email_source": "other"
         },
         {
           "candidate_id": "r6",
@@ -1715,6 +1821,7 @@
             "LinkedIn"
           ],
           "email": "a@x.com",
+          "email_source": "other",
           "title": "Engineer",
           "no_contact": true
         }
@@ -2107,7 +2214,8 @@
           "sources": [
             "JobDiva-Applicants"
           ],
-          "email": "auto_1@jobdiva.com"
+          "email": "auto_1@jobdiva.com",
+          "email_source": "other"
         }
       ]
     },
@@ -2338,7 +2446,8 @@
           "title": "Engineer",
           "sources": [
             "JobDiva-Applicants"
-          ]
+          ],
+          "email_source": "other"
         }
       ]
     },
@@ -3673,7 +3782,8 @@
           "title": "Engineer",
           "client_conflict": true,
           "no_contact": true,
-          "email": "auto_1@jobdiva.com"
+          "email": "auto_1@jobdiva.com",
+          "email_source": "other"
         }
       ]
     },

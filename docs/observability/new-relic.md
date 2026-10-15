@@ -138,7 +138,7 @@ echo VENDOR_EXA_NO_CREDITS_TTL_S=0 >> ~/codebase/airecruiter/apps/api/.env    # 
 echo EXA_SEARCH_CACHE_TTL_S=0 >> ~/codebase/airecruiter/apps/api/.env         # Pass A / Dice search cache off (default 43200 s)
 echo EXA_PEOPLE_PER_QUERY_FACTOR=0 >> ~/codebase/airecruiter/apps/api/.env    # each Pass A query buys the full 50 again (default 2.0)
 echo CONTACT_LOOKUP_SINGLE_FLIGHT=false >> ~/codebase/airecruiter/apps/api/.env  # no per-person lease, no orphan sweep (read per call)
-echo EXA_DEEP_SKIP_REACHABLE_PCT=0 >> ~/codebase/airecruiter/apps/api/.env       # Launch deep-email holdout off: everyone keeps the run (default 50)
+echo EXA_DEEP_SKIP_REACHABLE_PCT=0 >> ~/codebase/airecruiter/apps/api/.env       # Launch deep-email holdout off: everyone keeps the run (the code default until it starts)
 echo SOURCING_DEFER_PAID_CONTACT_ENABLED=false >> ~/codebase/airecruiter/apps/api/.env  # Source & Launch searches buy Exa emails again
 sudo systemctl restart airecruiter-api
 # After a top-up: stop new workers adopting the open breaker (each worker's local copy still runs out its

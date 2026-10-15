@@ -617,7 +617,14 @@ EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
 # are logged when it is decided (services/contact_holdout.py). 0 = off
 # (everyone keeps the run), 100 = everyone skips it. Only Launch PAIR's lookups
 # (trigger "launch"); a recruiter's click always gets the deep search. Parsed
-# at import (a bad value is 50), read through this attribute at call time.
+# at import (a bad value is 0), read through this attribute at call time.
+# 0 in code until the experiment starts (50, by a one-line change here, so the
+# deploy sets it on every VM: CI writes no EXA_* values): PAIR does not keep
+# the field that says a screen was started by email yet, without which the
+# holdout cannot be read, and a person's first exposure takes their row in
+# contact_deep_skip_holdout for good, so exposures before the window would
+# drop out of the analysis. Start it once that field is persisted (or agreed
+# with PairBot) and Exa is topped up; docs/exa-cost-optimization.md.
 def _env_pct(name: str, default: int) -> int:
     try:
         value = int((_os.getenv(name) or "").strip() or default)
@@ -626,7 +633,7 @@ def _env_pct(name: str, default: int) -> int:
     return min(100, max(0, value))
 
 
-EXA_DEEP_SKIP_REACHABLE_PCT = _env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 50)
+EXA_DEEP_SKIP_REACHABLE_PCT = _env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0)
 
 # Source & Launch PAIR's full search (the browser's footer run and every
 # relaxed run behind it) and a launch session's S1 put the sourcing-time paid

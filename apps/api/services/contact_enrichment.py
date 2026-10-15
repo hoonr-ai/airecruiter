@@ -259,14 +259,15 @@ _DEEP_SKIP_SALT = b"deep_skip_reachable:"
 
 
 def deep_skip_reachable_pct() -> int:
-    """EXA_DEEP_SKIP_REACHABLE_PCT (sourcing_config, default 50), 0-100, read
-    at call time: the share of Launch PAIR's reachable people who skip it."""
+    """EXA_DEEP_SKIP_REACHABLE_PCT (sourcing_config, 0 until the experiment
+    starts), 0-100, read at call time: the share of Launch PAIR's reachable
+    people who skip it. A bad value is 0 (off: everyone keeps the run)."""
     from core import sourcing_config as _sc
 
     try:
-        pct = int(getattr(_sc, "EXA_DEEP_SKIP_REACHABLE_PCT", 50))
+        pct = int(getattr(_sc, "EXA_DEEP_SKIP_REACHABLE_PCT", 0))
     except (TypeError, ValueError):
-        return 50
+        return 0
     return min(100, max(0, pct))
 
 
