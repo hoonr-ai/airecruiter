@@ -460,6 +460,16 @@ RECONCILIATION_LOOKBACK_HOURS = 24
 # backlog is visible instead of silently dropped.
 RECONCILIATION_MAX_ROWS = 1000
 
+# Every uvicorn worker schedules both reconciliation jobs, so (like
+# _DAILY_DIGEST_LOCK_KEY above) each takes its own cross-worker advisory lock
+# first — PR #821 review: correctness never depended on this (dedup is the
+# table's own unique index via ON CONFLICT DO NOTHING, unlike the digest's
+# unindexed check-then-insert), but every worker otherwise re-runs the same
+# lookback scan on every tick for no benefit. 728198/728199 are the next free
+# keys after _DAILY_DIGEST_LOCK_KEY (728197) in that registry.
+_PASS_RECONCILIATION_LOCK_KEY = 728198
+_REJECTION_RECONCILIATION_LOCK_KEY = 728199
+
 
 def _reconcile_missed_pass_notifications_sync() -> None:
     conn = get_db_connection()
@@ -533,11 +543,21 @@ async def reconcile_missed_pass_notifications() -> None:
     each run; per-recipient dedup is the table's own unique index via
     `INSERT ... ON CONFLICT DO NOTHING` in `_insert_notification` — an
     index-only no-op for rows already notified, so this stays cheap.
+
+    Takes _PASS_RECONCILIATION_LOCK_KEY first so only one worker actually
+    scans per cron tick; the rest skip immediately (pure efficiency — the
+    ON CONFLICT dedup above makes concurrent runs safe either way).
     """
+    lock = AdvisoryLock(_PASS_RECONCILIATION_LOCK_KEY, "PassReconciliation")
+    if not await lock.try_acquire():
+        logger.info("PassReconciliation: another worker is running this cycle; skipping.")
+        return
     try:
         await asyncio.to_thread(_reconcile_missed_pass_notifications_sync)
     except Exception as e:  # noqa: BLE001 - scheduler job must never crash the loop
         logger.error("reconcile_missed_pass_notifications_failed: %s", e, exc_info=True)
+    finally:
+        await lock.release()
 
 
 def _reconcile_missed_rejection_notifications_sync() -> None:
@@ -647,11 +667,21 @@ async def reconcile_missed_rejection_notifications() -> None:
     recovered until they naturally fall back inside it on a later run — the
     RECONCILIATION_MAX_ROWS warning log is the signal something beyond
     normal operation (e.g. extended downtime) needs attention.
+
+    Takes _REJECTION_RECONCILIATION_LOCK_KEY first, same reasoning as the
+    Pass job's lock above (efficiency only — ON CONFLICT dedup already
+    makes concurrent runs safe).
     """
+    lock = AdvisoryLock(_REJECTION_RECONCILIATION_LOCK_KEY, "RejectionReconciliation")
+    if not await lock.try_acquire():
+        logger.info("RejectionReconciliation: another worker is running this cycle; skipping.")
+        return
     try:
         await asyncio.to_thread(_reconcile_missed_rejection_notifications_sync)
     except Exception as e:  # noqa: BLE001 - scheduler job must never crash the loop
         logger.error("reconcile_missed_rejection_notifications_failed: %s", e, exc_info=True)
+    finally:
+        await lock.release()
 
 
 def _job_level_duplicate_in_last_minute(cur, recipient_email: str, jobdiva_id: str, notification_type: str) -> bool:

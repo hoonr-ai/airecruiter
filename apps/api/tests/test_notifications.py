@@ -371,6 +371,7 @@ def test_reconcile_does_not_prefilter_by_recipient_blind_not_exists(monkeypatch)
     cur = FakeCursor(fetchall_results=[[]])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_pass_notifications())
 
@@ -392,6 +393,7 @@ def test_reconcile_backfills_new_recipient_for_already_notified_candidate(monkey
     cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 42}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_pass_notifications())
 
@@ -410,6 +412,7 @@ def test_reject_reconcile_filters_by_feedback_type_not_not_exists(monkeypatch):
     cur = FakeCursor(fetchall_results=[[]])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_rejection_notifications())
 
@@ -439,6 +442,7 @@ def test_reject_reconcile_skips_candidate_with_no_recruiter_emails(monkeypatch):
     cur = FakeCursor(fetchall_results=[[row]])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_rejection_notifications())
 
@@ -460,6 +464,7 @@ def test_reject_reconcile_notifies_everyone_when_submitted_by_is_missing(monkeyp
     cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 1}, {"id": 2}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_rejection_notifications())
 
@@ -478,6 +483,7 @@ def test_reject_reconcile_warns_when_max_rows_cap_is_hit(monkeypatch, caplog):
     cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 1}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     with caplog.at_level("WARNING", logger="services.notifications_service"):
         asyncio.run(reconcile_missed_rejection_notifications())
@@ -495,6 +501,7 @@ def test_reject_reconcile_backfills_new_recipient_for_already_notified_candidate
     cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 42}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_rejection_notifications())
 
@@ -517,12 +524,36 @@ def test_reject_reconcile_excludes_the_rejecter_from_recipients(monkeypatch):
     cur = FakeCursor(fetchall_results=[[row]], fetchone_results=[{"id": 42}])
     conn = FakeConn(cur)
     monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeAcquiredLock)
 
     asyncio.run(reconcile_missed_rejection_notifications())
 
     insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
     assert len(insert_calls) == 1
     assert insert_calls[0][1][0] == "other@x.com"
+
+
+def test_reconcile_pass_skips_entirely_when_another_worker_holds_the_lock(monkeypatch):
+    """PR #821 review: both reconciliation jobs now take their own advisory
+    lock (efficiency only — dedup was always ON CONFLICT-safe) — a worker
+    that loses the race must not touch the DB at all."""
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeContestedLock)
+
+    def _fail():
+        raise AssertionError("must not touch the DB when another worker holds the lock")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(reconcile_missed_pass_notifications())  # no exception raised = pass
+
+
+def test_reconcile_rejection_skips_entirely_when_another_worker_holds_the_lock(monkeypatch):
+    monkeypatch.setattr("services.notifications_service.AdvisoryLock", _FakeContestedLock)
+
+    def _fail():
+        raise AssertionError("must not touch the DB when another worker holds the lock")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(reconcile_missed_rejection_notifications())  # no exception raised = pass
 
 
 # --- _job_level_duplicate_in_last_minute -------------------------------------
@@ -1217,6 +1248,92 @@ def test_prune_stale_cursors_only_removes_old_and_disconnected_entries():
     finally:
         for e in (old_disconnected, recent_disconnected, old_but_connected):
             _clear_subscriber_state(notif, e)
+
+
+def _fake_notification_row(row_id: int) -> dict:
+    return {
+        "id": row_id, "type": "candidate_passed", "job_id": "J1", "jobdiva_id": "JD1",
+        "candidate_id": "C1", "title": "t", "body": None, "score": None,
+        "metadata": {}, "read_at": None, "created_at": datetime(2026, 10, 15, 12, 0, 0),
+    }
+
+
+def test_register_subscriber_does_not_move_shared_cursor_for_a_second_tab(monkeypatch):
+    """Regression for PR #821 review: a second tab's since_id must never
+    overwrite the shared per-email cursor another tab is already relying on
+    — backward, it would replay already-rendered rows to that other tab;
+    forward, it would silently skip live events from that tab. Only the
+    connecting tab's own queue is backfilled for the gap it missed."""
+    import routers.notifications as notif
+
+    email = "multi-tab@x.com"
+    _clear_subscriber_state(notif, email)
+    monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(notif, "_max_id_sync", Mock(return_value=100))
+    gap_rows = [_fake_notification_row(51), _fake_notification_row(52)]
+    fetch_gap = Mock(return_value=gap_rows)
+    monkeypatch.setattr(notif, "_fetch_gap_sync", fetch_gap)
+
+    try:
+        async def scenario():
+            queue1 = asyncio.Queue()
+            await notif._register_subscriber(email, queue1)  # seeds shared cursor to 100
+            assert notif._last_seen_id[email] == 100
+
+            # A second tab reconnects with a STALE since_id (behind the
+            # shared cursor another tab already advanced).
+            queue2 = asyncio.Queue()
+            await notif._register_subscriber(email, queue2, since_id=50)
+
+            # The shared cursor must be untouched — queue1 keeps relying on it.
+            assert notif._last_seen_id[email] == 100
+            fetch_gap.assert_called_once_with(email, 50, 100)
+            # Only queue2 (the connecting subscriber) gets the backfill.
+            assert queue1.qsize() == 0
+            backfilled = [queue2.get_nowait()["id"] for _ in range(queue2.qsize())]
+            assert backfilled == [51, 52]
+
+            await notif._unregister_subscriber(email, queue1)
+            await notif._unregister_subscriber(email, queue2)
+
+        asyncio.run(scenario())
+    finally:
+        _clear_subscriber_state(notif, email)
+
+
+def test_register_subscriber_ignores_a_second_tabs_since_id_when_ahead_of_shared_cursor(monkeypatch):
+    """A second tab claiming to have seen MORE than the shared cursor must
+    not push that cursor forward either — the first tab may not have
+    received those rows yet, and jumping the shared cursor ahead would
+    silently skip them for it."""
+    import routers.notifications as notif
+
+    email = "multi-tab-ahead@x.com"
+    _clear_subscriber_state(notif, email)
+    monkeypatch.setattr(notif, "_ensure_broadcaster_running", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(notif, "_max_id_sync", Mock(return_value=100))
+    fetch_gap = Mock()
+    monkeypatch.setattr(notif, "_fetch_gap_sync", fetch_gap)
+
+    try:
+        async def scenario():
+            queue1 = asyncio.Queue()
+            await notif._register_subscriber(email, queue1)
+            assert notif._last_seen_id[email] == 100
+
+            queue2 = asyncio.Queue()
+            await notif._register_subscriber(email, queue2, since_id=500)
+
+            assert notif._last_seen_id[email] == 100
+            fetch_gap.assert_not_called()
+            assert queue2.qsize() == 0
+
+            await notif._unregister_subscriber(email, queue1)
+            await notif._unregister_subscriber(email, queue2)
+
+        asyncio.run(scenario())
+    finally:
+        _clear_subscriber_state(notif, email)
 
 
 # --- clear: scoped delete ----------------------------------------------------

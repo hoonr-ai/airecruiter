@@ -705,9 +705,19 @@ async def api_health():
             logger.warning(f"api_health: redis check failed: {type(exc).__name__}: {exc}")
             checks["redis"] = "error"
 
+    # PR #821 review: a failed notifications schema init used to be visible
+    # only as a log line — the app boots fine with no table/indexes, and
+    # every insert then fails silently into its own try/except. Surfacing it
+    # here means a health-check monitor actually catches the next one.
+    # notifications_router (module-level, see _safe_import above) is None if
+    # that router itself failed to import — status is "pending" either way,
+    # same as "the init step hasn't run/reported yet".
+    schema_ok = notifications_router.notifications_schema_status() if notifications_router else None
+    checks["notifications_schema"] = "pending" if schema_ok is None else ("ok" if schema_ok else "error")
+
     if checks["db"] != "ok":
         status, code = "down", 503
-    elif checks["redis"] != "ok":
+    elif checks["redis"] != "ok" or checks["notifications_schema"] == "error":
         status, code = "degraded", 200
     else:
         status, code = "ok", 200
