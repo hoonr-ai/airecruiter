@@ -162,6 +162,16 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
+# One New Relic `ExaCall` event per Exa call (cost, outcome, latency; ids and
+# enums only) and an `ExaConfig` event per worker per hour
+# (services/exa_telemetry.py). Read-only: nothing branches on it.
+EXA_TELEMETRY_ENABLED = get_env_bool("EXA_TELEMETRY_ENABLED", True)
+# Tag every contact Agent run with `metadata` (env, surface, tier, trigger,
+# job_id, call_id...) so the free run list can be split by environment and
+# surface (scripts/exa_runs_ledger.py). Should Exa ever reject it (a 400), the
+# run is re-sent once without it and metadata is switched off for the process
+# (logged at ERROR). false = never send it.
+EXA_RUN_METADATA_ENABLED = get_env_bool("EXA_RUN_METADATA_ENABLED", True)
 
 # ---- Exa Agent contact enrichment (paid fallback after Apollo) ----
 # The Exa Agent API (POST https://api.exa.ai/agent/runs) looks a person up by

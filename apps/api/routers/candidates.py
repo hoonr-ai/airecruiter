@@ -24,6 +24,7 @@ from services.profile_resume import normalize_linkedin_profile
 from services.feedback_metrics import HAS_DECISION_SQL, feedback_label, refresh_feedback_metrics_sync, submission_kind
 from services.job_attribution import stamp_job_launched_by
 from services import contact_enrichment
+from services import exa_telemetry
 from services.pair_auth import get_pair_auth_headers
 from utils.phone import normalize_phone
 from models import (
@@ -3041,7 +3042,30 @@ _exa_enrich_by_linkedin = contact_enrichment.exa_enrich_by_linkedin
 _kipplo_enrich_by_linkedin = contact_enrichment.kipplo_enrich_by_linkedin
 
 
+def _contact_lookup_trigger(request: EnrichCandidateContactRequest) -> str:
+    """ExaCall `trigger` of an on-demand lookup: launch (Launch PAIR's
+    automated pass), click_phone (the Step-5 phone button asks for the phone
+    only) or click (Rankings Get Contact / a full lookup)."""
+    if (request.trigger or "").strip().lower() == "launch":
+        return "launch"
+    fields = {str(f or "").strip().lower() for f in (request.fields or [])}
+    return "click_phone" if fields == {"phone"} else "click"
+
+
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
+    """The on-demand contact chain (``_enrich_candidate_contact_chain``) under
+    its telemetry context: who asked and for which job, unless an outer caller
+    (a launch session's S3) already said so."""
+    with exa_telemetry.scope(
+        override=False,
+        trigger=_contact_lookup_trigger(request),
+        path="ondemand",
+        job_id=request.jobdiva_id or None,
+    ):
+        return await _enrich_candidate_contact_chain(candidate_id, request)
+
+
+async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details using LinkedIn URL.
 

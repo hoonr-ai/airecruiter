@@ -34,6 +34,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from services import exa_telemetry
 from services.launch_sessions import config as cfg
 from services.launch_sessions import rules
 from services.launch_sessions import schema as S
@@ -218,20 +219,23 @@ async def run(ctx: StageContext) -> StageResult:
                 chunk += 1
             await ctx.boundary()
 
-        async with contextlib.aclosing(
-            ctx.fx.search_events(request, schedule_cross_submissions=cross)
-        ) as stream:
-            async for raw in stream:
-                if isinstance(raw, dict) and raw.get("type") in _SKIP_EVENTS:
-                    if time.monotonic() - last_flush >= cfg.stream_flush_s():
+        # ExaCall attribution: search_candidates() starts a new pipeline run,
+        # so the session id is what joins this attempt's Exa spend.
+        with exa_telemetry.scope(trigger="launch_s1", attempt=i, launch_session_id=ctx.sid):
+            async with contextlib.aclosing(
+                ctx.fx.search_events(request, schedule_cross_submissions=cross)
+            ) as stream:
+                async for raw in stream:
+                    if isinstance(raw, dict) and raw.get("type") in _SKIP_EVENTS:
+                        if time.monotonic() - last_flush >= cfg.stream_flush_s():
+                            await flush()
+                        continue
+                    if not stat["began"]:
+                        run_.begin_attempt()
+                        stat["began"] = True
+                    buffer.append(_normalise(raw) if isinstance(raw, dict) else raw)
+                    if len(buffer) >= cfg.stream_flush_events() or time.monotonic() - last_flush >= cfg.stream_flush_s():
                         await flush()
-                    continue
-                if not stat["began"]:
-                    run_.begin_attempt()
-                    stat["began"] = True
-                buffer.append(_normalise(raw) if isinstance(raw, dict) else raw)
-                if len(buffer) >= cfg.stream_flush_events() or time.monotonic() - last_flush >= cfg.stream_flush_s():
-                    await flush()
         if not stat["began"]:
             # The stream answered and ended without a row: it still began
             # (the browser clears / appends the table on an OK response).

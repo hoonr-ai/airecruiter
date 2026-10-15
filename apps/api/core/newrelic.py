@@ -399,30 +399,50 @@ def attach_log_forwarding() -> None:
 # asyncio.to_thread trace propagation
 # ---------------------------------------------------------------------------
 
+def _propagate_to_thread() -> bool:
+    return (os.getenv("NEW_RELIC_PROPAGATE_TO_THREAD") or "on").strip().lower() not in _OFF_VALUES
+
+
+def _wrap_in_trace(func: Callable[..., Any]) -> Callable[..., Any]:
+    try:
+        from newrelic.api.time_trace import current_trace
+        from newrelic.core.context import context_wrapper
+
+        trace = current_trace()
+        if trace is not None:
+            return context_wrapper(func, trace=trace, strict=False)
+    except Exception:
+        pass
+    return func
+
+
+def wrap_for_thread(func: Callable[..., Any]) -> Callable[..., Any]:
+    """``func`` bound to the caller's trace, for ``loop.run_in_executor``
+    (which, unlike the patched ``asyncio.to_thread``, carries no trace): the
+    blocking call's external/DB segments then land in the caller's
+    transaction. ``func`` itself when the agent is off, outside a transaction
+    or with NEW_RELIC_PROPAGATE_TO_THREAD off. Call it on the event loop
+    thread, at submit time."""
+    if not is_enabled() or not _propagate_to_thread():
+        return func
+    return _wrap_in_trace(func)
+
+
 def _install_to_thread_propagation() -> None:
     """Run asyncio.to_thread callables under the caller's trace so blocking
     psycopg2 work shows up in transactions (the agent only propagates
     Starlette's run_in_threadpool). Kill switch NEW_RELIC_PROPAGATE_TO_THREAD."""
     global _original_to_thread
-    if (os.getenv("NEW_RELIC_PROPAGATE_TO_THREAD") or "on").strip().lower() in _OFF_VALUES:
+    if not _propagate_to_thread():
         return
     if _original_to_thread is not None:
         return
-
-    from newrelic.api.time_trace import current_trace
-    from newrelic.core.context import context_wrapper
 
     original = asyncio.to_thread
 
     @functools.wraps(original)
     async def to_thread(func, /, *args, **kwargs):
-        try:
-            trace = current_trace()
-            if trace is not None:
-                func = context_wrapper(func, trace=trace, strict=False)
-        except Exception:
-            pass
-        return await original(func, *args, **kwargs)
+        return await original(_wrap_in_trace(func), *args, **kwargs)
 
     _original_to_thread = original
     asyncio.to_thread = to_thread

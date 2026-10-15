@@ -327,15 +327,24 @@ def test_the_deep_search_request(monkeypatch):
 
 
 def test_deep_search_goes_web_only_when_exa_refuses_fiber(monkeypatch):
+    from services import exa_telemetry
+
     bodies = []
-    _exa_env(monkeypatch, bodies, [_Resp(400, {"error": "dataSources not available"}), FOUND])
+    refused = _Resp(400, {"error": "dataSources not available"})
+    _exa_env(monkeypatch, bodies, [refused, refused, FOUND])
 
     res = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", fields=("phone",), deep=True))
 
     assert res["ok"] and res["fields"]["mobilePhone"] == "+14155550100"
-    assert bodies[0]["dataSources"] == [{"provider": "fiber"}]
-    assert "dataSources" not in bodies[1] and "Fiber" not in bodies[1]["query"]
-    assert "search thoroughly" in bodies[1]["query"] and bodies[1]["effort"] == "medium"
+    # The metadata guard goes first: the same Fiber body without metadata,
+    # refused too, so it was not the metadata (no latch) ...
+    assert bodies[0]["dataSources"] == [{"provider": "fiber"}] and "metadata" in bodies[0]
+    assert bodies[1]["dataSources"] == [{"provider": "fiber"}] and "metadata" not in bodies[1]
+    assert exa_telemetry.run_metadata_enabled()
+    # ... then the existing fallback: web search alone, still without metadata.
+    assert "dataSources" not in bodies[2] and "Fiber" not in bodies[2]["query"]
+    assert "search thoroughly" in bodies[2]["query"] and bodies[2]["effort"] == "medium"
+    assert "metadata" not in bodies[2]
 
 
 def test_deep_search_without_data_sources_when_switched_off(monkeypatch):

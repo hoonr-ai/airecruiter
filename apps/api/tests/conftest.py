@@ -38,6 +38,8 @@ def _block_real_redis(monkeypatch):
     for lim in (vendor_limiter.OPENAI, vendor_limiter.EXA, vendor_limiter.UNIPILE):
         monkeypatch.setattr(lim, "_local_next", 0.0)
         monkeypatch.setattr(lim, "_local_cooldown_until", 0.0)
+        # The Exa out-of-credits breaker a 402 test trips must not leak.
+        monkeypatch.setattr(lim, "_local_no_credits_until", 0.0)
     # Scripted Unipile fakes make many calls per test; pacing them is just delay.
     monkeypatch.setattr(vendor_limiter.UNIPILE, "min_interval_s", 0.0)
 
@@ -48,6 +50,29 @@ def _no_real_kipplo_calls(monkeypatch):
     must never reach a real lookup from the suite. Kipplo tests set a fake key
     and stub httpx themselves."""
     monkeypatch.delenv("KIPPLO_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_exa_calls_and_fresh_exa_state(monkeypatch):
+    """Exa bills per call and core.config loads apps/api/.env, so a key there
+    must never reach a real search or Agent run from the suite: the shared
+    SDK client is dropped and the contact path's key blanked (tests that
+    exercise them set fakes / a test key). The process-wide Exa telemetry
+    state (metadata latch, ExaConfig once-per-hour, bound context) starts
+    fresh in every test."""
+    from services import contact_enrichment, exa_telemetry
+    from services.exa_service import exa_service
+
+    monkeypatch.setattr(exa_service, "exa", None)
+    monkeypatch.setattr(contact_enrichment, "EXA_API_KEY", "")
+    exa_telemetry.reset_for_tests()
+    token = exa_telemetry._ctx.set(exa_telemetry._EMPTY)
+    yield
+    try:
+        exa_telemetry._ctx.reset(token)
+    except ValueError:
+        pass
+    exa_telemetry.reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
