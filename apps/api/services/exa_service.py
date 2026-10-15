@@ -1,5 +1,7 @@
 import asyncio
+import functools
 import logging
+import math
 import os
 import re
 import time
@@ -7,7 +9,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from core.newrelic import wrap_for_thread
 from exa_py import Exa
-from services import exa_telemetry
+from services import exa_search_cache, exa_telemetry
 from services.exa_errors import ExaNoSlotError, ExaOutOfCreditsError, out_of_credits_tag
 from services.location import (
     is_broad_region_location,
@@ -645,6 +647,118 @@ async def _exa_paced(loop, fn, *args, max_wait_s: float = 15.0):
                 raise ExaOutOfCreditsError(tag) from exc
         raise
 
+
+# Pass A / Dice people search. The contents spec is part of the search
+# cache's key (services/exa_search_cache.py), so it lives in one place: the
+# LinkedIn place is in the page header, which 1000 characters of text reach
+# without pulling the whole profile; the highlights carry the résumé.
+_PEOPLE_CATEGORY = "people"
+_PEOPLE_SEARCH_TYPE = "auto"
+_PEOPLE_CONTENTS: Dict[str, Any] = {
+    "text": {"max_characters": 1000},
+    "highlights": {"max_characters": 4000},
+}
+
+
+def _per_query_num_results(limit: int, queries: int, factor: float) -> int:
+    """Results to buy per query so the round-robin merge can still fill
+    ``limit``: ceil(limit * factor / queries), at least 10 (Exa's base price
+    covers 10) and at most ``limit``. One query, or factor 0, asks for
+    ``limit`` (the old size). 34 for 3 queries of 50 at factor 2."""
+    try:
+        factor = float(factor)
+    except (TypeError, ValueError):
+        return limit
+    if queries <= 1 or not math.isfinite(factor) or factor <= 0:
+        return limit
+    return min(limit, max(10, math.ceil(limit * factor / queries)))
+
+
+def _per_query_factor() -> float:
+    from core import sourcing_config as _sc
+
+    return getattr(_sc, "EXA_PEOPLE_PER_QUERY_FACTOR", 2.0)
+
+
+def _merge_key(result: Any) -> str:
+    return (
+        _normalize_linkedin_url(getattr(result, "url", "") or "")
+        or str(getattr(result, "id", "") or "")
+    )
+
+
+def _round_robin_merge(per_query: List[List[Any]], limit: int) -> Tuple[List[Any], int]:
+    """Interleave the per-query lists by rank, deduped by profile URL.
+    Returns (every distinct row, the 1-based rank the first ``limit`` reach)."""
+    merged: List[Any] = []
+    seen = set()
+    deepest = 0
+    for rank in range(max((len(r) for r in per_query), default=0)):
+        for results in per_query:
+            if rank >= len(results):
+                continue
+            r = results[rank]
+            key = _merge_key(r) or f"anon_{len(merged)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+            if len(merged) <= limit:
+                deepest = rank + 1
+    return merged, deepest
+
+
+class _Flight:
+    """One paid people search in this process that identical callers join
+    (a Remote job's locations, two tabs on one job) instead of buying it
+    again. ``sent`` = the request reached the SDK (set from the executor
+    thread): until then a flight everyone left is cancelled, unbought."""
+
+    __slots__ = ("slot", "n", "task", "sent", "waiters")
+
+    def __init__(self, slot: Tuple[int, str], n: int):
+        self.slot = slot
+        self.n = n
+        self.task: Optional["asyncio.Task[Any]"] = None
+        self.sent = False
+        self.waiters = 0
+
+
+# (id(event loop), cache key) -> the flight buying that query right now.
+_inflight: Dict[Tuple[int, str], _Flight] = {}
+
+
+def _drop_flight(flight: _Flight) -> None:
+    if _inflight.get(flight.slot) is flight:
+        del _inflight[flight.slot]
+
+
+def _land(flight: _Flight, task: "asyncio.Task[Any]") -> None:
+    _drop_flight(flight)
+    if not task.cancelled():
+        task.exception()  # retrieved: a flight nobody awaits any more must not warn
+
+
+def _joinable(flight: Optional[_Flight], n: int, loop: asyncio.AbstractEventLoop) -> bool:
+    return (
+        flight is not None and flight.n >= n
+        and not flight.task.done() and flight.task.get_loop() is loop
+    )
+
+
+async def _join(flight: _Flight) -> Any:
+    """Wait for a flight without cancelling it: a request already sent is
+    paid for, so its answer still reaches the cache when the caller leaves."""
+    flight.waiters += 1
+    try:
+        return await asyncio.shield(flight.task)
+    finally:
+        flight.waiters -= 1
+        if flight.waiters == 0 and not flight.sent and not flight.task.done():
+            _drop_flight(flight)  # a later caller leads afresh, never joins this
+            flight.task.cancel()
+
+
 class ExaService:
     def __init__(self):
         self.api_key = EXA_API_KEY
@@ -660,98 +774,186 @@ class ExaService:
         queries: List[str],
         limit: int,
         include_domains: Optional[List[str]] = None,
+        surface: Optional[str] = None,
     ) -> List[Any]:
         """Run one Exa people search per query concurrently and merge.
 
         Merging interleaves round-robin by rank so every role gets fair
         representation in the capped result, then dedupes by normalised
         profile URL (the same person often matches sibling role queries).
-        Per-query failures are logged and skipped — one bad query must not
-        sink the whole search — unless NO query succeeded and one of them
-        failed for credits: then ExaOutOfCreditsError is raised so Step 5
-        says "out of credits" instead of "no matches". One ExaCall event per
-        query (surface pass_a, or dice with ``include_domains``).
-        """
-        loop = asyncio.get_event_loop()
-        surface = "dice" if include_domains else "pass_a"
+        Each query buys ``_per_query_num_results`` results (34 of the kept 50
+        for 3 titles at EXA_PEOPLE_PER_QUERY_FACTOR=2).
 
-        def do_search(q: str):
+        Per query: the search cache (services/exa_search_cache.py) first, a
+        hit skipping the Exa limiter, the out-of-credits breaker and the
+        bill; then an identical search this process is already buying is
+        joined; else a paid call, shielded so that a request already sent
+        still reaches the cache when the Step-5 stream closes. One ExaCall
+        per paid call (surface pass_a, or dice), none for hits or joins.
+
+        Per-query failures are logged and skipped — one bad query must not
+        sink the whole search — unless no rows came back at all and a query
+        failed for credits: then ExaOutOfCreditsError is raised so Step 5
+        says "out of credits" instead of "no matches". One ExaPeopleFanout
+        event per call, the raise path included.
+        """
+        loop = asyncio.get_running_loop()
+        surface = surface or ("dice" if include_domains else "pass_a")
+        n = _per_query_num_results(limit, len(queries), _per_query_factor())
+        cache_state = exa_search_cache.state()
+        use_cache = cache_state == "on"
+        cache_tag = "miss" if use_cache else "off"
+        stats: Dict[str, Any] = {
+            "cache_hits": 0, "cache_misses": 0, "inflight_joins": 0, "cost_usd": 0.0,
+            "failed": 0, "ooc_failed": 0,
+        }
+
+        def do_search(q: str, flight: _Flight):
+            flight.sent = True
             kwargs: Dict[str, Any] = dict(
-                category="people",
-                type="auto",
-                num_results=limit,
-                # The LinkedIn place is in the page header. 1000 characters
-                # reaches that line without pulling the whole profile.
-                text={"max_characters": 1000},
-                highlights={"max_characters": 4000},
+                category=_PEOPLE_CATEGORY,
+                type=_PEOPLE_SEARCH_TYPE,
+                num_results=n,
+                **{part: dict(spec) for part, spec in _PEOPLE_CONTENTS.items()},
             )
             if include_domains:
                 kwargs["include_domains"] = include_domains
             return self.exa.search_and_contents(q, **kwargs)
 
-        async def one_query(q: str):
+        async def paid(q: str, key: str, flight: _Flight) -> Tuple[List[Any], float]:
             started = time.monotonic()
             try:
-                resp = await _exa_paced(loop, do_search, q)
+                resp = await _exa_paced(loop, do_search, q, flight)
             except BaseException as exc:
                 exa_telemetry.record_exa_call(
-                    surface, "search", num_results=limit,
+                    surface, "search", num_results=n, cache=cache_tag,
                     latency_ms=exa_telemetry.latency_ms(started),
                     **exa_telemetry.classify_exc(exc),
                 )
                 raise
+            rows = list(getattr(resp, "results", None) or [])
+            cost = exa_telemetry.cost_from_search_response(resp)
             exa_telemetry.record_exa_call(
-                surface, "search", "ok", num_results=limit,
-                n_results=len(getattr(resp, "results", None) or []),
+                surface, "search", "ok", num_results=n, cache=cache_tag,
+                n_results=len(rows),
                 latency_ms=exa_telemetry.latency_ms(started),
-                **exa_telemetry.cost_from_search_response(resp),
+                **cost,
             )
-            return resp
+            if use_cache:
+                try:
+                    await exa_search_cache.put(key, rows, n)
+                except Exception as exc:  # noqa: BLE001 — put never raises; belt and braces
+                    logger.debug("Exa search cache put skipped: %r", exc)
+            return rows, float(cost.get("cost_total") or 0.0)
 
-        responses = await asyncio.gather(
-            *[one_query(q) for q in queries],
-            return_exceptions=True,
-        )
+        async def one_query(q: str) -> List[Any]:
+            key = exa_search_cache.cache_key(
+                q,
+                category=_PEOPLE_CATEGORY,
+                search_type=_PEOPLE_SEARCH_TYPE,
+                include_domains=include_domains,
+                contents=_PEOPLE_CONTENTS,
+            )
+            if use_cache:
+                cached = await exa_search_cache.get(key, n)
+                if cached is not None:
+                    stats["cache_hits"] += 1
+                    return cached
+            slot = (id(loop), key)
+            flight = _inflight.get(slot)
+            if _joinable(flight, n, loop):
+                stats["inflight_joins"] += 1
+                rows, _cost = await _join(flight)
+                return rows[:n]
+            flight = _Flight(slot, n)
+            flight.task = loop.create_task(paid(q, key, flight))
+            _inflight[slot] = flight
+            flight.task.add_done_callback(functools.partial(_land, flight))
+            stats["cache_misses"] += 1
+            rows, cost = await _join(flight)
+            stats["cost_usd"] += cost
+            return rows
 
         per_query: List[List[Any]] = []
-        failed_queries = 0
-        credits_error: Optional[ExaOutOfCreditsError] = None
-        for q, resp in zip(queries, responses):
-            if isinstance(resp, BaseException):
-                failed_queries += 1
-                if isinstance(resp, ExaOutOfCreditsError):
-                    credits_error = credits_error or resp
-                logger.warning("Exa people search failed for query %r: %s", q, resp)
-                continue
-            per_query.append(list(getattr(resp, "results", None) or []))
-        if credits_error is not None and not per_query:
-            raise credits_error
-        if failed_queries:
-            # Loud one-liner: partial fan-out failure used to be invisible —
-            # "Found 17 profiles" with 2 of 3 queries dead reads like a thin
-            # market instead of an outage.
-            logger.error(
-                "Exa people search: %d/%d queries failed — results are PARTIAL (%d rows from %d surviving queries)",
-                failed_queries, len(queries), sum(len(r) for r in per_query), len(per_query),
-            )
-
         merged: List[Any] = []
-        seen = set()
-        for rank in range(max((len(r) for r in per_query), default=0)):
-            for results in per_query:
-                if rank >= len(results):
+        kept: List[Any] = []
+        deepest = 0
+        try:
+            responses = await asyncio.gather(
+                *[one_query(q) for q in queries],
+                return_exceptions=True,
+            )
+            credits_error: Optional[ExaOutOfCreditsError] = None
+            for q, resp in zip(queries, responses):
+                if isinstance(resp, BaseException):
+                    stats["failed"] += 1
+                    if isinstance(resp, ExaOutOfCreditsError):
+                        stats["ooc_failed"] += 1
+                        credits_error = credits_error or resp
+                    logger.warning("Exa people search failed for query %r: %s", q, resp)
                     continue
-                r = results[rank]
-                key = (
-                    _normalize_linkedin_url(getattr(r, "url", "") or "")
-                    or str(getattr(r, "id", "") or "")
-                    or f"anon_{len(merged)}"
+                per_query.append(list(resp))
+            merged, deepest = _round_robin_merge(per_query, limit)
+            if credits_error is not None and not merged:
+                raise credits_error
+            if stats["failed"]:
+                # Loud one-liner: partial fan-out failure used to be invisible —
+                # "Found 17 profiles" with 2 of 3 queries dead reads like a thin
+                # market instead of an outage.
+                logger.error(
+                    "Exa people search: %d/%d queries failed — results are PARTIAL (%d rows from %d surviving queries)",
+                    stats["failed"], len(queries), sum(len(r) for r in per_query), len(per_query),
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(r)
-        return merged[:limit]
+            kept = merged[:limit]
+            return kept
+        finally:
+            self._record_fanout(surface, queries, limit, n, cache_state, stats, per_query, merged, kept, deepest)
+
+    @staticmethod
+    def _record_fanout(
+        surface: str,
+        queries: List[str],
+        limit: int,
+        n: int,
+        cache_state: str,
+        stats: Dict[str, Any],
+        per_query: List[List[Any]],
+        merged: List[Any],
+        kept: List[Any],
+        deepest: int,
+    ) -> None:
+        """ExaPeopleFanout + an EXA_FANOUT log line. ``starved``: the merge
+        could not fill ``limit`` although a query came back full (bigger
+        per-query asks would have found more). ``cf15_same``: factor 1.5
+        would have kept the same rows (a query's top k assumed to be the
+        first k of a bigger ask)."""
+        try:
+            raw = sum(len(r) for r in per_query)
+            starved = len(merged) < limit and any(len(r) >= n for r in per_query)
+            n15 = _per_query_num_results(limit, len(queries), 1.5)
+            if n15 >= n:
+                cf15_same = True
+            else:
+                alt, _ = _round_robin_merge([r[:n15] for r in per_query], limit)
+                cf15_same = [id(r) for r in alt[:limit]] == [id(r) for r in kept]
+            attrs = dict(
+                queries=len(queries), per_query=n, limit_total=limit,
+                raw_rows=raw, dup_rows=raw - len(merged), merged_rows=len(merged),
+                kept_rows=len(kept), deepest_rank=deepest,
+                cache_state=cache_state, starved=starved, cf15_same=cf15_same,
+                **stats,
+            )
+            attrs["cost_usd"] = round(float(stats.get("cost_usd") or 0.0), 6)
+            exa_telemetry.record_people_fanout(surface, **attrs)
+            logger.info(
+                "EXA_FANOUT surface=%s queries=%d per_query=%d hits=%d misses=%d joins=%d "
+                "failed=%d ooc=%d raw=%d merged=%d kept=%d deepest=%d starved=%s cache=%s cost=%.4f",
+                surface, len(queries), n, stats["cache_hits"], stats["cache_misses"],
+                stats["inflight_joins"], stats["failed"], stats["ooc_failed"], raw,
+                len(merged), len(kept), deepest, starved, cache_state, attrs["cost_usd"],
+            )
+        except Exception as exc:  # noqa: BLE001 — telemetry never breaks a search
+            logger.debug("ExaPeopleFanout not recorded: %r", exc)
 
     async def search_candidates(
         self,
@@ -782,7 +984,7 @@ class ExaService:
             )
             logger.info("Executing Exa people search with %d natural-language queries: %s", len(queries), queries)
 
-            search_results = await self._people_search_fanout(queries, limit)
+            search_results = await self._people_search_fanout(queries, limit, surface="pass_a")
 
             results = []
             for idx, result in enumerate(search_results):
@@ -1191,7 +1393,7 @@ class ExaService:
             logger.info("Executing Dice (via Exa) search with %d natural-language queries: %s", len(queries), queries)
 
             search_results = await self._people_search_fanout(
-                queries, limit, include_domains=["dice.com"],
+                queries, limit, include_domains=["dice.com"], surface="dice",
             )
 
             results = []

@@ -59,13 +59,17 @@ def _no_real_exa_calls_and_fresh_exa_state(monkeypatch):
     SDK client is dropped and the contact path's key blanked (tests that
     exercise them set fakes / a test key). The process-wide Exa telemetry
     state (metadata latch, ExaConfig once-per-hour, bound context) starts
-    fresh in every test."""
-    from services import contact_enrichment, exa_telemetry
+    fresh in every test, and so does the Pass A search cache's (its down
+    window, warning latches, in-flight searches)."""
+    from services import contact_enrichment, exa_search_cache, exa_telemetry
+    from services import exa_service as exa_service_module
     from services.exa_service import exa_service
 
     monkeypatch.setattr(exa_service, "exa", None)
     monkeypatch.setattr(contact_enrichment, "EXA_API_KEY", "")
     exa_telemetry.reset_for_tests()
+    exa_search_cache.reset_for_tests()
+    exa_service_module._inflight.clear()
     token = exa_telemetry._ctx.set(exa_telemetry._EMPTY)
     yield
     try:

@@ -150,6 +150,117 @@ def test_linkedin_source_queries_each_selected_location_and_deduplicates():
 
 
 # ---------------------------------------------------------------------------
+# Exa sources: variants that search the same location string run once
+# ---------------------------------------------------------------------------
+
+class _ExaStub:
+    """Records the location each Exa people search / Dice search was asked for."""
+
+    def __init__(self):
+        self.locations = []
+        self.dice_locations = []
+
+    async def search_candidates(self, **kwargs):
+        self.locations.append(kwargs["location"])
+        return [{"id": "exa_linkedin.com/in/same", "profile_url": "https://www.linkedin.com/in/same",
+                 "source": "LinkedIn-Exa"}]
+
+    async def search_dice_candidates(self, **kwargs):
+        self.dice_locations.append(kwargs["location"])
+        return [{"id": "dice_0_x", "profile_url": "https://www.dice.com/x", "source": "Dice"}]
+
+
+def _remote_criteria(**kw):
+    return SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        location_type="Remote",
+        additional_locations=[
+            LocationEntry(value="Austin, TX", within_miles=25),
+            LocationEntry(value="Denver, CO", within_miles=25),
+        ],
+        open_to_work=False,
+        **kw,
+    )
+
+
+def test_remote_multi_location_dedupes_exa_variants():
+    """A Remote job searches its country whatever the location, so its three
+    locations used to buy the same Exa searches three times."""
+    service = _service()
+    service.exa_service = _ExaStub()
+
+    result = asyncio.run(service._search_exa(_remote_criteria()))
+
+    assert service.exa_service.locations == ["United States"]
+    assert [c["id"] for c in result["candidates"]] == ["exa_linkedin.com/in/same"]
+    assert result["source_type"] == "LinkedIn-Exa"
+
+
+def test_remote_multi_location_dedupes_dice_variants():
+    service = _service()
+    service.exa_service = _ExaStub()
+
+    asyncio.run(service._search_dice(_remote_criteria()))
+
+    assert service.exa_service.dice_locations == ["United States"]
+
+
+def test_onsite_distinct_locations_still_search_each_for_exa():
+    service = _service()
+    service.exa_service = _ExaStub()
+    criteria = SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        additional_locations=[LocationEntry(value="Menlo Park, CA", within_miles=25)],
+        open_to_work=False,
+    )
+
+    asyncio.run(service._search_exa(criteria))
+
+    assert sorted(service.exa_service.locations) == ["Menlo Park, CA", "New York, NY, United States"]
+
+
+def test_unipile_remote_variants_are_not_deduped():
+    """Only the Exa sources pass a dedupe key (Unipile's radius and query
+    differ per location)."""
+    class UnipileStub:
+        def __init__(self):
+            self.locations = []
+
+        async def search_candidates(self, **kwargs):
+            self.locations.append(kwargs["location"])
+            return []
+
+    service = _service()
+    service.unipile_service = UnipileStub()
+
+    asyncio.run(service._search_linkedin(_remote_criteria()))
+
+    assert service.unipile_service.locations == ["United States"] * 3
+
+
+def test_a_dedupe_key_that_fails_keeps_the_variant():
+    service = _service()
+    seen = []
+
+    async def single(variant):
+        seen.append(variant.location)
+        return {"candidates": []}
+
+    def key(variant):
+        if variant.location == "Austin, TX":
+            raise ValueError("unparseable")
+        return "United States"
+
+    asyncio.run(service._fan_out_multi_location_search(
+        _remote_criteria(), single, "LinkedIn-Exa", dedupe_key=key,
+    ))
+
+    assert seen == ["New York, NY", "Austin, TX"]
+
+
+# ---------------------------------------------------------------------------
 # _location_match_verdict — candidate matches only the SECOND location
 # ---------------------------------------------------------------------------
 
