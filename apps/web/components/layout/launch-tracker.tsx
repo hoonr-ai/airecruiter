@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { CheckCircle2, ChevronDown, ChevronUp, Loader2, Rocket, X, XCircle } from "lucide-react";
 import { launchSessionsApi } from "@/lib/api";
 import { LAUNCH_STARTED_EVENT, type LaunchSessionView } from "@/lib/launch-session";
-import { sourceAndLaunchHref } from "@/lib/routes";
+import { jobRankingsHref, sourceAndLaunchHref } from "@/lib/routes";
 
 // Bottom-right launch tracker (LinkedIn-style minimized dock). Source & Launch
 // runs server-side as a launch session (routers/launch_sessions.py), so the
@@ -99,7 +99,9 @@ function progressPct(s: TrackedSession): number | null {
 }
 
 function jobHref(s: TrackedSession): string {
-  return sourceAndLaunchHref(s.jobdiva_ref || s.job_id);
+  const ref = s.jobdiva_ref || s.job_id;
+  // Running: back to the launch's progress. Launched: to the results.
+  return isRunning(s) ? sourceAndLaunchHref(ref) : jobRankingsHref(ref);
 }
 
 export function LaunchTracker() {
@@ -262,7 +264,12 @@ export function LaunchTracker() {
                       </div>
                     )}
                     {!runningRow && !onThisJob && (s.failed_count || s.needs_contact_count) ? (
-                      <Link prefetch={false} href={jobHref(s)} className="text-xs font-medium text-blue-600 hover:underline">
+                      // Failed / needs-contact rows are retried from the launch step.
+                      <Link
+                        prefetch={false}
+                        href={sourceAndLaunchHref(s.jobdiva_ref || s.job_id)}
+                        className="text-xs font-medium text-blue-600 hover:underline"
+                      >
                         Review
                       </Link>
                     ) : null}
