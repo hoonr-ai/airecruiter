@@ -228,6 +228,48 @@ def test_gate_resolved_once_for_300_id_launch(monkeypatch, fake_launch):
     assert events[-1]["totals"]["sent"] == 300
 
 
+def _capture_recruiter(monkeypatch, calls):
+    async def core(req, precomputed_signals=None, launch_id=None, batch_idx=None, **kw):
+        calls.append(kw.get("recruiter_email"))
+        return {"success": True, "bulk_id": "b0",
+                "data": [{"interview_id": f"i-{c}"} for c in req.real_candidate_ids]}
+    monkeypatch.setattr(eng, "_send_bulk_interview_core", core)
+
+
+def test_launch_sends_authenticated_recruiter_email(monkeypatch, fake_launch):
+    seen: List[Any] = []
+    _capture_recruiter(monkeypatch, seen)
+    monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
+    monkeypatch.setattr(eng, "get_current_user", lambda _r, _c: type("U", (), {"email": " Rec@X.com "})())
+    req = eng.LaunchRequest(job_id="J1", candidate_ids=["c-0"], batch_size=75)
+    _run(_collect_after(eng.launch_bulk_interviews(req, http_request=object())))
+    assert seen == ["rec@x.com"]
+
+
+def test_launch_without_user_omits_recruiter_email(monkeypatch, fake_launch):
+    seen: List[Any] = []
+    _capture_recruiter(monkeypatch, seen)
+    monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
+
+    def no_user(_r, _c):
+        raise eng.HTTPException(status_code=401, detail="no token")
+    monkeypatch.setattr(eng, "get_current_user", no_user)
+    req = eng.LaunchRequest(job_id="J1", candidate_ids=["c-0"], batch_size=75)
+    _run(_collect_after(eng.launch_bulk_interviews(req, http_request=object())))
+    assert seen == [None]
+
+
+def test_request_bodies_cannot_carry_recruiter_email():
+    # Client-sent values are dropped: only the server sets the recruiter.
+    send = eng.SendBulkInterviewRequest(payload="{}", real_candidate_ids=[], recruiter_email="spoof@x.com")
+    launch = eng.LaunchRequest(job_id="J1", candidate_ids=[], recruiter_email="spoof@x.com")
+    assert not hasattr(send, "recruiter_email") and not hasattr(launch, "recruiter_email")
+
+
+async def _collect_after(coro):
+    return await _collect(await coro)
+
+
 def test_gate_flag_off_passes_no_precomputed(monkeypatch, fake_launch):
     calls, _ = fake_launch
     monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)

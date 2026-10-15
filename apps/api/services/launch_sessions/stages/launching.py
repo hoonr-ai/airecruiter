@@ -501,7 +501,6 @@ async def launch_pass(ctx: StageContext, ids: List[str]) -> None:
         job_id=ctx.job_ref, candidate_ids=list(claimed), is_initial_launch=False, notify_recruiters=False,
         send_job_posting_email=False, app_base_url=str(ctx.input.get("app_base_url") or ""),
         batch_size=int(opts.get("batch_size") or cfg.pairbot_batch_size()), launch_session_id=ctx.sid,
-        recruiter_email=(ctx.session.get("requested_by") or None),
     )
     outreach_stopped: Optional[str] = None
     stop_error: Optional[BaseException] = None
@@ -511,6 +510,7 @@ async def launch_pass(ctx: StageContext, ids: List[str]) -> None:
     async with contextlib.aclosing(ctx.fx.run_launch(
         request, launch_id=launch_id, run_id=ctx.sid, fire_side_effects=False, should_stop=ctx.should_stop,
         provision_inline=False, claimed_session_id=ctx.sid, bulk_id_for=record_bulk,
+        recruiter_email=(ctx.session.get("requested_by") or None),
     )) as events:
         async for evt in events:
             kind = evt.get("type")

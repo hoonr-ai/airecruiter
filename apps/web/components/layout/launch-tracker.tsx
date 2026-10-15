@@ -263,8 +263,8 @@ export function LaunchTracker() {
                         )}
                       </div>
                     )}
+                    {/* Failed / needs-contact rows are retried from the launch step. */}
                     {!runningRow && !onThisJob && (s.failed_count || s.needs_contact_count) ? (
-                      // Failed / needs-contact rows are retried from the launch step.
                       <Link
                         prefetch={false}
                         href={sourceAndLaunchHref(s.jobdiva_ref || s.job_id)}
