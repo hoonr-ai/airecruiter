@@ -3563,10 +3563,12 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         exa_answered = bool(_exa.get("ok"))
         exa_stop = bool(_exa.get("fatal"))
         # Still going after both windows (ours, or another lookup's we waited
-        # on): no deep search is bought for its fields while it may answer.
-        if _exa.get("run_id") or _exa.get("in_progress"):
-            normal_still_going = normal_fields
-        if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}, "exa"):
+        # on): no deep search is bought for those fields while it may answer.
+        # Only those: what the holder was not after was bought at once.
+        normal_still_going = tuple(f for f in normal_fields if f in (_exa.get("in_progress_fields") or ()))
+        # Fields can come without ``ok`` when one part answered and another
+        # failed (exa_step): what was found is kept, nothing is a miss.
+        if _exa.get("fields") and _merge_primary(_exa.get("fields") or {}, "exa"):
             exa_contributed = True
         exa_outcome = ",".join(f for f in normal_fields if f not in _missing_contact()) or (
             "miss" if exa_answered else str(_exa.get("message") or "failed")
@@ -3588,9 +3590,8 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         deep_answered = bool(_deep.get("ok"))
         # Still going after EXA_CONTACT_DEEP_TIMEOUT_S: what it finds is kept
         # for the next Launch / phone click instead of being thrown away.
-        if _deep.get("run_id") or _deep.get("in_progress"):
-            deep_still_going = deep_fields
-        if _deep.get("ok") and _merge_primary(_deep.get("fields") or {}, "exa_deep"):
+        deep_still_going = tuple(f for f in deep_fields if f in (_deep.get("in_progress_fields") or ()))
+        if _deep.get("fields") and _merge_primary(_deep.get("fields") or {}, "exa_deep"):
             exa_deep_contributed = True
         exa_deep_outcome = ",".join(f for f in deep_fields if f not in _missing_contact()) or (
             "miss" if deep_answered else str(_deep.get("message") or "failed")
@@ -3696,8 +3697,8 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         phone=_new_phone,
         email_provider=email_provider or provider_used,
         phone_provider=phone_provider or provider_used,
-        missed=[f for f in normal_fields if exa_answered and f in _missing_contact()],
-        deep_missed=[f for f in deep_fields if deep_answered and f in _missing_contact()],
+        missed=[f for f in normal_fields if exa_answered and f in _missing_contact() and f not in normal_still_going],
+        deep_missed=[f for f in deep_fields if deep_answered and f in _missing_contact() and f not in deep_still_going],
     )
 
     logger.info(

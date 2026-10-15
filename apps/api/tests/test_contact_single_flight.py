@@ -88,11 +88,13 @@ class _Resp:
 
 class _Exa:
     """The Exa Agent API, shared by every lookup of a test: counts creates;
-    a run is "running" until ``finished``, then answers ``answer``."""
+    a run is "running" until ``finished`` (a run in ``stuck`` for good), then
+    answers ``answer``."""
 
     def __init__(self):
         self.posts = []
         self.finished = False
+        self.stuck = set()
         self.answer = {"phone": "+1 415 555 0100"}
 
     def client(self):
@@ -114,7 +116,7 @@ class _Exa:
 
             async def get(self, url, headers=None, params=None):
                 run_id = url.rsplit("/", 1)[-1]
-                if exa.finished:
+                if exa.finished and run_id not in exa.stuck:
                     return _Resp(200, {"id": run_id, "status": "completed",
                                        "output": {"structured": {"contact": exa.answer}}})
                 return _Resp(200, {"id": run_id, "status": "running"})
@@ -361,21 +363,18 @@ def test_out_of_time_a_follower_joins_the_lease_and_is_not_a_miss(pgs, exa, even
     assert asyncio.run(contact_cache.release(SLUG, token)) == [{"candidate_id": "c2", "jobdiva_id": "26-1"}]
 
 
-def test_the_lease_does_not_lapse_while_the_leader_waits_for_a_slot(pgs, exa, monkeypatch):
+def test_the_lease_does_not_lapse_while_the_leaders_run_goes(pgs, exa, monkeypatch):
     monkeypatch.setattr(contact_cache, "LEASE_S", 1)
     monkeypatch.setattr(ce, "LEASE_HEARTBEAT_S", 0.2)
 
     async def _go():
-        sem = asyncio.Semaphore(1)
-        await sem.acquire()                                          # every slot taken
-        leader = asyncio.ensure_future(ce.exa_step("c1", LINKEDIN, "Jane Doe", fields=("phone",), semaphore=sem))
+        leader = asyncio.ensure_future(ce.exa_step("c1", LINKEDIN, "Jane Doe", fields=("phone",)))
         held = []
         for _ in range(3):
             await asyncio.sleep(0.6)                                 # 1.8 s > the 1 s lease
             held.append(await _held())
         rival = await contact_cache.claim(SLUG, ("phone",), "normal", **_H)
         exa.finished = True
-        sem.release()
         return held, rival, await leader
 
     held, rival, res = asyncio.run(_go())
@@ -385,25 +384,57 @@ def test_the_lease_does_not_lapse_while_the_leader_waits_for_a_slot(pgs, exa, mo
     assert len(exa.posts) == 1
 
 
-def test_a_leader_whose_lease_was_taken_while_queued_follows_instead(pgs, exa, monkeypatch):
-    unused = []
+def test_a_lookup_queued_for_a_slot_holds_nobody_up(pgs, exa, monkeypatch):
+    # Review fix (3b): the lease is claimed only with a slot in hand. A
+    # sourcing lookup queued behind the 3 sourcing slots used to hold the
+    # person, so a click waited its whole window and bought nothing.
+    exa.answer = {"email": "jane@acme.com", "phone": "+1 415 555 0100"}
 
     async def _go():
+        followed = _following(monkeypatch)
         sem = asyncio.Semaphore(1)
-        await sem.acquire()
-        leader = asyncio.ensure_future(ce.exa_step(
-            "c1", LINKEDIN, "Jane Doe", fields=("phone",), semaphore=sem, on_unused=lambda: unused.append(1),
+        await sem.acquire()                                          # every sourcing slot taken
+        queued = asyncio.ensure_future(ce.exa_step(
+            "Jane Doe", LINKEDIN, "Jane Doe", fields=("email",), semaphore=sem, tasks=set(),
         ))
-        await _until(lambda: bool(pgs("SELECT 1 FROM contact_enrichment_cache WHERE pending_token IS NOT NULL")))
-        # A DB hiccup let the lease lapse and another worker took the person
-        # and started its run.
-        pgs("UPDATE contact_enrichment_cache SET pending_token = 'other-worker', "
-            "pending_until = NOW() + interval '60 seconds', pending_run_id = 'run-other', pending_run_at = NOW()")
+        await asyncio.sleep(0.1)
+        held_while_queued = await _held()
+        click = asyncio.ensure_future(ce.exa_step("c1", LINKEDIN, "Jane Doe", fields=("email", "phone")))
+        await _until(lambda: len(exa.posts) == 1)                    # the click bought at once
+        sem.release()                                                # the queued lookup gets its slot...
+        await asyncio.wait_for(followed.wait(), 5)                   # ...and follows the click's run
         exa.finished = True
-        sem.release()
-        return await leader
+        return held_while_queued, await click, await queued
 
-    res = asyncio.run(_go())
+    held_while_queued, click, queued = asyncio.run(_go())
+
+    assert held_while_queued is False
+    assert click["role"] == "leader" and click["fields"]["mobilePhone"] == MOBILE
+    assert queued["role"] == "follower" and queued["fields"]["workEmail"] == "jane@acme.com"
+    assert len(exa.posts) == 1                                       # still one paid run
+
+
+def test_a_leader_whose_lease_was_taken_before_its_create_follows_instead(pgs, exa, monkeypatch):
+    unused = []
+    real_before_create = ce._StepRun.before_create
+    taken = []
+
+    async def _taken_first(self):
+        if not taken:
+            # A DB hiccup let the lease lapse and another worker took the
+            # person and started its run.
+            taken.append(1)
+            pgs("UPDATE contact_enrichment_cache SET pending_token = 'other-worker', "
+                "pending_until = NOW() + interval '60 seconds', pending_run_id = 'run-other', pending_run_at = NOW()")
+        return await real_before_create(self)
+
+    monkeypatch.setattr(ce._StepRun, "before_create", _taken_first)
+    exa.finished = True
+
+    res = asyncio.run(ce.exa_step(
+        "c1", LINKEDIN, "Jane Doe", fields=("phone",), semaphore=asyncio.Semaphore(1),
+        on_unused=lambda: unused.append(1),
+    ))
 
     assert exa.posts == []                                           # no second paid run
     assert res["role"] == "follower" and res["fields"]["mobilePhone"] == MOBILE
@@ -717,3 +748,216 @@ def test_the_chain_reports_final_misses_and_confirmed_rebuys(events, monkeypatch
     assert outcomes[0] == ("final_miss", "phone", "click_phone")
     assert outcomes[1] == ("confirm_rebuy", "phone", "click_phone")
     assert [x["outcome"] for x in _lookups(events)][2:] == ["passthrough"]   # the deep run (no key here)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (PR 3b)
+# ---------------------------------------------------------------------------
+
+def _hold(fields, run_id="", tier="normal"):
+    """Another lookup holds the person (its run, if any, stamped)."""
+    _, token = asyncio.run(contact_cache.claim(SLUG, fields, tier, **_H))
+    if run_id:
+        asyncio.run(contact_cache.heartbeat(SLUG, token, run_id=run_id))
+    return token
+
+
+def _counting(monkeypatch, name):
+    calls = []
+    real = getattr(contact_cache, name)
+
+    async def _spy(*args, **kwargs):
+        calls.append(1)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(contact_cache, name, _spy)
+    return calls
+
+
+@pytest.mark.parametrize("failure", ["unreachable", "not_a_dict"])
+def test_a_follower_whose_polls_fail_waits_instead_of_spinning(pgs, exa, monkeypatch, failure):
+    # The holder's run could not be read: _follow_run returned at once and the
+    # follower went straight round again (hundreds of lease reads and GETs a
+    # second, for its whole window, while Exa was unreachable).
+    _hold(("phone",), run_id="run-other")
+    gets = []
+
+    class _Failing:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            gets.append(url)
+            if failure == "unreachable":
+                raise ce.httpx.ConnectError("unreachable")
+            return _Resp(200, ["not", "a", "run"])
+
+        async def post(self, url, headers=None, json=None):
+            raise AssertionError("a follower never creates")
+
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _Failing)
+    monkeypatch.setattr(ce, "FOLLOW_POLL_S", 0.25)
+    monkeypatch.setattr(ce, "_EXA_POLL_INTERVAL_S", 0.25)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 1)
+    holder_reads = _counting(monkeypatch, "holder")
+
+    res = asyncio.run(ce.exa_step("c1", LINKEDIN, "Jane Doe", fields=("phone",), wait_retry=False,
+                                  cached=contact_cache.empty()))
+
+    assert res["in_progress"] is True and res["in_progress_fields"] == ["phone"]
+    assert len(holder_reads) <= 6 and len(gets) <= 6                 # ~1 s window / 0.25 s
+
+
+def test_a_lookup_buys_at_once_what_the_holder_is_not_after(pgs, exa, events, monkeypatch):
+    # Launch PAIR (email + phone) behind a sourcing lookup of the email whose
+    # run is still going: the phone is bought now, the email comes from the
+    # sourcing lookup's run (followed for free).
+    _hold(("email",), run_id="run-email")
+    exa.answer = {"email": "jane@acme.com", "phone": "+1 415 555 0100"}
+    exa.finished = True
+    exa.stuck = {"run-email"}
+
+    async def _go():
+        followed = _following(monkeypatch)
+        launch = asyncio.ensure_future(ce.exa_step(
+            "c9", LINKEDIN, "Jane Doe", fields=("email", "phone"), late={"candidate_id": "c9"},
+        ))
+        await asyncio.wait_for(followed.wait(), 5)                   # the phone is bought by now
+        exa.stuck.clear()                                            # the sourcing run answers
+        return await launch
+
+    res = asyncio.run(_go())
+
+    assert [p["outputSchema"] for p in exa.posts] == [ce._exa_contact_schema(("phone",))]
+    assert res["ok"] is True and not res.get("in_progress") and res["in_progress_fields"] == []
+    assert res["fields"]["mobilePhone"] == MOBILE and res["fields"]["workEmail"] == "jane@acme.com"
+    assert [(x["outcome"], x.get("reason")) for x in _lookups(events)] == [
+        ("passthrough", "partial_overlap"), ("follower", None),
+    ]
+
+
+def test_out_of_time_only_the_holders_fields_are_in_progress(pgs, exa, monkeypatch):
+    token = _hold(("email",), run_id="run-email")
+    exa.finished = True
+    exa.stuck = {"run-email"}                                        # still going after our window
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 0.5)
+
+    res = asyncio.run(ce.exa_step(
+        "c9", LINKEDIN, "Jane Doe", fields=("email", "phone"), wait_retry=False,
+        late={"candidate_id": "c9"}, cached=contact_cache.empty(),
+    ))
+
+    assert len(exa.posts) == 1                                       # the phone, bought
+    assert res["ok"] is True and res["fields"]["mobilePhone"] == MOBILE
+    assert res["in_progress"] is True and res["in_progress_fields"] == ["email"]
+    got = asyncio.run(contact_cache.get(LINKEDIN))
+    assert got["phone"] == MOBILE and not got["email_missed"]       # the email is no miss
+    assert asyncio.run(contact_cache.release(SLUG, token)) == [{"candidate_id": "c9"}]
+
+
+def test_a_part_that_failed_is_never_taken_for_a_miss():
+    answered = {"ok": True, "fields": {"workEmail": "jane@acme.com", "mobilePhone": ""}}
+    failed = {"ok": False, "message": "Exa create error (500)"}
+
+    joined = ce._with_part(answered, failed)
+    assert joined["ok"] is False and joined["fields"]["workEmail"] == "jane@acme.com"
+    assert joined["message"] == "Exa create error (500)"
+
+    still_going = {"ok": False, "in_progress": True, "message": "Another lookup ..."}
+    joined = ce._with_part(still_going, {"ok": True, "fields": {"mobilePhone": MOBILE}, "run_id": ""})
+    assert joined["ok"] is True and joined["in_progress"] and joined["fields"]["mobilePhone"] == MOBILE
+
+    assert "from_cache" not in ce._with_part({"ok": True, "from_cache": True}, {"ok": True})
+
+
+def test_a_follower_that_misses_the_release_still_gets_the_answer(pgs, exa, monkeypatch):
+    # The holder recorded its answer and released between the follower's last
+    # cache read and its join: the follower used to answer in_progress.
+    token = _hold(("phone",))
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 0.3)
+    real_join = contact_cache.join
+
+    async def _join(slug, ctx):
+        await contact_cache.record(LINKEDIN, phone=MOBILE, phone_provider="exa")
+        await contact_cache.release(SLUG, token)
+        return await real_join(slug, ctx)
+
+    monkeypatch.setattr(contact_cache, "join", _join)
+
+    res = asyncio.run(ce.exa_step(
+        "c2", LINKEDIN, "Jane Doe", fields=("phone",), wait_retry=False,
+        late={"candidate_id": "c2"}, cached=contact_cache.empty(),
+    ))
+
+    assert not res.get("in_progress") and res["in_progress_fields"] == []
+    assert res["ok"] and res["from_cache"] and res["fields"]["mobilePhone"] == MOBILE
+    assert exa.posts == []
+
+
+def test_a_leader_answered_by_the_cache_fills_the_rows_that_joined(pgs, exa, monkeypatch):
+    fills = []
+    monkeypatch.setattr(ce, "_fill_sourced_rows_sync", fills.append)
+    real_get = contact_cache.get
+
+    async def _get(url):
+        # With the slot in hand the leader looks at the cache again; another
+        # lookup joined its lease and the phone was found meanwhile.
+        await contact_cache.join(SLUG, {"candidate_id": "c2", "jobdiva_id": "26-2"})
+        await contact_cache.record(LINKEDIN, phone=MOBILE, phone_provider="apollo")
+        return await real_get(url)
+
+    monkeypatch.setattr(contact_cache, "get", _get)
+
+    res = asyncio.run(ce.exa_step(
+        "c1", LINKEDIN, "Jane Doe", fields=("phone",), semaphore=asyncio.Semaphore(1),
+        late={"candidate_id": "c1", "jobdiva_id": "26-1"}, cached=contact_cache.empty(),
+    ))
+
+    assert res["role"] == "leader" and res["from_cache"] and exa.posts == []
+    assert [(f["candidate_id"], f["jobdiva_id"], f["phone"]) for f in fills] == [("c2", "26-2", MOBILE)]
+    assert asyncio.run(contact_cache.holder(SLUG, **_H)) == {"state": "free"}
+
+
+def test_a_click_behind_another_lookups_run_buys_no_deep_search(pgs, exa, monkeypatch):
+    # Router: a normal step that ran out of time behind another lookup's run
+    # (in_progress) never buys the deep search for that field.
+    monkeypatch.setattr(sourcing_config, "CONTACT_LOOKUP_PROVIDERS", ("apollo", "exa"))
+    monkeypatch.setattr(core_config, "EXA_CONTACT_ENRICH_ENABLED", True)
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", False)
+    monkeypatch.setattr(apollo_phone, "reveal_available", lambda: False)
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_EFFORT", "medium")
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 0.3)
+    _hold(("phone",), run_id="run-other")
+    exa.finished = True
+    exa.stuck = {"run-other"}
+    steps = []
+    real_step = ce.exa_step
+
+    async def _step(*args, **kwargs):
+        steps.append("deep" if kwargs.get("deep") else "normal")
+        return await real_step(*args, **kwargs)
+
+    async def _apollo(candidate_id, linkedin_url):
+        return {"ok": True, "fields": {}}
+
+    def _no_db():
+        raise RuntimeError("no db in tests")
+
+    monkeypatch.setattr(ce, "exa_step", _step)
+    monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
+    monkeypatch.setattr(candidates_router, "_apollo_enrich_by_linkedin", _apollo)
+    body = candidates_router.EnrichCandidateContactRequest(
+        candidate_id="cand-1", linkedin_url=LINKEDIN, full_name="Jane Doe", fields=["phone"],
+    )
+
+    res = asyncio.run(candidates_router._enrich_candidate_contact_impl("cand-1", body))
+
+    assert steps == ["normal"]                                       # no deep search behind it
+    assert exa.posts == []
+    assert res["status"] == "in_progress" and res["in_progress_fields"] == ["phone"]
