@@ -132,7 +132,7 @@ def test_a_cached_email_and_a_final_phone_return_and_save_the_email(monkeypatch)
 
     res = _on_demand(monkeypatch, chain, **LAUNCH)
 
-    assert chain.calls() == []                                 # nobody is asked again
+    assert chain.calls() == ["apollo"]                         # no paid Exa run; cheap Apollo still asked
     assert res["status"] == "success"                          # Launch: no contact found, never "not eligible"
     assert res["email"] == "jane@acme.com" and res["phone"] is None
     assert res["final_missed_fields"] == ["phone"] and res["lookup"]["exa_deep"] == "final_miss"
@@ -144,7 +144,7 @@ def test_a_click_gets_the_held_contact_and_the_notice_not_an_error(monkeypatch):
 
     res = _on_demand(monkeypatch, chain)                      # Rankings Get Contact: both fields
 
-    assert chain.calls() == []
+    assert chain.calls() == ["apollo"]
     assert res["status"] == "success" and res["email"] == "jane@acme.com"
     assert res["final_missed_fields"] == ["phone"]
     assert res["checked_at"] == "2026-10-01T12:00:00+00:00"
@@ -156,7 +156,7 @@ def test_launch_ignores_confirm(monkeypatch):
 
     _on_demand(monkeypatch, chain, confirm=True, **LAUNCH)
 
-    assert chain.calls() == []
+    assert chain.calls() == ["apollo"]                         # never an Exa run
 
 
 def test_confirm_with_the_deep_search_off_runs_a_normal_run(monkeypatch):
@@ -164,7 +164,7 @@ def test_confirm_with_the_deep_search_off_runs_a_normal_run(monkeypatch):
     chain = _Chain(cached={"email": "jane@acme.com", "phone_missed": True, "phone_missed_in_deep_ttl": True})
 
     res = _on_demand(monkeypatch, chain, fields=["phone"])
-    assert chain.calls() == [] and res["status"] == "skipped"
+    assert chain.calls() == ["apollo"] and res["status"] == "skipped"
     assert res["est_usd"] == ce.rebuy_estimate_usd(("phone",), "normal")
 
     chain = _Chain(cached={"email": "jane@acme.com", "phone_missed": True, "phone_missed_in_deep_ttl": True})
@@ -203,6 +203,104 @@ def test_a_deep_miss_older_than_its_ttl_is_not_final(monkeypatch):
 
     assert chain.calls() == ["apollo", ("exa", ("phone",)), ("exa_deep", ("phone",))]
     assert res["final_missed_fields"] == [] and res["checked_at"] is None and res["est_usd"] is None
+
+
+# A normal-run miss inside the deep-miss window, the phone (no deep miss).
+NORMAL_MISSED_PHONE = {"phone_missed_in_deep_ttl": True, "phone_missed_at": "2026-08-15T12:00:00+00:00"}
+
+
+def _exa_off(monkeypatch, how):
+    if how == "providers":
+        monkeypatch.setattr(sourcing_config, "CONTACT_LOOKUP_PROVIDERS", ("apollo",))
+    elif how == "disabled":
+        monkeypatch.setattr(core_config, "EXA_CONTACT_ENRICH_ENABLED", False)
+
+
+@pytest.mark.parametrize("how", ["providers", "disabled"])
+def test_pulling_exa_never_cuts_apollo_coverage(monkeypatch, how):
+    # Exa pulled in an incident: a normal-run miss is not final (no Exa run
+    # could follow it anyway), so Apollo and its phone reveal are still asked.
+    revealed = []
+
+    async def _request(candidate_id, linkedin_url, **kw):
+        revealed.append(candidate_id)
+        return None
+
+    _exa_off(monkeypatch, how)
+    monkeypatch.setattr(apollo_phone, "reveal_available", lambda: True)
+    monkeypatch.setattr(apollo_phone, "request_phone", _request)
+    chain = _Chain(cached={"email": "jane@acme.com", **NORMAL_MISSED_PHONE})
+
+    res = _on_demand(monkeypatch, chain, **LAUNCH)
+    assert chain.calls() == ["apollo"] and revealed == ["cand-1"]
+    assert res["final_missed_fields"] == []
+
+    chain = _Chain(cached={"email": "jane@acme.com", **NORMAL_MISSED_PHONE})
+    res = _on_demand(monkeypatch, chain, fields=["phone"])     # the phone button
+    assert chain.calls() == ["apollo"]
+    assert res["status"] == "success" and res["final_missed_fields"] == [] and res["est_usd"] is None
+
+
+def test_with_exa_off_a_deep_miss_is_still_final_but_priced_at_nothing(monkeypatch):
+    _exa_off(monkeypatch, "providers")
+    chain = _Chain(cached={"email": "jane@acme.com", **DEEP_MISSED_PHONE})
+
+    res = _on_demand(monkeypatch, chain, fields=["phone"])
+
+    assert chain.calls() == ["apollo"]
+    assert res["status"] == "skipped" and res["final_missed_fields"] == ["phone"]
+    assert res["est_usd"] is None                              # a plain "Search again": no Exa run to buy
+
+
+def test_a_rebuy_the_reachability_rule_holds_back_is_priced_at_nothing(monkeypatch):
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", True)
+    chain = _Chain(cached={"email": "jane@acme.com", **DEEP_MISSED_PHONE})
+
+    res = _on_demand(monkeypatch, chain, fields=["phone"])
+
+    assert res["status"] == "skipped" and res["est_usd"] is None
+
+
+def test_apollo_finding_a_final_phone_ends_the_final_miss(monkeypatch):
+    chain = _Chain(cached={"email": "jane@acme.com", **DEEP_MISSED_PHONE},
+                   apollo={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
+
+    res = _on_demand(monkeypatch, chain, fields=["phone"])
+
+    assert chain.calls() == ["apollo"]
+    assert res["status"] == "success" and res["phone"] == MOBILE and res["final_missed_fields"] == []
+
+
+# ---------------------------------------------------------------------------
+# A held contact is never replaced by a cached one
+# ---------------------------------------------------------------------------
+
+def test_a_cached_email_never_replaces_the_rows_own(monkeypatch):
+    chain = _Chain(cached={"email": "old@acme.com"}, rows=[_row(email="fixed@acme.com")],
+                   deep={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
+
+    res = _on_demand(monkeypatch, chain, **LAUNCH)
+
+    assert res["email"] is None and res["phone"] == MOBILE      # Launch keeps the row's email
+    assert chain.updates and chain.updates[0][1] is None       # COALESCE keeps the row's email
+    assert all(r.get("email") != "old@acme.com" for r in chain.records)
+
+
+def test_a_cached_contact_never_replaces_what_the_request_holds(monkeypatch):
+    chain = _Chain(cached={"email": "old@acme.com", "phone": "+14155550199"})
+
+    res = _on_demand(monkeypatch, chain, email="fixed@acme.com", phone=MOBILE)
+
+    assert res["email"] is None and res["phone"] is None and res["provider"] == "none"
+    assert chain.calls() == []                                 # nothing missing, nothing bought
+
+
+def test_a_cached_phone_fills_a_row_whose_phone_is_junk(monkeypatch):
+    chain = _Chain(cached={"email": "old@acme.com", "phone": MOBILE}, rows=[_row(email="fixed@acme.com", phone="N/A")])
+
+    res = _on_demand(monkeypatch, chain, **LAUNCH)
+
+    assert res["phone"] == MOBILE and res["email"] is None and res["provider"] == "cache"
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +422,9 @@ def test_a_sourcing_breaker_skip_records_nothing_and_gives_the_slots_back(monkey
     assert all(not r.get("missed") for r in records)
 
 
-def _queued_env(monkeypatch, bought):
-    """Sourcing with one Exa slot and a cache that holds what the runs found.
-    ``bought`` collects the URL of every run created; each run waits on
+def _queued_env(monkeypatch, bought, slots=1):
+    """Sourcing with ``slots`` Exa slots and a cache that holds what the runs
+    found. ``bought`` collects the URL of every run created; each run waits on
     ``gate`` (set it to let runs finish)."""
     store = {}
     gate = asyncio.Event()
@@ -350,7 +448,7 @@ def _queued_env(monkeypatch, bought):
 
     monkeypatch.setattr(contact_cache, "get", _cache_get)
     monkeypatch.setattr(contact_cache, "record", _record)
-    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", 1)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", slots)
     ce.reset_job_counter("job-o", include_lifetime=True)
     return store, gate
 
@@ -395,12 +493,13 @@ def test_a_sourcing_lookup_cancelled_while_queued_for_a_slot_buys_nothing(monkey
     assert bought == [OTHER]                                    # Jane was never bought
 
 
-def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch):
+@pytest.mark.parametrize("slots", [1, 3])
+def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch, slots):
     # Search 1's lookup of Jane runs (billed) and the stream closes; the
-    # re-search's lookup of Jane misses the cache, queues for the slot, and
-    # finds Jane's answer there once the first run gives the slot back.
+    # re-search's lookup of Jane misses the cache and, whether or not an Exa
+    # slot is free (production has 3), waits for that run instead of buying.
     bought = []
-    _store, gate = _queued_env(monkeypatch, bought)
+    _store, gate = _queued_env(monkeypatch, bought, slots)
 
     async def _go():
         first = asyncio.ensure_future(_lookup(LINKEDIN))
@@ -420,6 +519,76 @@ def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch):
     assert bought == [LINKEDIN]                                 # one run, not two
     assert res["provider_used"] == "cache" and res["workEmail"] == "jane-doe@acme.com"
     assert ce._JOB_EXA_COUNTERS.get("job-s", 0) == 0            # the reuse cost no cap slot
+    assert ce._JOB_EXA_LIFETIME.get("job-s", 0) == 1            # the one run bought
+    assert not ce._SOURCING_EXA_INFLIGHT
+
+
+def test_two_rows_of_one_person_with_free_slots_buy_one_run(monkeypatch):
+    bought = []
+    _store, gate = _queued_env(monkeypatch, bought, slots=3)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        second = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gate.set()
+        answers = await asyncio.gather(first, second)
+        return answers, ce._exa_semaphore()._value
+
+    (first, second), free = asyncio.run(_go())
+
+    assert bought == [LINKEDIN]
+    assert {first["provider_used"], second["provider_used"]} == {"exa", "cache"}
+    assert first["workEmail"] == second["workEmail"] == "jane-doe@acme.com"
+    assert ce._JOB_EXA_LIFETIME.get("job-s", 0) == 1            # the follower gave its slot back
+    assert free == 3                                            # no Exa slot leaked
+
+
+def test_a_follower_cancelled_by_its_stream_leaves_the_run_alone(monkeypatch):
+    bought = []
+    store, gate = _queued_env(monkeypatch, bought, slots=3)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        second = asyncio.ensure_future(_lookup(LINKEDIN, "job-o"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        assert ce._JOB_EXA_LIFETIME.get("job-o", 0) == 0        # its cap slot is back
+        gate.set()
+        return await first
+
+    res = asyncio.run(_go())
+
+    assert bought == [LINKEDIN]
+    assert res["provider_used"] == "exa"
+    assert store[LINKEDIN]["email"] == "jane-doe@acme.com"
+
+
+def test_a_lookup_asking_more_than_the_run_going_buys_its_own(monkeypatch):
+    # The run going asks the email only; a lookup that also wants the phone
+    # is not covered by it and buys its own.
+    bought = []
+    _store, gate = _queued_env(monkeypatch, bought, slots=3)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        second = asyncio.ensure_future(ce.enrich_contact_for_sourcing(
+            LINKEDIN, "job-o", full_name="Jane Doe", include_exa=True, want_phone=True,
+        ))
+        await _until(lambda: len(bought) == 2)
+        gate.set()
+        return await asyncio.gather(first, second)
+
+    asyncio.run(_go())
+
+    assert bought == [LINKEDIN, LINKEDIN]
 
 
 def test_a_queued_lookup_does_not_rebuy_a_miss_recorded_while_it_waited(monkeypatch):

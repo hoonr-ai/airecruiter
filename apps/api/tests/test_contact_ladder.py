@@ -207,7 +207,7 @@ def test_a_recent_deep_miss_is_final_and_a_click_rebuys_it_only_on_confirm(monke
 
     chain = _Chain(cached=cached)
     res = _on_demand(monkeypatch, chain, fields=["phone"])     # the phone button
-    assert chain.calls == []
+    assert chain.calls == ["apollo"]                            # no paid Exa run; Apollo still asked
     assert res["status"] == "skipped" and res["reason"] == "recent_deep_miss"
     assert res["checked_at"] == "2026-10-01T12:00:00+00:00" and 0.15 <= res["est_usd"] <= 0.30
 

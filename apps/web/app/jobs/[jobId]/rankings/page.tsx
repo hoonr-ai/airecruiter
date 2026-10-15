@@ -72,7 +72,13 @@ import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { useActiveTime } from "@/hooks/use-active-time";
 import { recordActivity } from "@/lib/activity";
 import { RANKINGS_TABLE_MAX_HEIGHT } from "@/lib/table-layout";
-import { finalMissNotice, inProgress } from "@/lib/contact-lookup";
+import {
+  contactStatusHover,
+  finalMissNotice,
+  STILL_LOOKING_UP,
+  stillLookingUpMessage,
+  type ContactClickStatus,
+} from "@/lib/contact-lookup";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -326,7 +332,8 @@ interface Candidate {
 
 // `searchAgain`: label of the "Search again (~$X)" button, set when a recent
 // search already found nothing for what is still missing (a final miss).
-type EnrichStatus = { type: "info" | "error" | "success"; message: string; searchAgain?: string };
+// `inProgress`: an Exa run for it is still going ("check again in a few minutes").
+type EnrichStatus = ContactClickStatus & { type: "info" | "error" | "success" };
 type ToastState = { type: "info" | "error" | "success" | "warning"; message: string } | null;
 
 function isPlaceholderEmail(e?: string): boolean {
@@ -790,25 +797,6 @@ export default function CandidateRankingsPage() {
     return "text-slate-600";
   };
 
-  const compactEnrichStatusMessage = (status: EnrichStatus): string => {
-    const raw = String(status.message || "").trim();
-    const lower = raw.toLowerCase();
-    if (!raw) return "";
-    if (lower.includes("no contact info found") || lower.includes("no contact match")) {
-      return "No contact found";
-    }
-    if (lower.includes("linkedin url missing")) {
-      return "LinkedIn URL missing";
-    }
-    if (lower.includes("applied")) {
-      return "Contact info applied";
-    }
-    if (lower.includes("failed")) {
-      return "Contact lookup failed";
-    }
-    return raw;
-  };
-
   // Distinct sources present in the current candidate set, for the source dropdown.
   const availableSources = useMemo(() => {
     const set = new Set<string>();
@@ -1175,6 +1163,19 @@ export default function CandidateRankingsPage() {
         confirm: confirm === true,
       });
 
+      // An Exa run for it is still going: say so, never "No contact found",
+      // which invites a re-click that buys a second run. Nothing new came
+      // back to apply (the server answers in_progress only then).
+      const stillGoing = stillLookingUpMessage(payload);
+      if (stillGoing && !payload?.phone && !payload?.email) {
+        setEnrichStatusByCandidateId(prev => ({
+          ...prev,
+          [candidateKey]: { type: "info", message: `${stillGoing}.`, inProgress: true },
+        }));
+        pushToast(STILL_LOOKING_UP, "info");
+        return;
+      }
+
       const nextPhone = payload?.phone || candidate.phone || "";
       const nextEmail = payload?.email || candidate.email || "";
       // What is still missing because a recent search found none.
@@ -1185,9 +1186,7 @@ export default function CandidateRankingsPage() {
         : "";
 
       if (!nextPhone && !nextEmail) {
-        const msg = inProgress(payload)
-          ? "No contact info found yet: already being looked up, check again in a few minutes."
-          : `No contact info found for this LinkedIn URL.${missText}`;
+        const msg = `No contact info found for this LinkedIn URL.${missText}`;
         setEnrichStatusByCandidateId(prev => ({
           ...prev,
           [candidateKey]: {
@@ -2776,9 +2775,10 @@ export default function CandidateRankingsPage() {
                               {(() => {
                                 const cid = String(candidate.candidate_id || candidate.id || "").trim();
                                 const status = enrichStatusByCandidateId[cid];
-                                // A final miss keeps its date in the hover ("Searched <date>, nothing found").
+                                // A final miss keeps its date in the hover ("Searched <date>, nothing found"),
+                                // a lookup still going its "check again in a few minutes".
                                 const hoverStatus = status
-                                  ? (status.searchAgain ? status.message : compactEnrichStatusMessage(status))
+                                  ? contactStatusHover(status)
                                   : "Look up missing phone/email (Apollo → Exa)";
                                 const enriching = enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || ""));
                                 return (

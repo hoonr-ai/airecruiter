@@ -175,3 +175,48 @@ export function inProgress(answer: unknown): boolean {
   const status = answer && typeof answer === "object" ? (answer as { status?: unknown }).status : "";
   return String(status || "") === "in_progress";
 }
+
+/** The toast for an `in_progress` answer: never "No contact found", which invites a paid re-click. */
+export const STILL_LOOKING_UP = "Still being looked up — check again in a few minutes";
+
+/**
+ * What a click shows for an `in_progress` answer, naming the fields still
+ * being looked up when the answer says ("Phone still being looked up — check
+ * again in a few minutes"); null for any other answer.
+ */
+export function stillLookingUpMessage(answer: unknown): string | null {
+  if (!inProgress(answer)) return null;
+  const raw = (answer as { in_progress_fields?: unknown }).in_progress_fields;
+  const fields = (Array.isArray(raw) ? raw : [])
+    .map((f: unknown) => String(f || "").trim())
+    .filter((f: string) => f === "email" || f === "phone");
+  if (fields.length === 0) return STILL_LOOKING_UP;
+  const names = fields.join(" and ");
+  return `${names.charAt(0).toUpperCase()}${names.slice(1)} still being looked up — check again in a few minutes`;
+}
+
+/** Rankings Get Contact: the last answer's status line for one candidate. */
+export interface ContactClickStatus {
+  message: string;
+  /** "Search again (~$X)": a final miss (finalMissNotice). */
+  searchAgain?: string;
+  /** The lookup is still going (stillLookingUpMessage). */
+  inProgress?: boolean;
+}
+
+/**
+ * The Get Contact button's hover for a status: a final miss and a lookup
+ * still going keep their whole message (its date, "check again in a few
+ * minutes"); anything else is shortened ("No contact found", "Contact info
+ * applied", "Contact lookup failed").
+ */
+export function contactStatusHover(status: ContactClickStatus): string {
+  const raw = String(status.message || "").trim();
+  if (!raw || status.searchAgain || status.inProgress) return raw;
+  const lower = raw.toLowerCase();
+  if (lower.includes("no contact info found") || lower.includes("no contact match")) return "No contact found";
+  if (lower.includes("linkedin url missing")) return "LinkedIn URL missing";
+  if (lower.includes("applied")) return "Contact info applied";
+  if (lower.includes("failed")) return "Contact lookup failed";
+  return raw;
+}

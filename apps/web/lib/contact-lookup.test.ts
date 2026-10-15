@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   contactProviderLabel,
+  contactStatusHover,
   describeContactsFound,
   finalMissNotice,
   formatCheckedDate,
@@ -11,6 +12,8 @@ import {
   isKipploIssue,
   mostCommon,
   readNdjson,
+  STILL_LOOKING_UP,
+  stillLookingUpMessage,
 } from "./contact-lookup.ts";
 
 test("groups candidates for one call each, the last group shorter", () => {
@@ -152,4 +155,41 @@ test("in_progress is only that status", () => {
   for (const answer of [{ status: "success" }, { status: "skipped" }, {}, null]) {
     assert.equal(inProgress(answer), false);
   }
+});
+
+test("a lookup still going says so, naming the fields when the answer does", () => {
+  assert.equal(
+    stillLookingUpMessage({ status: "in_progress", in_progress_fields: ["phone"] }),
+    "Phone still being looked up — check again in a few minutes",
+  );
+  assert.equal(
+    stillLookingUpMessage({ status: "in_progress", in_progress_fields: ["email", "phone"] }),
+    "Email and phone still being looked up — check again in a few minutes",
+  );
+  assert.equal(stillLookingUpMessage({ status: "in_progress" }), STILL_LOOKING_UP);
+  assert.equal(stillLookingUpMessage({ status: "in_progress", in_progress_fields: ["x"] }), STILL_LOOKING_UP);
+  for (const answer of [{ status: "success", in_progress_fields: ["phone"] }, { status: "skipped" }, null]) {
+    assert.equal(stillLookingUpMessage(answer), null);
+  }
+});
+
+test("the Get Contact hover never turns a lookup still going into 'No contact found'", () => {
+  const going = stillLookingUpMessage({ status: "in_progress", in_progress_fields: ["phone"] }) || "";
+  assert.equal(contactStatusHover({ message: going, inProgress: true }), going);
+  // Even a message that reads like a miss keeps its words while the lookup goes on.
+  assert.equal(
+    contactStatusHover({ message: "No contact info found yet: still being looked up.", inProgress: true }),
+    "No contact info found yet: still being looked up.",
+  );
+  assert.equal(contactStatusHover({ message: "No contact info found for this LinkedIn URL." }), "No contact found");
+});
+
+test("the Get Contact hover keeps a final miss's date and shortens the rest", () => {
+  const miss = "No contact info found for this LinkedIn URL. Phone: searched Oct 1, 2026, nothing found.";
+  assert.equal(contactStatusHover({ message: miss, searchAgain: "Search again (~$0.23)" }), miss);
+  assert.equal(contactStatusHover({ message: "Contact info applied." }), "Contact info applied");
+  assert.equal(contactStatusHover({ message: "LinkedIn URL missing — cannot look up contact." }), "LinkedIn URL missing");
+  assert.equal(contactStatusHover({ message: "Enrichment request failed" }), "Contact lookup failed");
+  assert.equal(contactStatusHover({ message: "Something else" }), "Something else");
+  assert.equal(contactStatusHover({ message: "" }), "");
 });

@@ -316,6 +316,18 @@ def test_sql_a_deep_miss_stays_final_for_months_a_normal_miss_does_not(pg, monke
     assert not got["phone_deep_missed"] and not got["email_missed_in_deep_ttl"]
 
 
+def test_sql_a_miss_ttl_of_zero_makes_no_normal_miss_final(pg, monkeypatch):
+    monkeypatch.delenv("CONTACT_CACHE_DEEP_MISS_TTL_DAYS", raising=False)
+    monkeypatch.setenv("CONTACT_CACHE_MISS_TTL_DAYS", "0")             # 0 = not honoured
+    run = asyncio.run
+    run(contact_cache.record(LINKEDIN, missed=["email"], deep_missed=["phone"]))
+    _age(pg, "email_missed_at", 1)
+
+    got = run(contact_cache.get(LINKEDIN))
+    assert not got["email_missed"] and not got["email_missed_in_deep_ttl"]
+    assert got["phone_deep_missed"]                                  # the deep-miss TTL is its own
+
+
 def test_sql_migration_adds_the_deep_miss_columns():
     try:
         conn = psycopg2.connect(_DSN, connect_timeout=2)

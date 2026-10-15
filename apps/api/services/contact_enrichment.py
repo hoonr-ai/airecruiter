@@ -1647,6 +1647,52 @@ def _cached_contact_answer(cached: Dict[str, Any], wanted: Any) -> Optional[Dict
     }
 
 
+# Per-worker single-flight of the sourcing Exa step: the person (LinkedIn
+# slug) -> (task, fields) of the _sourcing_exa_lookup buying their contact in
+# this worker right now. Another lookup of the same person meanwhile (a
+# re-search after Stop while an Exa slot is free, a second row of the same
+# person) waits for that run instead of buying a second one. Only in this
+# worker, and only until the run answers or is handed to the late watch.
+_SOURCING_EXA_INFLIGHT: Dict[str, Tuple["asyncio.Future[Dict[str, Any]]", Tuple[str, ...]]] = {}
+
+
+def _sourcing_run_in_flight(slug: str, fields: Tuple[str, ...]) -> "Optional[asyncio.Future[Dict[str, Any]]]":
+    """This worker's sourcing Exa run of ``slug`` still going and asking at
+    least ``fields``, or None."""
+    task, asked = _SOURCING_EXA_INFLIGHT.get(slug, (None, ()))
+    if task is None or task.done() or not set(fields) <= set(asked):
+        return None
+    return task
+
+
+def _track_sourcing_run(slug: str, task: "asyncio.Future[Dict[str, Any]]", fields: Tuple[str, ...]) -> None:
+    """``task`` is the person's sourcing Exa run in this worker until it ends."""
+    _SOURCING_EXA_INFLIGHT[slug] = (task, tuple(fields))
+
+    def _forget(done: "asyncio.Future[Dict[str, Any]]") -> None:
+        if _SOURCING_EXA_INFLIGHT.get(slug, (None, ()))[0] is done:
+            del _SOURCING_EXA_INFLIGHT[slug]
+
+    task.add_done_callback(_forget)
+
+
+async def _follow_sourcing_run(task: "asyncio.Future[Dict[str, Any]]", fields: Tuple[str, ...]) -> Dict[str, Any]:
+    """What another lookup's run of the same person found of ``fields``, as a
+    sourcing answer (provider_used "cache": that run caches it itself), or {}
+    (it found none and recorded the miss, it is still going, or the breaker
+    skipped it). Waits without cancelling that run: this caller's cancel (the
+    Step-5 stream closing) never reaches it."""
+    await asyncio.wait({task})
+    if task.cancelled() or task.exception() is not None:
+        return {}
+    result = task.result() or {}
+    found = (result.get("fields") or {}) if result.get("ok") else {}
+    return _cached_contact_answer({
+        "email": str(found.get("workEmail") or found.get("personalEmail") or ""),
+        "phone": str(found.get("mobilePhone") or ""),
+    }, fields) or {}
+
+
 async def _sourcing_exa_lookup(
     label: str,
     linkedin_url: str,
@@ -1991,6 +2037,15 @@ async def enrich_contact_for_sourcing(
                 field for field, have in (("email", seed_email), ("phone", seed_phone))
                 if not have and (want_phone or field != "phone")
             )
+            # This person's contact is being bought by another sourcing
+            # lookup in this worker right now (a re-search after Stop, a
+            # second row of the same person): wait for that run instead of
+            # buying a second one, and give this lookup's cap slots back.
+            slug = contact_cache.linkedin_slug(linkedin_url)
+            lead = _sourcing_run_in_flight(slug, exa_fields)
+            if lead is not None:
+                _refund_exa_slots(job_key)
+                return await _follow_sourcing_run(lead, exa_fields)
             # Wait for an Exa slot here, where the caller's cancel still wins:
             # a lookup the closed Step-5 stream cancels while it is queued
             # (up to EXA_SOURCING_CONTACT_CAP of them per search behind
@@ -2006,28 +2061,39 @@ async def enrich_contact_for_sourcing(
             try:
                 # Looked at again with the slot in hand: a lookup of the same
                 # person queued ahead (a re-search after Stop, another row of
-                # the same person) may have bought it meanwhile.
+                # the same person, another worker) may have bought it meanwhile.
                 fresh = await contact_cache.get(linkedin_url)
                 reuse = _cached_contact_answer(fresh, exa_fields)
                 if reuse or all(fresh.get(f"{f}_missed") for f in exa_fields):
                     permit.release()
                     _refund_exa_slots(job_key)
                     return reuse or {}
-                # A run of its own, holding the slot until its answer is
-                # cached: the stream closing from here on cancels this
-                # lookup, but the run still finishes and keeps its answer.
-                exa_task = asyncio.ensure_future(_sourcing_exa_lookup(
-                    exa_label, linkedin_url, full_name or "", company or "", exa_fields, job_key, permit,
-                ))
+                # ...or started a run of them while this one waited (checked
+                # with no await before this lookup's own run is tracked).
+                lead = _sourcing_run_in_flight(slug, exa_fields)
+                if lead is not None:
+                    permit.release()
+                    _refund_exa_slots(job_key)
+                else:
+                    # A run of its own, holding the slot until its answer is
+                    # cached: the stream closing from here on cancels this
+                    # lookup, but the run still finishes and keeps its answer.
+                    exa_task = asyncio.ensure_future(_sourcing_exa_lookup(
+                        exa_label, linkedin_url, full_name or "", company or "", exa_fields, job_key, permit,
+                    ))
             except BaseException:
                 permit.release()
                 _refund_exa_slots(job_key)
                 raise
+            if lead is not None:
+                return await _follow_sourcing_run(lead, exa_fields)
             # Also gives the slot back should the task be cancelled before it
             # ever runs (loop shutdown); a no-op once the task released it.
             exa_task.add_done_callback(permit.release)
             _SOURCING_EXA_TASKS.add(exa_task)
             exa_task.add_done_callback(_SOURCING_EXA_TASKS.discard)
+            if slug:
+                _track_sourcing_run(slug, exa_task, exa_fields)
             exa_result = await asyncio.shield(exa_task)
             if exa_result.get("skipped"):
                 # Breaker opened while this lookup waited: nothing was sent,

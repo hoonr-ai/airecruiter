@@ -12,9 +12,10 @@ already come back empty. This table remembers, per LinkedIn profile:
     CONTACT_CACHE_MISS_TTL_DAYS, and a miss of the deep search
     (``*_deep_missed_at``, the end of the chain) is final for
     CONTACT_CACHE_DEEP_MISS_TTL_DAYS: Launch PAIR and sourcing never re-buy
-    it, and a recruiter's click re-buys it only once they confirm
-    (routers/candidates.py, CONTACT_CLICK_HONOUR_DEEP_MISS). A normal-run
-    miss inside that window is final too when no deep search can follow.
+    it from Exa, and a recruiter's click re-buys it only once they confirm
+    (routers/candidates.py, CONTACT_CLICK_HONOUR_DEEP_MISS); the on-demand
+    chain still asks the cheaper providers. A normal-run miss inside that
+    window is final too when Exa runs but no deep search can follow.
 
 Only provider-found values are written, never the contact a row arrived with
 (LLM-extracted profile text is unreliable). A miss is recorded only when the
@@ -66,7 +67,8 @@ MIGRATE_SQL = """
     ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_deep_missed_at TIMESTAMPTZ
 """
 
-# Hit TTL 0 = a found value never expires. Miss TTL 0 = misses not honoured.
+# Hit TTL 0 = a found value never expires. Miss TTL 0 = misses not honoured
+# (a normal-run miss is then not final either: *_missed_in_deep_ttl needs both).
 READ_SQL = """
     SELECT email, email_provider, phone, phone_provider,
            email_missed_at, phone_missed_at, email_deep_missed_at, phone_deep_missed_at,
@@ -76,9 +78,9 @@ READ_SQL = """
                AND (%(hit_days)s = 0 OR phone_found_at > NOW() - make_interval(days => %(hit_days)s)) AS phone_fresh,
            %(miss_days)s > 0 AND email_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_missed_recent,
            %(miss_days)s > 0 AND phone_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_missed_recent,
-           %(deep_miss_days)s > 0
+           %(miss_days)s > 0 AND %(deep_miss_days)s > 0
                AND email_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS email_missed_in_deep_ttl,
-           %(deep_miss_days)s > 0
+           %(miss_days)s > 0 AND %(deep_miss_days)s > 0
                AND phone_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS phone_missed_in_deep_ttl,
            %(deep_miss_days)s > 0
                AND email_deep_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS email_deep_missed_recent,
@@ -145,7 +147,8 @@ def hit_ttl_days() -> int:
 
 def miss_ttl_days() -> int:
     """How long a normal Exa run's miss sends the next lookup straight to the
-    deep search (and keeps sourcing from re-buying it). 0 = not honoured."""
+    deep search (and keeps sourcing from re-buying it). 0 = not honoured at
+    all (nor final when no deep search can follow)."""
     return _int_env("CONTACT_CACHE_MISS_TTL_DAYS", 30)
 
 
@@ -251,7 +254,8 @@ async def get(linkedin_url: Any) -> Dict[str, Any]:
     for a normal-run miss within CONTACT_CACHE_MISS_TTL_DAYS or a deep-search
     miss within CONTACT_CACHE_DEEP_MISS_TTL_DAYS, ``*_deep_missed`` only for
     the latter, ``*_missed_in_deep_ttl`` for a normal-run miss within the
-    deep-miss TTL (final when no deep search can follow). ``*_missed_at`` /
+    deep-miss TTL (final when Exa runs but no deep search can follow; never
+    with CONTACT_CACHE_MISS_TTL_DAYS=0). ``*_missed_at`` /
     ``*_deep_missed_at`` are the last miss times (ISO 8601, "" = none)."""
     out = empty()
     slug = linkedin_slug(linkedin_url)
