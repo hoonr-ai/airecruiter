@@ -61,9 +61,32 @@ _CURSOR_MAX_RETENTION_SECONDS = 3600
 # currently connected, so _last_seen_id/_last_seen_cursor_at don't grow
 # unbounded over a worker's lifetime.
 _CURSOR_PRUNE_AFTER_SECONDS = 86400
+# A second tab's gap backfill (see _fetch_gap_sync/_register_subscriber)
+# can't usefully deliver more than the queue itself can hold, so it's capped
+# here rather than left unbounded — a tab stale enough to have missed more
+# than this has a gap large enough that its own list() truth-up on load
+# already covers the difference better than a partial replay would.
+_GAP_BACKFILL_MAX_ROWS = _STREAM_QUEUE_MAXSIZE
+_GAP_BACKFILL_PAGE_SIZE = 50
+
+
+# Set by init_notifications_schema_sync; read by main.py's /api/health.
+# A schema-init failure is otherwise only ever a log line nobody watches —
+# the app boots normally with no notifications table/indexes, and every
+# insert then fails silently into its own try/except (the exact kind
+# of incident this module's docstring and _CONFLICT_CANDIDATE_LEVEL already
+# describe happening once from a DIFFERENT cause). Surfacing it on the
+# health endpoint means a monitor can actually catch the next one.
+_schema_init_ok: Optional[bool] = None
+
+
+def notifications_schema_status() -> Optional[bool]:
+    """None = init_notifications_schema_sync hasn't run yet this process."""
+    return _schema_init_ok
 
 
 def init_notifications_schema_sync() -> None:
+    global _schema_init_ok
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -160,6 +183,12 @@ def init_notifications_schema_sync() -> None:
                 # predicate in services/notifications_service.py — exactly
                 # that kind of drift broke candidate_passed/rejected entirely
                 # once already (see that module's docstring).
+                #
+                # f-string interpolation (not a bind param) is safe ONLY
+                # because REVIEW_LOOP_TYPES is a fixed, hardcoded module-level
+                # constant — never user input, request data, or anything
+                # else that could carry a quote/injection payload. This must
+                # never be built from anything but another such constant.
                 review_loop_types_sql = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
                 cur.execute(
                     "SELECT indexdef FROM pg_indexes WHERE indexname = 'uniq_notifications_recipient_candidate_job_type'"
@@ -275,8 +304,10 @@ def init_notifications_schema_sync() -> None:
                     """
                 )
                 conn.commit()
+        _schema_init_ok = True
     except Exception as e:  # noqa: BLE001 - schema init must never crash boot
         logger.error(f"init_notifications_schema failed: {e}")
+        _schema_init_ok = False
 
 
 async def init_notifications_schema() -> None:
@@ -390,7 +421,7 @@ def _mark_all_notifications_read_sync(email: str) -> None:
                 """
                 UPDATE notifications
                 SET read_at = now()
-                WHERE recipient_email = %s AND read_at IS NULL
+                WHERE recipient_email = %s AND read_at IS NULL AND cleared_at IS NULL
                 """,
                 (email,),
             )
@@ -555,6 +586,52 @@ def _poll_new_notifications_sync(last_seen: Dict[str, int]) -> Dict[str, List[di
     return out
 
 
+def _fetch_gap_sync(email: str, since_id: int, up_to_id: int) -> List[dict]:
+    """All rows strictly after `since_id` and up to (inclusive) `up_to_id` —
+    the backlog a reconnecting subscriber with a stale since_id missed. Used
+    to backfill ONE subscriber's own queue without touching the shared
+    per-email cursor (see _register_subscriber).
+
+    Pages through the gap in _GAP_BACKFILL_PAGE_SIZE batches rather than one
+    bounded query: a single LIMIT left the remainder silently undelivered,
+    with nothing logged, if a tab was stale enough to be more than one page
+    behind. Still capped overall at _GAP_BACKFILL_MAX_ROWS — logged as a
+    warning when that cap (not just a naturally short result) is what ended
+    the loop, since those rows ARE then simply never delivered to this
+    subscriber."""
+    rows: List[dict] = []
+    cursor = since_id
+    truncated = False
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            while cursor < up_to_id:
+                if len(rows) >= _GAP_BACKFILL_MAX_ROWS:
+                    truncated = True
+                    break
+                cur.execute(
+                    """
+                    SELECT id, type, job_id, jobdiva_id, candidate_id, title, body,
+                           score, metadata, read_at, created_at
+                    FROM notifications
+                    WHERE recipient_email = %s AND id > %s AND id <= %s AND cleared_at IS NULL
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (email, cursor, up_to_id, _GAP_BACKFILL_PAGE_SIZE),
+                )
+                page = cur.fetchall()
+                if not page:
+                    break
+                rows.extend(page)
+                cursor = page[-1]["id"]
+    if truncated:
+        logger.warning(
+            "notifications_stream_gap_backfill_truncated email=%s delivered=%d since_id=%d up_to_id=%d",
+            email, len(rows), since_id, up_to_id,
+        )
+    return rows
+
+
 def _prune_stale_cursors() -> None:
     """Drop bookkeeping for emails that are both disconnected and old enough
     that nothing will ever resume from them — keeps _last_seen_id /
@@ -614,7 +691,9 @@ async def _register_subscriber(
     1. The client's own `since_id` (its highest-rendered notification id) —
        authoritative, standard SSE Last-Event-ID-style resume, and the only
        option that's correct across a reconnect landing on a DIFFERENT
-       worker (the in-memory cursors below are per-process).
+       worker (the in-memory cursors below are per-process). Only safe to
+       apply directly to the SHARED cursor when this is the first subscriber
+       for this email on this worker (see below for why).
     2. A retained cursor from this email's last subscriber on THIS worker,
        if it's still fresh (< _CURSOR_MAX_RETENTION_SECONDS old) — resumes a
        short reconnect gap without a round trip.
@@ -626,8 +705,48 @@ async def _register_subscriber(
         is_new_email = email not in _subscribers
         _subscribers.setdefault(email, set()).add(queue)
 
-    if since_id is not None:
+    if since_id is not None and is_new_email:
         _last_seen_id[email] = max(0, since_id)
+    elif since_id is not None:
+        # Another tab for this email already shares a live cursor on this
+        # worker — overwriting it from THIS subscriber's since_id would
+        # corrupt it for every other tab sharing it: moving it backward
+        # replays rows those other tabs already rendered; moving it forward
+        # silently skips live events they haven't received yet. Neither
+        # direction touches the shared cursor here — only the gap this one
+        # subscriber missed, if any, is backfilled straight into its own
+        # queue.
+        current = _last_seen_id.get(email, 0)
+        if since_id < current:
+            gap_rows = await asyncio.to_thread(_fetch_gap_sync, email, since_id, current)
+            if gap_rows:
+                # This queue was already added to _subscribers above, so the
+                # broadcaster could have pushed rows with id > current into
+                # it while the (possibly multi-page) fetch above was
+                # running. Those are newer than everything in gap_rows, so
+                # if any arrived they're ahead of where this backlog
+                # belongs for a client treating ids as a monotonic stream.
+                # Drain and rebuild with the backlog first — both loops
+                # below are synchronous (no `await`), so nothing else can
+                # interleave once the fetch above has returned.
+                requeued: List[dict] = []
+                while not queue.empty():
+                    requeued.append(queue.get_nowait())
+                for row in gap_rows:
+                    try:
+                        queue.put_nowait(_row_to_item(row).model_dump())
+                    except asyncio.QueueFull:
+                        logger.warning("notifications_stream_queue_full_on_backfill email=%s", email)
+                        break
+                for item in requeued:
+                    try:
+                        queue.put_nowait(item)
+                    except asyncio.QueueFull:
+                        logger.warning("notifications_stream_queue_full_on_backfill_requeue email=%s", email)
+                        break
+        # since_id >= current: this subscriber already has everything the
+        # shared cursor has delivered so far; the normal broadcaster poll
+        # covers anything newer, nothing to backfill.
     elif is_new_email:
         retained = _last_seen_id.get(email)
         retained_at = _last_seen_cursor_at.get(email)
