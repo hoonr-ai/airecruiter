@@ -1515,6 +1515,11 @@ function NewJobPageContent() {
   const [showResumeModal, setShowResumeModal] = useState(false);
 
   const [isHydratingJobSetup, setIsHydratingJobSetup] = useState(false);
+  // Gate autosave on a dedicated "hydration complete" signal instead of
+  // Boolean(jobData): loadJobDraft sets jobData partway through a sequence
+  // of setState calls, so Boolean(jobData) alone could flip true mid-hydration
+  // and let a spurious auto-save fire before every field had its persisted value.
+  const isWizardHydrated = Boolean(jobData) && !isHydratingJobSetup;
   const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
   const stepStartMsRef = useRef<number>(Date.now());
 
@@ -2966,13 +2971,7 @@ function NewJobPageContent() {
     const saveTimeoutId = setTimeout(() => saveController.abort("timeout"), 20000);
     try {
       const apiUrl = API_BASE;
-      // Use the new endpoint that saves directly to monitored_jobs
-      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: saveController.signal,
-        keepalive: stepData.keepalive,
-        body: JSON.stringify({
+      const requestBody = JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
           user_session: "default", // Add user session parameter required by API
@@ -3019,7 +3018,19 @@ function NewJobPageContent() {
           step2_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 2 : undefined,
           step3_completed: stepData.saveType !== "auto" ? stepData.currentStep >= 3 : undefined,
           is_auto_saved: stepData.saveType === "auto"
-        })
+      });
+
+      // keepalive requests are capped (~64KB in Chromium). A large rubric
+      // payload past that is silently dropped, so fall back to a normal fetch.
+      const KEEPALIVE_BYTE_LIMIT = 60000;
+      const useKeepalive = Boolean(stepData.keepalive) && new TextEncoder().encode(requestBody).length < KEEPALIVE_BYTE_LIMIT;
+
+      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: saveController.signal,
+        keepalive: useKeepalive,
+        body: requestBody
       });
 
       if (!response.ok) {
@@ -3065,7 +3076,7 @@ function NewJobPageContent() {
   // debounce hasn't flushed yet — if they click a different step indicator
   // within that window the cleanup below would clearTimeout, dropping the
   // edit. The currentStep-keyed effect further down catches that case.
-  useStepAutosave(currentStep, 5, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 5, isReadOnly, isWizardHydrated, saveJobDraft, [
     searchSources,
     sourceTitles,
     sourceSkills,
@@ -3081,7 +3092,7 @@ function NewJobPageContent() {
 
   // Step 1 auto-save for Intake fields (Recruiter Notes, Employment Type, Emails, Screening Level, Work Auth)
   // Ensures data isn't lost if the user refreshes before clicking Next.
-  useStepAutosave(currentStep, 1, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 1, isReadOnly, isWizardHydrated, saveJobDraft, [
     recruiterNotes,
     selectedEmpTypes,
     recruiterEmails,
@@ -3090,7 +3101,7 @@ function NewJobPageContent() {
   ]);
 
   // Step 2 auto-save for Publish fields (Job Title, Enhanced Title, AI Description, Job Boards)
-  useStepAutosave(currentStep, 2, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 2, isReadOnly, isWizardHydrated, saveJobDraft, [
     jobTitle,
     enhancedTitle,
     jobPosting,
@@ -3099,13 +3110,13 @@ function NewJobPageContent() {
   ]);
 
   // Step 3 auto-save for Rubric fields (Titles, Skills, Education, Requirements etc.)
-  useStepAutosave(currentStep, 3, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 3, isReadOnly, isWizardHydrated, saveJobDraft, [
     rubricData,
     resumeMatchFilters,
   ]);
 
   // Step 4 auto-save for Screening Questions
-  useStepAutosave(currentStep, 4, isReadOnly, Boolean(jobData), saveJobDraft, [
+  useStepAutosave(currentStep, 4, isReadOnly, isWizardHydrated, saveJobDraft, [
     screenQuestions,
   ]);
 
