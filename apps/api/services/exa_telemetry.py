@@ -50,7 +50,13 @@ run, and per on-demand final miss / confirmed re-buy) says what the person's
 single-flight lease decided: ``outcome`` leader | follower | passthrough |
 in_progress | lease_error | adopted | final_miss | confirm_rebuy
 (``record_contact_lookup``). A follower's free polls of another lookup's run
-send no ExaCall: the run's owner reports it.
+send no ExaCall: the run's owner reports it. ``outcome`` ``lookup`` is one
+per on-demand lookup (routers/candidates.py): ``existing_rows``,
+``seed_from`` (request | row | -), the booleans ``seeded_email`` /
+``has_name`` / ``has_company``, ``normal_asked`` / ``normal_outcome`` /
+``deep_asked`` / ``deep_outcome``, and the Launch deep-email holdout's
+``deep_skip_eligible`` / ``deep_skip_arm`` (skip | control) /
+``deep_skip_pct`` / ``first_exposure``.
 
 ``ExaPeopleFanout`` (one per Pass A / Dice fan-out) counts cache hits,
 misses and in-flight joins, the per-query size and what the merge kept
@@ -92,6 +98,8 @@ CONTEXT_KEYS = (
     "tier", "fields_asked", "arm", "defer", "role",
 )
 _METADATA_KEYS = ("tier", "path", "trigger", "job_id", "attempt", "arm")
+# ContactLookup's boolean flags (record_contact_lookup).
+LOOKUP_FLAGS = ("seeded_email", "has_name", "has_company")
 _MAX_STR = 64
 
 _EMPTY: Mapping[str, Any] = MappingProxyType({})
@@ -338,16 +346,21 @@ def record_people_fanout(surface: str, **attrs: Any) -> None:
         logger.debug("ExaPeopleFanout not recorded: %s", exc)
 
 
-def record_contact_lookup(outcome: str, **attrs: Any) -> None:
+def record_contact_lookup(outcome: str, *, flags: Optional[Mapping[str, Any]] = None, **attrs: Any) -> None:
     """One ``ContactLookup`` event: what a contact step's single-flight lease
-    (or the final-miss rule) decided (see the module docstring), with the
-    who-asked context. Ids, enums and numbers only. Never raises."""
+    (or the final-miss rule) decided, or one on-demand lookup's summary (see
+    the module docstring), with the who-asked context. Ids, enums and numbers
+    only. ``flags``: booleans among LOOKUP_FLAGS, sent as booleans past the
+    PII key filter (their names hold "email" / "name"; a bool carries
+    nothing). Never raises."""
     if not enabled():
         return
     try:
         payload = _with_context(attrs)
         payload["outcome"] = outcome
-        _send(LOOKUP_EVENT, _nr.safe_attributes({k: _flat(v) for k, v in payload.items()}))
+        out = _nr.safe_attributes({k: _flat(v) for k, v in payload.items()})
+        out.update({k: bool(v) for k, v in (flags or {}).items() if k in LOOKUP_FLAGS})
+        _send(LOOKUP_EVENT, out)
     except Exception as exc:  # noqa: BLE001
         logger.debug("ContactLookup not recorded: %s", exc)
 
@@ -392,6 +405,7 @@ def record_config_once() -> None:
             "breaker_ttl_s": float(EXA.no_credits_ttl_s),
             "normal_effort": str(getattr(_cfg, "EXA_CONTACT_ENRICH_EFFORT", "") or ""),
             "deep_effort": str(getattr(_cfg, "EXA_CONTACT_DEEP_EFFORT", "") or ""),
+            "deep_skip_pct": int(getattr(_sc, "EXA_DEEP_SKIP_REACHABLE_PCT", 0) or 0),
             "worker_pid": os.getpid(),
         }))
         _config_sent_at = now

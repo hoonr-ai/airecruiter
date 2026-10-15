@@ -33,6 +33,7 @@ Two surfaces:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -248,6 +249,44 @@ def rebuy_estimate_usd(fields: Tuple[str, ...], tier: str) -> float:
     if deep and "fiber" in deep_data_sources():
         usd += _EXA_FIBER_RUN_USD
     return round(usd, 2)
+
+
+# Launch PAIR's deep email run for a candidate already holding a personal
+# phone: a holdout (sourcing_config.EXA_DEEP_SKIP_REACHABLE_PCT). The bucket is
+# a hash of the LinkedIn slug, never Python's hash() (salted per process): a
+# person stays in one arm across the 8 workers and every restart.
+_DEEP_SKIP_SALT = b"deep_skip_reachable:"
+
+
+def deep_skip_reachable_pct() -> int:
+    """EXA_DEEP_SKIP_REACHABLE_PCT (sourcing_config, default 50), 0-100, read
+    at call time: the share of Launch PAIR's reachable people who skip it."""
+    from core import sourcing_config as _sc
+
+    try:
+        pct = int(getattr(_sc, "EXA_DEEP_SKIP_REACHABLE_PCT", 50))
+    except (TypeError, ValueError):
+        return 50
+    return min(100, max(0, pct))
+
+
+def deep_skip_bucket(linkedin_url: Any) -> Optional[int]:
+    """The person's holdout bucket, 0-99 (None without a LinkedIn slug)."""
+    slug = contact_cache.linkedin_slug(linkedin_url)
+    if not slug:
+        return None
+    return int(hashlib.sha1(_DEEP_SKIP_SALT + slug.encode("utf-8")).hexdigest(), 16) % 100
+
+
+def deep_skip_arm(linkedin_url: Any, pct: int) -> str:
+    """The person's arm at ``pct``: "skip" (no deep email run while a
+    personal phone is held), "control" (the deep email run as before) or
+    "off" (pct 0, or no LinkedIn slug)."""
+    bucket = deep_skip_bucket(linkedin_url)
+    if pct <= 0 or bucket is None:
+        return "off"
+    return "skip" if bucket < pct else "control"
+
 
 _LINKEDIN_PROFILE_RE = re.compile(r"linkedin\.com/in/", re.IGNORECASE)
 

@@ -603,6 +603,29 @@ EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
     "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
+
+# Launch PAIR's deep-search EMAIL run for a candidate who already holds a
+# personal phone (2026-10-14, user decision: a 50/50 holdout for 2 weeks, then
+# decide). The launch gate is phone OR email, so that run (~$0.30 per email
+# found, ~$1.6k a month) never changes who can be launched; it buys a second
+# channel. This share of such people, 0-100 by a hash of their LinkedIn slug
+# (one arm per person across workers and restarts:
+# contact_enrichment.deep_skip_arm), skips it; the rest keep it, and both arms
+# are logged when it is decided (services/contact_holdout.py). 0 = off
+# (everyone keeps the run), 100 = everyone skips it. Only Launch PAIR's lookups
+# (trigger "launch"); a recruiter's click always gets the deep search. Parsed
+# at import (a bad value is 50), read through this attribute at call time.
+def _env_pct(name: str, default: int) -> int:
+    try:
+        value = int((_os.getenv(name) or "").strip() or default)
+    except ValueError:
+        return default
+    return min(100, max(0, value))
+
+
+EXA_DEEP_SKIP_REACHABLE_PCT = _env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 50)
+
+
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate
 # already has an email but no phone. ZoomInfo cannot match a LinkedIn URL, but it
 # CAN match an email, so this is the cheap way to fill exactly the gap that used
