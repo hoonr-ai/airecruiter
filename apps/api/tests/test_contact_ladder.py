@@ -330,6 +330,8 @@ def test_deep_search_goes_web_only_when_exa_refuses_fiber(monkeypatch):
     from services import exa_telemetry
 
     bodies = []
+    sent = []
+    monkeypatch.setattr(exa_telemetry, "_send", lambda event_type, attrs: sent.append(attrs))
     refused = _Resp(400, {"error": "dataSources not available"})
     _exa_env(monkeypatch, bodies, [refused, refused, FOUND])
 
@@ -345,6 +347,8 @@ def test_deep_search_goes_web_only_when_exa_refuses_fiber(monkeypatch):
     assert "dataSources" not in bodies[2] and "Fiber" not in bodies[2]["query"]
     assert "search thoroughly" in bodies[2]["query"] and bodies[2]["effort"] == "medium"
     assert "metadata" not in bodies[2]
+    guard = [(a["outcome"], a.get("http_status")) for a in sent if a.get("endpoint") == "agent_guard"]
+    assert guard == [("sources_refused", 400)]  # not metadata_rejected, not rejected
 
 
 def test_deep_search_without_data_sources_when_switched_off(monkeypatch):

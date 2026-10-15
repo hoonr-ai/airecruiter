@@ -14,7 +14,8 @@ Pins:
     acquire() unchanged, TTL 0 = off
   - Pass A fan-out: raises only when no query succeeded; one event per query
   - contact path: breaker open = fatal with no POST; a 402 trips it with the
-    answer unchanged; sourcing skips BEFORE the per-job caps, records no miss
+    answer unchanged; sourcing skips BEFORE the per-job caps, records no miss,
+    and refunds them when the breaker opens while the lookup is queued
   - Step 5: source_status "failed" with the out-of-credits reason, JobDiva
     still completes, multi-location keeps the locations that answered
 """
@@ -311,7 +312,7 @@ def test_contact_402_trips_the_breaker_with_the_answer_unchanged(contact_env):
     second = asyncio.run(ce.exa_enrich_by_linkedin("c2", LINKEDIN, "Jane Doe", fields=("phone",)))
 
     assert first == {"ok": False, "message": "Exa create error (402)", "fatal": True}
-    assert second == {"ok": False, "message": "Exa out of credits", "fatal": True}
+    assert second == {"ok": False, "message": "Exa out of credits", "fatal": True, "skipped": True}
     assert len(_Client.posts) == 1  # fatal: no retry, and nothing sent while open
     assert asyncio.run(vl.EXA.no_credits_left()) > 0
 
@@ -342,6 +343,46 @@ def test_sourcing_skips_exa_before_the_caps_and_records_no_miss(contact_env, mon
     assert _Client.posts == []
     assert "job-dry" not in ce._JOB_EXA_COUNTERS and "job-dry" not in ce._JOB_EXA_LIFETIME
     assert recorded and all(not kw.get("missed") for kw in recorded)
+
+
+def test_sourcing_refunds_the_caps_when_the_breaker_opens_while_queued(contact_env, monkeypatch):
+    # Counted, then queued on the Exa semaphore while another lookup's 402
+    # trips the breaker: nothing is sent, so both slots come back.
+    monkeypatch.setattr(sourcing_config, "EXA_SOURCING_CONTACT_FALLBACK", True)
+    monkeypatch.setattr(sourcing_config, "CONTACT_LOOKUP_PROVIDERS", ("exa",))
+    recorded = []
+
+    async def _get(url):
+        return {}
+
+    async def _record(url, **kw):
+        recorded.append(kw)
+
+    from services import contact_cache
+
+    monkeypatch.setattr(contact_cache, "get", _get)
+    monkeypatch.setattr(contact_cache, "record", _record)
+
+    class _TripsWhileQueued:
+        async def __aenter__(self):
+            await vl.EXA.trip_no_credits("NO_MORE_CREDITS")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(ce, "_exa_semaphore", _TripsWhileQueued)
+    ce.reset_job_counter("job-q", include_lifetime=True)
+    monkeypatch.setitem(ce._JOB_EXA_LIFETIME, "job-q", 7)
+
+    res = asyncio.run(ce.enrich_contact_for_sourcing(
+        LINKEDIN, "job-q", full_name="Jane Doe", include_exa=True, want_phone=False,
+    ))
+
+    assert res == {}
+    assert _Client.posts == []
+    assert ce._JOB_EXA_COUNTERS.get("job-q", 0) == 0 and ce._JOB_EXA_LIFETIME["job-q"] == 7
+    assert recorded and all(not kw.get("missed") for kw in recorded)
+    ce.reset_job_counter("job-q", include_lifetime=True)
 
 
 # ---------------------------------------------------------------------------

@@ -1124,7 +1124,10 @@ class ExaService:
             return []
         except Exception as e:
             logger.warning("Exa Agent poll failed for run_id=%s: %s", run_id, e)
-            _exit("poll_error", exa_run_id=run_id, error_kind=type(e).__name__)
+            failure = exa_telemetry.classify_exc(e)  # a 429 stays rate_limited
+            if failure.get("outcome") == "error":
+                failure["outcome"] = "poll_error"
+            _exit(exa_run_id=run_id, **failure)
             return []
 
         status = getattr(completed, "status", "")

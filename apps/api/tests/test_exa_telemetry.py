@@ -13,7 +13,10 @@ Pins:
   - the guard: a 400 with metadata is re-sent once without it; accepted =>
     latched off for the process (ERROR once); the deep search keeps Fiber
   - ExaConfig once per worker per hour, only once New Relic took it
-  - ExaCall per contact attempt / late watch, with cost from the run JSON
+  - ExaCall per contact attempt / late watch, with cost from the run JSON; a
+    poll 429 is rate_limited, a cancelled attempt or query is abandoned
+  - Pass B / per-URL deep analysis events (both ship off) and _exa_paced
+    running the SDK call under the New Relic trace
 """
 import asyncio
 import logging
@@ -154,6 +157,8 @@ def test_classify_exc():
     assert tele.classify_exc(ValueError("Request failed with status code 429: slow down"))["outcome"] == "rate_limited"
     assert tele.classify_exc(ValueError("Request failed with status code 500: oops")) == {
         "outcome": "error", "http_status": 500, "error_kind": "ValueError"}
+    # A closed Step-5 stream cancels its queries: abandoned, as on the contact path.
+    assert tele.classify_exc(asyncio.CancelledError()) == {"outcome": "abandoned"}
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +433,60 @@ def test_timed_out_contact_run_records_no_cost_until_the_late_watch(exa_env, eve
     assert call["outcome"] == "timeout" and call["exa_run_id"] == "run-2" and "cost_total" not in call
 
 
+def test_a_poll_429_is_a_rate_limit_not_a_poll_error(exa_env, events):
+    # The Agent errors alert excludes rate_limited; poll_error would page it.
+    running = _Resp(200, {"id": "run-3", "status": "running"})
+    exa_env([running], polls=[_Resp(429, text="too many requests"), _Resp(503, text="busy")])
+
+    first = _lookup(fields=("phone",), wait_retry=False)
+
+    assert first == {"ok": False, "message": "Exa poll error (429)", "run_id": "run-3"}
+    [call] = _calls(events, endpoint="agent_run")
+    assert call["outcome"] == "rate_limited" and call["http_status"] == 429 and call["exa_run_id"] == "run-3"
+
+    events.clear()
+    exa_env([running], polls=[_Resp(503, text="busy")])
+    _lookup(fields=("phone",), wait_retry=False)
+    [call] = _calls(events, endpoint="agent_run")
+    assert call["outcome"] == "poll_error" and call["http_status"] == 503
+
+
+def test_a_contact_attempt_cancelled_mid_run_is_abandoned(exa_env, events, monkeypatch):
+    polled = []
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return _Resp(200, {"id": "run-4", "status": "running"})
+
+        async def get(self, url, headers=None, params=None):
+            polled.append(url)
+            await asyncio.sleep(30)  # cancelled here
+
+    exa_env([])
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _Client)
+
+    async def go():
+        task = asyncio.create_task(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", fields=("phone",)))
+        while not polled:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    [call] = _calls(events, endpoint="agent_run")
+    assert call["outcome"] == "abandoned" and call["exa_run_id"] == "run-4" and "cost_total" not in call
+
+
 def test_out_of_credits_create_is_recorded_as_such(exa_env, events):
     exa_env([_Resp(402, text='{"error":"No more credits","tag":"NO_MORE_CREDITS"}')])
 
@@ -456,6 +515,170 @@ def test_late_watch_records_its_final_cost(monkeypatch, events):
     [call] = _calls(events)
     assert call["late"] is True and call["outcome"] == "completed" and call["cost_total"] == 0.142
     assert call["tier"] == "deep" and call["fields_found"] == "phone" and call["exa_run_id"] == "run-9"
+
+
+# ---------------------------------------------------------------------------
+# Pass A cancellation, per-URL deep analysis, Pass B (both ship off: these pin
+# the telemetry a deliberate re-enable would run)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def exa_unpaced(monkeypatch):
+    from core.vendor_limiter import EXA
+
+    monkeypatch.setattr(EXA, "min_interval_s", 0.0)
+
+
+def test_a_cancelled_pass_a_query_is_abandoned_not_an_error(monkeypatch, events):
+    from services import exa_service as es
+
+    started = []
+
+    async def _paced(loop, fn, *args, **kw):
+        started.append(args)
+        await asyncio.sleep(30)  # a stream closed mid-search cancels us here
+
+    monkeypatch.setattr(es, "_exa_paced", _paced)
+    svc = es.ExaService()
+
+    async def go():
+        task = asyncio.create_task(svc._people_search_fanout(["Data Engineer in Denver"], 10))
+        while not started:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    [call] = _calls(events)
+    assert call["surface"] == "pass_a" and call["endpoint"] == "search" and call["outcome"] == "abandoned"
+
+
+def test_exa_paced_runs_the_sdk_call_under_the_new_relic_trace(monkeypatch, exa_unpaced):
+    from services import exa_service as es
+
+    wrapped = []
+
+    def _wrap(fn):
+        def inner(*args):
+            wrapped.append(args)
+            return fn(*args)
+        return inner
+
+    monkeypatch.setattr(es, "wrap_for_thread", _wrap)
+
+    async def go():
+        return await es._exa_paced(asyncio.get_running_loop(), lambda x: x * 2, 21)
+
+    assert asyncio.run(go()) == 42
+    assert wrapped == [(21,)]  # the executor ran the wrapped fn, not the bare one
+
+
+def _analyzer(answer):
+    from services import exa_service as es
+
+    def get_contents(**kw):
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    svc = es.ExaService()
+    svc.exa = types.SimpleNamespace(get_contents=get_contents)
+    return svc
+
+
+def _analyze(svc):
+    return asyncio.run(svc.deep_analyze_candidate(LINKEDIN, ["python"], "Denver, CO"))
+
+
+def test_deep_analyze_records_ok_with_cost_timeout_and_error(events, exa_unpaced):
+    ok = types.SimpleNamespace(
+        results=[types.SimpleNamespace(text="profile", summary="fits")],
+        cost_dollars={"total": 0.003, "contents": {"text": 0.001, "summary": 0.002}},
+    )
+    assert _analyze(_analyzer(ok)) == {"text": "profile", "summary": "fits"}
+    assert _analyze(_analyzer(TimeoutError())) == {}
+    assert _analyze(_analyzer(ValueError("Request failed with status code 500: oops"))) == {}
+
+    done, timed_out, failed = _calls(events, surface="deep_analyze", endpoint="contents")
+    assert done["outcome"] == "ok" and done["n_results"] == 1 and done["num_results"] == 1
+    assert done["cost_total"] == 0.003 and done["cost_pages"] == 0.003
+    assert timed_out["outcome"] == "timeout" and "cost_total" not in timed_out
+    assert failed["outcome"] == "error" and failed["http_status"] == 500
+
+
+class _AgentRuns:
+    def __init__(self, create, poll=None):
+        self.create_answer, self.poll_answer = create, poll
+        self.created = []
+
+    def create(self, **kw):
+        self.created.append(kw)
+        if isinstance(self.create_answer, BaseException):
+            raise self.create_answer
+        return self.create_answer
+
+    def poll_until_finished(self, rid, **kw):
+        if isinstance(self.poll_answer, BaseException):
+            raise self.poll_answer
+        return self.poll_answer
+
+
+def _pass_b(runs):
+    from services import exa_service as es
+
+    svc = es.ExaService()
+    svc.exa = types.SimpleNamespace(beta=types.SimpleNamespace(agent=types.SimpleNamespace(runs=runs)))
+    return asyncio.run(svc.deep_research_candidates(
+        jd_title="Data Engineer", jd_role="Data Engineer", skills=["python"], location="Denver, CO",
+        seed_urls=["https://www.linkedin.com/in/a", "https://www.linkedin.com/in/b"],
+    ))
+
+
+CREATED = types.SimpleNamespace(id="run-b1")
+
+
+def test_pass_b_completed_run_records_cost_and_results(events, exa_unpaced):
+    done = types.SimpleNamespace(
+        status="completed", cost_dollars={"total": 1.25, "agentCompute": 1.0, "search": 0.25},
+        usage=types.SimpleNamespace(agent_compute_units=12.5),
+        output=types.SimpleNamespace(structured={"candidates": [{"linkedin_url": "u1"}, {"linkedin_url": "u2"}]}),
+    )
+    runs = _AgentRuns(CREATED, done)
+
+    assert len(_pass_b(runs)) == 2
+    [call] = _calls(events, surface="pass_b")
+    assert call["outcome"] == "completed" and call["endpoint"] == "agent_run" and call["exa_run_id"] == "run-b1"
+    assert call["cost_total"] == 1.25 and call["cost_compute"] == 1.0 and call["acu"] == 12.5
+    assert call["n_results"] == 2 and call["num_results"] == 2 and call["effort"]
+
+
+def test_pass_b_with_the_breaker_open_sends_nothing(events, exa_unpaced):
+    from core.vendor_limiter import EXA
+
+    asyncio.run(EXA.trip_no_credits("NO_MORE_CREDITS"))
+    runs = _AgentRuns(CREATED)
+
+    assert _pass_b(runs) == []
+    assert runs.created == []
+    [call] = _calls(events, surface="pass_b")
+    assert call["outcome"] == "breaker_open"
+
+
+@pytest.mark.parametrize("create, poll, outcome", [
+    (ValueError("Request failed with status code 500: oops"), None, "create_error"),
+    (ValueError("Request failed with status code 429: slow down"), None, "rate_limited"),
+    (CREATED, TimeoutError(), "timeout"),
+    (CREATED, ValueError("Request failed with status code 429: slow down"), "rate_limited"),
+    (CREATED, ValueError("Request failed with status code 502: bad gateway"), "poll_error"),
+    (CREATED, types.SimpleNamespace(status="failed", cost_dollars={"total": 0.4}), "run_failed"),
+])
+def test_pass_b_failures_return_nothing_and_record_one_event(events, exa_unpaced, create, poll, outcome):
+    assert _pass_b(_AgentRuns(create, poll)) == []
+    [call] = _calls(events, surface="pass_b")
+    assert call["outcome"] == outcome
+    if outcome == "run_failed":
+        assert call["cost_total"] == 0.4 and call["exa_run_id"] == "run-b1"
 
 
 # ---------------------------------------------------------------------------

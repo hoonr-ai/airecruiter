@@ -761,9 +761,10 @@ async def _exa_lookup(
 
     if await _exa_limit.no_credits_left() > 0:
         # Nothing is sent: fatal, so no deep search follows, and never a
-        # cacheable miss (only an answered lookup records one).
+        # cacheable miss (only an answered lookup records one). ``skipped``:
+        # a caller that took a budget slot for this lookup gives it back.
         exa_telemetry.record_exa_call("contact", "agent_run", "breaker_open")
-        return {"ok": False, "message": "Exa out of credits", "fatal": True}
+        return {"ok": False, "message": "Exa out of credits", "fatal": True, "skipped": True}
 
     timeout_s = EXA_CONTACT_DEEP_TIMEOUT_S if deep else EXA_CONTACT_ENRICH_TIMEOUT_S
     headers = {
@@ -1145,7 +1146,12 @@ async def _exa_contact_attempt_impl(
             g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
             if g.status_code >= 400:
                 logger.warning("Exa agent poll non-2xx for %s: %s", candidate_id, g.status_code)
-                tele.update(outcome="poll_error", http_status=g.status_code)
+                # A poll 429 is a rate limit like a create 429 (the Agent errors
+                # alert excludes rate_limited), not a broken poll.
+                tele.update(
+                    outcome="rate_limited" if g.status_code == 429 else "poll_error",
+                    http_status=g.status_code,
+                )
                 return {"message": f"Exa poll error ({g.status_code})", "retry": "wait", "run_id": run_id}
             run = g.json()
             tele["run"] = run
@@ -1786,7 +1792,10 @@ async def enrich_contact_for_sourcing(
                     return {}
             # Out of credits: skip BEFORE the per-job counters, which would
             # otherwise be used up by free 402s and starve the job after the
-            # top-up. Nothing asked, so no miss is recorded either.
+            # top-up. Nothing asked, so no miss is recorded either. A lookup
+            # already counted and queued on the Exa semaphore when the
+            # breaker trips is skipped inside exa_enrich_by_linkedin and gives
+            # its slots back below.
             from core.vendor_limiter import EXA as _exa_limit
 
             if await _exa_limit.no_credits_left() > 0:
@@ -1848,6 +1857,15 @@ async def enrich_contact_for_sourcing(
                     exa_label, job_key, e,
                 )
                 exa_result = {"ok": False}
+            if exa_result.get("skipped"):
+                # Breaker opened while this lookup waited: nothing was sent,
+                # so the per-run and lifetime slots are refunded and no miss
+                # is recorded.
+                async with _JOB_ENRICH_LOCK:
+                    for counters in (_JOB_EXA_COUNTERS, _JOB_EXA_LIFETIME):
+                        if counters.get(job_key, 0) > 0:
+                            counters[job_key] -= 1
+                return {}
 
             trace["exa_asked"] = exa_fields
             trace["exa_answered"] = bool(exa_result.get("ok"))

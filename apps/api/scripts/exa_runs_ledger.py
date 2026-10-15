@@ -22,13 +22,15 @@ set by services/exa_telemetry.agent_metadata). Runs without metadata are
 or a worker that latched metadata off after a 400.
 
 ``--seen FILE``: one id per line, run ids and/or ``call_id``s of runs New
-Relic saw finish, exported with
+Relic saw finish (completed, failed or cancelled: every TERMINAL status),
+exported with
 
     SELECT uniques(exa_run_id, 10000), uniques(call_id, 10000) FROM ExaCall
-      WHERE endpoint = 'agent_run' AND outcome = 'completed' SINCE 8 days ago
+      WHERE endpoint = 'agent_run' AND outcome IN ('completed', 'run_failed', 'run_cancelled')
+      SINCE 8 days ago
 
 A billed, finished run whose id and call_id are both missing from it is an
-ORPHAN: paid for, result never kept (a sourcing timeout, a late watch killed
+ORPHAN: paid for, its end never seen (a sourcing timeout, a late watch killed
 by a restart, a lost create). Runs younger than ``--grace-min`` are skipped.
 
 Exit code 0; 2 when the key is missing or the API refuses the listing.
@@ -186,7 +188,7 @@ def _print_report(report: Dict[str, Any], days: float) -> None:
         print(f"{row['group']:<60} {row['runs']:>7} {row['usd']:>10.2f}  {row['by_status']}")
     orphans = report.get("orphans")
     if orphans is not None:
-        print(f"\nOrphans (billed, finished, no completed ExaCall): {orphans['runs']} runs, ${orphans['usd']:.2f}")
+        print(f"\nOrphans (billed, finished, no ExaCall saw it end): {orphans['runs']} runs, ${orphans['usd']:.2f}")
         for group, n in orphans["by_group"].items():
             print(f"  {group:<58} {n:>7}")
         for o in orphans["sample"]:
@@ -196,7 +198,7 @@ def _print_report(report: Dict[str, Any], days: float) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--days", type=float, default=8.0, help="trailing window (default 8)")
-    parser.add_argument("--seen", help="file of run ids / call_ids New Relic saw complete (see module doc)")
+    parser.add_argument("--seen", help="file of run ids / call_ids New Relic saw finish (see module doc)")
     parser.add_argument("--grace-min", type=float, default=30.0, help="skip runs younger than this in the orphan check")
     parser.add_argument("--max-pages", type=int, default=600)
     parser.add_argument("--json", action="store_true", help="print JSON instead of a table")

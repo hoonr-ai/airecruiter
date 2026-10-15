@@ -20,7 +20,7 @@ name / url / text / contact / content / resume ..., hence ``cost_pages`` not
   the contact path's 400 guard, not a call)
 - ``outcome``: completed | ok | timeout | error | rate_limited | no_slot |
   out_of_credits | breaker_open | create_error | create_rejected | poll_error |
-  request_error | run_failed | run_cancelled | not_found |
+  request_error | run_failed | run_cancelled | not_found | abandoned |
   metadata_rejected | sources_refused | rejected | ...
 - cost: ``cost_total``, ``cost_search``, ``cost_pages`` (contents),
   ``cost_compute``, ``cost_fee_e`` / ``cost_fee_p`` (per email / phone found),
@@ -229,7 +229,11 @@ def cost_from_run_json(run: Any) -> Dict[str, float]:
 
 
 def classify_exc(exc: BaseException) -> Dict[str, Any]:
-    """``outcome`` / ``http_status`` / ``error_kind`` for a failed call."""
+    """``outcome`` / ``http_status`` / ``error_kind`` for a failed call. A
+    cancelled call (a Step-5 stream closed mid-search) is ``abandoned``, as on
+    the contact path, not an Exa error."""
+    if isinstance(exc, asyncio.CancelledError):
+        return {"outcome": "abandoned"}
     if isinstance(exc, ExaOutOfCreditsError):
         if exc.skipped:
             return {"outcome": "breaker_open"}

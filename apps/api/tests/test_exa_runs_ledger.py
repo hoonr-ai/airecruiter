@@ -91,6 +91,27 @@ def test_summary_groups_by_metadata_and_flags_orphans():
     assert report["orphans"]["sample"][0]["id"] == "r4"
 
 
+def test_a_seen_failed_or_cancelled_run_is_not_an_orphan():
+    runs = [
+        ledger.slim(_run("f1", 5, 0.03, {**CONTACT, "call_id": "c-f1"}, status="failed")),
+        ledger.slim(_run("x1", 5, 0.02, status="cancelled")),
+        ledger.slim(_run("f2", 5, 0.03, status="failed")),
+    ]
+
+    report = ledger.summarize(runs, {"c-f1", "x1"}, grace_min=30, now=NOW)
+
+    assert [o["id"] for o in report["orphans"]["sample"]] == ["f2"]
+
+
+def test_the_seen_export_covers_every_terminal_run_outcome():
+    # ExaCall records a finished run as completed / run_failed / run_cancelled;
+    # an export of 'completed' alone made every billed failed run an orphan.
+    nrql = " ".join(ledger.__doc__.split("SELECT uniques(exa_run_id", 1)[1].split("SINCE", 1)[0].split())
+    for status in ledger.TERMINAL:
+        outcome = "completed" if status == "completed" else f"run_{status}"
+        assert f"'{outcome}'" in nrql, outcome
+
+
 def test_without_seen_ids_there_is_no_orphan_section():
     report = ledger.summarize([], None, now=NOW)
     assert report == {"runs": 0, "usd": 0.0, "group_keys": "env/surface/tier/trigger/arm", "groups": []}
