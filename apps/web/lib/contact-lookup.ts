@@ -1,7 +1,8 @@
 // Launch PAIR's contact lookup on Step 5: how candidates are grouped per call
 // and how the answers are summed up for the recruiter. The lookups run
 // server-side (/candidates/enrich-contacts: Apollo → Exa → Exa deep search,
-// cheapest first); each answer names who found the phone / the email.
+// cheapest first); each answer names who found the phone / the email. Also
+// how a click (phone button, Rankings Get Contact) reads a final miss.
 
 const PROVIDER_LABELS: Record<string, string> = {
   kipplo: "Kipplo",
@@ -101,3 +102,74 @@ export async function readNdjson(
   emit(buffer);
 }
 
+
+// ── Final misses (the person's contact is never bought twice) ───────────────
+
+export interface FinalMissNotice {
+  /** The fields a recent search found nothing for ("email" / "phone"). */
+  fields: string[];
+  /** When they were searched (ISO 8601), or null if the answer did not say. */
+  checkedAt: string | null;
+  /** About what "Search again" costs, in USD, or null. */
+  estUsd: number | null;
+  /** "Searched Oct 1, 2026, nothing found". */
+  message: string;
+  /** "Search again (~$0.23)": the button that re-sends with confirm: true. */
+  searchAgainLabel: string;
+}
+
+/** "Oct 1, 2026" for an ISO timestamp; "" when it does not parse. */
+export function formatCheckedDate(iso: string | null | undefined, timeZone?: string): string {
+  const text = String(iso || "").trim();
+  if (!text) return "";
+  const at = new Date(text);
+  if (Number.isNaN(at.getTime())) return "";
+  return at.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    ...(timeZone ? { timeZone } : {}),
+  });
+}
+
+/**
+ * What a lookup answer says about fields it did not buy because a recent
+ * search (usually the deep search) already found nothing for them
+ * (`final_missed_fields`, `checked_at`, `est_usd` from /candidates/enrich-contact),
+ * limited to `wanted` when given. null when there are none.
+ */
+export function finalMissNotice(
+  answer: unknown,
+  wanted?: string[] | null,
+  timeZone?: string,
+): FinalMissNotice | null {
+  const a = (answer && typeof answer === "object" ? answer : {}) as Record<string, unknown>;
+  const raw = Array.isArray(a.final_missed_fields) ? a.final_missed_fields : [];
+  const fields = raw
+    .map((f: unknown) => String(f || "").trim())
+    .filter((f: string) => f && (!wanted || wanted.length === 0 || wanted.includes(f)));
+  if (fields.length === 0) return null;
+  const checkedAt = typeof a.checked_at === "string" && a.checked_at ? a.checked_at : null;
+  const est = Number(a.est_usd);
+  const estUsd = a.est_usd != null && Number.isFinite(est) && est > 0 ? est : null;
+  const date = formatCheckedDate(checkedAt, timeZone);
+  return {
+    fields,
+    checkedAt,
+    estUsd,
+    message: date ? `Searched ${date}, nothing found` : "Searched recently, nothing found",
+    searchAgainLabel: estUsd != null ? `Search again (~$${estUsd.toFixed(2)})` : "Search again",
+  };
+}
+
+/**
+ * Whether the answer is `status: "in_progress"`: another lookup of the same
+ * person (another tab, Launch PAIR) is already buying this contact, so nothing
+ * was bought twice and nothing is known yet; its result lands in the contact
+ * cache, so look again in a few minutes. (Sent once lookups of one person are
+ * single-flight across workers; until then never.)
+ */
+export function inProgress(answer: unknown): boolean {
+  const status = answer && typeof answer === "object" ? (answer as { status?: unknown }).status : "";
+  return String(status || "") === "in_progress";
+}

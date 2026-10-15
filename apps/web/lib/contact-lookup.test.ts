@@ -4,7 +4,10 @@ import { test } from "node:test";
 import {
   contactProviderLabel,
   describeContactsFound,
+  finalMissNotice,
+  formatCheckedDate,
   inGroups,
+  inProgress,
   isKipploIssue,
   mostCommon,
   readNdjson,
@@ -94,3 +97,59 @@ test("a broken stream rejects after delivering what came before", async () => {
   assert.deepEqual(seen, [{ index: 0, result: {} }]);
 });
 
+
+test("a final miss reads as 'Searched <date>, nothing found' with the re-buy price", () => {
+  const answer = {
+    status: "skipped",
+    reason: "recent_deep_miss",
+    final_missed_fields: ["phone"],
+    checked_at: "2026-10-01T12:00:00+00:00",
+    est_usd: 0.23,
+  };
+  assert.deepEqual(finalMissNotice(answer, ["phone"], "UTC"), {
+    fields: ["phone"],
+    checkedAt: "2026-10-01T12:00:00+00:00",
+    estUsd: 0.23,
+    message: "Searched Oct 1, 2026, nothing found",
+    searchAgainLabel: "Search again (~$0.23)",
+  });
+});
+
+test("a final miss the caller did not ask about is not its notice", () => {
+  const answer = { status: "success", final_missed_fields: ["email"], checked_at: null, est_usd: 0.18 };
+  assert.equal(finalMissNotice(answer, ["phone"]), null);
+  assert.deepEqual(finalMissNotice(answer)?.fields, ["email"]);
+  assert.equal(finalMissNotice(answer)?.message, "Searched recently, nothing found");
+});
+
+test("no notice without final misses, and older answers are fine", () => {
+  for (const answer of [
+    {},
+    null,
+    undefined,
+    { status: "success", phone: "+14155550100" },
+    { final_missed_fields: [] },
+    { final_missed_fields: "phone" },
+  ]) {
+    assert.equal(finalMissNotice(answer), null, JSON.stringify(answer));
+  }
+});
+
+test("an unknown price still offers to search again", () => {
+  const notice = finalMissNotice({ final_missed_fields: ["phone"], est_usd: null });
+  assert.equal(notice?.searchAgainLabel, "Search again");
+  assert.equal(notice?.estUsd, null);
+});
+
+test("checked dates format in the given zone; junk is empty", () => {
+  assert.equal(formatCheckedDate("2026-10-01T23:30:00Z", "UTC"), "Oct 1, 2026");
+  assert.equal(formatCheckedDate("not a date"), "");
+  assert.equal(formatCheckedDate(null), "");
+});
+
+test("in_progress is only that status", () => {
+  assert.equal(inProgress({ status: "in_progress" }), true);
+  for (const answer of [{ status: "success" }, { status: "skipped" }, {}, null]) {
+    assert.equal(inProgress(answer), false);
+  }
+});
