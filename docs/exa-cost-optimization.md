@@ -67,4 +67,6 @@ Monthly total: about $6.3–7.6k.
 - `x-api-key` header, `limit=100`, cursor pagination.
 - Each run carries `costDollars` (agentCompute, enrichments, dataSources) and `usage`.
 
-Once run `metadata` ships, group spend by `metadata.env/surface/tier/trigger/arm`. Never store or print `request.query` or `output`: they contain candidate names.
+Contact runs now carry `metadata` (`env/surface/tier/path/trigger/job_id/attempt/arm/call_id`). `apps/api/scripts/exa_runs_ledger.py` does the weekly reconcile: it groups spend by `metadata.env/surface/tier/trigger/arm` and, given the `exa_run_id`/`call_id`s New Relic saw complete, flags billed runs no `ExaCall` event saw. Never store or print `request.query` or `output`: they contain candidate names.
+
+Live spend: New Relic `ExaCall` events (cost per call, by surface / tier / trigger) on the PAIR Ops dashboard's "Exa" page; runbook and kill switches in `docs/observability/new-relic.md`.

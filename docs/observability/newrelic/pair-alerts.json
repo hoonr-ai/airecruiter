@@ -250,6 +250,106 @@
       ],
       "violationTimeLimitSeconds": 86400,
       "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR Exa credits exhausted",
+      "enabled": true,
+      "description": "Exa answered 402 NO_MORE_CREDITS / API_KEY_BUDGET_EXCEEDED / TEAM_BUDGET_EXCEEDED: LinkedIn-Exa and Dice sourcing and every paid Exa contact lookup are off until the account is topped up. The breaker logs 'Exa is OUT OF CREDITS' (ERROR, never sampled) once per 5-min window while it lasts. The 'Exa%' prefix keeps Apollo's own 'Apollo is OUT OF CREDITS' line out.",
+      "nrql": {
+        "query": "SELECT count(*) FROM Log WHERE entity.name IN ('PAIR API (QA)', 'PAIR API (PROD)') AND message LIKE 'Exa%' AND (message LIKE '%OUT OF CREDITS%' OR message LIKE '%NO_MORE_CREDITS%' OR message LIKE '%BUDGET_EXCEEDED%') FACET entity.name"
+      },
+      "signal": {
+        "aggregationWindow": 60,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "CRITICAL",
+          "operator": "ABOVE",
+          "threshold": 0,
+          "thresholdDuration": 300,
+          "thresholdOccurrences": "AT_LEAST_ONCE"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR Exa Agent errors",
+      "enabled": true,
+      "description": "Contact Agent runs that failed to create or poll, or a create Exa refused (400) with no fallback left, or Exa rejecting run metadata (then set EXA_RUN_METADATA_ENABLED=false). Rate limits (outcome rate_limited) and a refused Fiber data source (sources_refused, the deep search falls back to web search) are excluded. ExaCall events are not sampled.",
+      "nrql": {
+        "query": "SELECT count(*) FROM ExaCall WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND endpoint IN ('agent_run', 'agent_guard') AND outcome IN ('create_error', 'poll_error', 'metadata_rejected', 'rejected') FACET appName"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "WARNING",
+          "operator": "ABOVE",
+          "threshold": 0,
+          "thresholdDuration": 1800,
+          "thresholdOccurrences": "AT_LEAST_ONCE"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR Exa contact poll timeouts",
+      "enabled": false,
+      "description": "Share of contact Agent runs still going when we stopped waiting (billed anyway; the late watch keeps what they find). Late-watch events excluded. DISABLED until a week of ExaCall data sets a per-tier threshold (normal and deep differ): edit the threshold, then enable.",
+      "nrql": {
+        "query": "SELECT percentage(count(*), WHERE outcome = 'timeout') FROM ExaCall WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND surface = 'contact' AND endpoint = 'agent_run' AND late IS NOT true FACET appName, tier"
+      },
+      "signal": {
+        "aggregationWindow": 900,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "WARNING",
+          "operator": "ABOVE",
+          "threshold": 50,
+          "thresholdDuration": 3600,
+          "thresholdOccurrences": "ALL"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
+    },
+    {
+      "name": "PAIR Exa Pass A query failures",
+      "enabled": true,
+      "description": "Some LinkedIn-Exa / Dice people-search queries failed and Step 5 showed a PARTIAL list (exa_service._people_search_fanout logs this at ERROR, never sampled). A run where every query ran out of credits is the credits alert instead.",
+      "nrql": {
+        "query": "SELECT count(*) FROM Log WHERE entity.name IN ('PAIR API (QA)', 'PAIR API (PROD)') AND message LIKE 'Exa people search:%queries failed%' FACET entity.name"
+      },
+      "signal": {
+        "aggregationWindow": 300,
+        "aggregationMethod": "EVENT_FLOW",
+        "aggregationDelay": 120,
+        "fillOption": "NONE"
+      },
+      "terms": [
+        {
+          "priority": "WARNING",
+          "operator": "ABOVE",
+          "threshold": 0,
+          "thresholdDuration": 900,
+          "thresholdOccurrences": "AT_LEAST_ONCE"
+        }
+      ],
+      "violationTimeLimitSeconds": 86400,
+      "runbookUrl": "https://github.com/hoonr-ai/airecruiter/blob/develop/docs/observability/new-relic.md"
     }
   ],
   "notes": "No notification workflow is attached by default: add one in New Relic (Alerts > Workflows) pointing this policy at email/Slack."
