@@ -45,7 +45,9 @@ Context. A ContextVar carries who asked, so no signature changes (tests fake
 
 ``ExaPeopleFanout`` (one per Pass A / Dice fan-out) counts cache hits,
 misses and in-flight joins, the per-query size and what the merge kept
-(``record_people_fanout``; see exa_service._people_search_fanout).
+(``record_people_fanout``; see exa_service._people_search_fanout). One whose
+caller left before the merge carries ``abandoned`` = true and the lookup
+counts only (no rows, cost, ``starved`` or ``cf15_same``).
 
 ``ExaConfig`` (once per worker per hour, from the Step-5 search) shows the
 Exa flags each worker actually runs with, so a hand-set ``.env`` override is

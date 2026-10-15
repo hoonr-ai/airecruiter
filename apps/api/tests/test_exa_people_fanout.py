@@ -26,6 +26,10 @@ Pins:
   - the cache failing (get or put) never fails the search
   - ExaPeopleFanout attributes survive safe_attributes; starved /
     cf15_same / deepest_rank / dup_rows; never starved when a query failed
+  - a fan-out cancelled before the merge (a closed Step-5 stream) sends
+    abandoned=true with the lookup counts only (no rows, failed, cost,
+    starved, cf15_same), so the sizing widget's filter leaves it out; a
+    completed fan-out that kept nothing is not abandoned
   - the round-robin merge cases ported from test_exa_query_builder.py
 """
 import asyncio
@@ -307,6 +311,7 @@ def test_every_query_out_of_credits_raises_and_still_records_the_fanout(events):
     [ev] = _fanouts(events)
     assert ev["failed"] == 3 and ev["ooc_failed"] == 3 and ev["kept_rows"] == 0
     assert ev["cost_usd"] == 0 and ev["cache_misses"] == 3
+    assert ev["abandoned"] is False  # the merge ran: a real outcome
 
 
 def test_no_rows_and_one_query_out_of_credits_raises(events):
@@ -422,6 +427,10 @@ def test_a_request_already_sent_reaches_the_cache_after_the_caller_left(redis_on
     assert len(redis_on.store) == 1
     [call] = _calls(events)
     assert call["outcome"] == "ok" and call["cost_total"] == 0.05
+    # The spend is on ExaCall; the fan-out the caller left reports no cost.
+    [fan] = _fanouts(events)
+    assert fan["abandoned"] is True and fan["cache_misses"] == 1
+    assert "cost_usd" not in fan and "kept_rows" not in fan
 
 
 def test_a_request_not_yet_sent_is_not_bought_when_the_caller_left(redis_on, events, monkeypatch):
@@ -504,8 +513,44 @@ def test_a_joiner_keeps_the_flight_alive_when_the_leader_leaves(events, monkeypa
 FANOUT_ATTRS = (
     "surface", "queries", "per_query", "limit_total", "raw_rows", "dup_rows", "merged_rows",
     "kept_rows", "deepest_rank", "failed", "ooc_failed", "cache_hits", "cache_misses",
-    "inflight_joins", "cache_state", "cost_usd", "starved", "cf15_same",
+    "inflight_joins", "cache_state", "cost_usd", "starved", "cf15_same", "abandoned",
 )
+
+# What an abandoned fan-out cannot know: the merge never ran.
+MERGE_ATTRS = (
+    "raw_rows", "dup_rows", "merged_rows", "kept_rows", "deepest_rank", "failed", "ooc_failed",
+    "cost_usd", "starved", "cf15_same",
+)
+
+
+def _in_sizing_widget(ev):
+    """The sizing widget's / runbook's WHERE, as NRQL reads it (a missing
+    attribute matches neither `= 0` nor `IS true`)."""
+    return (
+        (ev.get("cache_misses") or 0) > 0
+        and ev.get("failed") == 0
+        and ev.get("abandoned") is not True
+    )
+
+
+def test_sizing_widget_and_runbook_leave_abandoned_fanouts_out():
+    import json
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    dash = json.loads((root / "docs/observability/newrelic/pair-ops-dashboard.json").read_text())
+    queries = [
+        q["query"]
+        for page in dash["pages"] for widget in page["widgets"]
+        for q in widget.get("rawConfiguration", {}).get("nrqlQueries", [])
+        if "FROM ExaPeopleFanout" in q["query"] and "cf15_same" in q["query"]
+    ]
+    runbook = (root / "docs/observability/new-relic.md").read_text()
+    sizing = runbook[runbook.index("WHERE cf15_same IS true"):]
+    queries.append(sizing[: sizing.index("SINCE")])
+    assert len(queries) == 2
+    for q in queries:
+        assert "cache_misses > 0 AND failed = 0 AND abandoned IS NOT true" in q
 
 
 def test_fanout_event_attributes_survive_safe_attributes(events):
@@ -518,6 +563,7 @@ def test_fanout_event_attributes_survive_safe_attributes(events):
     assert (ev["raw_rows"], ev["dup_rows"], ev["merged_rows"], ev["kept_rows"]) == (102, 0, 102, 50)
     assert ev["deepest_rank"] == 17
     assert ev["starved"] is False and ev["cf15_same"] is True
+    assert ev["abandoned"] is False and _in_sizing_widget(ev)
 
 
 def test_starved_when_duplicates_leave_the_merge_short(events):
@@ -540,6 +586,52 @@ def test_never_starved_when_a_query_failed(events):
     [ev] = _fanouts(events)
     assert len(rows) == 34 and ev["merged_rows"] == 34 and ev["per_query"] == 34
     assert ev["failed"] == 2 and ev["starved"] is False
+
+
+def test_a_fanout_cancelled_before_the_merge_is_abandoned_with_lookup_counts_only(
+    redis_on, events, monkeypatch, caplog,
+):
+    # A closed Step-5 stream cancels the fan-out mid-search. It used to send
+    # cache_misses=2, failed=0, cost_usd=0, kept_rows=0, cf15_same=True: a
+    # paid search that kept nothing for free, dragging the sizing widget's
+    # '$ per paid query' toward $0 and 'F=1.5 same %' toward 100%.
+    queries = [f"{r}, based in Denver, CO" for r in THREE]
+    warm = _service(_three())
+    asyncio.run(warm._people_search_fanout(queries[:1], 50))  # one query cached
+    events.clear()
+    caplog.clear()  # the warm-up's EXA_FANOUT line, when INFO is already on
+    gate = _gated(monkeypatch)
+    svc = _service(_three())
+
+    async def go():
+        task = asyncio.create_task(svc._people_search_fanout(queries, 50, surface="pass_a"))
+        await _until(lambda: gate["entered"] == 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.02)
+
+    with caplog.at_level(logging.INFO, logger=es.logger.name):
+        asyncio.run(go())
+    [ev] = _fanouts(events)
+    assert ev["abandoned"] is True and ev["surface"] == "pass_a"
+    assert (ev["queries"], ev["per_query"], ev["limit_total"]) == (3, 34, 50)
+    assert (ev["cache_hits"], ev["cache_misses"], ev["inflight_joins"]) == (1, 2, 0)
+    assert ev["cache_state"] == "on"
+    assert not set(MERGE_ATTRS) & set(ev), sorted(set(MERGE_ATTRS) & set(ev))
+    assert not _in_sizing_widget(ev)
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("EXA_FANOUT")]
+    assert "abandoned=True" in line and "misses=2" in line
+    assert svc.exa.calls == []  # neither request was sent: nothing bought
+
+
+def test_a_fanout_that_kept_nothing_is_not_abandoned(events):
+    svc = _service({})  # every query answers with no rows
+    assert asyncio.run(svc._people_search_fanout([f"{r}, based in Denver, CO" for r in THREE], 50)) == []
+    [ev] = _fanouts(events)
+    assert ev["abandoned"] is False and ev["kept_rows"] == 0 and ev["failed"] == 0
+    assert ev["cost_usd"] == pytest.approx(0.15) and ev["starved"] is False
+    assert _in_sizing_widget(ev)
 
 
 def test_fanout_event_carries_the_job_and_trigger(events):

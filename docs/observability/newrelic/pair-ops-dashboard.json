@@ -981,14 +981,14 @@
                 "accountIds": [
                   7594453
                 ],
-                "query": "SELECT count(*) AS 'fan-outs', sum(cost_usd) AS '$', average(cost_usd / cache_misses) AS '$ per paid query', percentage(count(*), WHERE starved IS true) AS 'starved %', percentage(count(*), WHERE cf15_same IS true) AS 'F=1.5 same %', average(deepest_rank) AS 'deepest rank', average(dup_rows) AS 'dups' FROM ExaPeopleFanout WHERE appName = {{api_app}} AND cache_misses > 0 AND failed = 0 FACET surface, queries, per_query LIMIT 20"
+                "query": "SELECT count(*) AS 'fan-outs', sum(cost_usd) AS '$', average(cost_usd / cache_misses) AS '$ per paid query', percentage(count(*), WHERE starved IS true) AS 'starved %', percentage(count(*), WHERE cf15_same IS true) AS 'F=1.5 same %', average(deepest_rank) AS 'deepest rank', average(dup_rows) AS 'dups' FROM ExaPeopleFanout WHERE appName = {{api_app}} AND cache_misses > 0 AND failed = 0 AND abandoned IS NOT true FACET surface, queries, per_query LIMIT 20"
               }
             ],
             "platformOptions": {
               "ignoreTimeRange": false
             }
           },
-          "description": "Fan-outs that paid and lost no query (a failed query leaves the merge short for another reason). starved should stay under 5% (raise EXA_PEOPLE_PER_QUERY_FACTOR if not); lower it to 1.5 when 'F=1.5 same %' is 95%+. '$ per paid query' by per_query answers how Exa bills contents past 10 results."
+          "description": "Fan-outs that paid, lost no query (a failed query leaves the merge short for another reason) and were not abandoned (a closed Step-5 stream sends no rows or cost). starved should stay under 5% (raise EXA_PEOPLE_PER_QUERY_FACTOR if not); lower it to 1.5 when 'F=1.5 same %' is 95%+. '$ per paid query' by per_query answers how Exa bills contents past 10 results."
         },
         {
           "title": "Exa warnings / errors (logs)",

@@ -804,7 +804,9 @@ class ExaService:
         sink the whole search — unless no rows came back at all and a query
         failed for credits: then ExaOutOfCreditsError is raised so Step 5
         says "out of credits" instead of "no matches". One ExaPeopleFanout
-        event per call, the raise path included.
+        event per call, the raise path included; a call cancelled before the
+        merge (a closed Step-5 stream, a stop) sends one with abandoned=true
+        and only the lookup counts (see _record_fanout).
         """
         loop = asyncio.get_running_loop()
         surface = surface or ("dice" if include_domains else "pass_a")
@@ -893,6 +895,7 @@ class ExaService:
         merged: List[Any] = []
         kept: List[Any] = []
         deepest = 0
+        merge_ran = False
         try:
             responses = await asyncio.gather(
                 *[one_query(q) for q in queries],
@@ -909,6 +912,7 @@ class ExaService:
                     continue
                 per_query.append(list(resp))
             merged, deepest = _round_robin_merge(per_query, limit)
+            merge_ran = True
             if credits_error is not None and not merged:
                 raise credits_error
             if stats["failed"] and stats["ooc_failed"] == stats["failed"]:
@@ -931,7 +935,10 @@ class ExaService:
             kept = merged[:limit]
             return kept
         finally:
-            self._record_fanout(surface, queries, limit, n, cache_state, stats, per_query, merged, kept, deepest)
+            self._record_fanout(
+                surface, queries, limit, n, cache_state, stats, per_query, merged, kept, deepest,
+                abandoned=not merge_ran,
+            )
 
     @staticmethod
     def _record_fanout(
@@ -945,14 +952,38 @@ class ExaService:
         merged: List[Any],
         kept: List[Any],
         deepest: int,
+        abandoned: bool = False,
     ) -> None:
         """ExaPeopleFanout + an EXA_FANOUT log line. ``starved``: the merge
         could not fill ``limit`` although a query came back full (bigger
         per-query asks would have found more); never when a query failed,
         since then the merge is short for that reason and a bigger factor
         would not help. ``cf15_same``: factor 1.5 would have kept the same
-        rows (a query's top k assumed to be the first k of a bigger ask)."""
+        rows (a query's top k assumed to be the first k of a bigger ask).
+
+        ``abandoned``: the caller was cancelled before the merge (a closed
+        Step-5 stream, a stop). Only what was known then is sent, the sizing
+        and the lookup counts (hits, misses, joins); the rows, failures,
+        cost, ``starved`` and ``cf15_same`` are left out, since an empty
+        merge at $0 with no failure would read as a paid search that kept
+        nothing for free and skew the sizing (``$ per paid query`` toward
+        $0, ``cf15_same`` toward 100%). The searches it sent still finish,
+        shielded, and their spend is on ExaCall."""
         try:
+            attrs: Dict[str, Any] = dict(
+                queries=len(queries), per_query=n, limit_total=limit, cache_state=cache_state,
+                cache_hits=stats["cache_hits"], cache_misses=stats["cache_misses"],
+                inflight_joins=stats["inflight_joins"], abandoned=bool(abandoned),
+            )
+            if abandoned:
+                exa_telemetry.record_people_fanout(surface, **attrs)
+                logger.info(
+                    "EXA_FANOUT surface=%s queries=%d per_query=%d hits=%d misses=%d joins=%d "
+                    "abandoned=True cache=%s",
+                    surface, len(queries), n, stats["cache_hits"], stats["cache_misses"],
+                    stats["inflight_joins"], cache_state,
+                )
+                return
             raw = sum(len(r) for r in per_query)
             starved = (
                 not stats.get("failed")
@@ -965,14 +996,13 @@ class ExaService:
             else:
                 alt, _ = _round_robin_merge([r[:n15] for r in per_query], limit)
                 cf15_same = [id(r) for r in alt[:limit]] == [id(r) for r in kept]
-            attrs = dict(
-                queries=len(queries), per_query=n, limit_total=limit,
+            attrs.update(
                 raw_rows=raw, dup_rows=raw - len(merged), merged_rows=len(merged),
                 kept_rows=len(kept), deepest_rank=deepest,
-                cache_state=cache_state, starved=starved, cf15_same=cf15_same,
-                **stats,
+                failed=stats["failed"], ooc_failed=stats["ooc_failed"],
+                cost_usd=round(float(stats.get("cost_usd") or 0.0), 6),
+                starved=starved, cf15_same=cf15_same,
             )
-            attrs["cost_usd"] = round(float(stats.get("cost_usd") or 0.0), 6)
             exa_telemetry.record_people_fanout(surface, **attrs)
             logger.info(
                 "EXA_FANOUT surface=%s queries=%d per_query=%d hits=%d misses=%d joins=%d "
