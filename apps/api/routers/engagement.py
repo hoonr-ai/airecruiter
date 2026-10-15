@@ -950,6 +950,9 @@ class SendBulkInterviewRequest(BaseModel):
     # batch only.
     send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
+    # Signed-in recruiter who clicked Launch PAIR; sent to Pairbot as
+    # ``recruiter_email``. Set server-side from the auth token, never the client.
+    recruiter_email: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -4069,6 +4072,8 @@ async def _send_bulk_interview_core(
                         client_bulk_id = str(_forced_bulk_id)
                 if isinstance(payload_obj, dict):
                     payload_obj["bulk_id"] = client_bulk_id
+                    if request.recruiter_email:
+                        payload_obj["recruiter_email"] = request.recruiter_email
                 logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
                 async with _trace_span("pairbot_post", batch_idx=batch_idx):
@@ -4796,6 +4801,9 @@ class LaunchRequest(BaseModel):
     # launches. The default SSE path (LAUNCH_ASYNC off) has no run row to
     # carry it, so there it is only logged. No other behaviour change.
     launch_session_id: Optional[str] = None
+    # Server-set from the auth token (/engage/launch) or the session's
+    # requested_by; any client-sent value is overwritten.
+    recruiter_email: Optional[str] = None
 
 
 # Backend batch size for the launch orchestrator's per-batch Pairbot calls.
@@ -5488,6 +5496,7 @@ async def _run_one_batch(
             notify_recruiters=False,       # fired once after the loop
             send_job_posting_email=False,  # fired once after the loop
             app_base_url=request.app_base_url,
+            recruiter_email=request.recruiter_email,
         )
         # Launch-session hooks ride along only when set, so the legacy call
         # shape (and anything that stands in for the core) is unchanged.
@@ -5903,6 +5912,18 @@ async def launch_bulk_interviews(request: LaunchRequest, http_request: Request =
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json.dumps(obj)}\n\n"
 
+    # The recruiter on the Pairbot payload comes from the auth token only.
+    requested_by: Optional[str] = None
+    if http_request is not None:
+        try:
+            _user = await asyncio.to_thread(get_current_user, http_request, None)
+            requested_by = (_user.email or "").strip().lower() or None
+        except HTTPException:
+            requested_by = None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("launch: could not resolve requester: %s", exc)
+    request.recruiter_email = requested_by
+
     async def _work(launch_id: Optional[str] = None, run_id: Optional[str] = None):
         async with contextlib.aclosing(
             run_launch(request, launch_id=launch_id, run_id=run_id)
@@ -5914,15 +5935,6 @@ async def launch_bulk_interviews(request: LaunchRequest, http_request: Request =
     if request.async_launch and _launch_flag("LAUNCH_ASYNC", False):
         launch_id = str(uuid.uuid4())
         run_id = _trace_new_run(request.job_id)
-        requested_by: Optional[str] = None
-        if http_request is not None:
-            try:
-                _user = await asyncio.to_thread(get_current_user, http_request, None)
-                requested_by = (_user.email or "").strip().lower() or None
-            except HTTPException:
-                requested_by = None
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("async launch: could not resolve requester: %s", exc)
         try:
             # Lazy safety net for runs whose worker died without a final write.
             await asyncio.to_thread(_sweep_stale_launch_runs)
