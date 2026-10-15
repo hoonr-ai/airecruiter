@@ -165,6 +165,66 @@
         }
       },
       "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva, a test@ local part the lookup drops",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-TalentSearch",
+          "email": "test@gmail.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, an example.org address",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "jane@example.org"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a test.com address",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "jane@test.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a .local address",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "jane@jobdiva.local"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a candidate@ local part",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-JobAgent",
+          "email": "Candidate@acme.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a real address that only looks like one",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "tester@localbank.com"
+        }
+      },
+      "expected": "tester@localbank.com"
     }
   ]
 }

@@ -71,6 +71,33 @@ export function isValidLaunchEmail(value: string | null | undefined): boolean {
   return true;
 }
 
+// The contact lookup's own placeholder test (apps/api/utils/email_utils.py
+// is_placeholder_email), stricter than isValidLaunchEmail: test@gmail.com,
+// jane@example.org, x@jobdiva.local. The lookup drops a seed email it calls
+// a placeholder and buys one instead, so getCandidateSeedEmail never holds
+// one (a held seed keeps the row's own email over the one bought).
+const SERVER_PLACEHOLDER_EMAIL_DOMAINS = new Set([
+  "example.com", "example.org", "example.net", "test.com", "invalid", "localhost", "local",
+]);
+const SERVER_PLACEHOLDER_EMAIL_LOCAL_PARTS = new Set([
+  "your-email", "your_email", "email", "test", "example", "candidate",
+]);
+
+export function isServerPlaceholderEmail(value: unknown): boolean {
+  const email = String(value || "").trim().toLowerCase();
+  if (!email || PLACEHOLDER_LAUNCH_EMAILS.has(email)) return true;
+  if (email.endsWith("@noemail.pair.ai")) return true;
+  const at = email.lastIndexOf("@");
+  if (at < 0) return true;
+  const localPart = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  if (SERVER_PLACEHOLDER_EMAIL_DOMAINS.has(domain)) return true;
+  if (domain.endsWith(".local")) return true;
+  if (SERVER_PLACEHOLDER_EMAIL_LOCAL_PARTS.has(localPart)) return true;
+  // Auto_<id>@jobdiva.com (and any other jobdiva.com address).
+  return domain === "jobdiva.com";
+}
+
 export function launchPhoneDigits(value: string | null | undefined): string {
   return String(value || "").replace(/\D/g, "");
 }
@@ -782,8 +809,9 @@ export function resolveLinkedInUrl(c: any): string {
 }
 
 // The email a Launch lookup is told the candidate already has: the TOP-LEVEL
-// email of a JobDiva row, when it is a real launch email ("" otherwise). The
-// lookup then buys only the phone, and the candidate keeps their own address.
+// email of a JobDiva row, when it is a real launch email the lookup keeps as
+// a seed too (not isServerPlaceholderEmail; "" otherwise). The lookup then
+// buys only the phone, and the candidate keeps their own address.
 // Emails on LinkedIn / Dice / Unipile rows are regex- or LLM-extracted
 // (unreliable: apps/api/services/contact_cache.py), and ones a provider found
 // are reused through the contact cache anyway. That holds for one such row's
@@ -792,7 +820,7 @@ export function getCandidateSeedEmail(c: any): string {
   if (!candIsJobDivaUI(c)) return "";
   if (c.email_source && c.email_source !== "jobdiva") return "";
   const email = String(c?.email || "").trim().toLowerCase();
-  return isValidLaunchEmail(email) ? email : "";
+  return isValidLaunchEmail(email) && !isServerPlaceholderEmail(email) ? email : "";
 }
 
 // The name a Launch lookup is told: the row's name, else first + last name;

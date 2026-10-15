@@ -271,10 +271,13 @@ def test_s3_seeds_the_lookup_and_keeps_the_held_jobdiva_email():
         cand("j", 80, source="JobDiva-TalentSearch", email="Jane@Gmail.com", phone="", profile_url=li + "-j",
              current_company="Acme Bank"),
         cand("l", 80, email="", phone="", profile_url=li + "-l"),
+        # An address the lookup drops as a placeholder (utils.email_utils):
+        # never held, so the email it buys is the one launched.
+        cand("t", 80, source="JobDiva-Applicants", email="test@gmail.com", phone="", profile_url=li + "-t"),
     ]
     found = {"status": "success", "phone": "+15125550100", "phone_provider": "exa",
              "email": "work@found.test", "email_provider": "apollo"}
-    world.enrich_answers = {"j": dict(found), "l": dict(found)}
+    world.enrich_answers = {"j": dict(found), "l": dict(found), "t": dict(found)}
     sent: List[Dict[str, Any]] = []
     enrich = world.enrich
 
@@ -291,10 +294,11 @@ def test_s3_seeds_the_lookup_and_keeps_the_held_jobdiva_email():
     by_id = {it["candidate_id"]: it for it in sent}
     assert by_id["j"]["email"] == "jane@gmail.com" and by_id["j"]["full_name"] == "Person j"
     assert by_id["j"]["company_name"] == "Acme Bank" and by_id["j"]["trigger"] == "launch"
-    assert "email" not in by_id["l"] and all("phone" not in it for it in sent)
+    assert "email" not in by_id["l"] and "email" not in by_id["t"] and all("phone" not in it for it in sent)
     contact = {cid: c["contact"] for cid, c in store.cands[fields["id"]].items()}
     assert contact["j"]["override"] == {"phone": "+15125550100"} and "email_provider" not in contact["j"]
     assert contact["l"]["override"] == {"phone": "+15125550100", "email": "work@found.test"}
+    assert contact["t"]["override"] == {"phone": "+15125550100", "email": "work@found.test"}
 
 
 def test_s1_defers_paid_contact_on_every_attempt():

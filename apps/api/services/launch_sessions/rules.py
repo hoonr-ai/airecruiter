@@ -61,6 +61,8 @@ Who gets a contact lookup                     selectCandidatesMissingContact    
 LinkedIn URL (7 fields + résumé regex)        resolveLinkedInUrl                      759-769, 8760-8770
 Lookup seeds (JobDiva top-level email only;   getCandidateSeedEmail /                 (2026-10-15)
   name / first+last, never the title)           getCandidateLookupName
+Seed placeholders (the lookup's own,          isServerPlaceholderEmail                utils/email_utils.py
+  stricter is_placeholder_email)
 Lookup request body (+ seeds, never a phone)  buildEnrichRequest                      8918-8927
 Lookup answer → override / outcome (a held    interpretEnrichAnswer                   8785-8833
   seed email is never replaced)
@@ -334,6 +336,37 @@ def is_valid_launch_email(value: Any) -> bool:
     if email.endswith("@jobdiva.com"):
         return False
     return True
+
+
+# The contact lookup's own placeholder test (utils.email_utils
+# is_placeholder_email), stricter than is_valid_launch_email. The lookup drops
+# a seed email it calls a placeholder and buys one instead, so
+# get_candidate_seed_email never holds one.
+_SERVER_PLACEHOLDER_EMAIL_DOMAINS = frozenset({
+    "example.com", "example.org", "example.net", "test.com", "invalid", "localhost", "local",
+})
+_SERVER_PLACEHOLDER_EMAIL_LOCAL_PARTS = frozenset({
+    "your-email", "your_email", "email", "test", "example", "candidate",
+})
+
+
+def is_server_placeholder_email(value: Any) -> bool:
+    email = _js_trim(_s(value)).lower()
+    if not email or email in PLACEHOLDER_LAUNCH_EMAILS:
+        return True
+    if email.endswith("@noemail.pair.ai"):
+        return True
+    if "@" not in email:
+        return True
+    local_part, domain = email.rsplit("@", 1)
+    if domain in _SERVER_PLACEHOLDER_EMAIL_DOMAINS:
+        return True
+    if domain.endswith(".local"):
+        return True
+    if local_part in _SERVER_PLACEHOLDER_EMAIL_LOCAL_PARTS:
+        return True
+    # Auto_<id>@jobdiva.com (and any other jobdiva.com address).
+    return domain == "jobdiva.com"
 
 
 def launch_phone_digits(value: Any) -> str:
@@ -1169,7 +1202,8 @@ def resolve_linkedin_url(c: Any) -> str:
 
 def get_candidate_seed_email(c: Any) -> str:
     """The email a Launch lookup is told the candidate already has: the
-    TOP-LEVEL email of a JobDiva row when it is a real launch email, else ""
+    TOP-LEVEL email of a JobDiva row when it is a real launch email the
+    lookup keeps as a seed too (not is_server_placeholder_email), else ""
     (LinkedIn / Dice / Unipile emails are extracted, so unreliable; so is
     one such row's email a JobDiva row took on a merge: ``email_source``)."""
     if not cand_is_jobdiva_ui(c):
@@ -1178,7 +1212,7 @@ def get_candidate_seed_email(c: Any) -> str:
     if _truthy(email_source) and email_source != "jobdiva":
         return ""
     email = _js_trim(_s(_get(c, "email"))).lower()
-    return email if is_valid_launch_email(email) else ""
+    return email if is_valid_launch_email(email) and not is_server_placeholder_email(email) else ""
 
 
 def get_candidate_lookup_name(c: Any) -> str:

@@ -1175,6 +1175,10 @@ class UnifiedCandidateSearch:
                 "qualifications", "employee_status", "available",
                 "availability_status", "current_company", "scoring_mode",
                 "no_contact", "no_contact_reason", "no_contact_company",
+                # Where the row's email came from when a merge gave it
+                # another row's (_merge_candidate_best_of): Launch PAIR's
+                # getCandidateSeedEmail reads it.
+                "email_source",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -1495,9 +1499,11 @@ class UnifiedCandidateSearch:
                 "certifications", "skills", "urls", "experience_years",
                 "name", "title", "location", "email", "phone",
                 # Forward merged identity so a take-over reflects the unioned
-                # sources + absorbed contact/profile on the surviving row.
+                # sources + absorbed contact/profile on the surviving row, and
+                # where an absorbed email came from (email_source: Launch
+                # PAIR's getCandidateSeedEmail never seeds another source's).
                 "sources", "profile_url", "linkedin_url", "image_url",
-                "resume_id", "city", "state",
+                "resume_id", "city", "state", "email_source",
                 # Geo verdict → UI "~N mi away" badge on the location cell.
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
@@ -8805,6 +8811,8 @@ class UnifiedCandidateSearch:
         Returns a dict of the fields that changed, suitable for a UI patch.
         """
         changed: Dict[str, Any] = {}
+        # Before the sources / JobDiva id below can make it a JobDiva row.
+        dst_was_jobdiva = self._cand_is_jobdiva(dst)
 
         def _src_list(c: Dict[str, Any]) -> List[str]:
             out: List[str] = []
@@ -8841,6 +8849,21 @@ class UnifiedCandidateSearch:
         ):
             dst["email"] = s_email
             changed["email"] = s_email
+            # Where an adopted email came from ("jobdiva" | "other"), carried
+            # through later merges (launch-rules.ts deduplicateCandidatesUI
+            # does the same): Launch PAIR's getCandidateSeedEmail never sends
+            # one a JobDiva survivor took from a LinkedIn / Exa / Dice row as
+            # the email the candidate holds.
+            dst["email_source"] = src.get("email_source") or (
+                "jobdiva" if self._cand_is_jobdiva(src) else "other"
+            )
+            changed["email_source"] = dst["email_source"]
+        elif d_email and not dst_was_jobdiva and not dst.get("email_source") and self._cand_is_jobdiva(dst):
+            # A non-JobDiva survivor the merge just made a JobDiva row (its
+            # sources / JobDiva id) keeps its own extracted email: not one
+            # JobDiva holds.
+            dst["email_source"] = "other"
+            changed["email_source"] = "other"
 
         # Resume text: prefer a real, longer resume over a missing/placeholder one.
         def _bad_resume(r: str) -> bool:

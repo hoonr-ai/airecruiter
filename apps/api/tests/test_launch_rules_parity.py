@@ -119,6 +119,7 @@ ADAPTERS = {
     "extractLinkedInFromText": lambda i: rules.extract_linkedin_from_text(i.get("text")),
     "looksLikeLinkedInProfile": lambda i: rules.looks_like_linkedin_profile(i.get("url")),
     "resolveLinkedInUrl": lambda i: rules.resolve_linkedin_url(i["candidate"]),
+    "isServerPlaceholderEmail": lambda i: rules.is_server_placeholder_email(i.get("value")),
     "getCandidateSeedEmail": lambda i: rules.get_candidate_seed_email(i["candidate"]),
     "getCandidateLookupName": lambda i: rules.get_candidate_lookup_name(i["candidate"]),
     "buildEnrichRequest": lambda i: rules.build_enrich_request(
@@ -306,6 +307,32 @@ def test_floor_matches_web_outreach_floor():
     floor = consts.get(floor, floor)
     assert rules.LAUNCH_MIN_SCORE == int(floor)
     assert rules.QUALIFIED_SCORE_THRESHOLD == rules.LAUNCH_MIN_SCORE
+
+
+def test_seed_placeholders_match_the_lookups_own():
+    """getCandidateSeedEmail holds no email the contact lookup drops as a
+    placeholder (utils.email_utils.is_placeholder_email): a dropped seed gets
+    the email bought, and a held one throws that answer away, so the row
+    would launch on the dead address."""
+    from utils.email_utils import is_placeholder_email
+
+    values = [
+        case["input"]["value"]
+        for case in json.loads((FIXTURE_DIR / "is_server_placeholder_email.json").read_text())["cases"]
+        if isinstance(case["input"]["value"], str)
+    ]
+    values += [
+        case["input"]["candidate"]["email"]
+        for case in json.loads((FIXTURE_DIR / "get_candidate_seed_email.json").read_text())["cases"]
+        if isinstance(case["input"]["candidate"], dict) and isinstance(case["input"]["candidate"].get("email"), str)
+    ]
+    values += ["", "a@b", "x@sub.example.org", "email@example.com", "noreply@example.com"]
+    assert len(values) > 30
+    for value in values:
+        assert rules.is_server_placeholder_email(value) == is_placeholder_email(value), value
+    for value in values:
+        seed = rules.get_candidate_seed_email({"source": "JobDiva", "email": value})
+        assert not seed or not is_placeholder_email(seed), value
 
 
 def test_dnc_normalisation_matches_backend_dnc_matching():
