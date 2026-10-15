@@ -83,7 +83,7 @@ async def init_campaigns_schema():
                         customer_name             TEXT,
                         recruiter_emails          TEXT,
                         selected_employment_types TEXT,
-                        screening_level           TEXT DEFAULT 'L0.5',
+                        screening_level           TEXT DEFAULT %s,
                         recruiter_notes           TEXT,
                         work_authorization        TEXT,
                         selected_job_boards       TEXT,
@@ -106,7 +106,8 @@ async def init_campaigns_schema():
                         created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
-                    """
+                    """,
+                    (DEFAULT_SCREENING_LEVEL,),
                 )
                 cur.execute(
                     """
@@ -122,8 +123,13 @@ async def init_campaigns_schema():
                 )
                 # Tables created before the L0.5 rollout still carry the old
                 # column default; re-point it so new rows match app code.
+                # Bound to DEFAULT_SCREENING_LEVEL (not a hardcoded literal)
+                # so this can't drift from the CREATE TABLE default above, or
+                # from app code, if the env override is ever used — PR #823
+                # review.
                 cur.execute(
-                    "ALTER TABLE campaigns ALTER COLUMN screening_level SET DEFAULT 'L0.5';"
+                    "ALTER TABLE campaigns ALTER COLUMN screening_level SET DEFAULT %s;",
+                    (DEFAULT_SCREENING_LEVEL,),
                 )
                 conn.commit()
     except Exception as e:
