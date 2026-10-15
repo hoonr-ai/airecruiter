@@ -53,7 +53,8 @@ export const NR_LOCAL_API_ORIGINS = [
   "http://127.0.0.1:8001",
 ];
 
-// Never record the agent's own beacons or Amplitude's as AjaxRequest events.
+// Never record the agent's own beacons as AjaxRequest events. Amplitude is gone
+// (2026-10-12) but stays denied while tabs still run a pre-removal bundle.
 export const NR_AJAX_DENY_LIST = ["bam.nr-data.net", "*.amplitude.com"];
 
 export interface NrBrowserConfig {

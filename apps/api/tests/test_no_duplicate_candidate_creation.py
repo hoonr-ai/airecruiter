@@ -184,7 +184,12 @@ class _KeysCursor:
         return False
 
     def execute(self, sql, params=None):
-        self._result = ("26-1", "123") if "monitored_jobs" in sql else self._rows
+        if "monitored_jobs" in sql:
+            self._result = ("26-1", "123")
+        elif "engage_interview_audit" in sql:
+            self._result = [("gone", "Gone@X.com")]   # an audit-only launched person
+        else:
+            self._result = self._rows
         self.sql = " ".join(sql.split())
 
     def fetchone(self):
@@ -207,8 +212,10 @@ class _KeysConn:
 
 def test_launched_keys_expose_the_stored_profile_id(monkeypatch):
     rows = [
-        (EXA_ID, "LinkedIn-Exa", PROFILE),   # provisioned Exa person
-        ("555", "JobDiva-Applicants", None),  # organic applicant, no stamp
+        # provisioned + launched Exa person
+        (EXA_ID, "LinkedIn-Exa", PROFILE, "jane@x.com", "415-555-0142", None, "sent", "iv-1"),
+        # organic applicant, no stamp, never launched
+        ("555", "JobDiva-Applicants", None, "bob@x.com", None, None, "", ""),
     ]
     monkeypatch.setattr(cands, "get_db_connection", lambda: _KeysConn(rows))
     monkeypatch.setattr(cands, "_verify_job_access_by_id", lambda *_a, **_k: None)
@@ -224,4 +231,9 @@ def test_launched_keys_expose_the_stored_profile_id(monkeypatch):
             {"candidate_id": EXA_ID, "source": "LinkedIn-Exa", "jobdiva_candidate_id": PROFILE},
             {"candidate_id": "555", "source": "JobDiva-Applicants"},
         ],
+        # Only launched / in-flight people: another id of them is "launched".
+        "person_keys": {
+            "email:jane@x.com": EXA_ID, "phone:4155550142": EXA_ID, f"jobdiva:{PROFILE}": EXA_ID,
+            "email:gone@x.com": "gone",
+        },
     }

@@ -43,7 +43,10 @@ Browser apps: `accountID = trustKey = 7594453`, `agentID = applicationID`, brows
 |---|---|---|
 | `PipelineStage` | `core/pipeline_trace.span` | `run_id`, `job_id`, `stage`, `ms`, `ok`, `started_at_ms`, stage counters (`batch_idx`, `n`, `scope`, `source`...). A launch session adopts its id as `run_id`. |
 | `PairLaunchSession` | launch-session runner (every stage transition) | `session_id`, `job_id`, `stage`, `status`, `ms_in_stage`, `attempt`, counts |
-| `PairLaunchTiming` | `services/launch_timing.record_timing_event` (session completed) | `job_id`, `session_id`, `trigger`, `mode`, `status`, `attempt`, `added_to_click_s`, `click_to_launch_s`, `machine_s`, `click_to_first_dial_s`, `sourcing_s`, `selection_s`, `enrichment_s`, `human_wait_s`, `saving_s`, `pairbot_s`, `launch_total_s`, counts |
+| `PairLaunchTiming` | `services/launch_timing.record_timing_event` (session completed) | `job_id`, `session_id`, `trigger`, `mode`, `status`, `attempt`, `relaunch` (always a boolean: the job's first interview predates this session's click), `first_launch` (this session created the job's first interview), `added_to_click_s` (only when `first_launch`), `click_to_launch_s`, `machine_s`, `click_to_first_dial_s`, `sourcing_s`, `selection_s`, `enrichment_s`, `human_wait_s`, `saving_s`, `pairbot_s`, `launch_total_s`, counts |
+| `PairJobFirstLaunch` | `services/launch_timing.stamp_first_launch` — the call that sets a job's T2 for the first time, from EVERY launch path (legacy `/engage/launch` included, so PROD is timed) | `job_id`, `jobdiva_id`, `added_to_click_s` (A), `click_to_launch_s` (B), `added_to_launch_s`, `click_recorded`, `click_to_launch_source`. One per job version: the source for job-level A / B averages (a relaunch never adds a sample). |
+| `RecruiterAction` | `services/recruiter_activity.record_action` — server-side at the endpoint (search, launch click, launch-session review / needs-contact / retry / cancel, Submit / Reject / Unreachable) and for browser-only actions sent via `POST /api/v1/activity/actions` | `recruiter` (sha256(email)[:12], the browser's NR user id), `action`, `source` (`server` / `client`), `job_id`, numeric / enum attrs only |
+| `RecruiterActiveTime` | `services/recruiter_activity.record_active_time` (each ~2-min flush of a surface's active time; the wizard's step time is mirrored as `wizard_step_N`) | `recruiter`, `surface`, `active_ms`, `job_id` |
 | `JobDivaAPI` | JobDiva hook (errors / slow only) | `endpoint` (path), `method`, `status_code`, `elapsed_ms`, `response_size_bytes`, `error_kind` (≤ 80 chars, dropped if it holds `@` or a 7+ digit run) |
 | `JobDivaBiLimiter` | `services/jobdiva_rate_limit` | `outcome` (`granted` / `slot_timeout` / `http_429` / `counters`), `label`, `priority`, `bi_wait_ms`, `bi_cooldown_ms`, `bi_429_total`. (`JobDivaBILimiter` with a capital I is retired: event types are case-sensitive.) |
 | `PairBackendStep`, `BackendError`, `BackendMessage` | `core.newrelic.log_step` / `capture_exception` / `record_message` | `PairBackendStep` was `BackendStep`, which collided with Pairbot's event of the same name. |
@@ -186,12 +189,20 @@ FROM JobDivaBiLimiter SELECT count(*) WHERE env = 'prod' FACET outcome, priority
 FROM JobDivaBiLimiter SELECT latest(bi_429_total), latest(bi_wait_ms) WHERE outcome = 'counters' FACET priority, host
 ```
 
+**Recruiter activity** (dashboard: `docs/observability/newrelic/pair-recruiter-dashboard.json`; a recruiter's NR id is on Recruiter Analytics → Activity)
+```sql
+FROM RecruiterActiveTime SELECT sum(active_ms) / 3.6e6 AS 'hours' WHERE env = 'prod' FACET recruiter, surface SINCE 7 days ago
+FROM RecruiterAction SELECT count(*) WHERE env = 'prod' FACET action SINCE 7 days ago
+```
+
 **Launch timings and sessions**
 ```sql
--- Timing A (added -> click) and B (click -> first interview), minutes
-FROM PairLaunchTiming SELECT median(added_to_click_s) / 60 AS 'A median min', average(added_to_click_s) / 60 AS 'A avg min',
+-- Timing A (added -> click) and B (click -> first interview), minutes: one sample per JOB
+FROM PairJobFirstLaunch SELECT median(added_to_click_s) / 60 AS 'A median min', average(added_to_click_s) / 60 AS 'A avg min',
   median(click_to_launch_s) / 60 AS 'B median min', average(click_to_launch_s) / 60 AS 'B avg min', count(*)
-  WHERE env = 'prod' AND status = 'completed' SINCE 30 days ago
+  WHERE env = 'prod' SINCE 30 days ago
+-- Per-session launch speed, first launches vs relaunches (server launch sessions)
+FROM PairLaunchTiming SELECT median(click_to_launch_s) / 60, count(*) WHERE env = 'prod' FACET relaunch SINCE 30 days ago
 -- Where B goes
 FROM PairLaunchTiming SELECT average(sourcing_s), average(selection_s), average(enrichment_s), average(human_wait_s),
   average(saving_s), average(pairbot_s) WHERE env = 'prod' FACET trigger SINCE 30 days ago
@@ -227,7 +238,7 @@ be earned. Measure before and after each rollout step:
 ```sql
 FROM NrConsumption SELECT sum(GigabytesIngested) FACET usageMetric SINCE 1 day ago COMPARE WITH 1 week ago
 SELECT bytecountestimate() / 10e8 AS 'GB' FROM Transaction, Span, Log, PipelineStage, JobDivaAPI, JobDivaBiLimiter,
-  PairLaunchSession, PairLaunchTiming, BackendMessage FACET eventType() SINCE 1 day ago COMPARE WITH 1 week ago
+  PairLaunchSession, PairLaunchTiming, PairJobFirstLaunch, BackendMessage FACET eventType() SINCE 1 day ago COMPARE WITH 1 week ago
 ```
 
 What this change does to it:

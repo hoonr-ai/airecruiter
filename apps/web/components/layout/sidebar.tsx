@@ -2,18 +2,21 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge, Network } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge, Network, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
+import { useNotificationsStream } from "@/context/notifications-context";
 
 export function Sidebar() {
     const pathname = usePathname();
     const { isAdmin, isTeamLead, teamName, orgRoleLabel, isLoading } = useUserRole();
+    const { unreadCount } = useNotificationsStream();
 
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
+        { label: "Notifications", href: "/notifications", icon: Bell, disabled: false, badge: unreadCount },
         // Live Report navigation hidden temporarily during testing (accessible directly via /admin/live-report)
         // { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
         // Admins get the full analytics + team management; team leads get the
@@ -92,7 +95,17 @@ export function Sidebar() {
                                             "mr-3 h-[20px] w-[20px] transition-colors duration-200",
                                             isActive ? "text-white" : "text-slate-400 group-hover:text-slate-600"
                                         )} />
-                                        {item.label}
+                                        <span className="flex-1">{item.label}</span>
+                                        {"badge" in item && !!item.badge && (
+                                            <span
+                                                className={cn(
+                                                    "ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-semibold",
+                                                    isActive ? "bg-white/20 text-white" : "bg-primary text-white"
+                                                )}
+                                            >
+                                                {item.badge > 99 ? "99+" : item.badge}
+                                            </span>
+                                        )}
                                     </Link>
                                 )}
                             </li>

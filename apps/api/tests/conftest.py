@@ -43,15 +43,6 @@ def _block_real_redis(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_amplitude_events(monkeypatch):
-    """core.logging ships every WARNING/ERROR to Amplitude through httpx when
-    AMPLITUDE_API_KEY is set (it is, in apps/api/.env). From the suite that
-    sent real events and, in tests that stub httpx, showed up as extra
-    requests in their call counts."""
-    monkeypatch.setattr("core.amplitude.AMPLITUDE_API_KEY", "", raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _no_real_kipplo_calls(monkeypatch):
     """Kipplo bills per hit and core.config loads apps/api/.env, so a key there
     must never reach a real lookup from the suite. Kipplo tests set a fake key

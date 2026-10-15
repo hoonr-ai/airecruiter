@@ -1,5 +1,5 @@
-// Active-time accounting for a wizard step: the number behind the reports'
-// "Step 5 Active Time" (apps/api/services/job_step_time.py).
+// Active-time accounting for a wizard step: the numbers behind the reports'
+// per-step "Active Time" (apps/api/services/job_step_time.py).
 //
 // "Active" means the tab is visible AND the recruiter did something (clicked,
 // typed, scrolled, moved the mouse) within the last IDLE_MS. A Step 5 left
@@ -22,7 +22,11 @@ export const IDLE_MS = 5 * 60_000;
 // when a flush happens, not what gets counted: time is computed from
 // timestamps, never by adding up ticks.
 export const SAMPLE_MS = 15_000;
-export const FLUSH_MS = 60_000;
+// Every open wizard step sends one write this often while it is worked, and
+// nginx gives a whole office (one client IP) 30 API writes a minute. Hiding
+// the tab, leaving the step and closing the page still send at once, so a
+// longer cadence only delays the numbers; it loses nothing.
+export const FLUSH_MS = 120_000;
 // Below this a flush is skipped (the time stays pending), so tab flicking and
 // the unmount of a step opened for a moment don't turn into requests.
 export const MIN_FLUSH_MS = 1_000;
@@ -150,6 +154,10 @@ export type StepTimeSessionOptions = {
   visible: boolean;
   send: StepTimeSender;
   idleMs?: number;
+  /** Send the 0 ms ENTRY report at start (default true). The wizard needs it
+   *  (it stamps first_entered_at); surfaces that only sum time
+   *  (hooks/use-active-time.ts) skip it — one request fewer per page view. */
+  entry?: boolean;
 };
 
 /**
@@ -169,6 +177,7 @@ export function createStepTimeSession({
   visible,
   send,
   idleMs = IDLE_MS,
+  entry = true,
 }: StepTimeSessionOptions): StepTimeSession {
   const tracker = createActiveTimeTracker({ now, idleMs, visible });
   tracker.activity(now);
@@ -180,7 +189,7 @@ export function createStepTimeSession({
   // Any report the server takes creates the row, so the first "sent" settles
   // it, and so does a "drop" (the server would refuse it again). Until then,
   // failures back the retry off.
-  let entrySettled = false;
+  let entrySettled = !entry;
   let entryFailures = 0;
 
   const dispatch = (activeMs: number, keepalive: boolean) => {
@@ -236,7 +245,7 @@ export function createStepTimeSession({
     dispatch(tracker.take(), keepalive);
   };
 
-  dispatch(0, false);
+  if (entry) dispatch(0, false);
 
   return {
     activity(at) {

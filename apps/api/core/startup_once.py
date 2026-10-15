@@ -32,7 +32,7 @@ from core.advisory_lock import AdvisoryLock
 
 log = logging.getLogger(__name__)
 
-STARTUP_SCHEMA_LOCK_KEY = 728196  # 728193-728195: poll, jobdiva_bi_sync, AutoSync
+STARTUP_SCHEMA_LOCK_KEY = 728196  # 728193-728195: poll, jobdiva_bi_sync, AutoSync; 728197: DailyDigest
 SCHEMA_WAIT_S = float(os.getenv("STARTUP_SCHEMA_WAIT_S", "150") or 150)
 _POLL_S = 1.0
 

@@ -1,5 +1,7 @@
 "use client";
 
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { useState, useEffect } from "react";
 import { API_BASE, authFetch } from "@/lib/api";
 import {
@@ -66,6 +68,15 @@ export function AssessModal({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [stopOutreachOpen, setStopOutreachOpen] = useState(false);
+
+  // Recruiter activity: time reviewing in this modal (its opener pauses its
+  // own surface meanwhile) and one "candidate opened" per opening.
+  useActiveTime({ surface: "assess_modal", enabled: open });
+  useEffect(() => {
+    if (open && interviewId) {
+      recordActivity("candidate_opened", { candidateId: candidateId || null, attrs: { view: "assess" } });
+    }
+  }, [open, interviewId, candidateId]);
 
   useEffect(() => {
     if (open && interviewId) {

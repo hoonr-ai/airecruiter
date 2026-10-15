@@ -13,6 +13,7 @@ import {
   failedRowsToCsv,
   findFullRow,
   isLaunchComplete,
+  isSettledForPolling,
   isTerminal,
   keysetBeforeCursors,
   lookupRetryDelay,
@@ -41,6 +42,7 @@ import {
   type LaunchSessionView,
   type RowCache,
 } from "@/lib/launch-session";
+import { LAUNCH_STARTED_EVENT } from "@/lib/launch-session";
 
 // Watches a server launch session for Step 5 (apps/api/routers/launch_sessions.py).
 // The rules — what to send, how to read answers, the back-off, the row merge,
@@ -483,6 +485,9 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
     };
 
     void (async () => {
+      // Slower polling while the session waits on the recruiter or only
+      // JobDiva provisioning is left (lib/launch-session isSettledForPolling).
+      let settled = false;
       while (live && followIdRef.current === id) {
         let terminal = false;
         let again = false;
@@ -526,6 +531,7 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
             if (rows.changed) setRowsVersion((v) => v + 1);
             errors = rows.ok ? 0 : errors + 1;
             terminal = isTerminal(view);
+            settled = isSettledForPolling(view);
           }
         } catch {
           errors += 1;
@@ -539,6 +545,7 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
             hiddenMs: cfg?.hidden_poll_ms ?? 15000,
             hidden: document.visibilityState === "hidden",
             errors,
+            settled,
           }),
         );
       }
@@ -565,6 +572,12 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
+      if (!live) return;
+      // Nobody sees the banner in a hidden tab: skip the request, look again later.
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        timer = setTimeout(() => void tick(), OTHER_POLL_MS);
+        return;
+      }
       const res = await launchSessionsApi.get(otherId);
       if (!live) return;
       if (res.ok && res.data?.session) {
@@ -681,11 +694,20 @@ export function useLaunchSession({ jobRef, reattach }: UseLaunchSessionOptions) 
   // ── actions ─────────────────────────────────────────────────────────────
 
   /** POST create, re-sent with the SAME body (same idempotency key) on 429 / 5xx / network. */
+  // Wake the bottom-right launch tracker (components/layout/launch-tracker)
+  // once a new session exists, so it shows without waiting for its idle poll.
+  const announceCreated = (outcome: CreateOutcome): CreateOutcome => {
+    if (outcome.kind === "created" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event(LAUNCH_STARTED_EVENT));
+    }
+    return outcome;
+  };
+
   const create = useCallback(async (job: string, body: CreateSessionBody): Promise<CreateOutcome> => {
     let outcome: CreateOutcome = { kind: "transient", status: 0, retryAfterMs: null };
     for (let attempt = 1; attempt <= CREATE_ATTEMPTS; attempt++) {
       outcome = classifyCreateResponse(await launchSessionsApi.create(job, body));
-      if (outcome.kind !== "transient" || !mountedRef.current) return outcome;
+      if (outcome.kind !== "transient" || !mountedRef.current) return announceCreated(outcome);
       if (attempt < CREATE_ATTEMPTS) await delay(writeRetryDelay(attempt, outcome.retryAfterMs));
       if (!mountedRef.current) return outcome;
     }

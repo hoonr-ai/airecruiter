@@ -19,10 +19,17 @@ from routers.jobs import save_job_draft
 
 USER = UserIdentity(email="recruiter@example.com", role="recruiter")
 
-# Index of the (is_auto_saved, greatest_bound, direct_value) params bound to
-# the UPDATE's `current_step = CASE WHEN %s THEN GREATEST(current_step, %s)
-# ELSE %s END` clause (see the column order in jobs.py's save_job_draft UPDATE).
-_CURRENT_STEP_CASE_PARAM_INDEX = 12
+# PR #823 review: a hardcoded param index would silently misread the wrong
+# values if the UPDATE's column order ever changes. Locating it dynamically
+# by counting %s placeholders up to the clause's own marker text means a
+# reordering just moves the index (correctly), and a change to the clause
+# itself raises ValueError here instead of a confusing wrong-value assertion
+# failure downstream.
+_CURRENT_STEP_CASE_MARKER = "current_step = CASE WHEN %s THEN GREATEST(current_step"
+
+
+def _current_step_case_param_index(sql: str) -> int:
+    return sql[: sql.index(_CURRENT_STEP_CASE_MARKER)].count("%s")
 
 
 def _mock_connection():
@@ -62,10 +69,8 @@ def test_manual_save_sets_current_step_directly_even_backwards():
     updates = _update_calls(cur)
     assert len(updates) == 1
     sql, params = updates[0].args
-    assert "GREATEST(current_step" in sql
-    is_auto, greatest_bound, direct_value = params[
-        _CURRENT_STEP_CASE_PARAM_INDEX:_CURRENT_STEP_CASE_PARAM_INDEX + 3
-    ]
+    idx = _current_step_case_param_index(sql)
+    is_auto, greatest_bound, direct_value = params[idx:idx + 3]
     assert is_auto is False
     # Manual save: current_step is set to the requested value directly,
     # regardless of GREATEST — a deliberate backwards step isn't clamped.
@@ -77,9 +82,8 @@ def test_auto_save_uses_greatest_so_it_cannot_move_current_step_back():
     updates = _update_calls(cur)
     assert len(updates) == 1
     sql, params = updates[0].args
-    is_auto, greatest_bound, direct_value = params[
-        _CURRENT_STEP_CASE_PARAM_INDEX:_CURRENT_STEP_CASE_PARAM_INDEX + 3
-    ]
+    idx = _current_step_case_param_index(sql)
+    is_auto, greatest_bound, direct_value = params[idx:idx + 3]
     assert is_auto is True
     # Auto-save: bounded by GREATEST(current_step, 1) at the SQL level, so an
     # out-of-order/stray auto-save can never regress the stored step.

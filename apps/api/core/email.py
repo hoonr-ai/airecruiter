@@ -381,6 +381,7 @@ def notify_pair_launched(
     recruiter_emails: List[str],
     job_id: str,                # internal DB job_id for deep-link
     app_base_url: Optional[str] = None,
+    relaunch: bool = False,
 ) -> bool:
     """
     Email #1 – PAIR Launch Confirmation.
@@ -388,6 +389,11 @@ def notify_pair_launched(
     From : pair@pyramidci.com
     To   : pair-recruiting@pyramidci.com + recruiter emails
     Subj : PAIR Has Been Launched for [jobdiva_id]
+           (relaunch: "More Candidates Launched in PAIR for [jobdiva_id]")
+
+    ``candidate_count`` is the people THIS launch created interviews for. A
+    ``relaunch`` (the job already had its first launch) says so instead of
+    announcing a new campaign.
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
@@ -399,12 +405,24 @@ def notify_pair_launched(
         f'{jobdiva_id}</a>'
     )
 
+    heading = "🚀 More Candidates Launched in PAIR" if relaunch else "🚀 PAIR Has Been Launched"
+    lead = (
+        "More candidates were just added to this job's PAIR campaign."
+        if relaunch else "A new PAIR campaign has just been activated."
+    )
+    sentence = (
+        f"PAIR has been launched for <strong>{candidate_count}</strong> more candidate(s) for"
+        if relaunch else
+        f"Congratulations, PAIR has been launched for <strong>{candidate_count}</strong> candidate(s) for"
+    )
+    count_label = "Candidates Launched Now" if relaunch else "Candidates Sourced"
+
     content = f"""
     <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
-      🚀 PAIR Has Been Launched
+      {heading}
     </h2>
     <p style="margin:0 0 20px;font-size:14px;color:#64748b;">
-      A new PAIR campaign has just been activated.
+      {lead}
     </p>
 
     <table cellpadding="0" cellspacing="0"
@@ -414,13 +432,12 @@ def notify_pair_launched(
         {_info_row("JobDiva ID", jd_hyperlink)}
         {_info_row("Job Title", job_title or "—")}
         {_info_row("Customer", customer_name or "—")}
-        {_info_row("Candidates Sourced", str(candidate_count))}
+        {_info_row(count_label, str(candidate_count))}
       </tbody>
     </table>
 
     <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.7;">
-      Congratulations, PAIR has been launched for
-      <strong>{candidate_count}</strong> candidate(s) for
+      {sentence}
       {jd_hyperlink}: <strong>{job_title}</strong> – <strong>{customer_name}</strong>.
     </p>
 
@@ -439,12 +456,15 @@ def notify_pair_launched(
         [PAIR_TEAM_EMAIL] + [e.strip() for e in recruiter_emails if e.strip()]
     ))
 
-    subject = f"PAIR Has Been Launched for {jobdiva_id}"
+    subject = (
+        f"More Candidates Launched in PAIR for {jobdiva_id}" if relaunch
+        else f"PAIR Has Been Launched for {jobdiva_id}"
+    )
 
     plain = (
-        f"PAIR Has Been Launched for {jobdiva_id}\n\n"
+        f"{subject}\n\n"
         f"Job: {job_title} – {customer_name}\n"
-        f"Candidates sourced: {candidate_count}\n"
+        f"{'Candidates launched now' if relaunch else 'Candidates sourced'}: {candidate_count}\n"
         f"JobDiva: {jobdiva_link}\n"
         f"Track progress: {rankings_link}\n"
     )
@@ -1259,7 +1279,8 @@ def notify_cross_submissions(
     </div>
     <p style="margin:16px 0 0;font-size:12px;color:#64748b;line-height:1.6;">
       "Screen result" is the outcome of the PAIR phone screen for the <em>previous</em> job
-      (In Progress = partially completed). "Match" is the résumé match against <em>this</em> job's
+      (In Progress = partially completed, Pending = not screened yet). Candidates who passed are listed,
+      plus Pending / In Progress / Failed ones that are a very strong match for this job. "Match" is the résumé match against <em>this</em> job's
       Step&nbsp;5 criteria. These candidates are not on this job's candidate list yet — add them from
       Step&nbsp;5 or reach out directly.
     </p>
@@ -1273,7 +1294,8 @@ def notify_cross_submissions(
         f"While sourcing {job_title or 'this job'}{(' at ' + customer_name) if customer_name else ''} ({jobdiva_id}; {jobdiva_link}), "
         f"PAIR found {n} candidate(s) it already phone-screened for other jobs in the last {int(lookback_days)} days "
         f"who also match this role:\n\n" + "\n".join(plain_rows) + "\n\n"
-        "Screen result is the outcome of the PAIR phone screen for the previous job (In Progress = partially completed). "
+        "Screen result is the outcome of the PAIR phone screen for the previous job (In Progress = partially completed, "
+        "Pending = not screened yet). Candidates who passed are listed, plus Pending / In Progress / Failed ones that are a very strong match for this job. "
         "Match is the resume match against this job's Step 5 criteria.\n"
     )
     return _send(to_list, subject, _base_html(content), plain)

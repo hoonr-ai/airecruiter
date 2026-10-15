@@ -23,6 +23,7 @@ import { api, type CrossSubmission } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { getScoreBand, getScoreTone } from "@/lib/match-score";
 import { cn } from "@/lib/utils";
+import { RANKINGS_TABLE_MAX_HEIGHT } from "@/lib/table-layout";
 
 // These rows are scored by the same matrix as Step 5
 // (services/unified_candidate_search.apply_scoring_policy), so they are shown
@@ -203,10 +204,10 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
       </div>
 
       {open && (
-        <div className="border-t border-indigo-100 overflow-x-auto">
+        <div className="border-t border-indigo-100 overflow-auto" style={{ maxHeight: RANKINGS_TABLE_MAX_HEIGHT }}>
           <table className="w-full min-w-[900px] border-separate border-spacing-0 text-[12px]">
             <thead>
-              <tr className="bg-indigo-50/60 text-[10px] uppercase tracking-wide text-slate-500">
+              <tr className="text-[10px] uppercase tracking-wide text-slate-500 [&>th]:sticky [&>th]:top-0 [&>th]:z-10 [&>th]:bg-indigo-50">
                 <th className="text-left font-semibold px-4 py-2">Candidate</th>
                 <th className="text-left font-semibold px-3 py-2">Contact</th>
                 <th className="text-left font-semibold px-3 py-2">Screened for</th>
@@ -236,6 +237,7 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
                         <div className="flex items-center gap-3 mt-1 text-[11px] font-medium">
                           {reportHref && (
                             <Link
+                              prefetch={false} // opens in a new tab, so a prefetch is never used
                               href={reportHref}
                               target="_blank"
                               className="inline-flex items-center gap-1 text-indigo-600 hover:underline"
@@ -314,8 +316,9 @@ export function CrossSubmissionsPanel({ jobId, onAdded, notify, className }: Pro
             </tbody>
           </table>
           <div className="px-4 py-2 text-[11px] text-slate-500 border-t border-slate-100">
-            "Screen result" is the PAIR phone-screen outcome for the <em>previous</em> job (In Progress = partially completed).
-            "Match" is the résumé match against <em>this</em> job's Step 5 criteria. Adding a candidate does not start outreach.
+            "Screen result" is the PAIR phone-screen outcome for the <em>previous</em> job (In Progress = partially completed,
+            Pending = not screened yet). Listed: candidates who passed, plus Pending / In Progress / Failed ones that are a very strong match
+            for this job. "Match" is the résumé match against <em>this</em> job's Step 5 criteria. Adding a candidate does not start outreach.
           </div>
         </div>
       )}

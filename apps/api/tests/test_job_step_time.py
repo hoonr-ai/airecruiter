@@ -1,4 +1,4 @@
-"""services/job_step_time: recording Step 5 active time and the per-job read
+"""services/job_step_time: recording wizard step active time and the per-job read
 all three reports share (Launch Report, Admin Analytics, Recruiter Analytics).
 
 The Postgres tests skip when no server is reachable (set LAUNCH_REPORT_TEST_DSN,
@@ -41,6 +41,34 @@ def test_by_user_keys_are_normalised_and_summed():
         "b@x.com": 0,
     }
     assert jst._merge_by_user(None) == {}
+
+
+def test_by_step_minutes_covers_every_wizard_step():
+    minutes, total = jst._by_step_minutes({"1": 90_000, "3": 0, "5": 30 * 60_000, "9": 5, "x": 1})
+    assert minutes == {1: 1.5, 2: None, 3: 0.0, 4: None, 5: 30.0}
+    # A step that was opened but not worked (0 ms) is a real 0, not a dash.
+    assert total == 31.5
+    assert jst._by_step_minutes(None) == ({1: None, 2: None, 3: None, 4: None, 5: None}, None)
+
+
+def test_posting_time_columns():
+    metrics = {
+        "active_minutes_by_step": {1: 2.0, 2: None, 3: 4.5, 4: 0.0, 5: 30.0},
+        "posting_active_minutes": 36.5,
+    }
+    assert jst.posting_time_columns(metrics) == {
+        "step1_active_minutes": 2.0,
+        "step2_active_minutes": None,
+        "step3_active_minutes": 4.5,
+        "step4_active_minutes": 0.0,
+        "posting_active_minutes": 36.5,
+    }
+    # A failed read (None) or an untimed job: every column is a dash.
+    blank = dict.fromkeys(
+        ["step1_active_minutes", "step2_active_minutes", "step3_active_minutes", "step4_active_minutes", "posting_active_minutes"]
+    )
+    assert jst.posting_time_columns(None) == blank
+    assert jst.posting_time_columns(jst.empty_step_metrics()) == blank
 
 
 def test_step_metrics_sql_placeholders():
@@ -163,6 +191,9 @@ def test_fetch_step_metrics_per_job(pg):
     assert a["first_launch_at"] == t(15)  # the failed 13:30 attempt is not a launch
     assert a["to_launch_minutes"] == 120.0
     assert a["by_user"] == {"priya@x.com": 40 * 60_000, "sam@x.com": 20 * 60_000}
+    # Every step's total, whatever step was asked for; Step 4 had 99 ms.
+    assert a["active_minutes_by_step"] == {1: None, 2: None, 3: None, 4: 0.0, 5: 60.0}
+    assert a["posting_active_minutes"] == 60.0
 
     b = got["-4"]
     assert b["first_launch_at"] == t(11) and b["to_launch_minutes"] == 60.0
@@ -172,6 +203,23 @@ def test_fetch_step_metrics_per_job(pg):
     assert c["to_launch_minutes"] is None  # launched before Step 5 was timed
 
     assert got["31990009"] == jst.empty_step_metrics()
+
+
+def test_fetch_step_metrics_reads_steps_one_to_four(pg):
+    t = datetime.datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
+    _set(pg, "31990011", "a@x.com", ms=3 * 60_000, entered=t, step=1)
+    _set(pg, "31990011", "b@x.com", ms=1 * 60_000, entered=t, step=1)
+    _set(pg, "31990011", "a@x.com", ms=6 * 60_000, entered=t, step=3)
+    _set(pg, "31990012", "a@x.com", ms=2 * 60_000, entered=t, step=2)  # another job
+
+    got = jst.fetch_step_metrics(pg, [("31990011", "26-1"), ("31990012", "26-2")])
+
+    job = got["31990011"]
+    assert job["active_minutes_by_step"] == {1: 4.0, 2: None, 3: 6.0, 4: None, 5: None}
+    assert job["posting_active_minutes"] == 10.0
+    # Step 5's own figures stay "not tracked" when only the setup steps were timed.
+    assert job["active_minutes"] is None and job["by_user"] == {}
+    assert got["31990012"]["active_minutes_by_step"][2] == 2.0
 
 
 def test_fetch_step_metrics_empty_input_skips_the_query(pg):

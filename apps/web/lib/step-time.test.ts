@@ -20,7 +20,7 @@ describe("step-time active tracker", () => {
   it("exports the agreed timings", () => {
     assert.equal(IDLE_MS, 5 * MIN);
     assert.equal(SAMPLE_MS, 15 * SEC);
-    assert.equal(FLUSH_MS, 60 * SEC);
+    assert.equal(FLUSH_MS, 2 * MIN);
     assert.equal(MIN_FLUSH_MS, 1 * SEC);
     assert.equal(ACTIVITY_THROTTLE_MS, 1 * SEC);
     // Never more than the server accepts in one report.
@@ -281,9 +281,9 @@ describe("step-time session", () => {
     const { send, calls } = fakeSender();
     const s = createStepTimeSession({ now: 0, visible: true, send });
     await settleAll(calls);
-    for (let minute = 1; minute <= 30; minute++) {
-      s.activity(minute * MIN);
-      s.tick(minute * MIN);
+    for (let flush = 1; flush <= 30; flush++) {
+      s.activity(flush * FLUSH_MS);
+      s.tick(flush * FLUSH_MS);
       await settleAll(calls.slice(-1), "retry");
     }
     const sizes = calls.slice(1).map((c) => c.ms);
@@ -397,11 +397,12 @@ describe("step-time session", () => {
     };
     const s = createStepTimeSession({ now: 0, visible: false, send: timed });
     await settleAll(calls, "retry");
-    for (clockNow = SAMPLE_MS; clockNow <= 4 * MIN; clockNow += SAMPLE_MS) {
+    for (clockNow = SAMPLE_MS; clockNow <= 6 * MIN; clockNow += SAMPLE_MS) {
       s.tick(clockNow);
       await settleAll(calls.slice(-1), "retry");
     }
-    assert.deepEqual(sentAt, [0, 15 * SEC, 45 * SEC, 105 * SEC, 165 * SEC, 225 * SEC]);
+    // 15s, 30s, 60s, then FLUSH_MS (2 min) between attempts.
+    assert.deepEqual(sentAt, [0, 15 * SEC, 45 * SEC, 105 * SEC, 225 * SEC, 345 * SEC]);
   });
 
   it("does not duplicate an entry that is still in flight", async () => {
@@ -461,12 +462,25 @@ describe("step-time session", () => {
     const { send, calls } = fakeSender();
     const s = createStepTimeSession({ now: 10 * MIN, visible: true, send });
     await settleAll(calls);
-    s.tick(11 * MIN);
-    assert.equal(calls[1].ms, MIN);
+    s.tick(10 * MIN + FLUSH_MS);
+    assert.equal(calls[1].ms, FLUSH_MS);
     await settleAll(calls);
-    s.activity(0); // the clock jumped back 11 minutes
+    s.activity(0); // the clock jumped back 12 minutes
     for (let at = SAMPLE_MS; at <= FLUSH_MS; at += SAMPLE_MS) s.tick(at);
     assert.equal(calls.length, 3, "flushes resume on the new clock");
     assert.equal(calls[2].ms, FLUSH_MS);
   });
 });
+
+describe("entry: false", () => it("sends nothing at start and only real time later", () => {
+  const sent: number[] = [];
+  const session = createStepTimeSession({
+    now: 0, visible: true, entry: false,
+    send: async (ms) => { sent.push(ms); return "sent"; },
+  });
+  assert.deepEqual(sent, []);
+  session.tick(SAMPLE_MS);
+  assert.deepEqual(sent, []);                  // no time yet worth a request, no entry ping
+  session.end(30_000);
+  assert.deepEqual(sent, [30_000]);
+}));

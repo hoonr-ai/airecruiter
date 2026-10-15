@@ -253,6 +253,7 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_launch_sessions_claimable ON launch_sessions (created_at) "
     "WHERE status IN ('queued', 'running')",
     "CREATE INDEX IF NOT EXISTS ix_launch_sessions_job ON launch_sessions (job_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_launch_sessions_requester ON launch_sessions (requested_by, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS ix_launch_sessions_parent ON launch_sessions (parent_session_id) "
     "WHERE parent_session_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS ix_launch_sessions_recheck ON launch_sessions (recheck_at) "

@@ -286,6 +286,33 @@ class PgStore:
             return [self._row(r) for r in cur.fetchall()]
         return self._tx(run)
 
+    def list_user_sessions(self, email: str, *, recent_hours: int = 24, limit: int = 10) -> List[Dict[str, Any]]:
+        """The launch tracker's rows: this requester's top-level sessions that
+        are active or finished within ``recent_hours``, newest first, each with
+        its job title (``job_title``; None when the job row is gone). Active
+        sessions sort first. An empty email matches nothing (system rows can
+        carry a blank requested_by)."""
+        email = (email or "").strip().lower()
+        if not email:
+            return []
+
+        def run(cur):
+            cur.execute(
+                "SELECT s.*, (SELECT mj.title FROM monitored_jobs mj "
+                "  WHERE mj.job_id::text = s.job_id ORDER BY mj.created_at DESC LIMIT 1) AS job_title "
+                "FROM launch_sessions s "
+                "WHERE s.requested_by = %(email)s AND s.status <> 'collecting' "
+                "AND (s.status = ANY(%(active)s) "
+                "     OR COALESCE(s.completed_at, s.updated_at) > now() - make_interval(hours => %(hours)s)) "
+                # Running launches first, so a run of finished ones can never
+                # push a live launch past the LIMIT.
+                "ORDER BY (s.status = ANY(%(active)s)) DESC, s.created_at DESC LIMIT %(limit)s",
+                {"email": email, "active": list(S.ACTIVE_STATUSES),
+                 "hours": max(1, int(recent_hours)), "limit": max(1, min(int(limit), 50))},
+            )
+            return [self._row(r) for r in cur.fetchall()]
+        return self._tx(run)
+
     def children(self, session_id: str) -> List[Dict[str, Any]]:
         def run(cur):
             cur.execute(
@@ -493,11 +520,18 @@ class PgStore:
                            SELECT 1 FROM engage_interview_audit a
                            WHERE a.candidate_id = sc.candidate_id AND a.jobdiva_id = ANY(%(keys)s)
                              AND COALESCE(a.interview_id, '') <> ''
-                       ) AS audit_launched
+                       ) AS audit_launched,
+                       -- Contacts, for the person gate's launched_person set
+                       -- (services/launch_person_keys.py).
+                       COALESCE(NULLIF(sc.email, ''), sc.data->>'email') AS email,
+                       COALESCE(NULLIF(sc.phone, ''), sc.data->>'phone') AS phone,
+                       COALESCE(NULLIF(sc.profile_url, ''), sc.data->>'profile_url',
+                                sc.data->>'linkedin_url', sc.data->'urls'->>'linkedin') AS profile_url
                 FROM sourced_candidates sc
                 WHERE sc.jobdiva_id = ANY(%(keys)s)
                 UNION ALL
-                SELECT DISTINCT a.candidate_id, NULL, '', '', '', '', '', TRUE
+                SELECT DISTINCT ON (a.candidate_id) a.candidate_id, NULL, '', '', '', '', '', TRUE,
+                       a.candidate_email, NULL, NULL
                 FROM engage_interview_audit a
                 WHERE a.jobdiva_id = ANY(%(keys)s) AND COALESCE(a.interview_id, '') <> ''
                   AND NOT EXISTS (

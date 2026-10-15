@@ -1,5 +1,6 @@
 "use client";
 
+import { useActiveTime } from "@/hooks/use-active-time";
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff } from "lucide-react";
@@ -470,6 +471,7 @@ const getRecruiterEmailsArray = (emails: string | string[] | null | undefined): 
 
 export default function GlobalCandidatesPage() {
   const CANDIDATE_PAGE_SIZE = 50;
+  useActiveTime({ surface: "candidates" });
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -711,7 +713,14 @@ export default function GlobalCandidatesPage() {
     return () => clearTimeout(timeout);
   }, [searchInput, searchQuery]);
 
+  // The min-score box fires on every keystroke ("75" was a request for 7,
+  // then one for 75, in the shared 30-a-minute /candidates/ budget), so a
+  // change to it waits for a pause in typing. Picks from the dropdowns and
+  // date pickers still go at once.
+  const lastMinScoreRef = useRef(filterMinScore);
   useEffect(() => {
+    const typed = lastMinScoreRef.current !== filterMinScore;
+    lastMinScoreRef.current = filterMinScore;
     const request = window.setTimeout(() => {
       void fetchCandidates({
         currentOffset: 0,
@@ -727,7 +736,7 @@ export default function GlobalCandidatesPage() {
         replace: true
       })
         .finally(() => setIsLoading(false));
-    }, 0);
+    }, typed ? 400 : 0);
     return () => window.clearTimeout(request);
   }, [searchQuery, filterStatus, filterFeedback, filterSource, filterMinScore, exportStartDate, exportEndDate, completedStartDate, completedEndDate, fetchCandidates]);
 
@@ -1115,6 +1124,7 @@ export default function GlobalCandidatesPage() {
                         <div className="flex flex-col gap-1 items-center justify-center">
                           {c.jobdiva_id ? (
                             <Link
+                              prefetch={false} // per row: would prefetch every visible candidate
                               href={`/jobs/${c.jobdiva_id}/report?candidateId=${encodeURIComponent(c.candidate_id || c.id)}`}
                               className="text-[14px] font-bold text-indigo-600 hover:text-indigo-700 hover:underline transition-colors text-center whitespace-normal leading-tight"
                             >

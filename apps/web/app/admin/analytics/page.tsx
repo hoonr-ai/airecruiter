@@ -1,5 +1,7 @@
 "use client";
 
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { useEffect, useState, useCallback, type ReactNode } from "react";
 import {
   Briefcase,
@@ -74,7 +76,13 @@ interface JobTimelineEntry {
   posted_date_raw: string;
   jobdiva_posted_on: string | null;
   added_to_curate_at: string | null;
+  /** The first Launch PAIR ATTEMPT (its first candidate save — set even when
+   *  that attempt created no interview). Shown as "Launch Attempted". */
   curate_launched_at: string | null;
+  /** The job's first SUCCESSFUL launch: its first PAIR interview (T2). This
+   *  is "Launched (PAIR)", as on the Launch Report; undefined when the
+   *  launch timings could not be read (the attempt is shown instead). */
+  first_launched_at?: string | null;
   outreach_stopped_at: string | null;
   posted_to_launch_days: number | null;
   is_archived: boolean;
@@ -118,6 +126,14 @@ interface JobTimelineEntry {
    *  unavailable this time (jobs_timeline_step_time_available=false). */
   step5_active_minutes?: number | null;
   step5_to_launch_minutes?: number | null;
+  /** Active time on Steps 1–4 of the job wizard and on Steps 1–5 together,
+   *  in minutes (services/job_step_time.posting_time_columns). null = not
+   *  tracked (Steps 1–4: jobs set up before 10/12/2026) or unavailable. */
+  step1_active_minutes?: number | null;
+  step2_active_minutes?: number | null;
+  step3_active_minutes?: number | null;
+  step4_active_minutes?: number | null;
+  posting_active_minutes?: number | null;
   /** The job's first Launch PAIR click and the two launch timings in minutes
    *  (services/launch_timing.py): Added → Click = that click − Added (PAIR);
    *  Click → Launch = the first interview PAIR Bot created − the click. null
@@ -131,6 +147,8 @@ interface JobTimelineEntry {
 
 interface LaunchSpeed {
   launched_jobs?: number;
+  /** Jobs with a launch ATTEMPT (first save), successful or not. */
+  launch_attempted_jobs?: number;
   unlaunched_active_jobs?: number;
   aged_unlaunched_jobs?: number;
   avg_days_posted_to_launch?: number | null;
@@ -269,6 +287,11 @@ const formatRelativeTime = (iso: string | null | undefined): string => {
 const formatLagValue = (lag: number): string =>
   Number.isInteger(lag) ? `${lag}` : lag.toFixed(1);
 
+/** "Launched (PAIR)": the first successful launch; the first attempt only
+ *  when the launch timings were unavailable (first_launched_at undefined). */
+const launchedOnPair = (job: JobTimelineEntry): string | null =>
+  job.first_launched_at === undefined ? job.curate_launched_at : job.first_launched_at;
+
 const renderDateCell = (iso: string | null | undefined) => {
   const formatted = formatEasternDateTime(iso);
   return formatted === EMPTY_DATE ? (
@@ -329,6 +352,28 @@ const renderDurationCell = (minutes: number | null | undefined) => {
     <span className="text-slate-300">{EMPTY_DATE}</span>
   ) : (
     <span className="font-semibold text-slate-700">{formatted}</span>
+  );
+};
+
+// The job wizard's steps (app/jobs/new/page.tsx STEP_LABELS), for the
+// Posting Time breakdown and its CSV columns.
+const POSTING_STEPS = [
+  { step: 1, name: "Intake", minutes: (j: JobTimelineEntry) => j.step1_active_minutes },
+  { step: 2, name: "Publish", minutes: (j: JobTimelineEntry) => j.step2_active_minutes },
+  { step: 3, name: "Rubric", minutes: (j: JobTimelineEntry) => j.step3_active_minutes },
+  { step: 4, name: "Filters", minutes: (j: JobTimelineEntry) => j.step4_active_minutes },
+  { step: 5, name: "Source", minutes: (j: JobTimelineEntry) => j.step5_active_minutes },
+] as const;
+
+/** Total job-wizard time, with the per-step split on hover. */
+const renderPostingTimeCell = (job: JobTimelineEntry) => {
+  const total = formatDuration(job.posting_active_minutes);
+  if (total === EMPTY_DATE) return renderDurationCell(job.posting_active_minutes);
+  const breakdown = POSTING_STEPS.map((s) => `Step ${s.step} ${s.name}: ${formatDuration(s.minutes(job))}`).join("\n");
+  return (
+    <span className="font-semibold text-slate-700 cursor-help underline decoration-dotted decoration-slate-300 underline-offset-4" title={breakdown}>
+      {total}
+    </span>
   );
 };
 
@@ -395,6 +440,7 @@ const TIMELINE_SKELETON_BARS: Array<{ center?: boolean; bar: string }> = [
   { bar: "h-4 w-20 rounded" }, // Launch Clicked
   { center: true, bar: "h-4 w-12 rounded" }, // Added → Click
   { center: true, bar: "h-4 w-12 rounded" }, // Click → Launch
+  { center: true, bar: "h-4 w-12 rounded" }, // Posting Time
   { center: true, bar: "h-4 w-12 rounded" }, // Step 5 Active Time
   { center: true, bar: "h-4 w-12 rounded" }, // Step 5 → Launch
   { center: true, bar: "h-5 w-16 rounded-full" }, // Active / Archived
@@ -430,7 +476,7 @@ const timelineCsvNote = (
   ...(stepTimeUnavailable
     ? [
         escapeCSV(
-          "Note: Step 5 time columns (Step 5 Active Time / Step 5 → Launch) were unavailable for this export and show —",
+          "Note: wizard step time columns (Posting Time / Step N Active Time / Step 5 → Launch) were unavailable for this export and show —",
         ),
       ]
     : []),
@@ -460,12 +506,14 @@ const timelineCsvHeaders = (withRecruiters: boolean): string[] => [
   "Posted on JobDiva",
   withEasternLabel("Added to PAIR"),
   withEasternLabel("Launched on PAIR"),
+  withEasternLabel("Launch Attempted"),
   "Lag (days)",
   withEasternLabel("Launch Clicked"),
   "Added → Click",
   "Click → Launch",
   // Durations as on screen ("1h 22m"), like the Launch Report's CSV; no zone.
-  "Step 5 Active Time",
+  "Posting Time (Steps 1–5)",
+  ...POSTING_STEPS.map((s) => `Step ${s.step} ${s.name} Active Time`),
   "Step 5 → Launch",
   "Active / Archived Jobs",
   "Archive Reason",
@@ -496,12 +544,14 @@ const timelineCsvRow = (job: JobTimelineEntry, withRecruiters: boolean): string[
     ? formatEasternDate(job.jobdiva_posted_on)
     : job.posted_date_raw || EMPTY_DATE,
   formatEasternDateTime(job.added_to_curate_at),
+  formatEasternDateTime(launchedOnPair(job)),
   formatEasternDateTime(job.curate_launched_at),
   lagCsvValue(job.posted_to_launch_days),
   formatEasternDateTime(job.launch_clicked_at),
   formatDuration(job.added_to_click_minutes),
   formatDuration(job.click_to_launch_minutes),
-  formatDuration(job.step5_active_minutes),
+  formatDuration(job.posting_active_minutes),
+  ...POSTING_STEPS.map((s) => formatDuration(s.minutes(job))),
   formatDuration(job.step5_to_launch_minutes),
   job.is_archived ? "Archived" : "Active",
   job.archive_reason || "",
@@ -590,6 +640,7 @@ export default function AdminAnalyticsPage() {
     email,
     role,
   } = useUserRole();
+  useActiveTime({ surface: "analytics", enabled: isAdmin || isTeamLead });
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -819,7 +870,7 @@ export default function AdminAnalyticsPage() {
 
     if (timelineStartDate || timelineEndDate) {
       const jobDate = normalizeToUtcDate(
-        job.curate_launched_at || job.added_to_curate_at,
+        launchedOnPair(job) || job.added_to_curate_at,
       );
       if (!jobDate) return false;
 
@@ -958,6 +1009,7 @@ export default function AdminAnalyticsPage() {
     escapeCSV(value === null || value === undefined ? "" : String(value));
 
   const downloadCsv = (lines: string[], filename: string) => {
+    recordActivity("report_exported", { attrs: { report: "admin_analytics", rows: Math.max(0, lines.length - 1) } });
     // BOM so Excel reads the file as UTF-8 — the "—" placeholders turn into
     // mojibake otherwise.
     const blob = new Blob([UTF8_BOM + lines.join("\n")], {
@@ -1404,7 +1456,10 @@ export default function AdminAnalyticsPage() {
               </div>
             )}
             <div className="text-[12px] text-slate-400 mt-1.5 font-medium">
-              all time
+              all time · first interview created
+              {typeof launchSpeed.launch_attempted_jobs === "number" &&
+                launchSpeed.launch_attempted_jobs !== launchSpeed.launched_jobs &&
+                ` · ${launchSpeed.launch_attempted_jobs.toLocaleString()} attempted`}
             </div>
           </div>
         </div>
@@ -2405,8 +2460,8 @@ export default function AdminAnalyticsPage() {
           >
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
             <span>
-              Step 5 time columns (Step 5 Active Time and Step 5 &rarr; Launch)
-              couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Reload
+              Wizard step time columns (Posting Time, Step 5 Active Time and
+              Step 5 &rarr; Launch) couldn&apos;t be loaded this time and show &ldquo;—&rdquo;. Reload
               to try again.
             </span>
           </div>
@@ -2463,7 +2518,7 @@ export default function AdminAnalyticsPage() {
                   {withEasternLabel("Added (PAIR)")}
                 </th>
                 <th rowSpan={2} className="py-3 px-6 whitespace-nowrap">
-                  <HeaderHint hint="When the job's first Launch PAIR attempt saved its candidates, just before PAIR Bot was called: shortly after the click (Launch Clicked), and set even if that attempt then failed.">
+                  <HeaderHint hint="The job's first SUCCESSFUL launch: when PAIR Bot created its first interview (the Launch Report's PAIR Launch). A relaunch never moves it. The small line under it is the first launch ATTEMPT (its candidates saved, just before PAIR Bot was called), shown when it differs — an attempt can create nobody.">
                     {withEasternLabel("Launched (PAIR)")}
                   </HeaderHint>
                 </th>
@@ -2481,6 +2536,11 @@ export default function AdminAnalyticsPage() {
                 <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
                   <HeaderHint hint="From the Launch PAIR click to the first interview PAIR Bot created (the first successful launch): how long PAIR took to launch after the click. — until the job has launched, and when the click wasn't recorded.">
                     Click &rarr; Launch
+                  </HeaderHint>
+                </th>
+                <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
+                  <HeaderHint hint="Time recruiters had the job wizard open and in use on this job, Steps 1–5 together (hover a value for the per-step split), summed across every visit and every recruiter. It pauses while the tab is hidden or after 5 minutes with no activity. Steps 1–4 are tracked since 10/12/2026 and Step 5 since 09/23/2026; jobs worked earlier show — or Step 5 only.">
+                    Posting Time
                   </HeaderHint>
                 </th>
                 <th rowSpan={2} className="py-3 px-6 text-center whitespace-nowrap">
@@ -2668,7 +2728,14 @@ export default function AdminAnalyticsPage() {
                         {renderDateCell(job.added_to_curate_at)}
                       </td>
                       <td className="py-3.5 px-6 whitespace-nowrap">
-                        {renderDateCell(job.curate_launched_at)}
+                        {renderDateCell(launchedOnPair(job))}
+                        {job.first_launched_at !== undefined &&
+                          job.curate_launched_at &&
+                          job.curate_launched_at !== job.first_launched_at && (
+                            <div className="text-[11px] text-slate-400">
+                              attempted {formatEasternDateTime(job.curate_launched_at)}
+                            </div>
+                          )}
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderLagChip(job.posted_to_launch_days)}
@@ -2681,6 +2748,9 @@ export default function AdminAnalyticsPage() {
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderDurationCell(job.click_to_launch_minutes)}
+                      </td>
+                      <td className="py-3.5 px-6 text-center whitespace-nowrap">
+                        {renderPostingTimeCell(job)}
                       </td>
                       <td className="py-3.5 px-6 text-center whitespace-nowrap">
                         {renderDurationCell(job.step5_active_minutes)}

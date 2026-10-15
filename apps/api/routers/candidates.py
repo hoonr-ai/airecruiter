@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, Query, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple, AsyncIterator
@@ -36,6 +36,13 @@ from routers.jobs import invalidate_monitored_jobs_cache
 from routers._helpers import _verify_job_access_by_id, _get_job_draft_sync
 from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
+from services.notifications_service import (
+    create_candidate_rejected_notifications,
+    create_zero_match_notification,
+    create_candidate_internal_review_requested_notification,
+    create_candidate_externally_submitted_notification,
+)
+from core.tasks import spawn as _spawn_task
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -115,7 +122,11 @@ from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_ro
 
 
 from services.engage_status import format_engage_status as _format_engage_status
-from services.engage_status import engage_display_sql, select_engage_status
+from services.engage_status import engage_display_sql, select_engage_status, PASS_STATUSES, FAIL_STATUSES, COMPLETED_STATUSES
+
+# Auto-email visibility: show the row only when the interview reached a terminal
+# state. Passed as a bind param (`= ANY(%s)`), never interpolated into the SQL text.
+_TERMINAL_STATUSES = list(PASS_STATUSES + FAIL_STATUSES + COMPLETED_STATUSES)
 
 
 def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
@@ -1070,6 +1081,67 @@ async def iter_search_events(
             yield event
 
 
+def _record_recruiter_action(user: UserIdentity, action: str, job_ref: Any, **kwargs: Any) -> None:
+    """The recruiter's action, for the activity log (services/recruiter_activity).
+    Fire-and-forget; never affects the request."""
+    try:
+        from services.recruiter_activity import record_action_soon
+
+        record_action_soon(user.email, action, job_key=job_ref, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"activity {action} not recorded: {exc}")
+
+
+def _maybe_notify_zero_match(
+    request: "CandidateSearchRequest",
+    criteria: Any,
+    summary_event: Dict[str, Any],
+    user: UserIdentity,
+    any_source_failed: bool = False,
+) -> None:
+    """Fires create_zero_match_notification when a FULL search's terminal
+    "summary" event reports total_candidates == 0 — not for a "sample"
+    probe (the cheap pre-check the Step-5 UI runs before a recruiter
+    approves a full search), where an empty result is a much weaker/
+    noisier signal that would false-alarm on routine probes.
+
+    any_source_failed: True if ANY "source_status" event earlier in this
+    same stream reported status == "failed" (see
+    unified_candidate_search.py's emit_source_status). A 0-candidate
+    summary caused by a broken/timed-out source pool is NOT the same
+    signal as a search that genuinely ran clean and found nobody — telling
+    the recruiter to loosen their filters when the real problem is a
+    failed upstream call would be a false alarm, so this suppresses the
+    notification in that case (the stream's own source_status event
+    already surfaces the real failure to the UI).
+
+    Called from stream_candidates() for every "summary" event (there's at
+    most one per search, the stream's terminal event) — fire-and-forget via
+    core.tasks.spawn so a slow/failed DB write can never stall or break the
+    NDJSON stream still being delivered to the client.
+    """
+    try:
+        if any_source_failed:
+            return
+        if str(getattr(criteria, "search_mode", "full")).lower() != "full":
+            return
+        summary = ((summary_event.get("data") or {}).get("summary")) or {}
+        if summary.get("total_candidates") != 0:
+            return  # also skips a malformed/missing summary, not just a nonzero count
+        # Coroutine created only right before spawning it, and explicitly
+        # closed if spawn itself raises (vs. just the notification call
+        # failing once running) — otherwise a never-awaited coroutine would
+        # leak and Python would warn about it.
+        coro = create_zero_match_notification(job_id=str(request.job_id), searcher_email=user.email)
+        try:
+            _spawn_task(coro, name="zero_match_notification")
+        except Exception:
+            coro.close()
+            raise
+    except Exception as exc:  # noqa: BLE001 - must never break the search stream
+        logger.warning(f"zero_match_warning not queued: {exc}")
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1091,6 +1163,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         return {"candidates": [], "message": "job_id required for candidate search"}
 
     _verify_job_access_by_id(str(request.job_id), user)
+    _record_recruiter_action(user, "search_run", request.job_id)
 
     resolved: Dict[str, Any] = {}
     try:
@@ -1103,8 +1176,18 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         _schedule_cross_submissions(str(request.job_id), criteria)
 
         async def stream_candidates():
+            # Tracks whether any source pool reported status == "failed"
+            # (see unified_candidate_search.py's emit_source_status) before
+            # the terminal "summary" event — passed to _maybe_notify_zero_match
+            # so a broken/timed-out source isn't mistaken for a clean search
+            # that genuinely found nobody.
+            any_source_failed = False
             async with contextlib.aclosing(_search_event_stream(criteria)) as events:
                 async for event in events:
+                    if event.get("type") == "source_status" and (event.get("data") or {}).get("status") == "failed":
+                        any_source_failed = True
+                    elif event.get("type") == "summary":
+                        _maybe_notify_zero_match(request, criteria, event, user, any_source_failed)
                     try:
                         line = json.dumps(event) + "\n"
                     except Exception as e:  # noqa: BLE001 — e.g. a datetime/Decimal value
@@ -1588,7 +1671,15 @@ async def get_job_candidates(
                         ) AS invalid_contact_count
                     FROM sourced_candidates sc
                     WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
-                      AND (sc.email IS NULL OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                      AND (
+                          sc.email IS NULL
+                          OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!'
+                          OR (
+                              -- Show auto-email candidates only when they have completed the interview
+                              COALESCE(NULLIF(BTRIM(sc.data->>'engage_interview_id'), ''), '') <> ''
+                              AND LOWER(COALESCE(sc.data->>'engage_status', '')) = ANY(%s)
+                          )
+                      )
                       AND NOT (
                           -- Hide jobdiva.local candidates with no verified phone in the DB.
                           -- The number embedded in pair-XXXX@no-email.jobdiva.local is unverified
@@ -1613,6 +1704,7 @@ async def get_job_candidates(
                     """,
                     (resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id),
+                     _TERMINAL_STATUSES,
                      resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
@@ -1633,6 +1725,7 @@ async def get_job_candidates(
                     str(resolved_numeric_job_id),
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
+                    _TERMINAL_STATUSES,
                     # Extra params for the duplicate-detection EXISTS sub-query
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
@@ -1660,7 +1753,15 @@ async def get_job_candidates(
                             *
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                          AND (
+                              email IS NULL
+                              OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!'
+                              OR (
+                                  -- Show auto-email candidates only when they have completed the interview
+                                  COALESCE(NULLIF(BTRIM(data->>'engage_interview_id'), ''), '') <> ''
+                                  AND LOWER(COALESCE(data->>'engage_status', '')) = ANY(%s)
+                              )
+                          )
                           AND NOT (
                               -- Hide jobdiva.local candidates with no verified phone in the DB.
                               email ILIKE '%%jobdiva.local%%'
@@ -1972,6 +2073,8 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
     "Already Launched" badge, preventing duplicate Launch PAIR clicks.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
+    from services import launch_person_keys as lpk
+
     try:
         conn = get_db_connection()
         try:
@@ -1982,9 +2085,15 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 row = cur.fetchone()
-                resolved_jobdiva_id = row[0] if row and row[0] else (row[1] if row else job_id_or_ref)
         finally:
             conn.close()
+        # Every key the job's rows may be stored under (the ref, the numeric
+        # job_id, and what the caller passed) — a launch stored under the
+        # other key used to be invisible here.
+        job_keys = list(dict.fromkeys(
+            str(k).strip() for k in ((row[0], row[1]) if row else ()) + (job_id_or_ref,)
+            if k is not None and str(k).strip()
+        ))
 
         conn = get_db_connection()
         try:
@@ -1995,22 +2104,45 @@ async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = D
                 # label. Without the id the Step-5 list cannot recognise that row
                 # as already launched and offers a second launch (a "twin" row).
                 cur.execute("""
-                    SELECT candidate_id, source, data->>'jobdiva_candidate_id'
+                    SELECT candidate_id, source, data->>'jobdiva_candidate_id',
+                           COALESCE(NULLIF(email, ''), data->>'email'),
+                           COALESCE(NULLIF(phone, ''), data->>'phone'),
+                           COALESCE(NULLIF(profile_url, ''), data->>'profile_url',
+                                    data->>'linkedin_url', data->'urls'->>'linkedin'),
+                           COALESCE(data->>'engage_status', ''),
+                           COALESCE(data->>'engage_interview_id', '')
                     FROM sourced_candidates
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                """, (str(resolved_jobdiva_id), str(job_id_or_ref)))
+                    WHERE jobdiva_id = ANY(%s)
+                """, (job_keys,))
                 rows = cur.fetchall()
+                cur.execute("""
+                    SELECT DISTINCT candidate_id, candidate_email
+                    FROM engage_interview_audit
+                    WHERE jobdiva_id = ANY(%s) AND COALESCE(interview_id, '') <> ''
+                """, (job_keys,))
+                audit_rows = cur.fetchall()
         finally:
             conn.close()
 
         launched = []
+        person_rows = []
         for r in rows:
             item = {"candidate_id": r[0], "source": r[1]}
             jd_id = str(r[2] or "").strip() if len(r) > 2 else ""
             if jd_id:
                 item["jobdiva_candidate_id"] = jd_id
             launched.append(item)
-        return {"status": "success", "launched": launched}
+            person_rows.append({
+                "candidate_id": r[0], "source": r[1], "email": r[3], "phone": r[4], "profile_url": r[5],
+                "data": {"jobdiva_candidate_id": jd_id}, "engage_status": r[6], "engage_interview_id": r[7],
+            })
+        for cid, email in audit_rows:
+            person_rows.append({"candidate_id": cid, "email": email, "engage_interview_id": "audit"})
+        # {person key: candidate_id} of everyone launched or in flight: Step 5
+        # treats another id of one of these people as already launched
+        # (apps/web/lib/launch-person-keys.ts), as the launch claim would.
+        return {"status": "success", "launched": launched,
+                "person_keys": lpk.launched_person_keys(person_rows)}
     except Exception as e:
         logger.error(f"Error fetching launched candidate keys for {job_id_or_ref}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -5517,6 +5649,7 @@ async def save_candidate_feedback(
     job_id_or_ref: str,
     candidate_id: str,
     request: CandidateFeedbackRequest,
+    background_tasks: BackgroundTasks,
     user: UserIdentity = Depends(get_current_user),
 ):
     """
@@ -5558,6 +5691,13 @@ async def save_candidate_feedback(
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
         f"{request.feedback_type} (submission_type={submission_type}, by {user.email})"
+    )
+    _record_recruiter_action(
+        user,
+        {"submit": "feedback_submit", "reject": "feedback_reject", "unreachable": "feedback_unreachable"}.get(
+            str(request.feedback_type or "").strip().lower(), "feedback_other"),
+        job_id_or_ref, candidate_id=candidate_id,
+        attrs={"submission_type": submission_type} if request.feedback_type == "Submit" else None,
     )
 
     # 1. Map to JobDiva Action String
@@ -5607,6 +5747,15 @@ async def save_candidate_feedback(
     candidate_name = "Candidate"
     job_title = "Job"
     customer_name = ""
+    # The candidate's feedback data as persisted by whatever came before
+    # THIS request's own step-3 merge — read here, before that merge
+    # overwrites it, so step 3.5 below can read its "internal_review_requested_by"
+    # (set by a prior internal submission, left untouched by any Reject/
+    # Unreachable in between) to tell an external submission apart from one
+    # that's the resolution of a pending internal review request. Defaults
+    # to {} when the resolution lookup below fails or finds no row, rather
+    # than leaving the name undefined.
+    data_blob: Dict[str, Any] = {}
 
     try:
         _conn = get_db_connection()
@@ -5685,6 +5834,13 @@ async def save_candidate_feedback(
                     jd_profile_id = jobdiva_profile_id_for(
                         row[8] if len(row) > 8 else None, sc_candidate_id, data_blob
                     )
+                else:
+                    logger.debug(
+                        "save_candidate_feedback: no sourced_candidates row resolved for "
+                        "candidate_id=%s job=%s — data_blob defaults to {} (prior-feedback "
+                        "fields like internal_review_requested_by will read as unset)",
+                        candidate_id, job_id_or_ref,
+                    )
         finally:
             _conn.close()
     except Exception as e:
@@ -5711,8 +5867,23 @@ async def save_candidate_feedback(
                 feedback_data["submission_type"] = submission_type
                 if submission_type == "internal":
                     feedback_data["manager_email"] = manager_email
+                    # Dedicated key for step 3.5 below, rather than overloading
+                    # "submitted_by" (which every feedback action — Reject,
+                    # Unreachable included — overwrites with the CURRENT
+                    # actor). A Reject/Unreachable in between an internal
+                    # submission and its eventual external resolution omits
+                    # this key from its own feedback_data entirely, so the
+                    # JSONB merge leaves it untouched; only Submit ever
+                    # touches it, here or in the "else" branch below.
+                    feedback_data["internal_review_requested_by"] = user.email
                     if request.recruiter_notes and request.recruiter_notes.strip():
                         feedback_data["recruiter_notes"] = request.recruiter_notes.strip()
+                else:
+                    # External submission resolves (or pre-empts) any pending
+                    # internal review request — clear the flag so a later,
+                    # unrelated external submission doesn't notify a stale
+                    # requester.
+                    feedback_data["internal_review_requested_by"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved
@@ -5739,6 +5910,70 @@ async def save_candidate_feedback(
         raise HTTPException(
             status_code=500,
             detail="Failed to persist candidate feedback in database. Please try again."
+        )
+
+    # 3.5. Notify co-recruiters in-app of this feedback outcome — Submit or
+    #      Reject only (not Unreachable), and only once feedback is actually
+    #      persisted. Queued via BackgroundTasks (same fire-after-response
+    #      idiom routers/jobs.py's wizard save endpoints use) rather than
+    #      awaited, so the response doesn't wait on an insert per
+    #      co-recruiter — both calls swallow their own errors regardless, so
+    #      nothing is lost by deferring. Independent of the JobDiva push
+    #      below: co-recruiters should know regardless of whether that sync
+    #      succeeds. Both calls exclude the acting recruiter from the
+    #      recipient list.
+    #
+    #      A Submit is never generically "candidate_submitted" — it's
+    #      always either internal or external, and each already has its own
+    #      specific notification below (the manager on internal; the
+    #      original requester on an external that resolves one). The
+    #      generic candidate_submitted type/UI row has been retired; no
+    #      notification fires here for a plain external Submit with no
+    #      pending internal review to resolve.
+    if request.feedback_type == "Submit":
+        if submission_type == "internal":
+            # The manager named here usually isn't one of the job's
+            # recruiters, so a generic "every other recruiter" notification
+            # would never reach them anyway — and even if it did, its
+            # wording wouldn't say "you're the one being asked to review
+            # this."
+            background_tasks.add_task(
+                create_candidate_internal_review_requested_notification,
+                job_id=str(app_job_ref or job_id_or_ref),
+                candidate_id=jd_candidate_id,
+                manager_email=manager_email,
+            )
+        elif submission_type == "external":
+            # data_blob reflects this candidate's feedback as it stood
+            # BEFORE step 3's merge above wrote this request's own values.
+            # internal_review_requested_by is set only by an internal Submit
+            # and cleared only by an external one (see step 3 above), so it
+            # survives an intervening Reject/Unreachable by someone else
+            # untouched — unlike submission_type/submitted_by, which that
+            # intervening action DOES overwrite, which previously could
+            # misidentify who the "original requester" was. A value here
+            # means this external submission is that pending request's
+            # resolution, so let the original requester know (skip if
+            # they're the one submitting externally themselves — nothing to
+            # tell them that they don't already know).
+            prior_requested_by = str(data_blob.get("internal_review_requested_by") or "").strip()
+            if (
+                prior_requested_by
+                and _EMAIL_RE.match(prior_requested_by)
+                and prior_requested_by.lower() != user.email.strip().lower()
+            ):
+                background_tasks.add_task(
+                    create_candidate_externally_submitted_notification,
+                    job_id=str(app_job_ref or job_id_or_ref),
+                    candidate_id=jd_candidate_id,
+                    recipient_email=prior_requested_by,
+                )
+    elif request.feedback_type == "Reject":
+        background_tasks.add_task(
+            create_candidate_rejected_notifications,
+            job_id=str(app_job_ref or job_id_or_ref),
+            candidate_id=jd_candidate_id,
+            rejecter_email=user.email,
         )
 
     # 4. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote

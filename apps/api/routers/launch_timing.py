@@ -107,6 +107,13 @@ async def record_launch_clicked(
         return {"status": "ignored"}
     if not await _access_or_error(job_ref, user):
         return {"status": "error"}
+    # Every click is an action in the activity log (only the FIRST is T1).
+    try:
+        from services.recruiter_activity import record_action_soon
+
+        record_action_soon(user.email, "launch_clicked", job_key=job_ref)
+    except Exception:  # noqa: BLE001 — telemetry
+        pass
     # stamp_launch_clicked never raises: a failed write is logged there and
     # reads as None, the same as an unknown job.
     stamped = await asyncio.to_thread(launch_timing.stamp_launch_clicked, job_ref)

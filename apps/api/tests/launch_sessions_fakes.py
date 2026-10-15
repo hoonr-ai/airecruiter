@@ -188,6 +188,21 @@ class MemoryStore:
             out.sort(key=lambda s: s["created_at"], reverse=True)
             return _deep(out[:limit])
 
+    def list_user_sessions(self, email, *, recent_hours=24, limit=10):
+        email = (email or "").strip().lower()
+        if not email:
+            return []
+        with self.lock:
+            cutoff = self.t - dt.timedelta(hours=recent_hours)
+            out = [dict(s, job_title=(self.jobs.get(s["job_id"]) or {}).get("title"))
+                   for s in self.sessions.values()
+                   if s.get("requested_by") == email and s["status"] != S.STATUS_COLLECTING
+                   and (s["status"] in S.ACTIVE_STATUSES
+                        or (s.get("completed_at") or s.get("updated_at") or s["created_at"]) > cutoff)]
+            out.sort(key=lambda s: s["created_at"], reverse=True)
+            out.sort(key=lambda s: s["status"] in S.ACTIVE_STATUSES, reverse=True)
+            return _deep(out[:limit])
+
     def children(self, session_id):
         with self.lock:
             out = [s for s in self.sessions.values() if s.get("parent_session_id") == session_id]
@@ -965,8 +980,16 @@ class FakeWorld:
     def _audit_iid(self, keys, cid):
         return self.store._audit_iid(cid, keys)
 
-    def claim_for_session(self, job_keys, ids, session_id):
+    async def settle_parked_legacy_rows(self):
+        self.legacy_settles = getattr(self, "legacy_settles", 0) + 1
+        return {"checked": 0}
+
+    def claim_for_session(self, job_keys, ids, session_id, duplicates=None):
         keys = [k for k in job_keys if k]
+        dup_of = dict(getattr(self, "person_duplicates", None) or {})
+        if duplicates is not None:
+            duplicates.update({c: v for c, v in dup_of.items() if c in {str(i) for i in ids}})
+        ids = [i for i in ids if str(i) not in dup_of]
         out = []
         with self.store.lock:
             for cid in dict.fromkeys(str(i) for i in ids):

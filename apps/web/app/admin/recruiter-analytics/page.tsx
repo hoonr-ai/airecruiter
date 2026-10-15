@@ -18,6 +18,9 @@
 // scope, launched or not. Every timestamp is
 // Eastern "MM/DD/YYYY HH:MM:SS" with the zone stated once in the header.
 
+import { RecruiterActivityPanel } from "@/components/RecruiterActivityPanel";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
@@ -61,8 +64,12 @@ import {
 // ---------------------------------------------------------------------------
 
 interface MetricsBlock {
-  jobs: { assigned: number; active: number; archived: number; launched: number; unassigned?: number };
-  candidates: { sourced: number; launched: number };
+  /** relaunched: in a date range, jobs listed because a relaunch reached new
+   *  people in range (first launched earlier); null in the all-time view. */
+  jobs: { assigned: number; active: number; archived: number; launched: number; relaunched?: number | null; unassigned?: number };
+  /** launched_in_period: people first launched in the date range (each on
+   *  the day of their first interview); null in the all-time view. */
+  candidates: { sourced: number; launched: number; launched_in_period?: number | null };
   outcomes: { passed: number; failed: number; in_progress: number };
   feedback: {
     total: number;
@@ -299,10 +306,22 @@ const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "launched",
     label: "Launched",
-    hint: "Candidates launched to PAIR across these jobs.",
+    hint: "Candidates launched to PAIR across these jobs (whole life of each job). In a date range, the small number is the people first launched inside the dates — relaunch work counts on the day it happened.",
     sortValue: (b) => b.candidates.launched,
-    cell: (b) => num(b.candidates.launched),
-    csv: (b) => [["Candidates Launched", String(b.candidates.launched)]],
+    cell: (b) => (
+      <span className="tabular-nums">
+        {num(b.candidates.launched)}
+        {typeof b.candidates.launched_in_period === "number" && (
+          <span className="ml-1 text-[11px] text-slate-400" title="First launched in these dates">
+            ({num(b.candidates.launched_in_period)} new)
+          </span>
+        )}
+      </span>
+    ),
+    csv: (b) => [
+      ["Candidates Launched", String(b.candidates.launched)],
+      ["Launched in Period", typeof b.candidates.launched_in_period === "number" ? String(b.candidates.launched_in_period) : ""],
+    ],
   },
   {
     key: "passed",
@@ -715,6 +734,7 @@ function RecruiterJobs({
 export default function RecruiterAnalyticsPage() {
   const { isAdmin, isTeamLead, teamName, orgRoleLabel, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
+  useActiveTime({ surface: "recruiter_analytics", enabled: canView });
 
   const [data, setData] = useState<RecruiterAnalyticsData | null>(null);
   // true until the first answer, so the table shows skeletons rather than
@@ -877,6 +897,7 @@ export default function RecruiterAnalyticsPage() {
     if (scopeName) parts.push(scopeName);
     link.download = `${parts.join(" - ")}.csv`;
     link.click();
+    recordActivity("report_exported", { attrs: { report: "recruiter_analytics", rows: visibleRecruiters.length } });
     URL.revokeObjectURL(url);
   };
 
@@ -1128,14 +1149,26 @@ export default function RecruiterAnalyticsPage() {
           icon={Rocket}
           tone="indigo"
           loading={firstLoad}
-          {...tile(false, num(totals?.jobs.launched), `of ${num(totals?.jobs.assigned)} jobs in view`)}
+          {...tile(
+            false,
+            num(totals?.jobs.launched),
+            `of ${num(totals?.jobs.assigned)} jobs in view` +
+              (totals?.jobs.relaunched ? ` · ${num(totals.jobs.relaunched)} relaunched` : ""),
+          )}
         />
         <KpiTile
           label="Candidates Launched"
           icon={Briefcase}
           tone="sky"
           loading={firstLoad}
-          {...tile(false, num(totals?.candidates.launched), `${num(totals?.candidates.sourced)} sourced`)}
+          {...tile(
+            false,
+            num(totals?.candidates.launched),
+            `${num(totals?.candidates.sourced)} sourced` +
+              (typeof totals?.candidates.launched_in_period === "number"
+                ? ` · ${num(totals.candidates.launched_in_period)} new in range`
+                : ""),
+          )}
         />
         <KpiTile
           label="Pass Candidates"
@@ -1405,6 +1438,13 @@ export default function RecruiterAnalyticsPage() {
           </dd>
         </div>
       </dl>
+
+      <RecruiterActivityPanel
+        range={range}
+        teamId={isAdmin ? activeTeamId : null}
+        enabled={!isRoleLoading && canView}
+        today={todayEastern()}
+      />
     </div>
   );
 }

@@ -16,11 +16,14 @@ interface CallRecording {
 interface CallRecordingsProps {
   interviewId: string | null;
   open: boolean;
+  // Shown instead of rendering nothing when there are no recordings — for
+  // places (like a dropdown) where an empty panel would look broken.
+  emptyMessage?: string;
 }
 
 // Call recordings only exist in production (S3). A failure here must never
 // break the modal it sits in, so errors show a hint and nothing else.
-export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
+export function CallRecordings({ interviewId, open, emptyMessage }: CallRecordingsProps) {
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
   const [unavailable, setUnavailable] = useState(false);
   // 403 ("not your job") is a different, permanent condition from a
@@ -30,6 +33,9 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
   // Bumped to force a refetch — e.g. a player's Retry after its presigned
   // URL's 15-minute TTL has expired, which a plain remount can't fix.
   const [refetchToken, setRefetchToken] = useState(0);
+  // Set once the first request settles, so `emptyMessage` doesn't flash
+  // before the list has arrived.
+  const [loaded, setLoaded] = useState(false);
 
   // Reset only on a genuinely new interview/open — NOT on refetchToken, so a
   // Retry-triggered refetch keeps showing the stale (still-valid) list
@@ -38,6 +44,7 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
     setRecordings([]);
     setUnavailable(false);
     setForbidden(false);
+    setLoaded(!interviewId);
   }, [open, interviewId]);
 
   useEffect(() => {
@@ -73,6 +80,8 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
       } catch (err) {
         console.warn("Call recordings request failed:", err);
         if (!cancelled) setUnavailable(true);
+      } finally {
+        if (!cancelled) setLoaded(true);
       }
     })();
     return () => {
@@ -82,7 +91,10 @@ export function CallRecordings({ interviewId, open }: CallRecordingsProps) {
 
   const refetch = useCallback(() => setRefetchToken((n) => n + 1), []);
 
-  if (!unavailable && !forbidden && recordings.length === 0) return null;
+  if (!unavailable && !forbidden && recordings.length === 0) {
+    if (!emptyMessage || !loaded) return null;
+    return <p className="text-[12px] text-slate-400 font-semibold mb-5">{emptyMessage}</p>;
+  }
 
   return (
     <div className="space-y-3 mb-6">

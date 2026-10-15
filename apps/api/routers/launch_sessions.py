@@ -7,6 +7,7 @@ browser only creates it and watches it.
   GET  /api/v1/launch-sessions/config
   POST /api/v1/jobs/{job_id}/launch-sessions
   GET  /api/v1/jobs/{job_id}/launch-sessions?active=&needs_contact=&limit=
+  GET  /api/v1/launch-sessions/mine?recent_hours=&limit=   (launch tracker)
   GET  /api/v1/launch-sessions/{id}
   GET  /api/v1/launch-sessions/{id}/events?after_seq=N
   GET  /api/v1/launch-sessions/{id}/candidates?state=&view=&after_rev=&after_id=&ids=
@@ -82,6 +83,18 @@ def _check_job_access_sync(job_ref: str, user: UserIdentity) -> None:
     raise HTTPException(status_code=403, detail="Access denied. You do not have permission to access this job.")
 
 
+def _activity(user: UserIdentity, action: str, job_ref: Any, session: Any, **attrs: Any) -> None:
+    """The recruiter's action, for the activity log (services/recruiter_activity).
+    Fire-and-forget; never affects the response."""
+    try:
+        from services.recruiter_activity import record_action_soon
+
+        sid = session.get("id") if isinstance(session, dict) else None
+        record_action_soon(user.email, action, job_key=job_ref, session_id=sid, attrs=attrs)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("launch_sessions: activity %s not recorded: %s", action, exc)
+
+
 async def _job_access(job_ref: str, user: UserIdentity) -> None:
     ref = (job_ref or "").strip()
     if not ref:
@@ -152,6 +165,8 @@ async def create_launch_session(
     400/404/503 from the recruiter-email gate."""
     await _job_access(job_id, user)
     status, view = await control.create_session(job_id, body, user)
+    if status == 201:
+        _activity(user, "launch_session_created", job_id, view, mode=body.mode, trigger=body.trigger)
     return JSONResponse(status_code=status, content={"session": view})
 
 
@@ -167,6 +182,25 @@ async def list_job_launch_sessions(
     any); ``needs_contact=true`` → finished sessions with parked rows."""
     await _job_access(job_id, user)
     sessions = await control.list_for_job(job_id, active=active, needs_contact=needs_contact, limit=limit)
+    _ignore_poll_transaction()
+    return {"sessions": sessions}
+
+
+@router.get("/launch-sessions/mine")
+async def list_my_launch_sessions(
+    recent_hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(10, ge=1, le=50),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """The launch tracker (bottom-right dock): the caller's own active and
+    recently finished sessions across every job. Scoped to requested_by, so
+    no job access check is needed — a user only ever sees their own launches
+    (job_title included: the recruiter started that launch themselves). A
+    caller without an email gets an empty list, never blank-requester rows."""
+    email = (user.email or "").strip().lower()
+    sessions = (
+        await control.list_for_user(email, recent_hours=recent_hours, limit=limit) if email else []
+    )
     _ignore_poll_transaction()
     return {"sessions": sessions}
 
@@ -272,7 +306,9 @@ async def confirm_launch_session(
     user: UserIdentity = Depends(get_current_user),
 ):
     row = await _session_access(session_id, user)
-    return {"session": await control.confirm_review(row, body)}
+    view = await control.confirm_review(row, body)
+    _activity(user, "review_confirmed", row.get("job_id"), view, contacts_edited=len(body.contacts or {}))
+    return {"session": view}
 
 
 @router.post("/launch-sessions/{session_id}/needs-contact")
@@ -283,6 +319,9 @@ async def launch_session_needs_contact(
 ):
     row = await _session_access(session_id, user)
     status, out = await control.needs_contact(row, body, user)
+    if status < 300:
+        _activity(user, "needs_contact_answered", row.get("job_id"), out.get("session") or row,
+                  contacts_given=len(body.contacts or {}), skipped=len(body.skip_ids or []))
     return JSONResponse(status_code=status, content=out)
 
 
@@ -294,6 +333,8 @@ async def launch_session_retry_failed(
 ):
     row = await _session_access(session_id, user)
     status, out = await control.retry_failed(row, body or RetryFailedRequest(), user)
+    if status < 300:
+        _activity(user, "retry_failed", row.get("job_id"), out.get("session") or row)
     return JSONResponse(status_code=status, content=out)
 
 
@@ -304,4 +345,6 @@ async def cancel_launch_session(
     user: UserIdentity = Depends(get_current_user),
 ):
     row = await _session_access(session_id, user)
-    return {"session": await control.cancel_session(row, body.reason if body else None)}
+    view = await control.cancel_session(row, body.reason if body else None)
+    _activity(user, "launch_cancelled", row.get("job_id"), view)
+    return {"session": view}

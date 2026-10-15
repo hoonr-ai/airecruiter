@@ -12,7 +12,7 @@ import {
 } from "@/lib/location-propagation";
 import { resolveLockedFlag, isLockedDefaultQuestion } from "@/lib/campaigns";
 import { extractErrorMessage } from "@/lib/api-error";
-import { shouldSkipForInFlightManualSave, isSupersededAbort } from "@/lib/save-coordination";
+import { decideSaveDispatch, clearIfCurrent } from "@/lib/job-draft-save-dispatch";
 import {
   DEFAULT_SEARCH_SOURCES,
   DISABLED_SEARCH_SOURCE_IDS,
@@ -110,6 +110,7 @@ import { useEngagementFlow, type LaunchUnverifiedEmployer } from "@/hooks/use-en
 import { useStepActiveTime } from "@/hooks/use-step-active-time";
 import { useStepAutosave } from "@/hooks/use-step-autosave";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
+import { isLaunchedPerson, launchedPersonBlocks, personOwnersFromResponse } from "@/lib/launch-person-keys";
 import {
   OUTREACH_MIN_SCORE,
   SCORE_BAND_EXCELLENT,
@@ -615,6 +616,11 @@ function NewJobPageContent() {
   // resilient fallback so a candidate re-sourced under a slightly different
   // `source` string still gets hidden once they're launched / in the rank list.
   const [launchedCandidateIds, setLaunchedCandidateIds] = useState<Set<string>>(new Set());
+  // Person keys (email / phone / LinkedIn / JobDiva id) of everyone launched or
+  // in flight for this job → their candidate_id. Another id of one of these
+  // people is "already launched" too: the server's launch claim refuses it
+  // (lib/launch-person-keys.ts).
+  const [launchedPersonOwners, setLaunchedPersonOwners] = useState<Map<string, string>>(new Map());
   // DNC (Do Not Contact) phone set, fetched once at mount. Used to flag and
   // skip candidates whose phone matches a Zoom DNC entry.
   const [dncPhones, setDncPhones] = useState<Set<string>>(new Set());
@@ -1388,6 +1394,7 @@ function NewJobPageContent() {
   const visibilityCtx = {
     launchedKeys: launchedCandidateKeys,
     launchedIds: launchedCandidateIds,
+    isLaunchedPerson: (c: any) => isLaunchedPerson(c, launchedPersonOwners),
     isExcluded: (c: any) => Boolean(getCandidateExclusionReason(c)),
     minScore,
     getScore: getCandidateMatchScore,
@@ -1475,14 +1482,14 @@ function NewJobPageContent() {
     };
 
     return [...filtered].sort(cmp);
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds]);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds, launchedPersonOwners]);
 
   // Feeds the all-hidden empty state; memoized because it runs the
   // string-heavy exclusion classifier over every loaded row and would
   // otherwise recompute per keystroke while that state is showing.
   const hiddenBreakdown = useMemo(
     () => computeHiddenBreakdown(candidates.filter((c: any) => matchesSourceFilter(c)), visibilityCtx),
-    [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds]
+    [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds, launchedPersonOwners]
   );
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
@@ -1679,6 +1686,7 @@ function NewJobPageContent() {
       const { keys, ids } = launchedSetsFromResponse(json?.launched);
       setLaunchedCandidateKeys(keys);
       setLaunchedCandidateIds(ids);
+      setLaunchedPersonOwners(personOwnersFromResponse(json?.person_keys));
     } catch (err) {
       console.warn('Failed to load launched candidate keys', err);
     }
@@ -1734,8 +1742,17 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
-  // Step 5 active time for the reports (hooks/use-step-active-time.ts).
-  useStepActiveTime({ jobRef: String(jobdivaId || numericJobId || ""), step: 5, enabled: currentStep === 5 });
+  // Active time on the open wizard step, for the reports' per-step columns
+  // (hooks/use-step-active-time.ts). Steps 1–4 count while the job is being
+  // set up (edit mode; the read-only modes only display them), Step 5 in every
+  // mode. Steps 1–4 start once a job is loaded and use ITS ref: the Step 1 ID
+  // box edits jobdivaId on every keystroke, which would restart the timer.
+  const loadedJobRef = jobData ? String(jobData.jobdiva_id || jobData.id || numericJobId || "").trim() : "";
+  useStepActiveTime({
+    jobRef: currentStep === 5 ? String(jobdivaId || numericJobId || "") : loadedJobRef,
+    step: currentStep,
+    enabled: currentStep === 5 || wizardMode === "edit",
+  });
 
   // Open-to-Work polling for Exa-sourced LinkedIn candidates.
   // Mirrors the Hoonrai/Revelio frontend polling pattern: every 5s POST any
@@ -2879,10 +2896,12 @@ function NewJobPageContent() {
     });
   };
 
-  const saveAbortControllerRef = useRef<AbortController | null>(null);
-  // Tracks whether the save currently owning saveAbortControllerRef is an
-  // auto-save or a user-initiated (manual) one — see shouldSkipForInFlightManualSave.
-  const saveIsAutoRef = useRef(false);
+  // Split in two (rather than one shared ref) so a background auto-save
+  // firing a moment after an explicit save (Next / Save & Exit) started can
+  // no longer cancel it out from under it — see saveJobDraft below for the
+  // race this fixes.
+  const explicitSaveAbortControllerRef = useRef<AbortController | null>(null);
+  const autoSaveAbortControllerRef = useRef<AbortController | null>(null);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
@@ -2896,7 +2915,7 @@ function NewJobPageContent() {
     resumeMatchFiltersOverride?: typeof resumeMatchFilters,
     screenQuestionsOverride?: typeof screenQuestions,
     rubricDataOverride?: any,
-  }): Promise<{ ok: boolean, message?: string }> => {
+  }): Promise<{ ok: boolean, message?: string, skipped?: boolean, superseded?: boolean }> => {
     if (isReadOnly) {
       // Source / view mode: Steps 1-4 are read-only, so skip the draft save
       // entirely. Falsely returning true keeps the Next button flow intact
@@ -2909,20 +2928,40 @@ function NewJobPageContent() {
       return { ok: false };
     }
 
+    // decideSaveDispatch (lib/job-draft-save-dispatch.ts) is the pure
+    // decision behind the explicit-vs-auto-save controller split: a
+    // background auto-save (saveType === "auto", from useStepAutosave's
+    // debounce/flush/beforeunload paths) must never cancel a save the user
+    // is actively waiting on — doing so used to abort the explicit save and
+    // surface "Save timed out — please retry" even though nothing timed
+    // out; it was just pre-empted by a same-job background save firing a
+    // moment later. An explicit save, conversely, always supersedes
+    // whatever's in flight (auto or explicit) since it reflects the most
+    // current data and the user is waiting on its result.
     const isAutoSave = stepData.saveType === "auto";
-
-    // "Latest wins" — but only among auto-saves. An auto-save must never
-    // cancel a save the user explicitly triggered (Next / Save & Exit).
-    // A manual save may always supersede whatever is in flight.
-    if (saveAbortControllerRef.current) {
-      if (shouldSkipForInFlightManualSave({ inFlightIsAuto: saveIsAutoRef.current, incomingIsAuto: isAutoSave })) {
-        return { ok: true };
-      }
-      saveAbortControllerRef.current.abort("superseded");
+    const dispatch = decideSaveDispatch(isAutoSave ? "auto" : "explicit", {
+      explicitInFlight: explicitSaveAbortControllerRef.current !== null,
+      autoInFlight: autoSaveAbortControllerRef.current !== null,
+    });
+    if (dispatch.action === "skip") {
+      // An explicit save is already in flight for this same job — it will
+      // persist data at least as current as this auto-save's, so skip
+      // rather than race it. The caller (useStepAutosave) restores its
+      // dirty flag on a non-ok result, so this edit isn't lost — it's
+      // retried on the next debounce tick, step change, or tab-hide flush.
+      return { ok: false, skipped: true };
+    }
+    for (const kind of dispatch.abort) {
+      const ref = kind === "auto" ? autoSaveAbortControllerRef : explicitSaveAbortControllerRef;
+      // "superseded" (not the default undefined reason) lets the catch
+      // block below tell "cancelled because a newer save took over" apart
+      // from "genuinely timed out" — the former isn't a failure worth
+      // showing the user, since the newer save reports its own outcome.
+      ref.current?.abort("superseded");
     }
     const saveController = new AbortController();
-    saveAbortControllerRef.current = saveController;
-    saveIsAutoRef.current = isAutoSave;
+    const saveControllerRef = isAutoSave ? autoSaveAbortControllerRef : explicitSaveAbortControllerRef;
+    saveControllerRef.current = saveController;
 
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
@@ -3007,9 +3046,12 @@ function NewJobPageContent() {
       }
       return { ok: true };
     } catch (error) {
-      const isAbort = error instanceof Error && error.name === "AbortError";
-      if (isSupersededAbort(isAbort, saveController.signal.reason)) {
-        return { ok: true };
+      const isAbort = error instanceof DOMException && error.name === "AbortError";
+      if (isAbort && saveController.signal.reason === "superseded") {
+        // A newer save (auto or explicit) already took over before this one
+        // finished — nothing actually failed, so stay quiet. The caller
+        // that triggered the newer save sees and reports ITS OWN outcome.
+        return { ok: false, superseded: true };
       }
       console.error("Error saving job to monitored jobs:", error);
       const errorMsg = isAbort
@@ -3021,6 +3063,7 @@ function NewJobPageContent() {
       return { ok: false, message: errorMsg };
     } finally {
       clearTimeout(saveTimeoutId);
+      clearIfCurrent(saveControllerRef, saveController);
     }
   };
 
@@ -6725,6 +6768,9 @@ function NewJobPageContent() {
       launchedKeys: launchedCandidateKeys,
       launchedIds: launchedCandidateIds,
       limit,
+      // Another id of a person already launched for this job: the launch
+      // claim would refuse it, so it never takes a slot of the cap.
+      blocked: launchedPersonBlocks(pool, launchedPersonOwners),
     });
 
   // ── Server launch sessions ──────────────────────────────────────────────
@@ -7540,6 +7586,7 @@ function NewJobPageContent() {
       launchedIds: launchedCandidateIds,
       limit: qaQuickLaunchCount,
       minScore: null,
+      blocked: launchedPersonBlocks(candidatesRef.current, launchedPersonOwners),
     });
     if (ids.length === 0) {
       showToast("QA quick launch: no launchable rows on screen. Run Search first.", "info");
@@ -10757,7 +10804,7 @@ function NewJobPageContent() {
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
+                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !isLaunchedPerson(c, launchedPersonOwners) && !dncCandidateKeys.has(key) && c.no_contact !== true && withClientConflictFlag(c).client_conflict !== true;
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -11567,7 +11614,12 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 1 data. Please try again.", "error");
+                    // A newer save (e.g. a second Next click) already
+                    // superseded this one — that newer call reports its own
+                    // outcome, so showing this one's would be misleading.
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 1 data. Please try again.", "error");
+                    }
                     return;
                   }
                   trackStepAdvance(1, 2, { via: "next_button" });
@@ -11586,7 +11638,9 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 2 data. Please try again.", "error");
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 2 data. Please try again.", "error");
+                    }
                     return;
                   }
 
@@ -11654,7 +11708,9 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 3 data. Please try again.", "error");
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 3 data. Please try again.", "error");
+                    }
                     return;
                   }
                   // If the rubric (titles/skills/total_years) has been
@@ -11681,7 +11737,9 @@ return (
                 try {
                   const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
                   if (!saved.ok) {
-                    showToast(saved.message || "Failed to save Step 4 data. Please try again.", "error");
+                    if (!saved.superseded) {
+                      showToast(saved.message || "Failed to save Step 4 data. Please try again.", "error");
+                    }
                     return;
                   }
                   const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);

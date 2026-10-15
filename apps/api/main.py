@@ -23,6 +23,7 @@ from core import (
     JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS
 )
 from core.email import notify_pair_launched, notify_job_posting, notify_pair_inactive
+from services.notifications_service import create_pair_inactive_notification
 
 PAIR_INACTIVE_STATUSES = os.getenv("PAIR_INACTIVE_STATUSES", "closed,filled,cancelled,canceled,expired,ignored,declined").lower().split(",")
 
@@ -40,7 +41,6 @@ def readable_ist_now() -> str:
 from core.logging import configure_logging, RequestIDMiddleware
 from core.advisory_lock import AdvisoryLock
 from core.startup_once import claim_once, run_schema_once
-from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,9 @@ async def lifespan(app: FastAPI):
         # JobDiva BI mirror behind the PAIR Dashboard.
         if jobdiva_bi_sync is not None:
             steps.append(("jobdiva_bi_schema_init", jobdiva_bi_sync.init_jobdiva_bi_schema, 10))
+        # In-app notifications table.
+        if notifications_router is not None and hasattr(notifications_router, "init_notifications_schema"):
+            steps.append(("notifications_schema_init", notifications_router.init_notifications_schema, 10))
 
         # Imported inside each step so a broken module fails only its step.
         async def _scs_init():
@@ -392,6 +395,66 @@ async def lifespan(app: FastAPI):
         id="monitored_jobs_cache_warmer",
         replace_existing=True,
     )
+
+    # Safety net for the webhook/BackgroundTasks-triggered in-app
+    # notifications (a crashed worker loses an asyncio.create_task or
+    # BackgroundTasks call before it completes, or a status changes outside
+    # the normal trigger path). Backfills anything the live path missed;
+    # dedup is the notifications table's own unique index, so this can never
+    # double-insert. One add_job call per type, each in its own try/except,
+    # so a scheduling failure for one can't prevent the other from
+    # registering.
+    try:
+        from services.notifications_service import (
+            reconcile_missed_pass_notifications,
+            reconcile_missed_rejection_notifications,
+        )
+    except Exception as e:  # noqa: BLE001 - startup must survive even if this module can't import
+        logger.error(f"notifications_reconciliation_import_failed: {e}; reconciliation jobs not scheduled")
+    else:
+        for reconcile_fn, reconcile_job_id in (
+            (reconcile_missed_pass_notifications, "notifications_reconciliation"),
+            (reconcile_missed_rejection_notifications, "notifications_reconciliation_rejected"),
+        ):
+            try:
+                scheduler.add_job(
+                    reconcile_fn,
+                    "interval",
+                    minutes=10,
+                    id=reconcile_job_id,
+                    replace_existing=True,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"{reconcile_job_id}_schedule_failed: {e}; continuing")
+
+    # Morning digest: one in-app summary per recruiter, for anyone with at
+    # least one unread candidate_passed notification. Scheduled at 19:00
+    # Asia/Kolkata rather than a US timezone because India has no DST, so
+    # this fixed IST time lands reliably every single day — no US
+    # EST/EDT transition dates to track — at either 9:30am EDT or 8:30am
+    # EST, i.e. close to when a US-based recruiter starts their day.
+    try:
+        from services.notifications_service import create_daily_digest_notifications
+        scheduler.add_job(
+            create_daily_digest_notifications,
+            "cron",
+            hour=19,
+            minute=0,
+            timezone="Asia/Kolkata",
+            id="daily_digest_notifications",
+            replace_existing=True,
+            # Default misfire grace is 1s — a restart, deploy, or a busy
+            # event loop right at 19:00 IST would otherwise drop that day's
+            # digest outright (PR review follow-up). coalesce=True collapses
+            # any backlog of missed ticks into a single run instead of
+            # firing once per missed tick; the cross-worker advisory lock
+            # and 20h dedup window in notifications_service.py already
+            # guard against a late fire double-sending.
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"daily_digest_notifications_schedule_failed: {e}; continuing")
     # Prime cache once at startup so the first dashboard request after
     # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
     # failure is logged inside the warmer and never blocks boot. Stays
@@ -503,6 +566,7 @@ launch_report_router = _safe_import("launch_report")
 recruiter_analytics_router = _safe_import("recruiter_analytics")
 job_step_time_router = _safe_import("job_step_time")
 launch_timing_router = _safe_import("launch_timing")
+recruiter_activity_router = _safe_import("recruiter_activity")
 launch_sessions_router = _safe_import("launch_sessions")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
@@ -512,6 +576,7 @@ live_report_router = _safe_import("live_report")
 pair_dashboard_router = _safe_import("pair_dashboard")
 apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
+notifications_router = _safe_import("notifications")
 pairbot_webhook_router = _safe_import("pairbot_webhook")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
@@ -559,6 +624,7 @@ _mount(launch_report_router, "launch_report")
 _mount(recruiter_analytics_router, "recruiter_analytics")
 _mount(job_step_time_router, "job_step_time")
 _mount(launch_timing_router, "launch_timing")
+_mount(recruiter_activity_router, "recruiter_activity")
 _mount(launch_sessions_router, "launch_sessions")
 _mount(teams_router, "teams")
 _mount(org_hierarchy_router, "org_hierarchy")
@@ -576,6 +642,7 @@ _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
 _mount(pairbot_webhook_router, "pairbot_webhook")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+_mount(notifications_router, "notifications", prefix="/api/v1/notifications")
 
 from core.auth import auth_router
 app.include_router(auth_router)
@@ -638,76 +705,33 @@ async def api_health():
             logger.warning(f"api_health: redis check failed: {type(exc).__name__}: {exc}")
             checks["redis"] = "error"
 
+    # A failed notifications schema init used to be visible only as a log
+    # line — the app boots fine with no table/indexes, and every insert then
+    # fails silently into its own try/except. Surfacing it here means a
+    # health-check monitor can actually catch it — though only one watching
+    # the RESPONSE BODY, not just the status code: this reports "degraded"
+    # with a 200, same as a Redis outage, not a 5xx. _schema_init_ok is also
+    # never retried after a transient boot failure; it stays "error" until
+    # the process restarts, since init only ever runs once at startup.
+    #
+    # notifications_router (module-level, see _safe_import above) is None if
+    # that router itself failed to import — reported as "unavailable" (there
+    # is no init function to have even attempted), distinct from "pending"
+    # (the router imported fine, but init_notifications_schema_sync hasn't
+    # run/reported yet).
+    if notifications_router is None:
+        checks["notifications_schema"] = "unavailable"
+    else:
+        schema_ok = notifications_router.notifications_schema_status()
+        checks["notifications_schema"] = "pending" if schema_ok is None else ("ok" if schema_ok else "error")
+
     if checks["db"] != "ok":
         status, code = "down", 503
-    elif checks["redis"] != "ok":
+    elif checks["redis"] != "ok" or checks["notifications_schema"] in ("error", "unavailable"):
         status, code = "degraded", 200
     else:
         status, code = "ok", 200
     return JSONResponse({"status": status, "checks": checks}, status_code=code)
-
-@app.middleware("http")
-async def amplitude_request_tracking(request: Request, call_next):
-    """Best-effort API telemetry: request journey + failures."""
-    started = time.perf_counter()
-    method = request.method
-    path = request.url.path
-    query = request.url.query
-    user_id = request.headers.get("x-user-id") or request.headers.get("x-user-email")
-
-    try:
-        response = await call_next(request)
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        track_event_async(
-            "api_request",
-            {
-                "method": method,
-                "path": path,
-                "query": query,
-                "status_code": response.status_code,
-                "duration_ms": duration_ms,
-            },
-            user_id=user_id,
-            device_id="airecruiter-api",
-        )
-        if response.status_code >= 500:
-            track_event_async(
-                "api_server_error",
-                {
-                    "method": method,
-                    "path": path,
-                    "status_code": response.status_code,
-                    "duration_ms": duration_ms,
-                },
-                user_id=user_id,
-                device_id="airecruiter-api",
-            )
-        return response
-    except Exception as e:
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        track_event_async(
-            "api_exception",
-            {
-                "method": method,
-                "path": path,
-                "query": query,
-                "duration_ms": duration_ms,
-                "error": str(e),
-            },
-            user_id=user_id,
-            device_id="airecruiter-api",
-        )
-        raise
-
-
-
-
-
-
-
-
-
-
 
 
 # Job monitoring utility functions
@@ -715,13 +739,28 @@ def load_monitored_jobs() -> Dict[str, Any]:
     """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
     return jobdiva_service.get_all_monitored_jobs()
 
+# The only fields the legacy "monitored jobs file" callers ever change.
+_LEGACY_SNAPSHOT_FIELDS = ("status", "customer_name", "title")
+
+
 def save_monitored_jobs(jobs_data: Dict[str, Any]):
-    """Save/Update monitored jobs in PostgreSQL via JobDivaService"""
+    """Write the legacy snapshot's status fields back to PostgreSQL.
+
+    ``jobs_data`` is a snapshot of EVERY job (load_monitored_jobs) taken
+    before the caller's own work. Writing whole rows back reverted every
+    column changed meanwhile — the dashboard counters (candidates_launched,
+    pair_submits, feedback_completed …), processing_status, recruiter_emails —
+    so only the status / customer / title the legacy callers maintain go back.
+    """
     for jid, details in jobs_data.get("jobs", {}).items():
-        jobdiva_service.monitor_job_locally(jid, details)
+        fields = {k: details.get(k) for k in _LEGACY_SNAPSHOT_FIELDS if k in (details or {})}
+        if fields:
+            jobdiva_service.monitor_job_locally(jid, fields)
 
 POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
 AUTO_SYNC_LOCK_KEY = 728195  # cross-worker lock for auto_sync_all_jobs (728194 is jobdiva_bi_sync)
+# 728196 is core/startup_once.py's STARTUP_SCHEMA_LOCK_KEY; 728197 is
+# services/notifications_service.py's _DAILY_DIGEST_LOCK_KEY.
 
 
 @background_transaction("scheduler/job_status_poll")
@@ -836,9 +875,12 @@ async def _run_poll_cycle():
             logger.info(f"▶️ Job {job_id} reactivated ({current_status}). Clearing inactive-notified marker.")
             asyncio.create_task(_clear_pair_inactive_marker(job_id))
     
-    # Save updated data
-    jobs_data["last_sync"] = readable_ist_now()
-    save_monitored_jobs(jobs_data)
+    # No bulk write-back here. The status changes above were already written
+    # per job (monitor_job_locally(job_id, db_data)); re-saving the snapshot
+    # loaded at the START of the cycle wrote every column of every job back
+    # after the JobDiva round-trip, reverting whatever changed meanwhile — the
+    # dashboard counters (candidates_launched, pair_submits, feedback_completed,
+    # time_to_first_pass …), processing_status, recruiter_emails.
     
     if changes_detected:
         logger.info(f"📢 Status changes detected: {changes_detected}")
@@ -871,7 +913,7 @@ async def _fire_pair_inactive_notification(job_id: str):
                SET pair_inactive_notified_at = NOW()
              WHERE job_id = %s
                AND pair_inactive_notified_at IS NULL
-            RETURNING recruiter_emails, jobdiva_id
+            RETURNING recruiter_emails, jobdiva_id, title, enhanced_title
             """,
             (job_id,),
         )
@@ -913,6 +955,19 @@ async def _fire_pair_inactive_notification(job_id: str):
                 conn.commit()
             except Exception:
                 pass
+
+        # In-app companion — independent of whether the email above
+        # succeeded or the claim just got released for retry (it's a
+        # separate channel; see services/notifications_service.py). Safe to
+        # run unconditionally, including on a later retry for the same
+        # inactive event: dedup is a DB-level partial index allowing at most
+        # one ACTIVE notification per recipient/job, not this call order.
+        await create_pair_inactive_notification(
+            job_id=job_id,
+            jobdiva_id=row["jobdiva_id"] or job_id,
+            job_title=row.get("enhanced_title") or row.get("title") or "",
+            recruiter_emails=recruiter_emails,
+        )
     except Exception as e:
         logger.error(f"❌ Failed to fire Inactive notification for {job_id}: {e}")
     finally:

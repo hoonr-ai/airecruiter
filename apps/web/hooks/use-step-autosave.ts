@@ -5,7 +5,7 @@ export type SaveJobDraft = (params: {
   saveType?: string;
   skipToast?: boolean;
   keepalive?: boolean;
-}) => Promise<{ ok: boolean, message?: string }>;
+}) => Promise<{ ok: boolean, message?: string, skipped?: boolean, superseded?: boolean }>;
 
 // Pulled out of the effect so it can be unit tested without a DOM/React renderer.
 export function haveDepsChanged(deps: readonly unknown[], prevDeps: readonly unknown[]): boolean {
@@ -37,19 +37,14 @@ export function useStepAutosave(
   // Use a ref to store previous dependencies so we only mark dirty on actual changes
   const prevDeps = useRef<any[]>(deps);
 
-  // saveJobDraft is a fresh closure every render of the parent component, so
-  // it can't live in the effect dependency arrays below directly — that tore
-  // down (clearTimeout'ing the pending debounce / removing the beforeunload
-  // listeners) and re-ran the effects on every render, not just when
-  // currentStep/targetStep/isReadOnly/isHydrated/deps actually changed. That
-  // spurious re-run cancelled the debounce timer and then saw depsChanged
-  // === false (prevDeps.current was already updated by the run it just tore
-  // down), so it never rescheduled: dirtyRef stayed true with no save
-  // pending. useEffectEvent gives a stable identity that always reads the
-  // latest saveJobDraft without needing it in the dependency arrays.
-  const onAutoSave = useEffectEvent((step: number, opts?: { keepalive?: boolean }) =>
-    saveJobDraft({ currentStep: step, saveType: "auto", skipToast: true, ...opts })
-  );
+  // page.tsx recreates saveJobDraft on every render, so it must not be an
+  // effect dependency. When it was, any unrelated re-render (Step 5 re-renders
+  // every few seconds from the launch-session poll) re-ran the debounce
+  // effect: the cleanup cancelled the pending timer and the re-run didn't
+  // reschedule it because the data hadn't changed, so autosaves only landed
+  // on step change or tab hide. An effect event always calls the latest
+  // saveJobDraft without making the effects re-run when it changes.
+  const save = useEffectEvent(saveJobDraft);
 
   useEffect(() => {
     // 1. Check if any dependency actually changed (skip if identical or first run)
@@ -66,7 +61,7 @@ export function useStepAutosave(
     // 2. Mark as dirty and set a debounce timer
     dirtyRef.current = true;
     const handle = setTimeout(async () => {
-      const ok = await onAutoSave(targetStep);
+      const ok = await save({ currentStep: targetStep, saveType: "auto", skipToast: true });
       if (ok.ok) dirtyRef.current = false;
     }, 1500);
 
@@ -81,7 +76,15 @@ export function useStepAutosave(
     if (!isHydrated) return;
 
     dirtyRef.current = false;
-    onAutoSave(targetStep);
+    // Restore the flag on a non-ok result (a genuine failure, or this save
+    // being skipped because an explicit save for the same job was already
+    // in flight — see job-draft-save-dispatch.ts) so the edit isn't
+    // silently dropped. It's picked up again by a later debounce tick,
+    // this same effect re-running on a subsequent step change, or a
+    // tab-hide flush.
+    save({ currentStep: targetStep, saveType: "auto", skipToast: true }).then((result) => {
+      if (!result.ok) dirtyRef.current = true;
+    });
   }, [currentStep, targetStep, isReadOnly, isHydrated]);
 
   // 4. Tab close / refresh / backgrounding: warn while dirty, and best-effort
@@ -95,7 +98,11 @@ export function useStepAutosave(
     const flush = () => {
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
-      onAutoSave(targetStep, { keepalive: true });
+      // See the step-change flush above: restore on a non-ok result so a
+      // skipped/failed flush doesn't silently drop the edit.
+      save({ currentStep: targetStep, saveType: "auto", skipToast: true, keepalive: true }).then((result) => {
+        if (!result.ok) dirtyRef.current = true;
+      });
     };
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (dirtyRef.current) {

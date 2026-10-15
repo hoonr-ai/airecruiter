@@ -69,6 +69,9 @@ import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
+import { RANKINGS_TABLE_MAX_HEIGHT } from "@/lib/table-layout";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -323,6 +326,15 @@ interface Candidate {
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
 type ToastState = { type: "info" | "error" | "success" | "warning"; message: string } | null;
 
+function isPlaceholderEmail(e?: string): boolean {
+  const n = String(e || "").trim().toLowerCase();
+  if (!n || !n.includes("@")) return true;
+  const domain = n.split("@").pop() || "";
+  if (domain === "jobdiva.com") return true;
+  if (n.endsWith("@noemail.pair.ai")) return true;
+  return false;
+}
+
 function ResumeScreeningHoverCard({
   candidate,
   open,
@@ -371,7 +383,7 @@ function ResumeScreeningHoverCard({
             {yearsStr}
           </span>
         )}
-        {candidate.email && (
+        {candidate.email && !isPlaceholderEmail(candidate.email) && (
           <span className="inline-flex items-center gap-1 break-all" title={candidate.email}>
             <Mail className="h-3 w-3 shrink-0 text-slate-400" />
             <span>{candidate.email}</span>
@@ -1427,14 +1439,6 @@ export default function CandidateRankingsPage() {
       if (srcs.some((x: any) => String(x || "").toLowerCase().includes("jobdiva"))) return true;
       return Boolean(String(c.data?.jobdiva_candidate_id || "").trim());
     };
-    const isPlaceholderEmail = (e?: string) => {
-      const n = String(e || "").trim().toLowerCase();
-      if (!n || !n.includes("@")) return true;
-      const domain = n.split("@").pop() || "";
-      if (domain === "jobdiva.com") return true;
-      if (n.endsWith("@noemail.pair.ai")) return true;
-      return false;
-    };
 
     const getCanonicalCandidateKey = (c: any) => {
       const emailRaw = String(c.email || c.data?.email || "").trim().toLowerCase();
@@ -1620,12 +1624,20 @@ export default function CandidateRankingsPage() {
     return sorted as Candidate[];
   }, []);
 
-  const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean) => {
+  // Guards async responses against overwriting state for a job the page has
+  // since navigated away from (or a newer fetchData run for the same job).
+  const activeJobIdRef = useRef(jobId);
+  useEffect(() => { activeJobIdRef.current = jobId; }, [jobId]);
+  const loadSeqRef = useRef(0);
+  const lastLoadedJobIdRef = useRef<typeof jobId | null>(null);
+
+  const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean, isStale?: () => boolean) => {
     const query = new URLSearchParams({
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
     const candData = await api.jobs.getCandidates(jobId as string, query.toString());
+    if (activeJobIdRef.current !== jobId || isStale?.()) return;
 
     if (candData.status !== "success" || !Array.isArray(candData.candidates)) return;
 
@@ -1702,6 +1714,15 @@ export default function CandidateRankingsPage() {
   }, [candidateOffset, fetchCandidatesPage, hasMoreCandidates, isLoading, isLoadingMore, jobId]);
 
   const fetchData = async () => {
+    const seq = ++loadSeqRef.current;
+    const isStale = () => seq !== loadSeqRef.current;
+    // Job-scoped panels are cleared only when switching jobs; a same-job
+    // background refresh keeps them so they don't flash empty.
+    if (lastLoadedJobIdRef.current !== jobId) {
+      lastLoadedJobIdRef.current = jobId;
+      setCriteriaList([]);
+      setAppliedFilters(null);
+    }
     setIsLoading(true);
     setIsLoadingMore(false);
     setCandidates([]);
@@ -1716,72 +1737,86 @@ export default function CandidateRankingsPage() {
     setOutreachStats(null);
     setStatsLoaded(false);
     try {
-      const apiBase = API_BASE;
+      // All four requests are independent, so start them together. The
+      // candidate list used to wait behind job details, outreach stats (slow
+      // pair-bot calls) and criteria in sequence, which delayed the table.
+      const jobTask = (async () => {
+        const jobData = await api.jobs.getMonitoredData(jobId as string);
+        if (isStale()) return;
 
-      // Fetch job details
-      const jobData = await api.jobs.getMonitoredData(jobId as string);
+        // Handle both { data: { ... } } and flat { ... } structures
+        const data = jobData.data || jobData;
 
-      // Handle both { data: { ... } } and flat { ... } structures
-      const data = jobData.data || jobData;
-
-      if (data) {
-        setJob({
-          job_id: jobId as string,
-          jobdiva_id: data.jobdiva_id,
-          jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
-          title: data.enhanced_title || data.title || `Job ${jobId}`,
-          customer_name: data.customer_name,
-          openings: data.openings,
-          max_allowed_submittals: data.max_allowed_submittals,
-          screening_level: data.screening_level,
-        });
-        // B5: surface step-5 sourcing filters on this page.
-        const sf = data.sourcing_filters || {};
-        if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
-          setAppliedFilters({
-            titles: Array.isArray(sf.titles) ? sf.titles : [],
-            skills: Array.isArray(sf.skills) ? sf.skills : [],
-            locations: Array.isArray(sf.locations) ? sf.locations : [],
-            companies: Array.isArray(sf.companies) ? sf.companies : [],
-            keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+        if (data) {
+          setJob({
+            job_id: jobId as string,
+            jobdiva_id: data.jobdiva_id,
+            jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
+            title: data.enhanced_title || data.title || `Job ${jobId}`,
+            customer_name: data.customer_name,
+            openings: data.openings,
+            max_allowed_submittals: data.max_allowed_submittals,
+            screening_level: data.screening_level,
           });
-        } else {
-          setAppliedFilters(null);
+          // B5: surface step-5 sourcing filters on this page.
+          const sf = data.sourcing_filters || {};
+          if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
+            setAppliedFilters({
+              titles: Array.isArray(sf.titles) ? sf.titles : [],
+              skills: Array.isArray(sf.skills) ? sf.skills : [],
+              locations: Array.isArray(sf.locations) ? sf.locations : [],
+              companies: Array.isArray(sf.companies) ? sf.companies : [],
+              keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+            });
+          } else {
+            setAppliedFilters(null);
+          }
         }
-      }
+      })().catch((e) => {
+        console.error("Error fetching job details:", e);
+        if (!isStale()) pushToast("Couldn't load job details — title and filters may be missing.", "error");
+      });
 
-      // Parallel fetch outreach stats (non-blocking — slow pair-bot calls won't delay the main list)
-      try {
-        const statsData = await api.jobs.getOutreachStats(jobId as string);
-        if (statsData) {
-          setOutreachStats(statsData);
+      // Outreach stats: non-blocking — slow pair-bot calls won't delay the main list
+      const statsTask = (async () => {
+        try {
+          const statsData = await api.jobs.getOutreachStats(jobId as string);
+          if (isStale()) return;
+          if (statsData) {
+            setOutreachStats(statsData);
+          }
+        } catch (e) {
+          console.warn("Failed to fetch outreach stats:", e);
+        } finally {
+          if (!isStale()) setStatsLoaded(true);
         }
-      } catch (e) {
-        console.warn("Failed to fetch outreach stats:", e);
-      } finally {
-        setStatsLoaded(true);
-      }
+      })();
 
-      // B5: parallel fetch step-3 criteria so the applied-filters panel can
-      // render priority + required/preferred chips next to sourcing filters.
-      try {
-        const critData = await api.jobs.getCriteria(jobId as string);
-        if (critData && Array.isArray(critData.criteria)) {
-          setCriteriaList(critData.criteria);
+      // B5: step-3 criteria so the applied-filters panel can render
+      // priority + required/preferred chips next to sourcing filters.
+      const criteriaTask = (async () => {
+        try {
+          const critData = await api.jobs.getCriteria(jobId as string);
+          if (isStale()) return;
+          if (critData && Array.isArray(critData.criteria)) {
+            setCriteriaList(critData.criteria);
+          }
+        } catch (e) {
+          // Non-fatal: panel just hides the criteria column when unavailable.
+          console.warn("Failed to fetch job criteria:", e);
         }
-      } catch (e) {
-        // Non-fatal: panel just hides the criteria column when unavailable.
-        console.warn("Failed to fetch job criteria:", e);
-      }
+      })();
 
-      await fetchCandidatesPage(0, true);
+      // The table's loading state only waits on the job + candidate list;
+      // statsTask and criteriaTask settle on their own (each catches its own
+      // errors) and fill their panels when they arrive.
+      await Promise.all([jobTask, fetchCandidatesPage(0, true, isStale)]);
     } catch (error) {
       console.error("Error fetching ranking data:", error);
+      if (!isStale()) pushToast("Couldn't load candidates. Please refresh.", "error");
     } finally {
-      setIsLoading(false);
-      // Guarantee the stats skeleton is never stuck, even if an earlier call threw
-      // before the inner stats try/finally had a chance to run.
-      setStatsLoaded(true);
+      if (!isStale()) setIsLoading(false);
+      // statsLoaded is set by statsTask's own finally, which always runs.
     }
   };
 
@@ -1825,7 +1860,18 @@ export default function CandidateRankingsPage() {
   const openDetails = (candidate: Candidate) => {
     setSelectedCandidate(candidate);
     setDetailsModalOpen(true);
+    recordActivity("candidate_opened", {
+      jobRef: String(jobId ?? ""),
+      candidateId: String(candidate.candidate_id || candidate.id),
+      attrs: { view: "details" },
+    });
   };
+
+  // Recruiter activity: time on the rank list vs. reviewing one candidate
+  // (details / activity log, recordings included). One surface at a time.
+  const reviewingCandidate = detailsModalOpen || isActivityLogModalOpen;
+  useActiveTime({ surface: "rankings", jobRef: String(jobId ?? ""), enabled: !reviewingCandidate });
+  useActiveTime({ surface: "candidate_detail", jobRef: String(jobId ?? ""), enabled: reviewingCandidate });
 
   const isInitialLoading = isLoading && !job && candidates.length === 0;
   const isRefreshing = isLoading && !isInitialLoading;
@@ -2379,7 +2425,7 @@ export default function CandidateRankingsPage() {
           <div
             ref={tableScrollRef}
             className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
-            style={{ maxHeight: 'calc(100vh - 320px)' }}
+            style={{ maxHeight: RANKINGS_TABLE_MAX_HEIGHT }}
           >
             <table className="table-fixed min-w-[1200px] w-full border-separate border-spacing-0">
               <TableHeader className="z-30 shadow-sm bg-slate-50">
@@ -2649,7 +2695,10 @@ export default function CandidateRankingsPage() {
                           {idx + 1}
                         </TableCell>
                         <TableCell className="border-b border-slate-200 sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                          {/* No prefetch: one per row as it scrolls into view was up
+                              to 100 page requests per screen of candidates. */}
                           <Link
+                            prefetch={false}
                             href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-1"
                           >
@@ -2669,7 +2718,7 @@ export default function CandidateRankingsPage() {
                             </span>
                           )}
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center px-1 break-all whitespace-normal" title={candidate.email}>
-                            <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
+                            <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {(candidate.email && !isPlaceholderEmail(candidate.email)) ? candidate.email : <span className="font-normal opacity-50">—</span>}
                           </span>
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
@@ -2683,6 +2732,11 @@ export default function CandidateRankingsPage() {
                                   name: candidate.name,
                                 });
                                 setIsActivityLogModalOpen(true);
+                                recordActivity("candidate_opened", {
+                                  jobRef: String(jobId ?? ""),
+                                  candidateId: String(candidate.candidate_id || candidate.id),
+                                  attrs: { view: "activity_log" },
+                                });
                               }}
                               className="text-[12px] text-indigo-600 hover:bg-indigo-50 px-2 py-0.5 rounded-md inline-flex items-center justify-center gap-1 mt-1 font-bold border border-indigo-100 shadow-sm transition-colors"
                               title="View user activity history"

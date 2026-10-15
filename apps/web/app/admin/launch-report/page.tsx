@@ -27,6 +27,8 @@
 // the tab is visible and never on top of a request already in flight, and
 // keeps the current rows on screen while it does.
 
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CalendarDays, Download, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
@@ -64,6 +66,12 @@ interface LaunchReportRow {
   total_candidates_sourced: number;
   pair_launch_at: string | null;
   total_candidates_launched: number;
+  /** People whose FIRST interview for this job falls in the report's range
+   *  (a person launched again later counts on their first day only). */
+  candidates_launched_in_period?: number;
+  /** False = the job first launched before the range: listed because a
+   *  relaunch in the range reached new people. */
+  first_launch_in_period?: boolean;
   time_to_launch_minutes: number | null;
   turn_around_time_minutes: number | null;
   /**
@@ -78,10 +86,19 @@ interface LaunchReportRow {
   added_to_click_minutes?: number | null;
   click_to_launch_minutes?: number | null;
   /**
-   * Step 5 ("Source") time. null = not tracked (a job worked before the
-   * tracking existed, or the read failed) — shown as "—", never as 0.
+   * Active time per wizard step (services/job_step_time.py), summed over
+   * every visit and recruiter, and Steps 1–5 together. null = not tracked (a
+   * job worked before the tracking existed — Step 5 09/23/2026, Steps 1–4
+   * 10/12/2026 — or the read failed) — shown as "—", never as 0. Steps 1–4
+   * and the total are optional so a page served ahead of the backend that
+   * sends them renders "—" too.
    */
+  step1_active_minutes?: number | null;
+  step2_active_minutes?: number | null;
+  step3_active_minutes?: number | null;
+  step4_active_minutes?: number | null;
   step5_active_minutes: number | null;
+  posting_active_minutes?: number | null;
   step5_to_launch_minutes: number | null;
   pending: number;
   in_progress: number;
@@ -131,6 +148,9 @@ interface LaunchReportData {
     jobs: number;
     candidates_sourced: number;
     candidates_launched: number;
+    /** Rows whose job first launched in the range (the rest are relaunches). */
+    jobs_first_launched?: number;
+    candidates_launched_in_period?: number;
     outreach_detail_resolved: number;
     outreach_detail_expected: number;
   };
@@ -197,6 +217,15 @@ type ColumnGroup = { title: string; columns: Column[]; showInfo?: boolean };
 
 const num = (value: number) => (value ? value.toLocaleString() : "0");
 
+// The job wizard's steps (app/jobs/new/page.tsx STEP_LABELS).
+const POSTING_STEPS = [
+  { step: 1, name: "Intake", field: "step1_active_minutes" },
+  { step: 2, name: "Publish", field: "step2_active_minutes" },
+  { step: 3, name: "Rubric", field: "step3_active_minutes" },
+  { step: 4, name: "Filters", field: "step4_active_minutes" },
+  { step: 5, name: "Source", field: "step5_active_minutes" },
+] as const satisfies ReadonlyArray<{ step: number; name: string; field: keyof LaunchReportRow }>;
+
 const COLUMN_GROUPS: ColumnGroup[] = [
   {
     title: "Job",
@@ -248,6 +277,30 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       { key: "sourced", label: "Sourced", numeric: true, text: (r) => num(r.total_candidates_sourced) },
     ],
   },
+  // Measured by the job wizard itself (services/job_step_time.py): time the
+  // step was open AND in use, all visits and recruiters. A job worked before
+  // that existed has no data and shows "—", not 0m.
+  {
+    title: "Job Posting Time",
+    columns: [
+      ...POSTING_STEPS.map(
+        ({ step, name, field }): Column => ({
+          key: `step${step}_active`,
+          label: `Step ${step} ${name}`,
+          numeric: true,
+          hint: `Time recruiters spent working on Step ${step} (${name}): tab open and in use, all visits and recruiters`,
+          text: (r) => formatDuration(r[field] ?? null),
+        }),
+      ),
+      {
+        key: "posting_active",
+        label: "Total Posting Time",
+        numeric: true,
+        hint: "Steps 1–5 together: active time across the whole job wizard",
+        text: (r) => formatDuration(r.posting_active_minutes ?? null),
+      },
+    ],
+  },
   {
     title: "Launch",
     columns: [
@@ -260,6 +313,25 @@ const COLUMN_GROUPS: ColumnGroup[] = [
       // The Rankings page's "Candidates Launched": people, not interviews. The
       // Interview Status buckets below are computed over exactly this set.
       { key: "launched", label: "Launched", numeric: true, text: (r) => num(r.total_candidates_launched) },
+      // Relaunch work on the day it happened: people first launched for the
+      // job inside the selected dates. A relaunch-only row (job first
+      // launched earlier) is marked.
+      {
+        key: "launched_in_period",
+        label: "Launched in Period",
+        hint: "People whose first PAIR interview for this job falls in the selected dates. A person launched again later counts only on their first day. ‘relaunch’ = the job first launched before these dates.",
+        numeric: true,
+        text: (r) =>
+          `${num(r.candidates_launched_in_period ?? 0)}${r.first_launch_in_period === false ? " (relaunch)" : ""}`,
+        render: (r) => (
+          <span>
+            {num(r.candidates_launched_in_period ?? 0)}
+            {r.first_launch_in_period === false && (
+              <span className="ml-1 rounded bg-amber-50 px-1 text-[10px] font-semibold text-amber-700">relaunch</span>
+            )}
+          </span>
+        ),
+      },
       { key: "tt_launch", label: "Time to Launch", numeric: true, text: (r) => formatDuration(r.time_to_launch_minutes) },
       {
         key: "tat",
@@ -296,17 +368,8 @@ const COLUMN_GROUPS: ColumnGroup[] = [
         hint: "First interview created in PAIR Bot (PAIR Launch) − first Launch PAIR click: how long PAIR took to launch after the click",
         text: (r) => formatDuration(r.click_to_launch_minutes),
       },
-      // Measured by the job wizard itself (services/job_step_time.py), so a
-      // job worked before that existed has no data and shows "—", not 0m.
-      {
-        key: "step5_active",
-        label: "Step 5 Active Time",
-        numeric: true,
-        hint: "Time recruiters spent working on Step 5 (Source) — tab open and in use, all visits and recruiters",
-        text: (r) => formatDuration(r.step5_active_minutes),
-      },
       // Ends at the PAIR Launch column's instant: both use the first
-      // SUCCESSFUL launch.
+      // SUCCESSFUL launch. Step 5's active time is in Job Posting Time.
       {
         key: "step5_to_launch",
         label: "Step 5 → Launch",
@@ -471,6 +534,7 @@ function StatTile({ label, value, hint }: { label: string; value: string; hint?:
 export default function LaunchReportPage() {
   const { isAdmin, isTeamLead, isLoading: isRoleLoading, email, role } = useUserRole();
   const canView = isAdmin || isTeamLead;
+  useActiveTime({ surface: "launch_report", enabled: canView });
 
   // Today's Eastern date: the latest selectable date and what "Live" is
   // measured against. Re-derived on every request and every live check, not
@@ -617,6 +681,7 @@ export default function LaunchReportPage() {
     const label = isMultiDay ? `${data.start_date} to ${data.end_date}` : data.report_date;
     link.download = `Pair Bulk Launch Report - ${label}.csv`;
     link.click();
+    recordActivity("report_exported", { attrs: { report: "launch_report", rows: data.jobs.length } });
     URL.revokeObjectURL(url);
   }, [data, flatColumns, isMultiDay]);
 
@@ -847,9 +912,10 @@ export default function LaunchReportPage() {
         rather than the next. Each row shows the job&apos;s current rank-list numbers — one per launched candidate, over
         the whole life of the job — so Sourced, Launched and the interview status columns match the job&apos;s Rankings
         page, and the interview status and feedback columns count launched candidates only. Interview status, channel,
-        phase and response columns are read live from PAIR Bot. The Step 5 time columns only cover jobs worked since
-        that tracking began, and Launch Clicked, Added → Click and Click → Launch only jobs launched since the Launch
-        PAIR click was recorded; older jobs show a dash. A report that includes today refreshes itself every 2
+        phase and response columns are read live from PAIR Bot. Job Posting Time is the time recruiters actively
+        worked each wizard step (tab open and in use); Step 5 is tracked since 09/23/2026 and Steps 1–4 since
+        10/12/2026. Launch Clicked, Added → Click and Click → Launch only cover jobs launched since the Launch PAIR
+        click was recorded. Older jobs show a dash. A report that includes today refreshes itself every 2
         minutes while this tab is open. Date ranges are limited to {MAX_LAUNCH_REPORT_RANGE_DAYS} days.
       </p>
 
@@ -900,9 +966,25 @@ export default function LaunchReportPage() {
 
       {/* Summary tiles */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatTile label="Jobs Launched" value={num(data?.totals.jobs ?? 0)} />
+        <StatTile
+          label="Jobs Launched"
+          value={num(data?.totals.jobs_first_launched ?? data?.totals.jobs ?? 0)}
+          hint={
+            data && typeof data.totals.jobs_first_launched === "number" && data.totals.jobs > data.totals.jobs_first_launched
+              ? `+ ${num(data.totals.jobs - data.totals.jobs_first_launched)} relaunched`
+              : undefined
+          }
+        />
         <StatTile label="Candidates Sourced" value={num(data?.totals.candidates_sourced ?? 0)} />
-        <StatTile label="Candidates Launched" value={num(data?.totals.candidates_launched ?? 0)} />
+        <StatTile
+          label="Candidates Launched"
+          value={num(data?.totals.candidates_launched ?? 0)}
+          hint={
+            typeof data?.totals.candidates_launched_in_period === "number"
+              ? `${num(data.totals.candidates_launched_in_period)} new in these dates`
+              : undefined
+          }
+        />
         {/* Time as the value, date as the hint. (This used to split the
             formatted string on ", " — which it never contains — so the tile
             showed the whole date-time and repeated the date underneath.) */}

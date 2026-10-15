@@ -236,6 +236,17 @@ from core.sourcing_config import JOBDIVA_TALENTSEARCH_MIN_SCORE as _STEP5_POOL_M
 CROSS_SUBMISSIONS_MIN_SCORE = float(
     get_env_with_default("CROSS_SUBMISSIONS_MIN_SCORE", str(_STEP5_POOL_MIN_SCORE))
 )
+# A candidate who PASSED a PAIR screen is listed at the floor above. One whose
+# screen is still undecided (Pending / In Progress) has no screen score to vouch
+# for them, so only a very strong match to THIS job gets listed. A scored Fail is
+# listed only on a stronger match still: a screen this job's recruiter may want to
+# overrule, not one to resurface on a so-so résumé.
+CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE = float(
+    get_env_with_default("CROSS_SUBMISSIONS_UNDECIDED_MIN_SCORE", "80")
+)
+CROSS_SUBMISSIONS_FAILED_MIN_SCORE = float(
+    get_env_with_default("CROSS_SUBMISSIONS_FAILED_MIN_SCORE", "90")
+)
 # Scoring is deterministic (no LLM) but bounded anyway: most-recent first.
 CROSS_SUBMISSIONS_MAX_SCORED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_SCORED", "500"))
 CROSS_SUBMISSIONS_MAX_LISTED = int(get_env_with_default("CROSS_SUBMISSIONS_MAX_LISTED", "25"))
@@ -302,11 +313,6 @@ ZOOMINFO_SCOPES          = get_env_with_default("ZOOMINFO_SCOPES",          "api
 # Fallback provider when ZoomInfo returns no match. Empty => routes that call
 # Apollo will short-circuit with a logged warning.
 APOLLO_API_KEY = get_env_with_default("APOLLO_API_KEY", "")
-
-# ---- Amplitude Telemetry ----
-AMPLITUDE_API_KEY = get_env_with_default("AMPLITUDE_API_KEY", "")
-AMPLITUDE_API_URL = get_env_with_default("AMPLITUDE_API_URL", "https://api2.amplitude.com/2/httpapi")
-AMPLITUDE_TRACK_LOGS = get_env_bool("AMPLITUDE_TRACK_LOGS", True)
 
 # ---- Candidate Scoring Calibration ----
 # These knobs tune how harsh the match_score curve is. Defaults were calibrated

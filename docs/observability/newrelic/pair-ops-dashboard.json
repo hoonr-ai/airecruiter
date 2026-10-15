@@ -312,14 +312,14 @@
                 "accountIds": [
                   7594453
                 ],
-                "query": "SELECT median(added_to_click_s) / 3600 AS 'hours' FROM PairLaunchTiming WHERE appName = {{api_app}} AND relaunch IS NOT true SINCE 30 days ago"
+                "query": "SELECT median(added_to_click_s) / 3600 AS 'hours' FROM PairJobFirstLaunch WHERE appName = {{api_app}} SINCE 30 days ago"
               }
             ],
             "platformOptions": {
               "ignoreTimeRange": false
             }
           },
-          "description": "T1 - T0: job added to PAIR until the recruiter's first Source & Launch click. Relaunches excluded."
+          "description": "T1 - T0: job added to PAIR until the recruiter's first Source & Launch click. One sample per job (PairJobFirstLaunch, sent when the job's first interview is created, from every launch path) — relaunches and sessions that launched nobody never add a sample."
         },
         {
           "title": "Launch click → Launch (median minutes)",
@@ -338,14 +338,14 @@
                 "accountIds": [
                   7594453
                 ],
-                "query": "SELECT median(click_to_launch_s) / 60 AS 'minutes' FROM PairLaunchTiming WHERE appName = {{api_app}} SINCE 30 days ago"
+                "query": "SELECT median(click_to_launch_s) / 60 AS 'minutes' FROM PairJobFirstLaunch WHERE appName = {{api_app}} SINCE 30 days ago"
               }
             ],
             "platformOptions": {
               "ignoreTimeRange": false
             }
           },
-          "description": "T2 - T1: click until the first interview is created in Pairbot (sourcing + screening + launch)."
+          "description": "T2 - T1: click until the job's first interview is created in Pairbot (sourcing + screening + launch). One sample per job (PairJobFirstLaunch); per-session speed, relaunches included, is the p50 / p90 tile."
         },
         {
           "title": "Launch sessions finished",
@@ -389,7 +389,7 @@
                 "accountIds": [
                   7594453
                 ],
-                "query": "SELECT percentile(click_to_launch_s / 60, 50, 90) FROM PairLaunchTiming WHERE appName = {{api_app}} TIMESERIES 1 day SINCE 30 days ago"
+                "query": "SELECT percentile(click_to_launch_s / 60, 50, 90) FROM PairLaunchTiming WHERE appName = {{api_app}} FACET relaunch TIMESERIES 1 day SINCE 30 days ago"
               }
             ],
             "platformOptions": {

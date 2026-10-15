@@ -4,10 +4,12 @@ import Script from "next/script";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AIProvider } from "@/context/ai-context";
+import { NotificationsProvider } from "@/context/notifications-context";
 import { MsalProviderWrapper } from "@/components/auth/MsalProviderWrapper";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { TiraChat } from "@/components/ai/tira-chat";
 import { TiraFab } from "@/components/ai/tira-fab";
+import { LaunchTracker } from "@/components/layout/launch-tracker";
 import { TelemetryBootstrap } from "@/components/TelemetryBootstrap";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
@@ -28,15 +30,18 @@ export default function RootLayout({
         <MsalProviderWrapper>
           <AuthGuard>
             <AIProvider>
-              <TelemetryBootstrap />
-              <div className="flex min-h-screen">
-                <Sidebar />
-                <main className="flex-1 ml-64 p-8 overflow-y-auto min-h-screen bg-[#f8fafc]">
-                  {children}
-                </main>
-              </div>
-              <TiraChat />
-              <TiraFab />
+              <NotificationsProvider>
+                <TelemetryBootstrap />
+                <div className="flex min-h-screen">
+                  <Sidebar />
+                  <main className="flex-1 ml-64 p-8 overflow-y-auto min-h-screen bg-[#f8fafc]">
+                    {children}
+                  </main>
+                </div>
+                <TiraChat />
+                <TiraFab />
+                <LaunchTracker />
+              </NotificationsProvider>
             </AIProvider>
           </AuthGuard>
         </MsalProviderWrapper>

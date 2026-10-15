@@ -594,14 +594,34 @@ export function writeRetryDelay(attempt: number, retryAfter: number | null, base
   return retryAfter !== null && retryAfter > backoff ? Math.min(60000, retryAfter) : backoff;
 }
 
+/** The poll interval while a session is settled (see isSettledForPolling). */
+export const SETTLED_POLL_MS = 10_000;
+
 /**
- * The next poll: config.poll_ms normally; doubling per consecutive error up
- * to `capMs` (15 s); never faster than hidden_poll_ms (15 s) while the tab is
- * hidden. Polling never gives up while the page is mounted.
+ * Nothing on screen moves fast: the session waits for the recruiter
+ * (awaiting_input — their confirm / cancel wakes the poll at once), or the
+ * launch is done and only JobDiva provisioning is left.
  */
-export function nextPollDelay(args: { baseMs: number; hiddenMs: number; hidden: boolean; errors: number; capMs?: number }): number {
+export const isSettledForPolling = (view: Pick<LaunchSessionView, "status" | "terminal" | "launch_complete" | "stage"> | null | undefined): boolean =>
+  Boolean(view && !isTerminal(view) && (view.status === "awaiting_input" || isLaunchComplete(view)));
+
+/**
+ * The next poll: config.poll_ms normally, SETTLED_POLL_MS while `settled`;
+ * doubling per consecutive error up to `capMs` (15 s); never faster than
+ * hidden_poll_ms (15 s) while the tab is hidden. Polling never gives up while
+ * the page is mounted.
+ */
+export function nextPollDelay(args: {
+  baseMs: number;
+  hiddenMs: number;
+  hidden: boolean;
+  errors: number;
+  capMs?: number;
+  settled?: boolean;
+}): number {
   const cap = Math.max(1000, args.capMs ?? 15000);
-  const base = Math.min(cap, Math.max(500, Number.isFinite(args.baseMs) ? args.baseMs : 3000));
+  const configured = Math.max(500, Number.isFinite(args.baseMs) ? args.baseMs : 3000);
+  const base = Math.min(cap, args.settled ? Math.max(configured, SETTLED_POLL_MS) : configured);
   const errors = Math.max(0, Math.floor(args.errors || 0));
   const delay = errors > 0 ? Math.min(cap, base * 2 ** errors) : base;
   return args.hidden ? Math.max(delay, Number.isFinite(args.hiddenMs) ? args.hiddenMs : 15000) : delay;
@@ -1942,7 +1962,7 @@ export function splitToasts(view: LaunchSessionView): Array<{ message: string; t
 const truncateText = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text);
 
 /**
- * The Amplitude / New Relic events a milestone emits — today's event names
+ * The New Relic events a milestone emits — today's event names
  * (candidate_search_failed / _finished, auto_launch_selection,
  * launch_pair_clicked, launch_contact_lookup) plus launch_session_finished —
  * with job_ref + launch_session_id. Ids, counts and the boolean queries only
@@ -2091,7 +2111,7 @@ export function clickToDoneMeasure(view: LaunchSessionView, nowPerfMs: number): 
   return { start: nowPerfMs - ms, end: nowPerfMs };
 }
 
-/** Amplitude / New Relic props shared by every launch-session event (ids and counts only, no PII). */
+/** New Relic props shared by every launch-session event (ids and counts only, no PII). */
 export function sessionEventProps(view: LaunchSessionView, jobRef: string): Record<string, string | number | boolean> {
   return {
     step: 5,
@@ -2101,3 +2121,7 @@ export function sessionEventProps(view: LaunchSessionView, jobRef: string): Reco
     trigger: String(view.trigger || ""),
   };
 }
+
+/** Window event fired when this tab creates a launch session; the launch
+ *  tracker (components/layout/launch-tracker) polls right away on it. */
+export const LAUNCH_STARTED_EVENT = "pair:launch-started";

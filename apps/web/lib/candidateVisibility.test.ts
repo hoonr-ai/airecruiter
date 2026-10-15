@@ -188,3 +188,9 @@ test("all-hidden bucket: breakdown accounts for every row (the empty-state contr
   assert.equal(b.bucket, 3);
   assert.equal(b.launched + b.excluded + b.filtered, 3);
 });
+
+test("another id of a launched person hides as launched", () => {
+  const ctx = baseCtx({ isLaunchedPerson: (c: any) => c.email === "jane@x.com" });
+  assert.equal(candidateHiddenReason({ candidate_id: "4471", email: "jane@x.com" }, ctx), "launched");
+  assert.equal(candidateHiddenReason({ candidate_id: "bob", email: "bob@x.com" }, ctx), null);
+});

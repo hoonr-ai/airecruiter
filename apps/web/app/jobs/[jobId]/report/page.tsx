@@ -36,6 +36,9 @@ import { cn } from "@/lib/utils";
 import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
+import { useActiveTime } from "@/hooks/use-active-time";
+import { recordActivity } from "@/lib/activity";
+import { CallRecordings } from "@/components/CallRecordings";
 interface TranscriptionItem {
   question: string;
   answer: string;
@@ -82,6 +85,7 @@ interface EvaluationReport {
     hard_filter_status: string;
     total_fit_score: number;
     is_boolean_interview?: boolean;
+    engage_interview_id?: string;
     engage_hard_filter_details?: any[];
     hard_filter_needs_review?: boolean;
   };
@@ -156,6 +160,14 @@ export default function CandidateEvaluationReportPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Recruiter activity: reading one candidate's evaluation report.
+  useActiveTime({ surface: "candidate_detail", jobRef: String(jobId ?? "") });
+  useEffect(() => {
+    if (candidateId) {
+      recordActivity("candidate_opened", { jobRef: String(jobId ?? ""), candidateId, attrs: { view: "report" } });
+    }
+  }, [jobId, candidateId]);
+
   useEffect(() => {
     async function fetchReport() {
       try {
@@ -183,6 +195,7 @@ export default function CandidateEvaluationReportPage() {
   // Feedback Integration States
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [recordingsOpen, setRecordingsOpen] = useState(false);
   const [syncingCandidateId, setSyncingCandidateId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "warning" | "info" } | null>(null);
 
@@ -625,10 +638,25 @@ export default function CandidateEvaluationReportPage() {
         <div className="space-y-0.5">
           <div className="bg-[#4f46e5] px-6 py-4 rounded-t-xl text-white font-bold text-[15px] flex items-center justify-between">
             ENGAGE
-            <Button variant="ghost" className="h-9 bg-white/15 hover:bg-white text-white hover:text-[#312e81] gap-2 font-bold text-[13px] px-5 border border-white/20 rounded-lg shadow-sm transition-all duration-200 group">
-              <Headphones className="w-4 h-4 text-white group-hover:text-[#4f46e5]" /> Call Recordings <ChevronDown className="w-3.5 h-3.5 text-white/80 group-hover:text-[#4f46e5]" />
+            <Button
+              variant="ghost"
+              onClick={() => setRecordingsOpen((o) => !o)}
+              aria-expanded={recordingsOpen}
+              aria-controls="engage-call-recordings"
+              className="h-9 bg-white/15 hover:bg-white text-white hover:text-[#312e81] gap-2 font-bold text-[13px] px-5 border border-white/20 rounded-lg shadow-sm transition-all duration-200 group"
+            >
+              <Headphones className="w-4 h-4 text-white group-hover:text-[#4f46e5]" /> Call Recordings <ChevronDown className={cn("w-3.5 h-3.5 text-white/80 group-hover:text-[#4f46e5] transition-transform", recordingsOpen && "rotate-180")} />
             </Button>
           </div>
+          {recordingsOpen && (
+            <div id="engage-call-recordings" className="bg-white border-x border-[#e2e8f0] px-6 pt-5">
+              <CallRecordings
+                interviewId={scores.engage_interview_id || null}
+                open={recordingsOpen}
+                emptyMessage="No call recordings available for this candidate."
+              />
+            </div>
+          )}
           <div className="bg-white rounded-b-xl border border-[#e2e8f0] shadow-sm p-6 space-y-10">
             
 

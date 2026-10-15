@@ -32,10 +32,18 @@ def test_config_has_one_assignment_per_top_level_name():
     assert duplicates == {}
 
 
-def test_default_screening_level_falls_back_to_l05():
-    nodes = [node for name, node in _assignments() if name == "DEFAULT_SCREENING_LEVEL"]
-    assert len(nodes) == 1
-    call = nodes[0].value
-    assert isinstance(call, ast.Call)
-    assert isinstance(call.args[1], ast.Constant)
-    assert call.args[1].value == "L0.5"
+def test_default_screening_level_falls_back_to_l05(monkeypatch):
+    """A plain import-and-assert exercising the real get_env_with_default
+    fallback is simpler and more direct than parsing the AST to guess which
+    call argument holds the default literal (PR #823 review) — it checks
+    actual runtime behavior, not just what the source code appears to say."""
+    import importlib
+    import core.config as config
+
+    monkeypatch.delenv("DEFAULT_SCREENING_LEVEL", raising=False)
+    try:
+        importlib.reload(config)
+        assert config.DEFAULT_SCREENING_LEVEL == "L0.5"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)  # restore the shared module to the real environment

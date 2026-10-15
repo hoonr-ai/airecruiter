@@ -11,25 +11,15 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { API_BASE, authFetch } from "../lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
-import { isRecruiterAddedQuestion } from "../lib/question-moderation";
+import { isRecruiterAddedQuestion, canEditQuestionType } from "@/lib/question-moderation";
 
-export { isRecruiterAddedQuestion };
-
-/**
- * Returns true when a question's type (scored/hard_filter/info_only) may be
- * changed by the recruiter. Only "other" or "custom" questions (i.e. those explicitly
- * typed by the recruiter) have an open type. System questions (is_default or is_locked)
- * are always fixed so the dropdown is hidden for them.
- * Note: questions loaded from saved data set is_locked via resolveLockedFlag
- * (which also inspects question_text), so is_default not being persisted for
- * pre-existing rows is safe — is_locked alone covers those.
- */
-export const canEditQuestionType = (q: { category?: string | null; is_default?: boolean; is_locked?: boolean }): boolean => {
-    const cat = String(q.category || "").toLowerCase();
-    return (cat === "other" || cat === "custom") && !q.is_default && !q.is_locked;
-};
+// Re-exported (not defined here) so lib/question-moderation.ts stays the one
+// place this logic lives — a second, drifted copy of canEditQuestionType
+// used to live in this file with narrower-than-intended category matching;
+// PR #823 review caught the duplicate.
+export { isRecruiterAddedQuestion, canEditQuestionType };
 
 export interface QuestionPolicyVerdict {
     ok: boolean;

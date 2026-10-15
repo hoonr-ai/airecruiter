@@ -1,10 +1,10 @@
-"""Wizard step timing: the write side of the reports' "Step 5 Active Time".
+"""Wizard step timing: the write side of the reports' per-step Active Time.
 
 POST /api/v1/jobs/{job_id}/step-time   body {step, active_ms}
 
 The job wizard (apps/web/hooks/use-step-active-time.ts) reports ACTIVE time on
-Step 5 as a delta about once a minute, plus a zero-ms ENTRY report when the
-step opens, which stamps first_entered_at. services/job_step_time owns the
+the open step (1–5) as a delta every few minutes, plus a zero-ms ENTRY report
+when the step opens, which stamps first_entered_at. services/job_step_time owns the
 table, the per-report clamp and the read the reports share. This router only
 authenticates, resolves the job and records.
 
@@ -37,8 +37,7 @@ from services.job_step_time import record_step_time
 router = APIRouter(prefix="/api/v1", tags=["Job Step Time"])
 logger = logging.getLogger(__name__)
 
-# The wizard has five steps. Only Step 5 is reported today, but the table is
-# keyed by step, so any real step is accepted.
+# The wizard's five steps, all reported since 2026-10-12 (Step 5 since 09-23).
 MIN_STEP = 1
 MAX_STEP = 5
 
@@ -99,6 +98,18 @@ def _record_sync(job_ref: str, step: int, email: str, active_ms: int) -> Optiona
         # happened to hold (the wizard can hold either one). That way the
         # reports' fetch_step_metrics joins on a single key.
         record_step_time(conn, job_id, step, email, active_ms)
+        # The same time in the recruiter-activity view (dated, per surface).
+        # Never fails the step-time write, which is already committed.
+        try:
+            from services.recruiter_activity import record_active_time
+
+            record_active_time(conn, email, f"wizard_step_{int(step)}", job_id, active_ms)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[JobStepTime] activity mirror failed for job {job_id}: {e}")
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
         return job_id
     finally:
         conn.close()
@@ -119,8 +130,8 @@ async def record_job_step_time(
 
     # The guard the wizard's own job reads use, minus its "lookup failed ->
     # 403" (see _check_access_sync). It runs a DB read, so it goes off the
-    # event loop, because this endpoint is hit once a minute by every open
-    # Step 5. A real denial still propagates as a 403. Either way out of
+    # event loop, because this endpoint is hit every few minutes by every
+    # open wizard. A real denial still propagates as a 403. Either way out of
     # here, nothing is written.
     try:
         await asyncio.to_thread(_check_access_sync, job_ref, user)
