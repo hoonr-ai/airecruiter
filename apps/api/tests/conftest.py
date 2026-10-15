@@ -35,6 +35,10 @@ def _block_real_redis(monkeypatch):
     monkeypatch.setattr(cfg, "REDIS_URL", "", raising=False)
     monkeypatch.setattr(jobdiva_rate_limit, "_redis_client", None)
     monkeypatch.setattr(vendor_limiter, "_redis_client", None)
+    # A test that reached an unreachable Redis must not leave the next one
+    # pacing per-worker for 30 s.
+    monkeypatch.setattr(jobdiva_rate_limit, "_redis_down_until", 0.0)
+    monkeypatch.setattr(vendor_limiter, "_redis_down_until", 0.0)
     for lim in (vendor_limiter.OPENAI, vendor_limiter.EXA, vendor_limiter.UNIPILE):
         monkeypatch.setattr(lim, "_local_next", 0.0)
         monkeypatch.setattr(lim, "_local_cooldown_until", 0.0)

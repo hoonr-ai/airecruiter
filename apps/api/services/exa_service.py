@@ -660,6 +660,14 @@ _PEOPLE_CONTENTS: Dict[str, Any] = {
 }
 
 
+# Longest a paid people search may take, the limiter wait included. The
+# SDK posts with no timeout, and every identical search on the worker joins
+# the flight buying it: a request that never gets an answer must not hold
+# them all (and every later retry or resume) for good. The thread runs on;
+# the flight fails with TimeoutError and the next caller buys afresh.
+_PEOPLE_SEARCH_TIMEOUT_S = 120.0
+
+
 def _per_query_num_results(limit: int, queries: int, factor: float) -> int:
     """Results to buy per query so the round-robin merge can still fill
     ``limit``: ceil(limit * factor / queries), at least 10 (Exa's base price
@@ -788,7 +796,8 @@ class ExaService:
         hit skipping the Exa limiter, the out-of-credits breaker and the
         bill; then an identical search this process is already buying is
         joined; else a paid call, shielded so that a request already sent
-        still reaches the cache when the Step-5 stream closes. One ExaCall
+        still reaches the cache when the Step-5 stream closes, and bounded by
+        _PEOPLE_SEARCH_TIMEOUT_S so a hung one cannot hold its joiners. One ExaCall
         per paid call (surface pass_a, or dice), none for hits or joins.
 
         Per-query failures are logged and skipped — one bad query must not
@@ -823,13 +832,19 @@ class ExaService:
         async def paid(q: str, key: str, flight: _Flight) -> Tuple[List[Any], float]:
             started = time.monotonic()
             try:
-                resp = await _exa_paced(loop, do_search, q, flight)
+                resp = await asyncio.wait_for(
+                    _exa_paced(loop, do_search, q, flight), _PEOPLE_SEARCH_TIMEOUT_S,
+                )
             except BaseException as exc:
                 exa_telemetry.record_exa_call(
                     surface, "search", num_results=n, cache=cache_tag,
                     latency_ms=exa_telemetry.latency_ms(started),
                     **exa_telemetry.classify_exc(exc),
                 )
+                if isinstance(exc, asyncio.TimeoutError):
+                    raise asyncio.TimeoutError(
+                        f"no answer from Exa in {_PEOPLE_SEARCH_TIMEOUT_S:.0f}s"
+                    ) from None
                 raise
             rows = list(getattr(resp, "results", None) or [])
             cost = exa_telemetry.cost_from_search_response(resp)
@@ -896,7 +911,16 @@ class ExaService:
             merged, deepest = _round_robin_merge(per_query, limit)
             if credits_error is not None and not merged:
                 raise credits_error
-            if stats["failed"]:
+            if stats["failed"] and stats["ooc_failed"] == stats["failed"]:
+                # Only credits (the breaker open, the other queries cached): the
+                # breaker's ERROR and the credits alert report that outage, so
+                # this must not read "queries failed" (the Pass A failures alert).
+                logger.warning(
+                    "Exa people search: %d/%d queries skipped while Exa is out of credits — "
+                    "results are PARTIAL (%d rows from %d answered queries)",
+                    stats["failed"], len(queries), sum(len(r) for r in per_query), len(per_query),
+                )
+            elif stats["failed"]:
                 # Loud one-liner: partial fan-out failure used to be invisible —
                 # "Found 17 profiles" with 2 of 3 queries dead reads like a thin
                 # market instead of an outage.
@@ -924,12 +948,17 @@ class ExaService:
     ) -> None:
         """ExaPeopleFanout + an EXA_FANOUT log line. ``starved``: the merge
         could not fill ``limit`` although a query came back full (bigger
-        per-query asks would have found more). ``cf15_same``: factor 1.5
-        would have kept the same rows (a query's top k assumed to be the
-        first k of a bigger ask)."""
+        per-query asks would have found more); never when a query failed,
+        since then the merge is short for that reason and a bigger factor
+        would not help. ``cf15_same``: factor 1.5 would have kept the same
+        rows (a query's top k assumed to be the first k of a bigger ask)."""
         try:
             raw = sum(len(r) for r in per_query)
-            starved = len(merged) < limit and any(len(r) >= n for r in per_query)
+            starved = (
+                not stats.get("failed")
+                and len(merged) < limit
+                and any(len(r) >= n for r in per_query)
+            )
             n15 = _per_query_num_results(limit, len(queries), 1.5)
             if n15 >= n:
                 cf15_same = True

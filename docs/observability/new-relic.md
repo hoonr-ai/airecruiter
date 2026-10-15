@@ -49,7 +49,7 @@ Browser apps: `accountID = trustKey = 7594453`, `agentID = applicationID`, brows
 | `RecruiterAction` | `services/recruiter_activity.record_action` — server-side at the endpoint (search, launch click, launch-session review / needs-contact / retry / cancel, Submit / Reject / Unreachable) and for browser-only actions sent via `POST /api/v1/activity/actions` | `recruiter` (sha256(email)[:12], the browser's NR user id), `action`, `source` (`server` / `client`), `job_id`, numeric / enum attrs only |
 | `RecruiterActiveTime` | `services/recruiter_activity.record_active_time` (each ~2-min flush of a surface's active time; the wizard's step time is mirrored as `wizard_step_N`) | `recruiter`, `surface`, `active_ms`, `job_id` |
 | `ExaCall` | `services/exa_telemetry.record_exa_call` — one per Exa call: each Pass A / Dice query, a per-URL contents call, the Pass B run (one exit event), every contact Agent attempt (`_exa_contact_attempt`) and late watch (`late = true`), plus `endpoint = 'agent_guard'` decisions of the contact path's 400 guard | `surface` (`pass_a` / `dice` / `deep_analyze` / `pass_b` / `contact`), `endpoint`, `outcome` (`ok`, `completed`, `timeout`, `out_of_credits`, `breaker_open`, `rate_limited`, `no_slot`, `create_error`, `create_rejected`, `poll_error` (a network failure too, `error_kind` = the exception class), `run_failed`, `abandoned` (cancelled mid-call, e.g. a closed Step-5 stream), `metadata_rejected`, `sources_refused`, `rejected`, ...), cost `cost_total` / `cost_search` / `cost_pages` (contents) / `cost_compute` / `cost_fee_e` / `cost_fee_p` / `cost_fiber`, `acu`, `num_results` / `n_results`, `fields_asked` / `fields_found`, `http_status`, `error_kind`, `latency_ms`, `exa_run_id`, `call_id` (the run's `metadata.call_id`), `effort`, `tier`, who asked (`trigger`: `step5_sample` / `step5_full` / `autosync` / `launch_s1` / `launch_s3` / `launch` / `click` / `click_phone`; `path`: `sourcing` / `ondemand`; `attempt`, `launch_session_id`, `arm`, `defer`), `job_id`, `run_id`, `cache` (Pass A / Dice: `miss` = the search cache was asked first, `off` = it is unavailable). Cost is Exa's own `costDollars` estimate. A Pass A / Dice search served from the search cache is not billed and sends **no** `ExaCall`. Never query text, names, URLs or contacts. |
-| `ExaPeopleFanout` | `services/exa_telemetry.record_people_fanout` — one per Pass A / Dice fan-out (`ExaService._people_search_fanout`), the out-of-credits raise path included | `surface` (`pass_a` / `dice`), `queries`, `per_query` (results bought per query), `limit_total`, `raw_rows`, `dup_rows`, `merged_rows`, `kept_rows`, `deepest_rank` (rank the kept rows reach), `failed`, `ooc_failed`, `cache_hits`, `cache_misses` (queries this fan-out paid for), `inflight_joins` (joined an identical search the worker was already buying), `cache_state` (`on` / `off` = TTL 0 / `off_config` = no `REDIS_URL` or `ENCRYPTION_KEY` / `down`), `cost_usd` (this fan-out's own paid calls), `starved` (the merge could not fill the limit though a query came back full), `cf15_same` (factor 1.5 would have kept the same rows), who asked (as `ExaCall`), `job_id`, `run_id`. |
+| `ExaPeopleFanout` | `services/exa_telemetry.record_people_fanout` — one per Pass A / Dice fan-out (`ExaService._people_search_fanout`), the out-of-credits raise path included | `surface` (`pass_a` / `dice`), `queries`, `per_query` (results bought per query), `limit_total`, `raw_rows`, `dup_rows`, `merged_rows`, `kept_rows`, `deepest_rank` (rank the kept rows reach), `failed`, `ooc_failed`, `cache_hits`, `cache_misses` (queries this fan-out paid for), `inflight_joins` (joined an identical search the worker was already buying), `cache_state` (`on` / `off` = TTL 0 / `off_config` = no `REDIS_URL` or `ENCRYPTION_KEY` / `down`), `cost_usd` (this fan-out's own paid calls), `starved` (the merge could not fill the limit though a query came back full; never when a query failed), `cf15_same` (factor 1.5 would have kept the same rows), who asked (as `ExaCall`), `job_id`, `run_id`. |
 | `ExaConfig` | `services/exa_telemetry.record_config_once` (each worker, at most hourly, from a Step-5 search with Exa or Dice) | `pass_b`, `deep_analysis`, `metadata_on`, `sdk_version` (exa_py), `breaker_ttl_s`, `normal_effort`, `deep_effort`, `per_query_factor`, `search_cache_ttl_s`, `search_cache` (state as above), `worker_pid`: shows a hand-set `.env` override per worker. |
 | `JobDivaAPI` | JobDiva hook (errors / slow only) | `endpoint` (path), `method`, `status_code`, `elapsed_ms`, `response_size_bytes`, `error_kind` (≤ 80 chars, dropped if it holds `@` or a 7+ digit run) |
 | `JobDivaBiLimiter` | `services/jobdiva_rate_limit` | `outcome` (`granted` / `slot_timeout` / `http_429` / `counters`), `label`, `priority`, `bi_wait_ms`, `bi_cooldown_ms`, `bi_429_total`. (`JobDivaBILimiter` with a capital I is retired: event types are case-sensitive.) |
@@ -262,13 +262,15 @@ FROM ExaCall SELECT average(cost_total), average(cost_search), average(cost_page
   WHERE env = 'prod' AND endpoint = 'search' AND outcome = 'ok' FACET surface SINCE 1 day ago
 FROM ExaCall SELECT count(*) WHERE env = 'prod' AND outcome NOT IN ('ok', 'completed') FACET surface, outcome SINCE 1 day ago
 FROM ExaConfig SELECT latest(pass_b), latest(deep_analysis), latest(metadata_on), latest(sdk_version) WHERE env = 'prod' FACET worker_pid SINCE 1 day ago
--- Pass A / Dice search cache: hit rate (0.40-0.65 expected), state, sizing signals
+-- Pass A / Dice search cache: hit rate (0.40-0.65 expected) and state
 FROM ExaPeopleFanout SELECT sum(cache_hits) / (sum(cache_hits) + sum(cache_misses) + sum(inflight_joins)) AS 'hit rate',
-  sum(cost_usd), percentage(count(*), WHERE starved IS true) AS 'starved %', percentage(count(*), WHERE cf15_same IS true) AS 'F=1.5 same %'
-  WHERE env = 'prod' FACET surface SINCE 1 day ago
+  sum(cost_usd) WHERE env = 'prod' FACET surface SINCE 1 day ago
 FROM ExaPeopleFanout SELECT count(*) WHERE env = 'prod' FACET cache_state SINCE 1 day ago
--- Billing model: $ per paid query by per-query size
-FROM ExaPeopleFanout SELECT average(cost_usd / cache_misses) WHERE env = 'prod' AND cache_misses > 0 FACET per_query SINCE 1 week ago
+-- Sizing, over fan-outs that paid and lost no query: $ per paid query by size settles the billing model;
+-- starved over 5% -> raise EXA_PEOPLE_PER_QUERY_FACTOR, F=1.5 same at 95%+ -> lower it to 1.5
+FROM ExaPeopleFanout SELECT average(cost_usd / cache_misses), percentage(count(*), WHERE starved IS true) AS 'starved %',
+  percentage(count(*), WHERE cf15_same IS true) AS 'F=1.5 same %'
+  WHERE env = 'prod' AND cache_misses > 0 AND failed = 0 FACET per_query SINCE 1 week ago
 FROM Log SELECT timestamp, message WHERE entity.name = 'PAIR API (PROD)' AND message LIKE 'Exa is OUT OF CREDITS%' SINCE 1 day ago
 ```
 
@@ -336,7 +338,9 @@ stage failures, JobDiva 5xx, JobDiva profile invariant, web JavaScript errors, a
   included) is a `create_error` / `poll_error` whose `error_kind` is the exception class.
 - **Exa contact poll timeouts** (WARNING, timeout % per `tier`, late watches excluded). Shipped **disabled**: set the
   per-tier threshold after a week of `ExaCall` data, then enable it.
-- **Exa Pass A query failures** (WARNING, Log `Exa people search:%queries failed%`, ERROR and never sampled).
+- **Exa Pass A query failures** (WARNING, Log `Exa people search:%queries failed%`, ERROR and never sampled). A
+  partial list that lost queries only to credits logs `queries skipped while Exa is out of credits` (WARNING) instead:
+  that outage is the credits alert's.
 
 Event conditions facet by `appName`, Log conditions by `entity.name`, so QA and PROD alert separately; an app that
 has never reported (PROD before its key is set) cannot fire. QA and PROD share one Exa key today, so a credits outage

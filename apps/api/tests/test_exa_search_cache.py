@@ -12,8 +12,12 @@ Pins:
     str or a list); a smaller request is a sliced hit, a larger one a miss
   - put never shrinks an entry, skips empty / oversize answers, gives a thin
     answer the 30-minute TTL, and stores an encrypted value
-  - an entry from another key is a miss; TTL 0 is ``off``, no REDIS_URL /
-    no ENCRYPTION_KEY is ``off_config`` (one WARNING), no client is ``down``
+  - an entry from another key (a rotated ENCRYPTION_KEY) or a corrupt one is
+    a miss that is deleted, so the next paid answer replaces it; TTL 0 is
+    ``off``, no REDIS_URL / no ENCRYPTION_KEY is ``off_config`` (one
+    WARNING), no client is ``down``
+  - ``redis_on`` never lets a real Redis client be built (the vendor
+    limiter would otherwise resolve the fake REDIS_URL's host)
   - a ResponseError (OOM) is a miss that never marks Redis down; a
     connection error opens this module's down window and leaves the JobDiva
     limiter's untouched; get / put never raise
@@ -23,10 +27,12 @@ import logging
 import types
 
 import pytest
+import redis.asyncio as redis_asyncio
 from redis import exceptions as redis_exc
 
 from core import config as core_config
 from core import newrelic as nr
+from core import vendor_limiter
 from services import exa_search_cache as cache
 from services import jobdiva_rate_limit as rl
 
@@ -42,6 +48,7 @@ class FakeRedis:
         self.ttls = {}
         self.calls = []
         self.fail = {}
+        self.real_clients = []  # redis.asyncio.from_url attempts (must stay empty)
 
     def _maybe_fail(self, op):
         self.calls.append(op)
@@ -64,6 +71,10 @@ class FakeRedis:
         self.ttls[key] = ex
         return True
 
+    async def unlink(self, *keys):
+        self._maybe_fail("unlink")
+        return sum(self.store.pop(k, None) is not None for k in keys)
+
 
 @pytest.fixture(autouse=True)
 def _default_ttl(monkeypatch):
@@ -73,11 +84,23 @@ def _default_ttl(monkeypatch):
 
 @pytest.fixture
 def redis_on(monkeypatch):
-    """Cache on: a fake Redis behind jobdiva_rate_limit._get_redis."""
+    """Cache on: a fake Redis behind jobdiva_rate_limit._get_redis.
+
+    REDIS_URL must be set for that, so every other Redis user is kept off
+    the network too: the vendor limiter (the fan-out's Exa slot and
+    out-of-credits breaker) keeps its per-process state, and any real client
+    being built is recorded on ``fake.real_clients`` and refused."""
     fake = FakeRedis()
     monkeypatch.setattr(core_config, "REDIS_URL", "redis://fake:6379/0", raising=False)
     monkeypatch.setattr(core_config, "EXA_SEARCH_CACHE_TTL_S", 43200, raising=False)
     monkeypatch.setattr(rl, "_get_redis", lambda: fake)
+    monkeypatch.setattr(vendor_limiter, "_get_redis", lambda: None)
+
+    def _no_real_client(*args, **kwargs):
+        fake.real_clients.append(args)
+        raise RuntimeError("tests must not build a real Redis client")
+
+    monkeypatch.setattr(redis_asyncio, "from_url", _no_real_client)
     cache.reset_for_tests()
     return fake
 
@@ -213,6 +236,47 @@ def test_the_value_is_encrypted_and_another_key_is_a_miss(redis_on, monkeypatch)
     assert _run(cache.get(_key(), 34)) is None
 
 
+def test_an_entry_from_a_rotated_key_is_dropped_and_replaced(redis_on, monkeypatch, caplog):
+    # ENCRYPTION_KEY rotated: the old entry's plain n_req prefix would make
+    # put's no-shrink guard refuse every rewrite until it expired (12 h of
+    # paying for the query on every search).
+    _run(cache.put(_key(), [_res(f"old{i}") for i in range(34)], 34))
+    monkeypatch.setattr(core_config, "ENCRYPTION_KEY", "a-rotated-key", raising=False)
+    cache.reset_for_tests()
+    caplog.set_level(logging.WARNING, logger=cache.__name__)
+
+    assert _run(cache.get(_key(), 34)) is None
+    assert _key() not in redis_on.store
+    assert any("unreadable entry dropped" in r.getMessage() for r in caplog.records)
+    assert _run(cache.put(_key(), [_res(f"new{i}") for i in range(34)], 34)) is True
+    assert _run(cache.get(_key(), 34))[0].id == "id-new0"
+
+
+@pytest.mark.parametrize("stored", [
+    "34.not-a-token",
+    "garbage-without-a-prefix",
+    b"\xff\xfe34.binary",
+])
+def test_a_corrupt_entry_is_dropped(redis_on, stored):
+    redis_on.store[_key()] = stored
+    assert _run(cache.get(_key(), 12)) is None
+    assert _key() not in redis_on.store
+    assert _run(cache.put(_key(), [_res("p")] * 12, 12)) is True
+
+
+def test_an_entry_with_no_results_is_dropped(redis_on):
+    fernet = cache._get_fernet()
+    redis_on.store[_key()] = cache._encode(fernet, 34, [])
+    assert _run(cache.get(_key(), 12)) is None
+    assert _key() not in redis_on.store
+
+
+def test_a_smaller_entry_is_a_plain_miss_and_kept(redis_on):
+    _run(cache.put(_key(), [_res(f"p{i}") for i in range(12)], 12))
+    assert _run(cache.get(_key(), 34)) is None
+    assert _key() in redis_on.store
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -285,7 +349,13 @@ def test_get_and_put_never_raise(redis_on, monkeypatch):
 
     redis_on.fail.clear()
     redis_on.store[_key()] = "34.not-a-token"
+    redis_on.fail["unlink"] = RuntimeError("boom")
     assert _run(cache.get(_key(), 12)) is None
+    redis_on.fail["unlink"] = redis_exc.ConnectionError("Connection refused")
+    assert _run(cache.get(_key(), 12)) is None
+    assert cache.state() == "down"
+    redis_on.fail.clear()
+    cache.reset_for_tests()
 
     monkeypatch.setattr(cache, "_encode", lambda *a: (_ for _ in ()).throw(ValueError("bad")))
     assert _run(cache.put(_key(q="other"), [_res("p")] * 12, 12)) is False

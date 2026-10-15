@@ -14,17 +14,24 @@ Pins:
   - a failed query is not cached while the others are; hit and miss runs
     give the same candidates
   - out of credits: rows from any query (cached or live) are returned, the
-    error is raised only when there are none; ExaPeopleFanout on both paths
+    error is raised only when there are none; ExaPeopleFanout on both paths;
+    a partial list that lost queries only to credits logs a WARNING, not the
+    "queries failed" ERROR the Pass A failures alert matches
   - identical in-flight searches in one process are bought once (a bigger
     ask does not join a smaller one); a request already sent still reaches
-    the cache when the caller is cancelled, one not yet sent is not bought
+    the cache when the caller is cancelled, one not yet sent is not bought;
+    a request that never answers ends its flight (and its joiners) at
+    _PEOPLE_SEARCH_TIMEOUT_S and the next caller buys afresh
+  - the cache-on suite never builds a real Redis client
   - the cache failing (get or put) never fails the search
   - ExaPeopleFanout attributes survive safe_attributes; starved /
-    cf15_same / deepest_rank / dup_rows
+    cf15_same / deepest_rank / dup_rows; never starved when a query failed
   - the round-robin merge cases ported from test_exa_query_builder.py
 """
 import asyncio
+import logging
 import math
+import threading
 import time
 import types
 
@@ -216,6 +223,8 @@ def test_a_hit_skips_the_sdk_the_limiter_the_breaker_and_exacall(redis_on, event
     assert first_ev["cost_usd"] == pytest.approx(0.15) and first_ev["cache_state"] == "on"
     assert (second_ev["cache_misses"], second_ev["cache_hits"]) == (0, 3)
     assert second_ev["cost_usd"] == 0 and second_ev["per_query"] == 34
+    # Hermetic: the limiter and breaker stayed per-process (REDIS_URL is set).
+    assert redis_on.real_clients == [] and vl._redis_down_until == 0.0
 
 
 def test_a_sample_size_ask_is_served_from_the_full_size_entry(redis_on, events):
@@ -234,33 +243,59 @@ def test_with_the_cache_off_every_call_is_paid_and_tagged_off(events):
     assert {e["cache_state"] for e in _fanouts(events)} == {"off_config"}
 
 
-def test_a_failed_query_is_not_cached_while_the_others_are(redis_on, events):
+def _partial_logs(caplog):
+    msgs = [(r.levelno, r.getMessage()) for r in caplog.records if r.getMessage().startswith("Exa people search:")]
+    return (
+        [m for lvl, m in msgs if lvl == logging.ERROR and "queries failed" in m],
+        [m for lvl, m in msgs if lvl == logging.WARNING and "skipped while Exa is out of credits" in m],
+    )
+
+
+def test_a_failed_query_is_not_cached_while_the_others_are(redis_on, events, caplog):
     answers = _three()
     answers["Product Manager"] = RuntimeError("boom")
     svc = _service(answers)
 
-    rows = _search(svc, THREE)
+    with caplog.at_level(logging.WARNING, logger=es.logger.name):
+        rows = _search(svc, THREE)
     assert len(rows) == 50 and len(redis_on.store) == 2
     assert _fanouts(events)[0]["failed"] == 1
+    failed, skipped = _partial_logs(caplog)
+    assert len(failed) == 1 and skipped == []  # the Pass A failures alert's line
 
     svc.exa.by_role["Product Manager"] = _people("m", 40)
     _search(svc, THREE)
     assert [q for q, _k in svc.exa.calls[3:]] == ["Product Manager, based in Denver, CO"]
 
 
-def test_two_hits_and_one_out_of_credits_return_the_rows(redis_on, events):
+def test_two_hits_and_one_out_of_credits_return_the_rows(redis_on, events, caplog):
     answers = _three()
     answers["Product Manager"] = RuntimeError("boom")
     svc = _service(answers)
     _search(svc, THREE)
 
     svc.exa.by_role["Product Manager"] = NO_CREDITS
-    rows = _search(svc, THREE)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=es.logger.name):
+        rows = _search(svc, THREE)
 
     assert len(rows) == 50
     ev = _fanouts(events)[-1]
     assert (ev["cache_hits"], ev["cache_misses"], ev["failed"], ev["ooc_failed"]) == (2, 1, 1, 1)
     assert _calls(events, outcome="out_of_credits")
+    # The credits alert covers this outage; the Pass A failures alert must not fire.
+    failed, skipped = _partial_logs(caplog)
+    assert failed == [] and len(skipped) == 1
+    assert skipped[0].startswith("Exa people search: 1/3 queries skipped")
+
+
+def test_credits_plus_another_failure_is_still_the_failures_error(events, caplog):
+    svc = _service({"Data Engineer": _people("e", 40), "Data Analyst": NO_CREDITS,
+                    "Product Manager": RuntimeError("boom")})
+    with caplog.at_level(logging.WARNING, logger=es.logger.name):
+        assert len(_search(svc, THREE)) == 34
+    failed, skipped = _partial_logs(caplog)
+    assert len(failed) == 1 and skipped == []
 
 
 def test_every_query_out_of_credits_raises_and_still_records_the_fanout(events):
@@ -407,6 +442,42 @@ def test_a_request_not_yet_sent_is_not_bought_when_the_caller_left(redis_on, eve
     assert [c["outcome"] for c in _calls(events)] == ["abandoned"]
 
 
+def test_a_request_that_never_answers_ends_its_flight_at_the_timeout(events, monkeypatch):
+    # The SDK posts with no timeout. A hung request must not hold the
+    # identical searches that join it, nor every later retry / resume.
+    monkeypatch.setattr(es, "_PEOPLE_SEARCH_TIMEOUT_S", 0.3)
+    release = threading.Event()
+    svc = _service({})
+
+    def answer():
+        if len(svc.exa.calls) == 1:
+            release.wait(5)  # the first request hangs (sent, never answered)
+        return _people("e", 40)
+
+    svc.exa.by_role["Data Engineer"] = answer
+    q = ["Data Engineer, based in Denver, CO"]
+
+    async def go():
+        try:
+            lead = asyncio.create_task(svc._people_search_fanout(q, 50))
+            await _until(lambda: len(svc.exa.calls) == 1)
+            joiner = asyncio.create_task(svc._people_search_fanout(q, 50))
+            hung = await asyncio.wait_for(asyncio.gather(lead, joiner), 3.0)
+            assert not es._inflight
+            later = await svc._people_search_fanout(q, 50)
+            return hung, later
+        finally:
+            release.set()  # let the stuck executor thread finish
+
+    (lead_rows, joiner_rows), later = asyncio.run(go())
+    assert lead_rows == [] and joiner_rows == []
+    assert len(svc.exa.calls) == 2 and len(later) == 40
+    assert [c["outcome"] for c in _calls(events)] == ["timeout", "ok"]
+    lead_ev, joiner_ev, later_ev = _fanouts(events)
+    assert sorted([lead_ev["inflight_joins"], joiner_ev["inflight_joins"]]) == [0, 1]
+    assert later_ev["cache_misses"] == 1 and later_ev["failed"] == 0
+
+
 def test_a_joiner_keeps_the_flight_alive_when_the_leader_leaves(events, monkeypatch):
     gate = _gated(monkeypatch)
     svc = _service(_three())
@@ -458,6 +529,17 @@ def test_starved_when_duplicates_leave_the_merge_short(events):
     assert (ev["raw_rows"], ev["dup_rows"], ev["merged_rows"]) == (68, 34, 34)
     assert ev["starved"] is True and ev["deepest_rank"] == 34
     assert ev["cf15_same"] is False  # 25 per query would have kept 25
+
+
+def test_never_starved_when_a_query_failed(events):
+    # 2 of 3 queries failed: the merge is short for that reason, not because
+    # the factor is too small, though the surviving query came back full.
+    svc = _service({"Data Engineer": _people("e", 40), "Data Analyst": NO_CREDITS,
+                    "Product Manager": RuntimeError("boom")})
+    rows = _search(svc, THREE)
+    [ev] = _fanouts(events)
+    assert len(rows) == 34 and ev["merged_rows"] == 34 and ev["per_query"] == 34
+    assert ev["failed"] == 2 and ev["starved"] is False
 
 
 def test_fanout_event_carries_the_job_and_trigger(events):

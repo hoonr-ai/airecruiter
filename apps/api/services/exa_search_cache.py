@@ -30,9 +30,12 @@ lives 30 minutes, not the full TTL, so a blip cannot pin it for 12 h.
 ``get`` / ``put`` never raise. A Redis connection or timeout error opens this
 module's own 30 s down window, never jobdiva_rate_limit's (a cache error
 must not switch the JobDiva BI limiter to per-worker pacing); a
-ResponseError (e.g. OOM) is a logged miss; an undecryptable value is a
-miss. Encode / decode run on a dedicated 2-thread executor, not the default
-one that the blocking Exa SDK calls queue on.
+ResponseError (e.g. OOM) is a logged miss. An unreadable value (written
+under another ENCRYPTION_KEY, or corrupt) is a miss and is deleted: left in
+place, the no-shrink guard (which reads only the plain prefix) would refuse
+every rewrite and the query would be bought on every search until it
+expired. Encode / decode run on a dedicated 2-thread executor, not the
+default one that the blocking Exa SDK calls queue on.
 
 ``state()``: ``on`` | ``off`` (EXA_SEARCH_CACHE_TTL_S=0) | ``off_config`` (no
 REDIS_URL or no ENCRYPTION_KEY: a configuration fault, one WARNING per
@@ -83,6 +86,10 @@ try:
 except Exception:  # pragma: no cover
     class _InvalidToken(Exception):  # type: ignore[no-redef]
         pass
+
+# A value that cannot be decrypted / inflated / parsed (json and utf-8
+# errors are ValueErrors).
+_UNREADABLE = (_InvalidToken, zlib.error, ValueError, TypeError)
 
 _down_until = 0.0
 _off_logged = False
@@ -237,9 +244,27 @@ async def _off_loop(fn: Any, *args: Any) -> Any:
     return await asyncio.get_running_loop().run_in_executor(_pool(), fn, *args)
 
 
+async def _discard(client: Any, key: str, why: BaseException) -> None:
+    """Delete an entry this worker cannot read, so the next paid answer can
+    replace it (put's no-shrink guard would refuse it otherwise). Another
+    worker may have rewritten it in between: dropping that costs one search.
+    Never raises."""
+    _warn(
+        "Exa search cache: unreadable entry dropped (ENCRYPTION_KEY changed, or corrupt): %s",
+        type(why).__name__,
+    )
+    try:
+        await client.unlink(key)
+    except _DOWN_ERRORS as exc:
+        _mark_down(exc)
+    except Exception:  # noqa: BLE001 — best effort; it expires anyway
+        pass
+
+
 async def get(key: str, n: int) -> Optional[List[SimpleNamespace]]:
     """Up to ``n`` cached results (rebuilt as attribute objects, in Exa's
-    order) when an entry asked for at least ``n``; else None. Never raises."""
+    order) when an entry asked for at least ``n``; else None. An unreadable
+    entry is deleted (a miss). Never raises."""
     try:
         _state, client, fernet = _open()
         if client is None:
@@ -254,17 +279,22 @@ async def get(key: str, n: int) -> Optional[List[SimpleNamespace]]:
             return None
         if not value:
             return None
-        if isinstance(value, bytes):
-            value = value.decode()
-        entry = await _off_loop(_decode, fernet, value)
-        if not entry or int(entry.get("n_req") or 0) < int(n):
+        try:
+            if isinstance(value, bytes):
+                value = value.decode()
+            entry = await _off_loop(_decode, fernet, value)
+            if not isinstance(entry, dict):
+                raise ValueError("not an entry")
+            held = int(entry.get("n_req") or 0)
+            rows = [r for r in (entry.get("results") or []) if isinstance(r, dict)]
+            if not rows:
+                raise ValueError("no results")  # put never stores an empty answer
+        except _UNREADABLE as exc:
+            await _discard(client, key, exc)
             return None
-        rows = [r for r in (entry.get("results") or []) if isinstance(r, dict)][: int(n)]
-        if not rows:
+        if held < int(n):
             return None
-        return [SimpleNamespace(**{k: r[k] for k in FIELDS if k in r}) for r in rows]
-    except _InvalidToken:
-        return None  # another key wrote it, or corrupt: a miss
+        return [SimpleNamespace(**{k: r[k] for k in FIELDS if k in r}) for r in rows[: int(n)]]
     except Exception as exc:  # noqa: BLE001
         _warn("Exa search cache: get failed (a miss): %r", exc)
         return None
