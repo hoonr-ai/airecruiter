@@ -117,8 +117,10 @@ const ADAPTERS: Record<string, (input: Input) => unknown> = {
   extractLinkedInFromText: (i) => rules.extractLinkedInFromText(i.text),
   looksLikeLinkedInProfile: (i) => rules.looksLikeLinkedInProfile(i.url),
   resolveLinkedInUrl: (i) => rules.resolveLinkedInUrl(i.candidate),
+  getCandidateSeedEmail: (i) => rules.getCandidateSeedEmail(i.candidate),
+  getCandidateLookupName: (i) => rules.getCandidateLookupName(i.candidate),
   buildEnrichRequest: (i) => rules.buildEnrichRequest(i.candidate, i.candidateId, i.linkedinUrl, i.jobdivaId),
-  interpretEnrichAnswer: (i) => rules.interpretEnrichAnswer(i.answer, i.launchableNow),
+  interpretEnrichAnswer: (i) => rules.interpretEnrichAnswer(i.answer, i.launchableNow, i.heldEmail),
   dncDroppedIds: (i) =>
     rules.dncDroppedIds(i.candidates, set(i.selectedIds), i.overrides || {}, set(i.dncPhones)),
   splitReadyNeedsContact: (i) =>

@@ -119,10 +119,14 @@ ADAPTERS = {
     "extractLinkedInFromText": lambda i: rules.extract_linkedin_from_text(i.get("text")),
     "looksLikeLinkedInProfile": lambda i: rules.looks_like_linkedin_profile(i.get("url")),
     "resolveLinkedInUrl": lambda i: rules.resolve_linkedin_url(i["candidate"]),
+    "getCandidateSeedEmail": lambda i: rules.get_candidate_seed_email(i["candidate"]),
+    "getCandidateLookupName": lambda i: rules.get_candidate_lookup_name(i["candidate"]),
     "buildEnrichRequest": lambda i: rules.build_enrich_request(
         i["candidate"], i["candidateId"], i["linkedinUrl"], i.get("jobdivaId"),
     ),
-    "interpretEnrichAnswer": lambda i: rules.interpret_enrich_answer(i.get("answer"), i["launchableNow"]),
+    "interpretEnrichAnswer": lambda i: rules.interpret_enrich_answer(
+        i.get("answer"), i["launchableNow"], i.get("heldEmail") or "",
+    ),
     "dncDroppedIds": lambda i: rules.dnc_dropped_ids(
         i["candidates"], _s(i, "selectedIds"), i.get("overrides") or {}, _s(i, "dncPhones"),
     ),

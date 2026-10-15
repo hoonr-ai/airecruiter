@@ -155,6 +155,7 @@ import {
   getCandidateExclusionReason,
   getCandidateLaunchEmail,
   getCandidateLaunchPhone,
+  getCandidateSeedEmail,
   interpretEnrichAnswer,
   isDetailFailedPatch,
   isLaunchableNow,
@@ -9147,10 +9148,11 @@ function NewJobPageContent() {
       }
 
       // How an answer is read (found contact → override that REPLACES the
-      // row's own, already reachable, not eligible, no contact, failed) is
+      // row's own, except the JobDiva email the lookup was seeded with;
+      // already reachable, not eligible, no contact, failed) is
       // interpretEnrichAnswer in lib/launch-rules.ts; this tallies it.
       const applyEnrichResult = (item: EnrichItem, enriched: EnrichAnswer) => {
-        const answer = interpretEnrichAnswer(enriched, item.launchableNow);
+        const answer = interpretEnrichAnswer(enriched, item.launchableNow, getCandidateSeedEmail(item.c));
         if (answer.outcome === "failed") {
           enrichFailedCount += 1;
           bumpEnrich("enrichFailed");

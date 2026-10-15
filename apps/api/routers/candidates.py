@@ -3228,7 +3228,9 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     apollo_attempted = False
 
     # Contact the candidate already has (request or sourced row) - ZoomInfo's
-    # match key and the short-circuit signal.
+    # match key and the short-circuit signal. Launch PAIR sends the email a
+    # JobDiva row holds (it looks contact up before the row is saved), never
+    # the phone: a held number may be a work line, and a personal one is wanted.
     seed_email = (request.email or "").strip()
     seed_email_from = "request" if seed_email else ""
     seed_phone = (request.phone or "").strip()
@@ -3807,6 +3809,13 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
 
     # Persist only when sourced candidate rows exist; Step 5 pre-save calls may
     # return enriched contact with updated_rows=0 and the FE will persist during save.
+    # The email Launch PAIR sent as held (a JobDiva row's own; placeholders
+    # were dropped above) stays the candidate's: a found one goes into the
+    # data blob and the contact cache, never over the row's email (the
+    # browser and S3 keep it too: interpretEnrichAnswer's heldEmail). A
+    # click's request email keeps the old behaviour (Rankings shows the
+    # answer's email).
+    row_email = None if (is_launch and seed_email_from == "request") else (enriched_email or None)
     updated_rows = 0
     if existing_rows and (enriched_phone or enriched_email):
         try:
@@ -3842,7 +3851,7 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
                             """,
                             (
                                 enriched_phone or None,
-                                enriched_email or None,
+                                row_email,
                                 json.dumps(data_blob),
                                 row.get("id"),
                             ),
@@ -3979,11 +3988,19 @@ LAUNCH_ENRICH_CONCURRENCY = 20
 
 def _launch_enrich_request(item: Dict[str, Any], job_id: Any) -> EnrichCandidateContactRequest:
     """Exactly what Launch PAIR's enrichment pass sends per candidate
-    (page.tsx enrichRequest): candidate_id, jobdiva_id, source, linkedin_url,
-    trigger="launch" (the spend policy), match_score only when it is a number."""
+    (launch-rules.ts buildEnrichRequest / rules.build_enrich_request):
+    candidate_id, jobdiva_id, source, linkedin_url, trigger="launch" (the
+    spend policy), match_score only when it is a number, and the seeds it
+    holds (2026-10-15): the JobDiva email (rules.get_candidate_seed_email),
+    the name and the current company. Never a phone: a held number may be a
+    work line, and the lookup is how a personal one is found."""
     score = item.get("match_score")
     if isinstance(score, bool) or not isinstance(score, (int, float)):
         score = None
+
+    def _seed(key: str) -> Optional[str]:
+        return str(item.get(key) or "").strip() or None
+
     return EnrichCandidateContactRequest(
         candidate_id=str(item.get("candidate_id") or item.get("id") or "").strip() or None,
         jobdiva_id=str(job_id) if job_id else None,
@@ -3991,6 +4008,9 @@ def _launch_enrich_request(item: Dict[str, Any], job_id: Any) -> EnrichCandidate
         linkedin_url=str(item["linkedin_url"]) if item.get("linkedin_url") else None,
         trigger="launch",
         match_score=float(score) if score is not None else None,
+        email=_seed("email"),
+        full_name=_seed("full_name"),
+        company_name=_seed("company_name"),
     )
 
 
@@ -4038,8 +4058,9 @@ async def enrich_contacts_for_launch(
     trigger="launch", same request fields), ``concurrency`` lookups in flight.
 
     ``items`` are row dicts with candidate_id (or id), source, linkedin_url,
-    match_score. Yields one `_launch_enrich_answer` dict per candidate as its
-    lookup ends: ``{"index", "candidate_id", "result" (the endpoint's answer),
+    match_score and the seeds email / full_name / company_name
+    (rules.build_enrich_request). Yields one `_launch_enrich_answer` dict per
+    candidate as its lookup ends: ``{"index", "candidate_id", "result" (the endpoint's answer),
     "outcome", "phone", "email", "phone_provider", "email_provider",
     "looked_up", "kipplo"}``.
 

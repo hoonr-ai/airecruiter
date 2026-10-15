@@ -259,6 +259,44 @@ def test_s3_lookups_counters_and_per_row_checkpoint():
     assert store.sessions[fields["id"]]["enrich_done_at"] is not None
 
 
+def test_s3_seeds_the_lookup_and_keeps_the_held_jobdiva_email():
+    """O9 (2026-10-15): S3 sends the browser's request body
+    (rules.build_enrich_request: the JobDiva email, the name, the company,
+    never the phone), and a found email never replaces the seeded one."""
+    store = MemoryStore()
+    job = add_job(store)
+    world = FakeWorld(store)
+    li = "https://www.linkedin.com/in/someone"
+    rows = [
+        cand("j", 80, source="JobDiva-TalentSearch", email="Jane@Gmail.com", phone="", profile_url=li + "-j",
+             current_company="Acme Bank"),
+        cand("l", 80, email="", phone="", profile_url=li + "-l"),
+    ]
+    found = {"status": "success", "phone": "+15125550100", "phone_provider": "exa",
+             "email": "work@found.test", "email_provider": "apollo"}
+    world.enrich_answers = {"j": dict(found), "l": dict(found)}
+    sent: List[Dict[str, Any]] = []
+    enrich = world.enrich
+
+    async def spy(items, *, job_id, concurrency):
+        sent.extend(items)
+        async for answer in enrich(items, job_id=job_id, concurrency=concurrency):
+            yield answer
+
+    world.enrich = spy
+    fields = new_session_fields(job)
+    ctx = claimed_ctx(store, world, fields, stage=S.STAGE_ENRICHING, rows=[row_rec(r, S.ROW_SELECTED) for r in rows])
+    run(enriching.run(ctx))
+
+    by_id = {it["candidate_id"]: it for it in sent}
+    assert by_id["j"]["email"] == "jane@gmail.com" and by_id["j"]["full_name"] == "Person j"
+    assert by_id["j"]["company_name"] == "Acme Bank" and by_id["j"]["trigger"] == "launch"
+    assert "email" not in by_id["l"] and all("phone" not in it for it in sent)
+    contact = {cid: c["contact"] for cid, c in store.cands[fields["id"]].items()}
+    assert contact["j"]["override"] == {"phone": "+15125550100"} and "email_provider" not in contact["j"]
+    assert contact["l"]["override"] == {"phone": "+15125550100", "email": "work@found.test"}
+
+
 def test_s3_goes_to_review_when_required():
     store = MemoryStore()
     job = add_job(store)

@@ -156,6 +156,9 @@ export function isLaunchableNow(candidate: any): boolean {
 
 // ── Display name (page.tsx 566-591) ─────────────────────────────────────────
 
+// Placeholder names sources give a row with no name.
+const ANONYMOUS_CANDIDATE_NAMES = ["linkedin candidate", "professional candidate", "unknown candidate", "unknown"];
+
 export const getCandidateDisplayName = (candidate: {
   name?: string;
   firstName?: string;
@@ -167,7 +170,7 @@ export const getCandidateDisplayName = (candidate: {
     const cleaned = (value || "").replace(/\s+/g, " ").trim();
     if (!cleaned) return "";
     const lowered = cleaned.toLowerCase();
-    if (["linkedin candidate", "professional candidate", "unknown candidate", "unknown"].includes(lowered)) {
+    if (ANONYMOUS_CANDIDATE_NAMES.includes(lowered)) {
       return "";
     }
     return cleaned;
@@ -773,15 +776,43 @@ export function resolveLinkedInUrl(c: any): string {
   return linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
 }
 
+// The email a Launch lookup is told the candidate already has: the TOP-LEVEL
+// email of a JobDiva row, when it is a real launch email ("" otherwise). The
+// lookup then buys only the phone, and the candidate keeps their own address.
+// Emails on LinkedIn / Dice / Unipile rows are regex- or LLM-extracted
+// (unreliable: apps/api/services/contact_cache.py), and ones a provider found
+// are reused through the contact cache anyway.
+export function getCandidateSeedEmail(c: any): string {
+  if (!candIsJobDivaUI(c)) return "";
+  const email = String(c?.email || "").trim().toLowerCase();
+  return isValidLaunchEmail(email) ? email : "";
+}
+
+// The name a Launch lookup is told: the row's name, else first + last name;
+// never the title or "LinkedIn profile" that getCandidateDisplayName falls
+// back to, nor a placeholder name ("" = none).
+export function getCandidateLookupName(c: any): string {
+  const clean = (value: unknown) => {
+    const cleaned = String(value || "").replace(/\s+/g, " ").trim();
+    return ANONYMOUS_CANDIDATE_NAMES.includes(cleaned.toLowerCase()) ? "" : cleaned;
+  };
+  return clean(c?.name) || clean([c?.firstName, c?.lastName].filter(Boolean).join(" "));
+}
+
 // One candidate's request to /candidates/enrich-contact(s). Held to the spend
 // policy server-side: LinkedIn/JobDiva sources at or above the score floor
-// only (a skip returns no contact).
+// only (a skip returns no contact). Seeds (2026-10-15): the JobDiva email the
+// row holds, its name and current company; never the phone (a held number
+// may be a work line, and a personal one is what the lookup is for).
 export function buildEnrichRequest(
   c: any,
   candidateId: string,
   linkedinUrl: string,
   jobdivaId: unknown,
 ): Record<string, unknown> {
+  const email = getCandidateSeedEmail(c);
+  const fullName = getCandidateLookupName(c);
+  const company = getCandidateCurrentCompanies(c)[0] || "";
   return {
     candidate_id: candidateId,
     jobdiva_id: jobdivaId,
@@ -789,6 +820,9 @@ export function buildEnrichRequest(
     linkedin_url: linkedinUrl,
     trigger: "launch",
     match_score: typeof c.match_score === "number" ? c.match_score : undefined,
+    email: email || undefined,
+    full_name: fullName || undefined,
+    company_name: company || undefined,
   };
 }
 
@@ -797,10 +831,13 @@ export type EnrichOutcome = "failed" | "succeeded" | "already_reachable" | "not_
 // How the launch reads one lookup answer (page.tsx applyEnrichResult):
 // `override` is the contact it found (it REPLACES the row's own phone/email at
 // launch: override.x || c.x), `lookedUp` marks a real lookup, `kipplo` is the
-// raw lookup.kipplo outcome for the "Kipplo issues" summary.
+// raw lookup.kipplo outcome for the "Kipplo issues" summary. `heldEmail` is
+// the email the request was seeded with (getCandidateSeedEmail): the
+// candidate's own, never replaced by one a provider found.
 export function interpretEnrichAnswer(
   enriched: any,
   launchableNow: boolean,
+  heldEmail = "",
 ): {
   outcome: EnrichOutcome;
   lookedUp: boolean;
@@ -816,7 +853,7 @@ export function interpretEnrichAnswer(
   const kipplo = String(enriched?.lookup?.kipplo || "");
   // `phone` is the candidate's personal number (never a work line).
   const nextPhone = enriched?.phone || enriched?.mobilePhone || "";
-  const nextEmail = enriched?.email || "";
+  const nextEmail = heldEmail ? "" : enriched?.email || "";
   if (nextPhone || nextEmail) {
     return {
       outcome: "succeeded",
@@ -832,7 +869,7 @@ export function interpretEnrichAnswer(
   }
   // Enrichment found nothing new, but the candidate already has a usable
   // phone or email — still launchable, not a miss.
-  if (launchableNow) return { outcome: "already_reachable", lookedUp, kipplo };
+  if (launchableNow || heldEmail) return { outcome: "already_reachable", lookedUp, kipplo };
   // "skipped" = held back by the spend policy (source / score floor).
   return { outcome: enriched?.status === "skipped" ? "not_eligible" : "no_contact", lookedUp, kipplo };
 }

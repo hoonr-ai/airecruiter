@@ -12,6 +12,7 @@ tests run with the production defaults; conftest lists every provider and
 turns the deep search off for the older chain tests.
 """
 import asyncio
+import json
 
 import pytest
 
@@ -82,11 +83,11 @@ class _Chain:
         return [c for c in self.calls if isinstance(c, tuple)]
 
 
-def _on_demand(monkeypatch, chain, linkedin=LINKEDIN, **req):
+def _on_demand(monkeypatch, chain, linkedin=LINKEDIN, db=None, **req):
     def _no_db():
         raise RuntimeError("no db in tests")
 
-    monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
+    monkeypatch.setattr(candidates_router, "get_db_connection", db.connect if db else _no_db)
     monkeypatch.setattr(contact_cache, "get", chain.cache_get)
     monkeypatch.setattr(contact_cache, "record", chain.cache_record)
     monkeypatch.setattr(candidates_router, "_kipplo_enrich_by_linkedin", chain.kipplo)
@@ -863,3 +864,120 @@ def test_lookup_outcomes_are_enums_never_free_text():
     assert enum("Exa create error (402): https://x @y") == "failed"
     assert enum("Exa run timed out", still_going=True) == "in_progress"
 
+
+# ---------------------------------------------------------------------------
+# Launch PAIR's seeds (2026-10-15): the JobDiva email the row holds, its name
+# and company; never the phone.
+# ---------------------------------------------------------------------------
+
+class _Db:
+    """sourced_candidates for the chain: the prefetch reads ``rows``; each
+    UPDATE's parameters are kept."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.updates = []
+
+    def connect(self):
+        db = self
+
+        class _Cur:
+            rowcount = 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params=None):
+                if not sql.strip().upper().startswith("SELECT"):
+                    db.updates.append(params)
+
+            def fetchall(self):
+                return [dict(r) for r in db.rows]
+
+        class _Conn:
+            def cursor(self, **kw):
+                return _Cur()
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        return _Conn()
+
+
+def test_a_seeded_email_buys_only_the_phone_and_is_never_overwritten(monkeypatch):
+    db = _Db([{
+        "id": 7, "candidate_id": "cand-1", "jobdiva_id": "26-1", "source": "JobDiva-TalentSearch", "name": "Jane Doe",
+        "headline": "", "profile_url": LINKEDIN, "email": "jane@gmail.com", "phone": "", "data": "{}",
+        "resume_match_percentage": 80,
+    }])
+    chain = _Chain(
+        apollo={"ok": True, "fields": _fields(workEmail="jane.doe@acme.com")},
+        exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)},
+    )
+    launch = {**LAUNCH, "source": "JobDiva-TalentSearch"}
+
+    res = _on_demand(monkeypatch, chain, db=db, email="jane@gmail.com", **launch)
+
+    assert chain.exa_calls() == [("exa", ("phone",))]
+    # EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT stays off: a seeded email never
+    # stops the phone lookup.
+    assert sourcing_config.EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT is False
+    [(phone, email, blob, row_id)] = db.updates
+    assert (phone, email, row_id) == (MOBILE, None, 7)     # the row keeps its email
+    assert json.loads(blob)["zoominfo_contact_enrichment"]["workEmail"] == "jane.doe@acme.com"
+    assert res["phone"] == MOBILE and res["updated_rows"] == 1
+
+
+def test_a_clicks_request_email_keeps_the_old_save(monkeypatch):
+    # Rankings Get Contact sends the row's email too and shows the answer's.
+    db = _Db([{
+        "id": 7, "candidate_id": "cand-1", "jobdiva_id": "26-1", "source": "JobDiva-TalentSearch", "name": "Jane Doe",
+        "headline": "", "profile_url": LINKEDIN, "email": "jane@gmail.com", "phone": "", "data": "{}",
+        "resume_match_percentage": 80,
+    }])
+    chain = _Chain(apollo={"ok": True, "fields": _fields(workEmail="jane.doe@acme.com")},
+                   exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
+
+    _on_demand(monkeypatch, chain, db=db, email="jane@gmail.com")
+
+    [(_phone, email, _blob, _id)] = db.updates
+    assert email == "jane.doe@acme.com"
+
+
+def test_a_found_email_still_fills_a_row_whose_email_came_from_the_row(monkeypatch):
+    db = _Db([{
+        "id": 7, "candidate_id": "cand-1", "jobdiva_id": "26-1", "source": "LinkedIn-Exa", "name": "Jane Doe",
+        "headline": "", "profile_url": LINKEDIN, "email": "", "phone": "", "data": "{}",
+        "resume_match_percentage": 80,
+    }])
+    chain = _Chain(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone=MOBILE)})
+
+    _on_demand(monkeypatch, chain, db=db, **LAUNCH)
+
+    [(phone, email, _blob, _id)] = db.updates
+    assert (phone, email) == (MOBILE, "jane@acme.com")
+
+
+def test_a_placeholder_seed_email_is_ignored(monkeypatch):
+    chain = _Chain(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone=MOBILE)})
+
+    res = _on_demand(monkeypatch, chain, email="Auto_123@jobdiva.com", **LAUNCH)
+
+    assert chain.exa_calls() == [("exa", ("email", "phone"))]
+    assert res["email"] == "jane@acme.com"
+
+
+def test_after_a_deferred_search_launch_asks_one_normal_run_for_both(monkeypatch):
+    # A deferred sourcing lookup asked no Exa, so it cached no miss: Launch's
+    # normal run asks for the email and the phone together, deep only after.
+    chain = _Chain(exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
+
+    _on_demand(monkeypatch, chain, **LAUNCH)
+
+    assert chain.exa_calls() == [("exa", ("email", "phone")), ("exa_deep", ("email",))]

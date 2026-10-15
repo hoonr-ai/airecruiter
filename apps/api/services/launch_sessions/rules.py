@@ -59,8 +59,11 @@ Launched keys + twin ids                      launchedSetsFromResponse          
 Hard-filter skips                             computeHardFilterSkips                  8650-8666
 Who gets a contact lookup                     selectCandidatesMissingContact          8689-8696
 LinkedIn URL (7 fields + résumé regex)        resolveLinkedInUrl                      759-769, 8760-8770
-Lookup request body                           buildEnrichRequest                      8918-8927
-Lookup answer → override / outcome            interpretEnrichAnswer                   8785-8833
+Lookup seeds (JobDiva top-level email only;   getCandidateSeedEmail /                 (2026-10-15)
+  name / first+last, never the title)           getCandidateLookupName
+Lookup request body (+ seeds, never a phone)  buildEnrichRequest                      8918-8927
+Lookup answer → override / outcome (a held    interpretEnrichAnswer                   8785-8833
+  seed email is never replaced)
 DNC re-check after lookups                    dncDroppedIds                           9062-9089
 Ready / needs-contact split                   splitReadyNeedsContact                  9091-9157
 Needs-contact answers over overrides          mergeContactOverrides                   9227-9240
@@ -1160,9 +1163,33 @@ def resolve_linkedin_url(c: Any) -> str:
     return ""
 
 
+def get_candidate_seed_email(c: Any) -> str:
+    """The email a Launch lookup is told the candidate already has: the
+    TOP-LEVEL email of a JobDiva row when it is a real launch email, else ""
+    (LinkedIn / Dice / Unipile emails are extracted, so unreliable)."""
+    if not cand_is_jobdiva_ui(c):
+        return ""
+    email = _js_trim(_s(_get(c, "email"))).lower()
+    return email if is_valid_launch_email(email) else ""
+
+
+def get_candidate_lookup_name(c: Any) -> str:
+    """The name a Launch lookup is told: ``name``, else first + last name;
+    never the title or a placeholder name ("" = none)."""
+    def clean(value: Any) -> str:
+        cleaned = _js_trim(_WS_RUN_RE.sub(" ", _s(value)))
+        return "" if cleaned.lower() in _ANONYMOUS_NAMES else cleaned
+
+    parts = [_get(c, "firstName"), _get(c, "lastName")]
+    return clean(_get(c, "name")) or clean(" ".join(_js_str(p) for p in parts if _truthy(p)))
+
+
 def build_enrich_request(c: Any, candidate_id: str, linkedin_url: str, jobdiva_id: Any = None) -> dict:
     """One /candidates/enrich-contact(s) request. Keys the browser leaves
-    ``undefined`` are omitted (``jobdiva_id=None`` → omitted)."""
+    ``undefined`` are omitted (``jobdiva_id=None`` → omitted). Seeds: the
+    JobDiva email (get_candidate_seed_email), the name
+    (get_candidate_lookup_name) and the first current company; never the
+    phone (a held number may be a work line)."""
     req: dict = {"candidate_id": candidate_id}
     if jobdiva_id is not None:
         req["jobdiva_id"] = jobdiva_id
@@ -1174,19 +1201,31 @@ def build_enrich_request(c: Any, candidate_id: str, linkedin_url: str, jobdiva_i
     score = _get(c, "match_score")
     if _is_number(score):
         req["match_score"] = score
+    email = get_candidate_seed_email(c)
+    full_name = get_candidate_lookup_name(c)
+    companies = get_candidate_current_companies(c)
+    company = companies[0] if companies else ""
+    if email:
+        req["email"] = email
+    if full_name:
+        req["full_name"] = full_name
+    if company:
+        req["company_name"] = company
     return req
 
 
-def interpret_enrich_answer(enriched: Any, launchable_now: bool) -> dict:
+def interpret_enrich_answer(enriched: Any, launchable_now: bool, held_email: str = "") -> dict:
     """``{"outcome", "lookedUp", "kipplo", "override"?, "phoneProvider"?,
     "emailProvider"?}``; outcome ∈ failed | succeeded | already_reachable |
-    not_eligible | no_contact. ``override`` REPLACES the row's own contact."""
+    not_eligible | no_contact. ``override`` REPLACES the row's own contact,
+    except an email the request was seeded with (``held_email``,
+    get_candidate_seed_email): never replaced by a found one."""
     if not _truthy(enriched) or _get(enriched, "status") == "error":
         return {"outcome": "failed", "lookedUp": False, "kipplo": ""}
     looked_up = _get(enriched, "status") == "success"
     kipplo = _s(_get(_get(enriched, "lookup"), "kipplo"))
     next_phone = _or(_get(enriched, "phone"), _get(enriched, "mobilePhone"), "")
-    next_email = _or(_get(enriched, "email"), "")
+    next_email = "" if _truthy(held_email) else _or(_get(enriched, "email"), "")
     if _truthy(next_phone) or _truthy(next_email):
         override: dict = {}
         if _truthy(next_phone):
@@ -1199,7 +1238,7 @@ def interpret_enrich_answer(enriched: Any, launchable_now: bool) -> dict:
         if _truthy(next_email):
             out["emailProvider"] = _js_str(_or(_get(enriched, "email_provider"), "other"))
         return out
-    if launchable_now:
+    if launchable_now or _truthy(held_email):
         return {"outcome": "already_reachable", "lookedUp": looked_up, "kipplo": kipplo}
     outcome = "not_eligible" if _get(enriched, "status") == "skipped" else "no_contact"
     return {"outcome": outcome, "lookedUp": looked_up, "kipplo": kipplo}

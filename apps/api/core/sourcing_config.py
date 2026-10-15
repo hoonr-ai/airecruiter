@@ -598,7 +598,9 @@ EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
 # an email Exa is the only source of a phone, and PAIR screens by phone first.
 # The spend is bounded by the eligibility policy (CONTACT_ENRICH_*, launch pass
 # only), and the contact cache means a person's phone is bought at most once.
-# ON between 2026-09-25 and 09-28 to cut Exa spend; set true to go back.
+# ON between 2026-09-25 and 09-28 to cut Exa spend. Do NOT set it true again:
+# since Launch PAIR sends the JobDiva email it holds (2026-10-15), it would stop
+# the phone lookup for every candidate who has an email.
 EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
     "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
