@@ -38,6 +38,7 @@ import os
 import re
 import time
 import weakref
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -225,6 +226,27 @@ def exa_deep_enabled() -> bool:
     """Whether a field the normal Exa run did not find gets a deep search
     (EXA_CONTACT_DEEP_EFFORT, "off" disables)."""
     return str(EXA_CONTACT_DEEP_EFFORT or "").strip().lower() not in {"", "off", "none", "false", "0"}
+
+
+# What one Exa Agent contact run costs (exa.ai/pricing, 2026-10-14): a flat fee
+# per effort, plus a fee per field it finds. Fiber.ai credits on a deep run
+# average ~$0.06 (run list 9/29-10/13). Only for the "Search again (~$X)" hint
+# of a final miss: telemetry reports what a run actually cost.
+_EXA_EFFORT_USD = {"minimal": 0.012, "low": 0.025, "medium": 0.10, "high": 0.50}
+_EXA_FOUND_USD = {"email": 0.02, "phone": 0.07}
+_EXA_FIBER_RUN_USD = 0.06
+
+
+def rebuy_estimate_usd(fields: Tuple[str, ...], tier: str) -> float:
+    """About what one more Exa run (``tier`` "deep" or "normal") for
+    ``fields`` costs if it finds them: deep ~$0.18-0.25, normal ~$0.05-0.12."""
+    deep = tier == "deep"
+    effort = str((EXA_CONTACT_DEEP_EFFORT if deep else EXA_CONTACT_ENRICH_EFFORT) or "").strip().lower()
+    usd = _EXA_EFFORT_USD.get(effort, _EXA_EFFORT_USD["medium" if deep else "low"])
+    usd += sum(_EXA_FOUND_USD.get(f, 0.0) for f in set(fields or ()))
+    if deep and "fiber" in deep_data_sources():
+        usd += _EXA_FIBER_RUN_USD
+    return round(usd, 2)
 
 _LINKEDIN_PROFILE_RE = re.compile(r"linkedin\.com/in/", re.IGNORECASE)
 
@@ -861,18 +883,45 @@ def _run_was_created(outcome: Dict[str, Any]) -> bool:
     )
 
 
+# A lost create is looked for among the newest runs on the key (shared with
+# QA, dev and scripts, so a page of 100) created in the last 10 minutes: an
+# older run with the same query is an earlier lookup, not this one.
+_FIND_STARTED_RUN_LIMIT = 100
+_FIND_STARTED_RUN_MAX_AGE_S = 600
+
+
+def _created_recently(run: Dict[str, Any], now: datetime) -> bool:
+    """Whether ``run`` was created within _FIND_STARTED_RUN_MAX_AGE_S. A run
+    without a readable createdAt is given the benefit of the doubt."""
+    raw = str(run.get("createdAt") or "").strip()
+    if not raw:
+        return True
+    try:
+        created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return created >= now - timedelta(seconds=_FIND_STARTED_RUN_MAX_AGE_S)
+
+
 async def _find_started_run(client: Any, headers: Dict[str, str], query: str) -> Optional[Dict[str, Any]]:
-    """The newest run with exactly this query (a create whose answer was lost),
-    or None. The query names the person and their LinkedIn URL, so a match is
-    a lookup of the same person."""
+    """The newest recent run with exactly this query (a create whose answer was
+    lost), or None. The query names the person and their LinkedIn URL, so a
+    match is a lookup of the same person."""
     if not query:
         return None
     for attempt in range(2):
         try:
-            g = await client.get(EXA_AGENT_RUNS_URL, headers=headers, params={"limit": 50})
+            g = await client.get(EXA_AGENT_RUNS_URL, headers=headers, params={"limit": _FIND_STARTED_RUN_LIMIT})
             if g.status_code < 400:
+                now = datetime.now(timezone.utc)
                 for run in (g.json() or {}).get("data") or []:
-                    if ((run.get("request") or {}).get("query") or "") == query and run.get("status") not in {"failed", "cancelled"}:
+                    if (
+                        ((run.get("request") or {}).get("query") or "") == query
+                        and run.get("status") not in {"failed", "cancelled"}
+                        and _created_recently(run, now)
+                    ):
                         return run
         except Exception as e:
             logger.info("Exa run list failed while looking for a started run: %s", e)
@@ -1008,6 +1057,17 @@ def _fields_found(extracted: Dict[str, Any]) -> str:
     ) or "none"
 
 
+# Transport errors after which the create may have reached Exa (a run may be
+# going and billed): the run list is checked before a new run is bought. Not
+# ConnectError: the request never left, so there is no run to find.
+_CREATE_MAY_HAVE_STARTED = (
+    httpx.TimeoutException,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
+
+
 async def _exa_contact_attempt(
     client: Any,
     headers: Dict[str, str],
@@ -1080,7 +1140,7 @@ async def _exa_contact_attempt_impl(
                     return {"message": "Exa rate-limited (no slot)", "retry": "new"}
                 try:
                     r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
-                except httpx.TimeoutException:
+                except _CREATE_MAY_HAVE_STARTED:
                     # Seen on QA 2026-09-29: the run was started but the answer
                     # to the create call never came, and a second run was bought
                     # 30s later. Look the started run up (listing is free).
@@ -1538,6 +1598,49 @@ def reset_job_counter(jobdiva_id: str, *, include_lifetime: bool = False) -> Non
         _JOB_EXA_LIFETIME.pop(jobdiva_id, None)
 
 
+# Sourcing-time Exa lookups run as tasks of their own (see
+# _sourcing_exa_lookup). Strong references: a task only weakly referenced by
+# the loop could vanish mid-run.
+_SOURCING_EXA_TASKS: set = set()
+
+
+async def _sourcing_exa_lookup(
+    label: str,
+    linkedin_url: str,
+    full_name: str,
+    company: str,
+    fields: Tuple[str, ...],
+    job_key: str,
+) -> Dict[str, Any]:
+    """The sourcing chain's paid Exa step, run as a task its caller awaits
+    through ``asyncio.shield``: when the Step-5 stream closes and cancels the
+    caller, the run (already billed) still finishes here, holding its Exa slot
+    until it does, and its answer goes to the contact cache; a run still going
+    after both windows is watched in the background. Never raises."""
+    from services import contact_cache
+
+    try:
+        async with _exa_semaphore():
+            result = await exa_enrich_by_linkedin(label, linkedin_url, full_name, company, fields=fields)
+    except Exception as e:
+        logger.warning("contact_enrichment Exa path raised for %s (job %s): %s", label, job_key, e)
+        return {"ok": False}
+    if result.get("skipped"):
+        return result  # nothing was sent: nothing to remember
+    found = (result.get("fields") or {}) if result.get("ok") else {}
+    await contact_cache.record(
+        linkedin_url,
+        email=str(found.get("workEmail") or found.get("personalEmail") or ""),
+        # Personal numbers only: the cache marks every phone it stores as personal.
+        phone=str(found.get("mobilePhone") or ""),
+        email_provider="exa",
+        phone_provider="exa",
+        missed=fields if result.get("ok") else (),
+    )
+    watch_late_exa_run(str(result.get("run_id") or ""), linkedin_url, fields=fields, provider="exa")
+    return result
+
+
 async def enrich_contact_for_sourcing(
     linkedin_url: str,
     jobdiva_id: Optional[str] = None,
@@ -1848,18 +1951,14 @@ async def enrich_contact_for_sourcing(
                 field for field, have in (("email", seed_email), ("phone", seed_phone))
                 if not have and (want_phone or field != "phone")
             )
-            try:
-                async with _exa_semaphore():
-                    exa_result = await exa_enrich_by_linkedin(
-                        exa_label, linkedin_url, full_name or "", company or "",
-                        fields=exa_fields,
-                    )
-            except Exception as e:
-                logger.warning(
-                    "contact_enrichment Exa path raised for %s (job %s): %s",
-                    exa_label, job_key, e,
-                )
-                exa_result = {"ok": False}
+            # A run of its own: the Step-5 stream closing cancels this lookup,
+            # but a paid run still finishes and keeps its answer.
+            exa_task = asyncio.ensure_future(_sourcing_exa_lookup(
+                exa_label, linkedin_url, full_name or "", company or "", exa_fields, job_key,
+            ))
+            _SOURCING_EXA_TASKS.add(exa_task)
+            exa_task.add_done_callback(_SOURCING_EXA_TASKS.discard)
+            exa_result = await asyncio.shield(exa_task)
             if exa_result.get("skipped"):
                 # Breaker opened while this lookup waited: nothing was sent,
                 # so the per-run and lifetime slots are refunded and no miss
