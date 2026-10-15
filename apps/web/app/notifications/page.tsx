@@ -393,8 +393,8 @@ export default function NotificationsPage() {
         <div className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 mb-4">
           <span className="flex items-center gap-2">
             <BellRing className="h-4 w-4 shrink-0 text-slate-500" />
-            Get a desktop alert the moment a candidate passes, even when this tab isn&apos;t in front. You can
-            choose which notifications alert you once enabled.
+            Get desktop alerts the moment something happens, even when this tab isn&apos;t in front. Choose
+            exactly which notifications alert you once enabled.
           </span>
           <Button
             variant="outline"
