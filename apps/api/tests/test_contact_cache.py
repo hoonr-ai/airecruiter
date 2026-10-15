@@ -229,6 +229,7 @@ def pg(monkeypatch):
 
     with conn.cursor() as cur:
         cur.execute(contact_cache.CREATE_SQL.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE", 1))
+        cur.execute(contact_cache.MIGRATE_SQL)   # what _ensure_table runs after it
     monkeypatch.setattr(contact_cache, "_connect", lambda: _KeepOpen())
     monkeypatch.setattr(contact_cache, "_table_ready", True)
     yield conn
@@ -328,7 +329,7 @@ def test_sql_a_miss_ttl_of_zero_makes_no_normal_miss_final(pg, monkeypatch):
     assert got["phone_deep_missed"]                                  # the deep-miss TTL is its own
 
 
-def test_sql_migration_adds_the_deep_miss_columns():
+def test_sql_migration_adds_the_deep_miss_and_lease_columns():
     try:
         conn = psycopg2.connect(_DSN, connect_timeout=2)
     except Exception:
@@ -346,7 +347,14 @@ def test_sql_migration_adds_the_deep_miss_columns():
                            WHERE table_name = 'contact_enrichment_cache'
                              AND table_schema LIKE 'pg_temp%%'""")
             cols = {r[0] for r in cur.fetchall()}
+            cur.execute("""SELECT indexname FROM pg_indexes
+                           WHERE tablename = 'contact_enrichment_cache'
+                             AND schemaname LIKE 'pg_temp%%'""")
+            indexes = {r[0] for r in cur.fetchall()}
         assert {"phone_personal", "email_deep_missed_at", "phone_deep_missed_at"} <= cols
+        assert {"pending_token", "pending_fields", "pending_tier", "pending_until",
+                "pending_run_id", "pending_run_at", "pending_meta"} <= cols
+        assert "contact_enrichment_cache_pending_run_idx" in indexes
     finally:
         conn.rollback()
         conn.close()
