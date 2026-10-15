@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test lib/*.test.ts"
+    "test": "node --test lib/*.test.ts hooks/*.test.ts"
   },
   "dependencies": {
     "@azure/msal-browser": "^3.12.0",
