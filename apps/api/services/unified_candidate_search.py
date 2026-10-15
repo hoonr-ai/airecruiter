@@ -2124,15 +2124,16 @@ class UnifiedCandidateSearch:
                         # plus a per-candidate match summary; preserves the
                         # original highlights in resume_text since downstream
                         # location extractors are tuned to that shape.
-                        # When EXA_AGENT_ENABLED, Pass B (Research API) is the
-                        # canonical enrichment path and supersedes this per-URL
-                        # get_contents() summary — keep this block as the
-                        # fallback when the agent path is disabled.
+                        # When Pass B (the Exa Agent run) is on it supersedes
+                        # this per-URL get_contents() summary. Both are paid
+                        # and both default off (sourcing_config): turning Pass B
+                        # off must not silently turn this on.
+                        from core import sourcing_config as _sc_deep
                         if (
                             source_type == "LinkedIn-Exa"
                             and not sample_mode
                             and not exa_pass_b_should_run
-                            and os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "true").strip().lower() == "true"
+                            and _sc_deep.exa_deep_analysis_enabled()
                         ):
                             try:
                                 deep = await self.exa_service.deep_analyze_candidate(
