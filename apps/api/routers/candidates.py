@@ -967,6 +967,7 @@ def build_search_criteria(
         # more than it saves (pool + enrichment scale with it).
         sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
         assess_all_sources=bool(request.assess_all_sources),
+        defer_paid_contact=bool(getattr(request, "defer_paid_contact", False)),
     )
 
 
@@ -1263,6 +1264,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     max_experience_years=request.max_experience_years,
                     jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
                     jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
+                    defer_paid_contact=bool(getattr(request, "defer_paid_contact", False)),
                 )
 
                 for candidate in candidates:

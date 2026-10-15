@@ -127,7 +127,7 @@ describe("buildSearchAttemptChain", () => {
 
   test("page.tsx: the server snapshot uses the same relaxation inputs as handleRunSearch", () => {
     const page = readFileSync(PAGE_SOURCE, "utf8");
-    const loopStart = page.indexOf("const handleRunSearch = async ()");
+    const loopStart = page.indexOf("const handleRunSearch = async (");
     assert.ok(loopStart > 0, "handleRunSearch not found");
     const loop = page.slice(loopStart, page.indexOf("return accumulated;", loopStart));
     assert.match(loop, /relaxBooleanString\(currentAttempts\[currentAttempts\.length - 1\]\.query, tier\)/);
@@ -143,6 +143,24 @@ describe("buildSearchAttemptChain", () => {
     assert.match(srv, /buildPayload: buildSearchPayload/);
     assert.match(srv, /initialQuery: initial/);
     assert.match(srv, /const initial = resolvedGeneratedBoolean;/);
+  });
+
+  // The server's S1 sets defer_paid_contact itself (bound_payload).
+  test("page.tsx: Source & Launch's full run and its relaxed runs defer paid contact lookups", () => {
+    const page = readFileSync(PAGE_SOURCE, "utf8");
+    const streamStart = page.indexOf("const runSearchStream = async (");
+    assert.ok(streamStart > 0, "runSearchStream not found");
+    const stream = page.slice(streamStart, page.indexOf("const controller = new AbortController();", streamStart));
+    assert.match(stream, /overrides\?\.deferPaidContact \? \{ defer_paid_contact: true \} : \{\}/);
+    const loopStart = page.indexOf("const handleRunSearch = async (");
+    const loop = page.slice(loopStart, page.indexOf("return accumulated;", loopStart));
+    const runs = [...loop.matchAll(/runSearchStream\(([^;]*)\);/g)].map((m) => m[1]);
+    assert.equal(runs.length, 2, "the first run and the relaxed runs");
+    for (const args of runs) assert.match(args, /deferPaidContact/);
+    const slStart = page.indexOf("const handleSourceAndLaunch = async");
+    assert.ok(slStart > 0, "handleSourceAndLaunch not found");
+    const sl = page.slice(slStart, page.indexOf("chooseSelectionPool(", slStart));
+    assert.match(sl, /handleRunSearch\(\{ deferPaidContact: true \}\)/);
   });
 });
 

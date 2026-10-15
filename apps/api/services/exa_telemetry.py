@@ -406,6 +406,7 @@ def record_config_once() -> None:
             "normal_effort": str(getattr(_cfg, "EXA_CONTACT_ENRICH_EFFORT", "") or ""),
             "deep_effort": str(getattr(_cfg, "EXA_CONTACT_DEEP_EFFORT", "") or ""),
             "deep_skip_pct": int(getattr(_sc, "EXA_DEEP_SKIP_REACHABLE_PCT", 0) or 0),
+            "defer_paid": bool(getattr(_sc, "SOURCING_DEFER_PAID_CONTACT_ENABLED", True)),
             "worker_pid": os.getpid(),
         }))
         _config_sent_at = now

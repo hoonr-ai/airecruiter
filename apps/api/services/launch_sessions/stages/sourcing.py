@@ -57,13 +57,17 @@ def _target(ctx: StageContext) -> int:
 def bound_payload(ctx: StageContext, payload: Dict[str, Any]) -> Dict[str, Any]:
     """The attempt's search payload with ``job_id`` bound to this session's
     job (control.create_session already refused any other job; this keeps a
-    stored snapshot from ever searching — and emailing — for another job)."""
+    stored snapshot from ever searching — and emailing — for another job),
+    and its paid contact lookups put off to S3 (``defer_paid_contact``: the
+    session launches what it finds, and S3 asks Exa for the email and the
+    phone in one run; Apollo still runs at sourcing)."""
     out = dict(payload or {})
     job_id = str(out.get("job_id") or "").strip()
     if job_id not in ctx.job_keys:
         if job_id:
             logger.warning("launch_session search payload job_id rebound session=%s", ctx.sid)
         out["job_id"] = ctx.job_id
+    out["defer_paid_contact"] = True
     return out
 
 

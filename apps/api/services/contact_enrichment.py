@@ -2486,7 +2486,11 @@ async def enrich_contact_for_sourcing(
             need this: ZoomInfo can't match by URL and Apollo credits run
             dry, so URL-only profiles otherwise stream in contactless.
             Gated by EXA_SOURCING_CONTACT_FALLBACK + EXA_CONTACT_ENRICH_ENABLED
-            and capped per job at EXA_SOURCING_CONTACT_CAP.
+            and capped per job at EXA_SOURCING_CONTACT_CAP. False for a search
+            that defers paid contact to Launch PAIR (Source & Launch's full
+            run, a launch session's S1: SearchCriteria.defer_paid_contact):
+            the cheap providers still run, and with Exa never asked no miss
+            is recorded, so Launch asks the normal run for both fields.
         company: candidate's current company, sharpens the Exa Agent query.
         seed_email / seed_phone: contact the candidate ALREADY has. Two uses:
             they seed the ZoomInfo match-by-email lookup, and they decide

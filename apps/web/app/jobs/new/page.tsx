@@ -6236,6 +6236,10 @@ function NewJobPageContent() {
       // `samplePerSource` fully-scored preview rows per source.
       searchMode?: "sample" | "full";
       samplePerSource?: number;
+      // Source & Launch's full run (and its relaxed runs): Launch PAIR is
+      // about to look contact up, so the search's paid Exa email lookups wait
+      // for it (one run for the email and the phone; Apollo still runs).
+      deferPaidContact?: boolean;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -6246,6 +6250,7 @@ function NewJobPageContent() {
       ...(typeof overrides?.jobdivaBatchSize === "number" ? { jobdiva_batch_size: overrides.jobdivaBatchSize } : {}),
       ...(overrides?.searchMode ? { search_mode: overrides.searchMode } : {}),
       ...(typeof overrides?.samplePerSource === "number" ? { sample_per_source: overrides.samplePerSource } : {}),
+      ...(overrides?.deferPaidContact ? { defer_paid_contact: true } : {}),
     };
 
     const controller = new AbortController();
@@ -6620,7 +6625,10 @@ function NewJobPageContent() {
     return sampleResults;
   };
 
-  const handleRunSearch = async (): Promise<any[]> => {
+  // `deferPaidContact`: the run is about to be launched (handleSourceAndLaunch),
+  // see runSearchStream.
+  const handleRunSearch = async (opts?: { deferPaidContact?: boolean }): Promise<any[]> => {
+    const deferPaidContact = opts?.deferPaidContact === true;
     if (hasInvalidExperienceRange) {
       setSearchStatus("Set Max YOE to the same value as or above Min YOE before searching.");
       return [];
@@ -6653,7 +6661,7 @@ function NewJobPageContent() {
       setSearchStatus("Connecting to source portals...");
 
       const firstRunStartMs = Date.now();
-      const firstRun = await runSearchStream(initial, "replace");
+      const firstRun = await runSearchStream(initial, "replace", deferPaidContact ? { deferPaidContact } : undefined);
       accumulated = [...firstRun];
       const firstQuality = collectCandidateQualityStats(firstRun);
       runBreakdown = [
@@ -6688,7 +6696,7 @@ function NewJobPageContent() {
         setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
 
         const relaxedRunStartMs = Date.now();
-        const nextRun = await runSearchStream(relaxed.query, "append", structuralOverrides);
+        const nextRun = await runSearchStream(relaxed.query, "append", { ...structuralOverrides, deferPaidContact });
         const relaxedQuality = collectCandidateQualityStats(nextRun);
         runBreakdown.push({
           attempt: currentAttempts.length,
@@ -7665,7 +7673,7 @@ function NewJobPageContent() {
       });
       let results: any[] = [];
       if (!launchRemainingOnly) {
-        results = await handleRunSearch();
+        results = await handleRunSearch({ deferPaidContact: true });
         if (searchAbortRef.current?.signal.aborted) return;
         // Let the final stream updates flush into candidates state/ref before
         // computing the auto-launch selection.

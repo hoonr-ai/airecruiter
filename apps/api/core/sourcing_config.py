@@ -564,7 +564,8 @@ EXA_AGENT_CONTACT_FIELDS = _os.getenv(
 # `enrich_contact_for_sourcing` falls through to the Exa Agent contact run
 # (still gated by EXA_CONTACT_ENRICH_ENABLED + EXA_API_KEY) for LinkedIn-*
 # sources. Capped per job by EXA_SOURCING_CONTACT_CAP to bound spend
-# (~$0.115/run).
+# (~$0.115/run). Source & Launch's own searches put it off to Launch PAIR
+# (SOURCING_DEFER_PAID_CONTACT_ENABLED below).
 EXA_SOURCING_CONTACT_FALLBACK = _os.getenv(
     "EXA_SOURCING_CONTACT_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
@@ -627,6 +628,17 @@ def _env_pct(name: str, default: int) -> int:
 
 EXA_DEEP_SKIP_REACHABLE_PCT = _env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 50)
 
+# Source & Launch PAIR's full search (the browser's footer run and every
+# relaxed run behind it) and a launch session's S1 put the sourcing-time paid
+# Exa email lookup off to Launch PAIR (SearchCriteria.defer_paid_contact,
+# 2026-10-14): Launch asks Exa for the email and the phone in ONE run instead
+# of an email run now and a phone run minutes later (a second $0.025 base fee,
+# ~8.4k pairs per 15 days), and people never launched cost nothing. Apollo
+# still runs at sourcing, and no miss is recorded, so Launch does a normal run
+# first. Browse-only Step-5 searches keep buying. false = every search buys.
+SOURCING_DEFER_PAID_CONTACT_ENABLED = _os.getenv(
+    "SOURCING_DEFER_PAID_CONTACT_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate
 # already has an email but no phone. ZoomInfo cannot match a LinkedIn URL, but it

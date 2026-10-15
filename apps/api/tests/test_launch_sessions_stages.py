@@ -297,6 +297,23 @@ def test_s3_seeds_the_lookup_and_keeps_the_held_jobdiva_email():
     assert contact["l"]["override"] == {"phone": "+15125550100", "email": "work@found.test"}
 
 
+def test_s1_defers_paid_contact_on_every_attempt():
+    """O6: the session launches what S1 finds, so every attempt's search puts
+    its paid Exa email lookups off to S3 (one run for email + phone)."""
+    store, world, job, fields = full_search_world()
+    seen = []
+    orig = world.search_events
+
+    def spy(request, *, schedule_cross_submissions):
+        seen.append(request.get("defer_paid_contact"))
+        return orig(request, schedule_cross_submissions=schedule_cross_submissions)
+
+    world.search_events = spy
+    store.create_session(fields)
+    run(drive(store, world, fields["id"]))
+    assert seen == [True, True]
+
+
 def test_s3_goes_to_review_when_required():
     store = MemoryStore()
     job = add_job(store)
