@@ -279,7 +279,7 @@
     {
       "name": "PAIR Exa Agent errors",
       "enabled": true,
-      "description": "Contact Agent runs that failed to create or poll, or a create Exa refused (400) with no fallback left, or Exa rejecting run metadata (then set EXA_RUN_METADATA_ENABLED=false). Rate limits (outcome rate_limited, a 429 on create or on poll) and a refused Fiber data source (sources_refused, the deep search falls back to web search) are excluded. ExaCall events are not sampled.",
+      "description": "Contact Agent runs that failed to create or poll (network failures included: a ConnectError, a create timeout with no started run found or a poll ReadTimeout, late watches too, is a create_error / poll_error with error_kind = the exception class), or a create Exa refused (400) with no fallback left, or Exa rejecting run metadata (then set EXA_RUN_METADATA_ENABLED=false). Rate limits (outcome rate_limited, a 429 on create or on poll) and a refused Fiber data source (sources_refused, the deep search falls back to web search) are excluded. ExaCall events are not sampled.",
       "nrql": {
         "query": "SELECT count(*) FROM ExaCall WHERE appName IN ('PAIR API (QA)', 'PAIR API (PROD)') AND endpoint IN ('agent_run', 'agent_guard') AND outcome IN ('create_error', 'poll_error', 'metadata_rejected', 'rejected') FACET appName"
       },

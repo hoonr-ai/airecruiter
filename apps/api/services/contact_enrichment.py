@@ -956,7 +956,7 @@ async def keep_late_exa_result(
                     break
     except Exception as e:
         logger.info("Exa late watch of run %s ended: %s", run_id, e)
-        _record("request_error", error_kind=type(e).__name__)
+        _record("poll_error", error_kind=type(e).__name__)
         return {}
     if run.get("status") != "completed":
         _record(f"run_{run['status']}" if run.get("status") in _EXA_TERMINAL_STATES else "timeout")
@@ -1029,7 +1029,7 @@ async def _exa_contact_attempt(
 
     Every return records one ExaCall event (cost from the terminal run JSON).
     """
-    tele: Dict[str, Any] = {"outcome": "request_error"}
+    tele: Dict[str, Any] = {"outcome": "create_error"}  # every exit sets its own
     started = time.monotonic()
     try:
         return await _exa_contact_attempt_impl(client, headers, body, candidate_id, run_id, timeout_s, tele)
@@ -1157,7 +1157,10 @@ async def _exa_contact_attempt_impl(
             tele["run"] = run
     except Exception as e:
         logger.warning("Exa agent request failed for %s: %s", candidate_id, e)
-        tele.update(outcome="request_error", error_kind=type(e).__name__)
+        # A network failure (ConnectError, a create timeout whose run was not
+        # found, a poll ReadTimeout) is a create / poll error like Pass B's,
+        # so the Agent errors alert sees it; error_kind names the exception.
+        tele.update(outcome="poll_error" if run_id else "create_error", error_kind=type(e).__name__)
         return {"message": f"Exa request failed: {e}", "retry": "wait" if run_id else "new", "run_id": run_id}
 
     status = run.get("status")

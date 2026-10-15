@@ -21,19 +21,30 @@ set by services/exa_telemetry.agent_metadata). Runs without metadata are
 "untagged": Pass B through the SDK, scripts, anything before metadata shipped,
 or a worker that latched metadata off after a 400.
 
-``--seen FILE``: one id per line, run ids and/or ``call_id``s of runs New
-Relic saw finish (completed, failed or cancelled: every TERMINAL status),
-exported with
+``--seen FILE``: the run ids and/or ``call_id``s of runs New Relic saw
+finish (completed, failed or cancelled: every TERMINAL status), exported ONE
+DAY PER QUERY:
 
     SELECT uniques(exa_run_id, 10000), uniques(call_id, 10000) FROM ExaCall
       WHERE endpoint = 'agent_run' AND outcome IN ('completed', 'run_failed', 'run_cancelled')
-      SINCE 8 days ago
+      SINCE 8 days ago UNTIL 7 days ago
+
+then the same with ``SINCE 7 days ago UNTIL 6 days ago``, ... down to
+``SINCE 1 day ago`` (UNTIL defaults to now): 8 queries for the default
+8-day window, every result appended to the one file. NRQL ``uniques()``
+returns at most 10,000 values, so a single 8-day query silently drops ids and
+every dropped run would show as a false ORPHAN. The file is New Relic's JSON
+export (several appended exports are fine; each array of ids is a column) or
+plain text, one id per line, a blank line between columns. A column holding
+10,000 ids was cut off: the script then refuses (exit 2) instead of
+reporting false orphans; split that day further (``SINCE 12 hours ago``).
 
 A billed, finished run whose id and call_id are both missing from it is an
 ORPHAN: paid for, its end never seen (a sourcing timeout, a late watch killed
 by a restart, a lost create). Runs younger than ``--grace-min`` are skipped.
 
-Exit code 0; 2 when the key is missing or the API refuses the listing.
+Exit code 0; 2 when the key is missing, the API refuses the listing or a
+``--seen`` column looks truncated.
 """
 from __future__ import annotations
 
@@ -43,7 +54,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import httpx
 
@@ -52,6 +63,8 @@ BETA = "agent-2026-05-07"
 TERMINAL = {"completed", "failed", "cancelled"}
 GROUP_KEYS = ("env", "surface", "tier", "trigger", "arm")
 _KEEP = ("id", "status", "createdAt", "costDollars", "usage", "metadata")
+#: NRQL uniques() returns at most this many values: a seen column this full was cut off.
+SEEN_CAP = 10_000
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -176,9 +189,72 @@ def _count_by(rows: List[Dict[str, Any]], key: str) -> Dict[str, int]:
     return dict(out)
 
 
-def _read_seen(path: str) -> Set[str]:
+def _json_docs(text: str) -> Optional[List[Any]]:
+    """The JSON documents of ``text`` (several may be appended), or None when
+    it is not JSON."""
+    decoder = json.JSONDecoder()
+    docs: List[Any] = []
+    i = 0
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            return docs or None
+        if text[i] not in "[{":
+            return None
+        try:
+            doc, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return None
+        docs.append(doc)
+
+
+def _json_columns(node: Any, label: str, out: List[Tuple[str, List[str]]]) -> None:
+    """Every array of ids (strings) in an exported NRQL result, by its key."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            _json_columns(value, str(key), out)
+    elif isinstance(node, list):
+        if node and all(isinstance(x, str) for x in node):
+            out.append((label, [x.strip() for x in node if x.strip()]))
+        else:
+            for item in node:
+                _json_columns(item, label, out)
+
+
+def seen_columns(text: str) -> List[Tuple[str, List[str]]]:
+    """The id columns of a ``--seen`` file: each array of ids in New Relic's
+    JSON export, or each blank-line separated block of a plain list."""
+    docs = _json_docs(text)
+    columns: List[Tuple[str, List[str]]] = []
+    if docs is not None:
+        for n, doc in enumerate(docs, 1):
+            found: List[Tuple[str, List[str]]] = []
+            _json_columns(doc, "ids", found)
+            columns += [(f"export {n} {label}", ids) for label, ids in found]
+        return columns
+    block: List[str] = []
+    for line in text.splitlines() + [""]:
+        value = line.strip()
+        if value and not value.startswith("#"):
+            value = value.strip('",')
+            if value:
+                block.append(value)
+        elif block:
+            columns.append((f"block {len(columns) + 1}", block))
+            block = []
+    return columns
+
+
+def truncated_columns(columns: List[Tuple[str, List[str]]]) -> List[Tuple[str, int]]:
+    """(label, count) of every column that hit the NRQL uniques() cap."""
+    return [(label, len(set(ids))) for label, ids in columns if len(set(ids)) >= SEEN_CAP]
+
+
+def _read_seen(path: str) -> Tuple[Set[str], List[Tuple[str, List[str]]]]:
     with open(path, encoding="utf-8") as fh:
-        return {line.strip().strip('",') for line in fh if line.strip()}
+        columns = seen_columns(fh.read())
+    return {i for _, ids in columns for i in ids}, columns
 
 
 def _print_report(report: Dict[str, Any], days: float) -> None:
@@ -204,6 +280,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="print JSON instead of a table")
     args = parser.parse_args(argv)
 
+    seen: Optional[Set[str]] = None
+    if args.seen:
+        seen, columns = _read_seen(args.seen)
+        full = truncated_columns(columns)
+        if full:
+            bar = "!" * 78
+            print(bar, file=sys.stderr)
+            for label, count in full:
+                print(f"--seen looks TRUNCATED: {label} holds {count:,} ids, the NRQL uniques() cap.", file=sys.stderr)
+            print(
+                "Every run past the cut would be reported as a false ORPHAN. Export one day per query\n"
+                "(SINCE n days ago UNTIL n-1 days ago, see the module doc; split a day that still hits\n"
+                "10,000) and append them. A plain list needs a blank line between exports.",
+                file=sys.stderr,
+            )
+            print(bar, file=sys.stderr)
+            return 2
+        largest = max((len(set(ids)) for _, ids in columns), default=0)
+        print(
+            f"seen: {len(seen):,} ids in {len(columns)} column(s), largest {largest:,} of {SEEN_CAP:,}",
+            file=sys.stderr,
+        )
+
     try:
         from dotenv import load_dotenv
 
@@ -220,7 +319,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001 - report and stop; nothing to undo
         print(f"Could not list Exa runs: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    report = summarize(runs, _read_seen(args.seen) if args.seen else None, grace_min=args.grace_min)
+    report = summarize(runs, seen, grace_min=args.grace_min)
     if args.json:
         print(json.dumps(report, indent=2))
     else:

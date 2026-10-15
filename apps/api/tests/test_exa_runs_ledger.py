@@ -121,3 +121,80 @@ def test_missing_key_exits_2(monkeypatch):
     # An empty value is never overridden by apps/api/.env (load_dotenv override=False).
     monkeypatch.setenv("EXA_API_KEY", "")
     assert ledger.main([]) == 2
+
+
+# ---------------------------------------------------------------------------
+# --seen: NRQL uniques() stops at 10,000, so a cut-off column must not
+# become a page of false orphans.
+# ---------------------------------------------------------------------------
+
+def _export(run_ids, call_ids):
+    # The shape of a New Relic JSON export of the module doc's query.
+    return json.dumps([{"uniques.exa_run_id": run_ids, "uniques.call_id": call_ids}], indent=2)
+
+
+def test_the_seen_export_is_one_day_per_query():
+    doc = " ".join(ledger.__doc__.split())
+    assert "SINCE 8 days ago UNTIL 7 days ago" in doc and "SINCE 1 day ago" in doc
+    assert "10,000" in doc and str(ledger.SEEN_CAP) == "10000"
+
+
+def test_appended_json_exports_are_read_column_by_column():
+    text = _export(["r1", "r2"], ["c-1"]) + "\n" + _export(["r3"], ["c-3", "c-4"])
+
+    columns = ledger.seen_columns(text)
+
+    assert [len(ids) for _, ids in columns] == [2, 1, 1, 2]
+    assert columns[0][0] == "export 1 uniques.exa_run_id" and columns[3][0] == "export 2 uniques.call_id"
+    assert {i for _, ids in columns for i in ids} == {"r1", "r2", "r3", "c-1", "c-3", "c-4"}
+    assert ledger.truncated_columns(columns) == []
+
+
+def test_a_plain_list_is_split_into_columns_at_blank_lines():
+    text = '"r1",\n"r2"\n\n# day 2\nc-1\n  \nr3\n'
+
+    columns = ledger.seen_columns(text)
+
+    assert [ids for _, ids in columns] == [["r1", "r2"], ["c-1"], ["r3"]]
+
+
+def test_a_column_at_the_uniques_cap_is_truncated():
+    full = [f"r{i}" for i in range(ledger.SEEN_CAP)]
+    columns = ledger.seen_columns(_export(full, ["c-1"]))
+    assert ledger.truncated_columns(columns) == [("export 1 uniques.exa_run_id", 10_000)]
+
+    # Eight days of 2,000 runs each, appended: 16,000 ids, no column at the cap.
+    days = "\n".join(_export([f"r{d}-{i}" for i in range(2000)], []) for d in range(8))
+    columns = ledger.seen_columns(days)
+    assert sum(len(ids) for _, ids in columns) == 16_000 and ledger.truncated_columns(columns) == []
+
+
+def test_a_truncated_seen_file_exits_2_before_listing_runs(tmp_path, monkeypatch, capsys):
+    seen = tmp_path / "seen.json"
+    seen.write_text(_export([f"r{i}" for i in range(ledger.SEEN_CAP)], []), encoding="utf-8")
+    monkeypatch.setenv("EXA_API_KEY", "k")
+
+    def _no_network(*a, **k):
+        raise AssertionError("must not list runs from a truncated export")
+
+    monkeypatch.setattr(ledger, "fetch_runs", _no_network)
+
+    assert ledger.main(["--seen", str(seen)]) == 2
+    err = capsys.readouterr().err
+    assert "TRUNCATED" in err and "uniques.exa_run_id" in err and "10,000" in err
+
+
+def test_an_untruncated_seen_file_reports_orphans(tmp_path, monkeypatch, capsys):
+    seen = tmp_path / "seen.txt"
+    seen.write_text("r1\nr2\n\nc-4\n", encoding="utf-8")
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    monkeypatch.setattr(
+        ledger, "fetch_runs",
+        lambda client, key, **kw: [ledger.slim(r) for r in (_run("r1", 48, 0.1), _run("r9", 48, 0.2, CONTACT))],
+    )
+
+    assert ledger.main(["--seen", str(seen), "--json"]) == 0
+    out = capsys.readouterr()
+    report = json.loads(out.out)
+    assert [o["id"] for o in report["orphans"]["sample"]] == ["r9"]
+    assert "3 ids in 2 column(s)" in out.err

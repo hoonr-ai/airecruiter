@@ -14,15 +14,20 @@ Pins:
     latched off for the process (ERROR once); the deep search keeps Fiber
   - ExaConfig once per worker per hour, only once New Relic took it
   - ExaCall per contact attempt / late watch, with cost from the run JSON; a
-    poll 429 is rate_limited, a cancelled attempt or query is abandoned
+    poll 429 is rate_limited, a cancelled attempt or query is abandoned, a
+    network failure is a create_error / poll_error the Agent errors alert counts
   - Pass B / per-URL deep analysis events (both ship off) and _exa_paced
     running the SDK call under the New Relic trace
 """
 import asyncio
+import json
 import logging
+import re
 import time
 import types
+from pathlib import Path
 
+import httpx
 import pytest
 
 from core import config as core_config
@@ -287,7 +292,10 @@ def _exa_client(bodies, answers, polls=()):
             return answer
 
         async def get(self, url, headers=None, params=None):
-            return polls.pop(0)
+            answer = polls.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
 
     return _Client
 
@@ -493,6 +501,51 @@ def test_out_of_credits_create_is_recorded_as_such(exa_env, events):
     assert _lookup(fields=("phone",)) == {"ok": False, "message": "Exa create error (402)", "fatal": True}
     [call] = _calls(events, endpoint="agent_run")
     assert call["outcome"] == "out_of_credits" and call["http_status"] == 402 and call["error_kind"] == "NO_MORE_CREDITS"
+
+
+def _alert_outcomes():
+    """The outcome list of the 'PAIR Exa Agent errors' alert (pair-alerts.json)."""
+    path = Path(__file__).parents[3] / "docs" / "observability" / "newrelic" / "pair-alerts.json"
+    [cond] = [c for c in json.loads(path.read_text())["conditions"] if c["name"] == "PAIR Exa Agent errors"]
+    return set(re.findall(r"'([a-z_]+)'", cond["nrql"]["query"].split("outcome IN", 1)[1].split(")", 1)[0]))
+
+
+@pytest.mark.parametrize("answers, polls, outcome, kind", [
+    ([httpx.ConnectError("refused"), httpx.ConnectError("refused")], [], "create_error", "ConnectError"),
+    ([httpx.ReadTimeout("late"), httpx.ReadTimeout("late")], [], "create_error", "ReadTimeout"),
+    ([_Resp(200, {"id": "run-5", "status": "running"})], [httpx.ReadTimeout("slow")], "poll_error", "ReadTimeout"),
+])
+def test_a_contact_network_failure_is_a_create_or_poll_error_the_alert_counts(
+    exa_env, events, monkeypatch, answers, polls, outcome, kind,
+):
+    # Recorded as request_error before, which the Agent errors alert never saw.
+    async def _no_started_run(client, headers, query):
+        return None
+
+    monkeypatch.setattr(ce, "_find_started_run", _no_started_run)
+    exa_env(answers, polls=polls)
+
+    assert not _lookup(fields=("phone",), wait_retry=False)["ok"]
+
+    calls = _calls(events, endpoint="agent_run")
+    assert calls and all(c["outcome"] == outcome and c["error_kind"] == kind for c in calls)
+    assert outcome in _alert_outcomes()
+    if outcome == "poll_error":
+        assert calls[0]["exa_run_id"] == "run-5"
+    else:
+        assert all("exa_run_id" not in c for c in calls)
+
+
+def test_a_late_watch_network_failure_is_a_poll_error_the_alert_counts(monkeypatch, events):
+    monkeypatch.setattr(ce.httpx, "AsyncClient", _exa_client([], [], [httpx.ConnectError("refused")]))
+    monkeypatch.setattr(ce, "_EXA_LATE_POLL_S", 0)
+    monkeypatch.setattr(ce, "EXA_LATE_RESULT_WAIT_S", 5)
+
+    assert asyncio.run(ce.keep_late_exa_result("run-8", LINKEDIN, fields=("phone",))) == {}
+
+    [call] = _calls(events)
+    assert call["late"] is True and call["outcome"] == "poll_error" and call["error_kind"] == "ConnectError"
+    assert call["exa_run_id"] == "run-8" and "poll_error" in _alert_outcomes()
 
 
 def test_late_watch_records_its_final_cost(monkeypatch, events):

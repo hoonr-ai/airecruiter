@@ -20,8 +20,9 @@ name / url / text / contact / content / resume ..., hence ``cost_pages`` not
   the contact path's 400 guard, not a call)
 - ``outcome``: completed | ok | timeout | error | rate_limited | no_slot |
   out_of_credits | breaker_open | create_error | create_rejected | poll_error |
-  request_error | run_failed | run_cancelled | not_found | abandoned |
-  metadata_rejected | sources_refused | rejected | ...
+  run_failed | run_cancelled | not_found | abandoned | metadata_rejected |
+  sources_refused | rejected | ... (an Agent run's network failure is a
+  create_error / poll_error with ``error_kind`` = the exception class)
 - cost: ``cost_total``, ``cost_search``, ``cost_pages`` (contents),
   ``cost_compute``, ``cost_fee_e`` / ``cost_fee_p`` (per email / phone found),
   ``cost_fiber`` (Exa Connect data sources), ``acu``
