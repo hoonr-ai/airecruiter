@@ -1320,7 +1320,9 @@ async def _exa_contact_attempt_impl(
 #   leader       claims it once it holds a slot of its semaphore (a lookup
 #                still queued for a slot holds nobody up: a click or Launch
 #                PAIR never waits on a sourcing lookup that has not started),
-#                renews it every LEASE_HEARTBEAT_S and before each create (no
+#                for the fields the cache still lacks with the slot in hand
+#                (the lease names exactly what its run asks), renews it
+#                every LEASE_HEARTBEAT_S and before each create (no
 #                create is sent once someone else holds the person), stamps
 #                the run it started, records the answer, then releases it. A
 #                run still going is handed, with the lease, to the late watch;
@@ -1688,7 +1690,12 @@ async def _single_flight(step: _Step) -> Dict[str, Any]:
         if held["state"] == "error":
             return await _passthrough(step, remaining, "lease_error")
         if held["state"] == "free":
-            status, token, permit = await _claim_with_slot(step, remaining)
+            status, token, permit, remaining = await _claim_with_slot(step, remaining)
+            if status == "cached":
+                # The cache answered the rest once the slot was in hand:
+                # nothing claimed, nothing bought.
+                return _finish(step, {"ok": True, "fields": {}, "from_cache": True}, "follower", "follower",
+                               lease_lost=lease_lost or None)
             if status == "error":
                 return await _passthrough(step, remaining, "lease_error", permit)
             if status == "won":
@@ -1743,8 +1750,7 @@ async def _single_flight(step: _Step) -> Dict[str, Any]:
             else:
                 await _pause()
         # What the cache answered meanwhile (a holder records before it releases).
-        step.got.update(_answered_since(step.before, await contact_cache.get(step.linkedin_url), remaining, step.deep))
-        remaining = tuple(f for f in remaining if f not in step.got)
+        remaining = await _unanswered(step, remaining)
         if not remaining:
             return _finish(step, {"ok": True, "fields": {}, "from_cache": True}, "follower", "follower",
                            waited_ms=exa_telemetry.latency_ms(started), lease_lost=lease_lost or None)
@@ -1753,10 +1759,7 @@ async def _single_flight(step: _Step) -> Dict[str, Any]:
             if not joined:
                 # Nobody holds the person any more? Its holder may have
                 # recorded the answer and released since the read above.
-                step.got.update(_answered_since(
-                    step.before, await contact_cache.get(step.linkedin_url), remaining, step.deep,
-                ))
-                remaining = tuple(f for f in remaining if f not in step.got)
+                remaining = await _unanswered(step, remaining)
                 if not remaining:
                     return _finish(step, {"ok": True, "fields": {}, "from_cache": True}, "follower", "follower",
                                    waited_ms=exa_telemetry.latency_ms(started), lease_lost=lease_lost or None)
@@ -1770,28 +1773,72 @@ async def _single_flight(step: _Step) -> Dict[str, Any]:
             )
 
 
-async def _claim_with_slot(step: _Step, fields: Tuple[str, ...]) -> Tuple[str, str, Optional[_SlotPermit]]:
-    """A slot of the step's semaphore first, then the person's lease: a
-    lookup still queued for a slot never holds the person, so it never holds
-    up one that could run now (a click or Launch PAIR behind a queued
-    sourcing lookup). ("won", token, permit), ("held", "", None) (the slot
-    given back) or ("error", "", permit) (fail open: run in that slot)."""
+async def _unanswered(step: _Step, fields: Tuple[str, ...]) -> Tuple[str, ...]:
+    """``fields`` less those the cache answered since the caller read it
+    (kept in ``step.got``)."""
+    if step.before is None:
+        return fields
+    step.got.update(_answered_since(step.before, await contact_cache.get(step.linkedin_url), fields, step.deep))
+    return tuple(f for f in fields if f not in step.got)
+
+
+def _give_back_claim(slug: str) -> Callable[["asyncio.Future[Tuple[str, str]]"], None]:
+    """Done-callback of a claim whose caller was cancelled while it ran: the
+    claim still commits in its thread, so a lease it won is released here
+    (else nobody holds or renews it, and every lookup of the person waits up
+    to contact_cache.LEASE_S for it to lapse)."""
+    def _done(claim: "asyncio.Future[Tuple[str, str]]") -> None:
+        if claim.cancelled() or claim.exception() is not None:
+            return
+        status, token = claim.result()
+        if status == "won":
+            _Lease(slug, token).release_soon()
+    return _done
+
+
+async def _claim_with_slot(
+    step: _Step, fields: Tuple[str, ...],
+) -> Tuple[str, str, Optional[_SlotPermit], Tuple[str, ...]]:
+    """A slot of the step's semaphore first, then the cache looked at again
+    with the slot in hand (a lookup of the same person that held the slot,
+    or any other lookup meanwhile, may have answered some of ``fields``),
+    then the person's lease for what is still unanswered: the lease names
+    exactly the fields its run asks, so a lookup of a field no run is after
+    never waits on it. A lookup still queued for a slot never holds the
+    person, so it never holds up one that could run now (a click or Launch
+    PAIR behind a queued sourcing lookup).
+
+    (status, token, permit, the fields to buy): ("won", token, permit, ...),
+    ("held", "", None, ...) (the slot given back), ("cached", "", None, ())
+    (the cache answered them all: nothing claimed, the slot given back) or
+    ("error", "", permit, ...) (fail open: run in that slot). A caller
+    cancelled while the claim runs releases the lease it took."""
     permit: Optional[_SlotPermit] = None
     if step.semaphore is not None:
         await step.semaphore.acquire()
         permit = _SlotPermit(step.semaphore)
+    claim: Optional["asyncio.Future[Tuple[str, str]]"] = None
     try:
-        status, token = await contact_cache.claim(
+        if permit is not None:
+            fields = await _unanswered(step, fields)
+            if not fields:
+                permit.release()
+                return "cached", "", None, ()
+        claim = asyncio.ensure_future(contact_cache.claim(
             step.slug, fields, step.tier, ctx=step.late or None, **_horizons(),
-        )
+        ))
+        _keep_task(claim)
+        status, token = await asyncio.shield(claim)
     except BaseException:
         if permit is not None:
             permit.release()
+        if claim is not None:
+            claim.add_done_callback(_give_back_claim(step.slug))
         raise
     if status == "held" and permit is not None:
         permit.release()
         permit = None
-    return status, token, permit
+    return status, token, permit, fields
 
 
 async def _follow_run(run_id: str, deadline: float) -> Dict[str, Any]:
@@ -1823,33 +1870,25 @@ async def _run_paid(
     step: _Step, fields: Tuple[str, ...], lease: Optional[_Lease], permit: Optional[_SlotPermit] = None,
 ) -> Dict[str, Any]:
     """A run of this step's own (the leader's, or one without a lease) in a
-    slot of the step's semaphore (``permit``: one already taken, else it is
-    waited for here): the cache looked at again with the slot in hand, then
-    the run, shielded. Its fields go in ``step.going`` while it is going."""
+    slot of the step's semaphore (``permit``: one already taken, the cache
+    looked at again by its taker, _claim_with_slot; else it is waited for
+    here and the cache looked at again with it in hand), then the run,
+    shielded. Its fields go in ``step.going`` while it is going. A leader's
+    ``fields`` are never narrowed here: its lease names them."""
     if lease is not None:
         lease.start_beats()
     try:
         if permit is None and step.semaphore is not None:
             await step.semaphore.acquire()
             permit = _SlotPermit(step.semaphore)
-        if permit is not None and step.before is not None:
-            # A lookup of the same person that held the slot (a re-search
-            # after Stop, another row of the person, a lookup without a
-            # lease) may have answered it meanwhile.
-            step.got.update(_answered_since(
-                step.before, await contact_cache.get(step.linkedin_url), fields, step.deep,
-            ))
-            fields = tuple(f for f in fields if f not in step.got)
-            if not fields:
-                permit.release()
-                if lease is not None:
-                    # Lookups that joined the lease meanwhile get the
-                    # cache's answer too.
-                    joined = await lease.release()
-                    email, phone = step.got.get("email") or "", step.got.get("phone") or ""
-                    if joined and (email or phone):
-                        await _fill_late_contexts(joined, email, phone, skip=step.late)
-                return {"ok": True, "fields": {}, "from_cache": True}
+            if lease is None:
+                # A lookup of the same person that held the slot (a
+                # re-search after Stop, another row of the person, a lookup
+                # without a lease) may have answered it meanwhile.
+                fields = await _unanswered(step, fields)
+                if not fields:
+                    permit.release()
+                    return {"ok": True, "fields": {}, "from_cache": True}
         task = asyncio.ensure_future(_paid_run(step, fields, lease, permit))
     except BaseException:
         if permit is not None:

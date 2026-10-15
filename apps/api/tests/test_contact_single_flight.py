@@ -1,13 +1,25 @@
 """One paid Exa contact lookup per person at a time across the 8 workers
 (2026-10-15, PR 3b; services/contact_enrichment.exa_step).
 
+RUN THESE LOCALLY WITH A POSTGRES BEFORE MERGING ANY CHANGE TO THE LEASE.
+CI has no Postgres: without LAUNCH_REPORT_TEST_DSN every test here that takes
+the ``pgs`` fixture SKIPS (the lease SQL, every leader / follower / sweep
+path), and only the DB-error and pure-function cases run. A broken lease
+predicate raises nothing, so a green CI says nothing about it. Locally::
+
+    PGTZ=UTC LAUNCH_REPORT_TEST_DSN='postgresql://...' \\
+        python -m pytest -q tests/test_contact_single_flight.py tests/test_contact_cache.py -rs
+
+and check the summary shows no "no Postgres reachable" skips.
+
 The person's contact_enrichment_cache row is a lease: the first lookup leads
-(claims it outside every semaphore, keeps it alive, stamps its run, caches the
-answer, releases it); a lookup of the same person meanwhile follows (polls the
-leader's run for free, or waits and claims what is still unanswered) or, out
-of time, joins the lease and answers ``in_progress`` (never a miss). A run
-still going goes to the late watch with the lease; a watch that dies with its
-worker is adopted by the 60 s sweep (FOR UPDATE SKIP LOCKED).
+(claims it once it holds a slot of its semaphore, for the fields the cache
+still lacks, keeps it alive, stamps its run, caches the answer, releases it);
+a lookup of the same person meanwhile follows (polls the leader's run for
+free, or waits and claims what is still unanswered) or, out of time, joins
+the lease and answers ``in_progress`` (never a miss). A run still going goes
+to the late watch with the lease; a watch that dies with its worker is
+adopted by the 60 s sweep (FOR UPDATE SKIP LOCKED).
 
 The SQL and end-to-end cases need a real Postgres (LAUNCH_REPORT_TEST_DSN):
 the table lives in a schema of its own and every call opens its own
@@ -16,6 +28,7 @@ connection, as the workers' pool does, so leases are contended for real.
 import asyncio
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -44,7 +57,8 @@ def pgs(monkeypatch):
     try:
         admin = psycopg2.connect(_DSN, connect_timeout=2)
     except Exception:
-        pytest.skip("no Postgres reachable (set LAUNCH_REPORT_TEST_DSN)")
+        # CI has no Postgres: run this file locally with the DSN before merging.
+        pytest.skip("no Postgres reachable (set LAUNCH_REPORT_TEST_DSN; CI has none, run it locally)")
     admin.autocommit = True
     schema = f"cc_lease_{uuid.uuid4().hex[:10]}"
     with admin.cursor() as cur:
@@ -774,6 +788,11 @@ def _counting(monkeypatch, name):
     return calls
 
 
+def _asked(post):
+    """The contact fields an Exa create asked for."""
+    return tuple(post["outputSchema"]["properties"]["contact"]["properties"])
+
+
 @pytest.mark.parametrize("failure", ["unreachable", "not_a_dict"])
 def test_a_follower_whose_polls_fail_waits_instead_of_spinning(pgs, exa, monkeypatch, failure):
     # The holder's run could not be read: _follow_run returned at once and the
@@ -900,28 +919,168 @@ def test_a_follower_that_misses_the_release_still_gets_the_answer(pgs, exa, monk
     assert exa.posts == []
 
 
-def test_a_leader_answered_by_the_cache_fills_the_rows_that_joined(pgs, exa, monkeypatch):
-    fills = []
-    monkeypatch.setattr(ce, "_fill_sourced_rows_sync", fills.append)
+def test_a_lookup_the_cache_answers_once_it_has_its_slot_claims_nothing(pgs, exa, events, monkeypatch):
+    # Second-round fix (3b): the cache is looked at again with the slot in
+    # hand BEFORE the claim (it used to be after, with the lease already
+    # naming the fields), so a lookup the cache answered never holds the
+    # person, not even for a moment.
     real_get = contact_cache.get
+    reads = []
 
     async def _get(url):
-        # With the slot in hand the leader looks at the cache again; another
-        # lookup joined its lease and the phone was found meanwhile.
-        await contact_cache.join(SLUG, {"candidate_id": "c2", "jobdiva_id": "26-2"})
+        reads.append(1)
         await contact_cache.record(LINKEDIN, phone=MOBILE, phone_provider="apollo")
         return await real_get(url)
 
     monkeypatch.setattr(contact_cache, "get", _get)
+    claims = _counting(monkeypatch, "claim")
 
     res = asyncio.run(ce.exa_step(
         "c1", LINKEDIN, "Jane Doe", fields=("phone",), semaphore=asyncio.Semaphore(1),
         late={"candidate_id": "c1", "jobdiva_id": "26-1"}, cached=contact_cache.empty(),
     ))
 
-    assert res["role"] == "leader" and res["from_cache"] and exa.posts == []
-    assert [(f["candidate_id"], f["jobdiva_id"], f["phone"]) for f in fills] == [("c2", "26-2", MOBILE)]
-    assert asyncio.run(contact_cache.holder(SLUG, **_H)) == {"state": "free"}
+    assert res["ok"] and res["from_cache"] and res["fields"]["mobilePhone"] == MOBILE
+    assert res["role"] == "follower" and res["in_progress_fields"] == []
+    assert claims == [] and reads == [1] and exa.posts == []
+    assert pgs("SELECT COUNT(*) FROM contact_enrichment_cache WHERE pending_token IS NOT NULL") == [(0,)]
+    assert [(x["outcome"], x.get("from_cache")) for x in _lookups(events)] == [("follower", True)]
+
+
+def test_the_lease_names_only_the_fields_its_run_asks(pgs, exa, events, monkeypatch):
+    # Second-round fix (3b): the cache answered the phone (a normal miss)
+    # after the caller read it, so the run asks the email only. The lease
+    # used to keep naming the phone: a deep search for the phone then waited
+    # its whole window behind a run nobody was asking the phone of, and
+    # answered in_progress for it.
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_TIMEOUT_S", 1)
+    exa.answer = {"email": "jane@acme.com", "phone": "+1 415 555 0100"}
+    exa.finished = True
+    exa.stuck = {"run-1"}                                            # the email run outlives its window
+    asyncio.run(contact_cache.record(LINKEDIN, missed=["phone"]))     # another lookup, meanwhile
+    sem = asyncio.Semaphore(3)
+    kw = {"semaphore": sem, "late": {"candidate_id": "c1"}, "cached": contact_cache.empty(), "wait_retry": False}
+
+    async def _go():
+        normal = await ce.exa_step("c1", LINKEDIN, "Jane Doe", fields=("email", "phone"), **kw)
+        held = await contact_cache.holder(SLUG, **_H)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deep = await ce.exa_step("c1", LINKEDIN, "Jane Doe", fields=("phone",), deep=True, **kw)
+        took = loop.time() - started
+        exa.stuck.clear()
+        await asyncio.gather(*list(ce._LATE_WATCHES))
+        return normal, held, deep, took
+
+    normal, held, deep, took = asyncio.run(_go())
+
+    assert normal["run_id"] == "run-1" and normal["in_progress_fields"] == ["email"]
+    assert held["fields"] == ("email",)                             # not ("email", "phone")
+    assert [_asked(p) for p in exa.posts] == [("email",), ("phone",)]
+    assert deep["role"] == "passthrough" and deep["ok"] and deep["fields"]["mobilePhone"] == MOBILE
+    assert deep["in_progress_fields"] == [] and took < 0.9           # never waited on the email run
+    assert [(x["outcome"], x.get("reason")) for x in _lookups(events)] == [
+        ("leader", None), ("passthrough", "no_overlap"),
+    ]
+    got = asyncio.run(contact_cache.get(LINKEDIN))
+    assert got["email"] == "jane@acme.com" and got["phone"] == MOBILE
+
+
+def test_a_click_whose_phone_the_cache_missed_meanwhile_still_buys_its_deep_search(pgs, exa, monkeypatch):
+    # The router's own chain: Apollo's turn is the gap in which another
+    # lookup records a normal phone miss. The normal run asks the email only
+    # and outlives its windows (late-watched, holding the lease); the deep
+    # search for the phone is bought at once instead of waiting behind it.
+    monkeypatch.setattr(sourcing_config, "CONTACT_LOOKUP_PROVIDERS", ("apollo", "exa"))
+    monkeypatch.setattr(core_config, "EXA_CONTACT_ENRICH_ENABLED", True)
+    monkeypatch.setattr(sourcing_config, "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", False)
+    monkeypatch.setattr(apollo_phone, "reveal_available", lambda: False)
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_EFFORT", "medium")
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_TIMEOUT_S", 1)
+    exa.finished = True                                              # (each run answers the phone only)
+    exa.stuck = {"run-1"}
+    steps = []
+    real_step = ce.exa_step
+
+    async def _step(*args, **kwargs):
+        steps.append("deep" if kwargs.get("deep") else "normal")
+        return await real_step(*args, **kwargs)
+
+    async def _apollo(candidate_id, linkedin_url):
+        await contact_cache.record(LINKEDIN, missed=["phone"])      # another lookup's miss, meanwhile
+        return {"ok": True, "fields": {}}
+
+    def _no_db():
+        raise RuntimeError("no db in tests")
+
+    monkeypatch.setattr(ce, "exa_step", _step)
+    monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
+    monkeypatch.setattr(candidates_router, "_apollo_enrich_by_linkedin", _apollo)
+    body = candidates_router.EnrichCandidateContactRequest(
+        candidate_id="cand-1", linkedin_url=LINKEDIN, full_name="Jane Doe", fields=["email", "phone"],
+    )
+
+    async def _go():
+        res = await candidates_router._enrich_candidate_contact_impl("cand-1", body)
+        exa.stuck.clear()
+        await asyncio.gather(*list(ce._LATE_WATCHES))
+        return res
+
+    res = asyncio.run(_go())
+
+    assert steps == ["normal", "deep"]
+    assert [_asked(p) for p in exa.posts] == [("email",), ("phone",)]
+    assert res["phone"] == MOBILE and res["in_progress_fields"] == ["email"]
+
+
+def test_a_lookup_cancelled_while_it_claims_leaves_no_lease(pgs, exa, monkeypatch):
+    # Second-round fix (3b): a lookup cancelled (a closed Step-5 stream)
+    # while its claim ran in its thread: the claim still committed, and the
+    # lease it took was held and renewed by nobody, so every lookup of the
+    # person waited up to LEASE_S for it to lapse.
+    real_lease_sync = contact_cache._lease_sync
+    claimed = []
+
+    def _slow_claim(sql, params, fetch=""):
+        if sql is contact_cache.CLAIM_SQL:
+            time.sleep(0.4)
+            out = real_lease_sync(sql, params, fetch)
+            claimed.append(out)
+            return out
+        return real_lease_sync(sql, params, fetch)
+
+    monkeypatch.setattr(contact_cache, "_lease_sync", _slow_claim)
+    unused = []
+
+    async def _go():
+        step = asyncio.ensure_future(ce.exa_step(
+            "c1", LINKEDIN, "Jane Doe", fields=("phone",), semaphore=asyncio.Semaphore(1),
+            cached=contact_cache.empty(), on_unused=lambda: unused.append(1),
+        ))
+        await asyncio.sleep(0.15)                                    # inside the claim
+        step.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await step
+        await _until(lambda: bool(claimed))                         # the claim committed...
+        for _ in range(100):                                         # ...and its lease is given back
+            held = await contact_cache.holder(SLUG, **_H)
+            if held["state"] == "free":
+                break
+            await asyncio.sleep(0.02)
+        return held
+
+    held = asyncio.run(_go())
+
+    assert claimed and claimed[0] is not None                        # it did win the lease
+    assert held == {"state": "free"}
+    assert pgs("SELECT COUNT(*) FROM contact_enrichment_cache WHERE pending_token IS NOT NULL") == [(0,)]
+    assert exa.posts == [] and unused == [1]
+    # Whoever looks the person up next leads at once.
+    exa.finished = True
+    res = asyncio.run(ce.exa_step("c2", LINKEDIN, "Jane Doe", fields=("phone",)))
+    assert res["role"] == "leader" and len(exa.posts) == 1
 
 
 def test_a_click_behind_another_lookups_run_buys_no_deep_search(pgs, exa, monkeypatch):

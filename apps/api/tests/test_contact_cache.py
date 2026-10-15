@@ -207,7 +207,10 @@ def test_a_normal_miss_older_than_the_miss_ttl_is_bought_again_when_a_deep_searc
 
 
 # ---------------------------------------------------------------------------
-# SQL (skips without a reachable Postgres; TEMP table only)
+# SQL (skips without a reachable Postgres; TEMP table only). CI has no
+# Postgres, so these skip there: run them locally with LAUNCH_REPORT_TEST_DSN
+# before merging a change to the cache SQL or its lease columns (see
+# tests/test_contact_single_flight.py).
 # ---------------------------------------------------------------------------
 
 _DSN = os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
