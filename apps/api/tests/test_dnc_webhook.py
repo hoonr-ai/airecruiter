@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
-from routers.dnc_webhook import _verify_hmac_signature
+from core.webhook_auth import verify_hmac_signature
 
 client = TestClient(app)
 
@@ -18,9 +18,9 @@ def test_dnc_webhook_signature_verification(monkeypatch):
     payload = b'{"event": "candidate.outreach_suppressed"}'
     valid_sig = "sha256=" + hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
-    assert _verify_hmac_signature(payload, valid_sig) is True
-    assert _verify_hmac_signature(payload, "sha256=invalid") is False
-    assert _verify_hmac_signature(payload, None) is False
+    assert verify_hmac_signature(payload, valid_sig) is True
+    assert verify_hmac_signature(payload, "sha256=invalid") is False
+    assert verify_hmac_signature(payload, None) is False
 
 
 def test_dnc_webhook_endpoint_rejects_invalid_signature(monkeypatch):

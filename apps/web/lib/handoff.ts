@@ -17,7 +17,9 @@ export type JoinView =
 /** What the page shows before the recruiter joins, from Pair-bot's state. */
 export function joinViewFor(state: {
   state: string | null;
-  is_your_handoff?: boolean;
+  // null: the API couldn't tell (no recruiter on Pair-bot's reply), so
+  // claim decides; only an explicit false means another recruiter's.
+  is_your_handoff?: boolean | null;
   claimed_by_email?: string | null;
   close_reason?: string | null;
 }): JoinView {
@@ -40,6 +42,10 @@ export function joinViewFor(state: {
       return { kind: "none" };
   }
 }
+
+/** States Pair-bot never moves on from (contract: a later state never moves back). */
+export const isHandoffOver = (state: string | null | undefined): boolean =>
+  state === "closed" || state === "missed" || state === "cancelled";
 
 /** A readable message for a failed claim/close (Pair-bot's own status codes). */
 export function describeHandoffError(err: unknown): string {

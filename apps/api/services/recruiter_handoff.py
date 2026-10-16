@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -173,9 +174,7 @@ class PairbotHandoffError(Exception):
 
 
 def _base_url() -> str:
-    from routers.engagement import EXTERNAL_INTERVIEW_API_URL
-
-    return EXTERNAL_INTERVIEW_API_URL.rstrip("/")
+    return os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
 
 
 async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -192,7 +191,14 @@ async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None) -
         except ValueError:
             detail = resp.text
         raise PairbotHandoffError(resp.status_code, str(detail)[:500])
-    return resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        logger.warning("pairbot handoff %s %s returned a non-object body: %.200s", method, path, resp.text)
+        raise PairbotHandoffError(502, "PAIR-bot sent an unexpected reply")
+    return data
 
 
 async def claim(interview_id: int, recruiter_email: str) -> Dict[str, Any]:

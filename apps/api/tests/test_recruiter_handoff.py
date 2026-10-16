@@ -73,7 +73,8 @@ def test_webhook_ignores_unknown_events_and_needs_an_interview(signed_env, monke
     raw, headers = _signed(_event(event="something_else"))
     assert client.post("/api/v1/webhooks/pairbot/handoff", content=raw, headers=headers).json()["status"] == "ignored"
     raw, headers = _signed(_event(interview_id=None))
-    assert client.post("/api/v1/webhooks/pairbot/handoff", content=raw, headers=headers).status_code == 422
+    resp = client.post("/api/v1/webhooks/pairbot/handoff", content=raw, headers=headers)
+    assert resp.status_code == 200 and resp.json()["status"] == "ignored"
 
 
 def test_webhook_storage_failure_is_a_5xx_so_pairbot_retries(signed_env, monkeypatch):
@@ -107,7 +108,7 @@ def test_claim_sends_the_login_email_not_a_body_field(as_recruiter, monkeypatch)
     assert calls == [(4242, "rec@example.com")]
 
 
-@pytest.mark.parametrize("status", [403, 409, 410])
+@pytest.mark.parametrize("status", [403, 404, 409, 410])
 def test_pairbot_refusals_pass_through(as_recruiter, monkeypatch, status):
     async def refuse(*a):
         raise handoff.PairbotHandoffError(status, "nope")
@@ -115,6 +116,39 @@ def test_pairbot_refusals_pass_through(as_recruiter, monkeypatch, status):
     monkeypatch.setattr(handoff, "claim", refuse)
     resp = client.post("/api/v1/handoff/4242/claim")
     assert resp.status_code == status and resp.json()["detail"] == "nope"
+
+
+@pytest.mark.parametrize("status", [401, 422, 500, 503])
+def test_other_pairbot_failures_become_502(as_recruiter, monkeypatch, status):
+    """A Pair-bot 401 (our service key) must not reach the browser, which
+    would read it as the recruiter's own login expiring."""
+    async def fail(*a):
+        raise handoff.PairbotHandoffError(status, "internal detail")
+
+    monkeypatch.setattr(handoff, "claim", fail)
+    resp = client.post("/api/v1/handoff/4242/claim")
+    assert resp.status_code == 502 and "internal detail" not in resp.text
+
+
+def _serve_state(monkeypatch, state):
+    async def fake_state(interview_id):
+        return dict(state, interview_id=interview_id)
+
+    monkeypatch.setattr(handoff, "state", fake_state)
+    return client.get("/api/v1/handoff/4242").json()
+
+
+def test_state_hides_who_owns_someone_elses_handoff(as_recruiter, monkeypatch):
+    body = _serve_state(monkeypatch, {"state": "claimed", "recruiter_email": "other@example.com",
+                                      "claimed_by_email": "other@example.com", "expires_at": "x"})
+    assert body["is_your_handoff"] is False
+    assert "recruiter_email" not in body and "claimed_by_email" not in body
+    assert body["state"] == "claimed"
+
+
+def test_state_without_a_recruiter_is_unknown_not_refused(as_recruiter, monkeypatch):
+    assert _serve_state(monkeypatch, {"state": None})["is_your_handoff"] is None
+    assert _serve_state(monkeypatch, {"state": "closed", "recruiter_email": None})["is_your_handoff"] is None
 
 
 def test_close_and_state(as_recruiter, monkeypatch):
@@ -156,6 +190,20 @@ def test_pairbot_client_maps_http_errors(monkeypatch):
     assert exc.value.status == 410 and "no longer waiting" in exc.value.detail
 
 
+@pytest.mark.parametrize("body", [b"", b"not json", b"[1, 2]"])
+def test_pairbot_client_rejects_a_2xx_without_a_json_object(monkeypatch, body):
+    import asyncio
+
+    import httpx
+
+    real = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+    monkeypatch.setattr(handoff.httpx, "AsyncClient", lambda **kw: real(transport=transport, **kw))
+    with pytest.raises(handoff.PairbotHandoffError) as exc:
+        asyncio.run(handoff.state(4242))
+    assert exc.value.status == 502
+
+
 # --- the launch flag reaches Pair-bot ----------------------------------------------
 
 def test_launch_models_accept_and_bound_the_handoff_fields():
@@ -172,14 +220,19 @@ def test_launch_models_accept_and_bound_the_handoff_fields():
 
 
 def test_payload_flag_is_gated_on_a_recruiter_email():
-    """Mirrors the block in _send_bulk_interview_core: only the launch's
-    recruiter can join, so the flag goes out only alongside their email."""
-    import inspect
-
-    src = inspect.getsource(eng._send_bulk_interview_core)
-    gate = src.index("if request.recruiter_handoff and recruiter_email:")
-    assert src.index('payload_obj["recruiter_handoff"] = True') > gate
-    assert src.index('payload_obj["recruiter_email"] = recruiter_email') < gate
+    """Only the launch's recruiter can join, so the flag goes out only
+    alongside their email."""
+    req = eng.SendBulkInterviewRequest.model_construct(recruiter_handoff=True, handoff_timeout_sec=600)
+    payload = {}
+    eng._apply_handoff_fields(payload, req, "rec@example.com")
+    assert payload == {"recruiter_handoff": True, "handoff_timeout_sec": 600}
+    payload = {}
+    eng._apply_handoff_fields(payload, req, None)
+    assert payload == {}
+    off = eng.SendBulkInterviewRequest.model_construct(recruiter_handoff=False, handoff_timeout_sec=None)
+    payload = {}
+    eng._apply_handoff_fields(payload, off, "rec@example.com")
+    assert payload == {}
 
 
 # --- webhook processing against a real Postgres (opt-in) ------------------------------
@@ -205,6 +258,11 @@ def pg(monkeypatch):
         admin = psycopg2.connect(_DSN, connect_timeout=3)
     except psycopg2.OperationalError as exc:
         pytest.skip(f"no Postgres at {_DSN!r}: {exc}")
+    # This fixture drops `notifications`: never against a real database.
+    dbname = admin.get_dsn_parameters().get("dbname", "")
+    if "test" not in dbname.lower():
+        admin.close()
+        pytest.fail(f"HANDOFF_TEST_DSN must point at a test database (got {dbname!r})")
     admin.autocommit = True
     with admin.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS notifications, recruiter_handoff_events")

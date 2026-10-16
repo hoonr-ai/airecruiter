@@ -16,7 +16,7 @@ import type { LocalTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api, type HandoffState } from "@/lib/api";
-import { describeHandoffError, formatSecondsLeft, isCandidateParticipant, joinViewFor } from "@/lib/handoff";
+import { describeHandoffError, formatSecondsLeft, isCandidateParticipant, isHandoffOver, joinViewFor } from "@/lib/handoff";
 
 type Phase = "loading" | "ready" | "joining" | "in_call" | "ended";
 
@@ -34,7 +34,8 @@ export default function HandoffJoinPage() {
   const [candidateVideo, setCandidateVideo] = useState<RemoteTrack | null>(null);
   const [candidateHere, setCandidateHere] = useState(false);
   const [micOn, setMicOn] = useState(true);
-  const [camOn, setCamOn] = useState(true);
+  // Off until the recruiter turns it on: no surprise live camera on join.
+  const [camOn, setCamOn] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
 
   const roomRef = useRef<Room | null>(null);
@@ -77,15 +78,17 @@ export default function HandoffJoinPage() {
 
   // Countdown, plus a light poll so a page left open learns the handoff
   // timed out or was cancelled without the recruiter reloading.
+  // Stops once the handoff is over: nothing can change after that.
+  const over = isHandoffOver(state?.state);
   useEffect(() => {
-    if (phase !== "ready") return;
+    if (phase !== "ready" || over) return;
     const tick = setInterval(() => setNow(Date.now()), 1000);
     const poll = setInterval(() => void refresh(), 10000);
     return () => {
       clearInterval(tick);
       clearInterval(poll);
     };
-  }, [phase, refresh]);
+  }, [phase, over, refresh]);
 
   const teardown = useCallback(async () => {
     audioEls.current.forEach((el) => el.remove());
@@ -152,15 +155,12 @@ export default function HandoffJoinPage() {
       syncCandidate(room);
       setAudioBlocked(!room.canPlaybackAudio);
       try {
-        const tracks = await createLocalTracks({ audio: true, video: true });
+        const tracks = await createLocalTracks({ audio: true, video: false });
         localTracks.current = tracks;
-        for (const t of tracks) {
-          await room.localParticipant.publishTrack(t);
-          if (t.kind === Track.Kind.Video && selfRef.current) t.attach(selfRef.current);
-        }
+        for (const t of tracks) await room.localParticipant.publishTrack(t);
       } catch (mediaErr) {
-        console.warn("handoff: joined without camera/mic", mediaErr);
-        setCamOn(false);
+        console.warn("handoff: joined without a microphone", mediaErr);
+        setMicOn(false);
       }
       setPhase("in_call");
     } catch (err) {
@@ -190,7 +190,8 @@ export default function HandoffJoinPage() {
       await lp.setMicrophoneEnabled(!micOn);
       setMicOn(!micOn);
     } else {
-      await lp.setCameraEnabled(!camOn);
+      const pub = await lp.setCameraEnabled(!camOn);
+      if (!camOn && pub?.track && selfRef.current) pub.track.attach(selfRef.current);
       setCamOn(!camOn);
     }
   };

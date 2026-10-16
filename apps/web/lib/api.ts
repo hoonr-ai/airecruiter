@@ -800,7 +800,7 @@ export interface HandoffState {
   expires_at?: string | null;
   claimed_by_email?: string | null;
   close_reason?: string | null;
-  is_your_handoff?: boolean;
+  is_your_handoff?: boolean | null;
 }
 
 export interface NotificationItem {

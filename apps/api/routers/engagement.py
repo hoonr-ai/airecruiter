@@ -3512,6 +3512,18 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
     return await _send_bulk_interview_core(request)
 
 
+def _apply_handoff_fields(payload_obj: dict, request, recruiter_email: Optional[str]) -> None:
+    """Only the launch's recruiter can join, so a handoff without one is
+    refused by Pair-bot (422); send the flag only when there is someone to
+    hand off to."""
+    if request.recruiter_handoff and recruiter_email:
+        payload_obj["recruiter_handoff"] = True
+        if request.handoff_timeout_sec:
+            payload_obj["handoff_timeout_sec"] = request.handoff_timeout_sec
+    elif request.recruiter_handoff:
+        logger.warning("recruiter_handoff requested without a recruiter_email; launching without handoff")
+
+
 async def _send_bulk_interview_core(
     request: SendBulkInterviewRequest,
     precomputed_signals: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -4079,15 +4091,7 @@ async def _send_bulk_interview_core(
                     # so /engage/send-bulk-interview callers cannot set it).
                     if recruiter_email:
                         payload_obj["recruiter_email"] = recruiter_email
-                    # Only the launch's recruiter can join, so a handoff
-                    # without one is refused by Pair-bot (422); send the flag
-                    # only when there is someone to hand off to.
-                    if request.recruiter_handoff and recruiter_email:
-                        payload_obj["recruiter_handoff"] = True
-                        if request.handoff_timeout_sec:
-                            payload_obj["handoff_timeout_sec"] = request.handoff_timeout_sec
-                    elif request.recruiter_handoff:
-                        logger.warning("recruiter_handoff requested without a recruiter_email; launching without handoff")
+                    _apply_handoff_fields(payload_obj, request, recruiter_email)
                 logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
                 async with _trace_span("pairbot_post", batch_idx=batch_idx):

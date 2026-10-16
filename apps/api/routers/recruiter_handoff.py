@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.auth import UserIdentity, get_current_user
-from routers.dnc_webhook import _verify_hmac_signature
+from core.webhook_auth import verify_hmac_signature
 from services import recruiter_handoff as handoff
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def receive_handoff_webhook(
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
 ):
     raw_body = await request.body()
-    if not _verify_hmac_signature(raw_body, x_hub_signature_256):
+    if not verify_hmac_signature(raw_body, x_hub_signature_256):
         logger.warning("Pairbot handoff webhook signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid signature")
     try:
@@ -60,7 +60,9 @@ async def receive_handoff_webhook(
     try:
         data["interview_id"] = int(data.get("interview_id"))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="interview_id is required")
+        # Malformed for good: a 4xx would only spend Pair-bot's retries.
+        logger.warning("Pairbot handoff webhook without a usable interview_id event=%s", event)
+        return {"status": "ignored", "reason": "interview_id is required"}
 
     try:
         outcome = await asyncio.to_thread(handoff.apply_event, data)
@@ -82,19 +84,37 @@ def _email(user: UserIdentity) -> str:
     return email
 
 
+# Pair-bot statuses that answer the recruiter's own request (contract §4):
+# 403 not your launch, 404 no such interview, 409 not waiting, 410 too late.
+_PASS_THROUGH = frozenset({403, 404, 409, 410})
+
+
 async def _proxy(coro):
     try:
         return await coro
     except handoff.PairbotHandoffError as exc:
-        # Pair-bot's status is the answer (403 not your launch, 409 not
-        # waiting, 410 too late); the join page shows it as is.
-        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+        if exc.status in _PASS_THROUGH:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+        # Anything else is Pair's problem with Pair-bot, not the recruiter's.
+        # A 401 in particular must never reach the browser: the web client
+        # reads it as an expired login and signs the recruiter out.
+        logger.error("pairbot handoff call failed status=%s detail=%s", exc.status, exc.detail)
+        raise HTTPException(status_code=502, detail="PAIR-bot is unavailable") from exc
 
 
 @router.get("/api/v1/handoff/{interview_id}")
 async def get_handoff(interview_id: int, user: UserIdentity = Depends(get_current_user)):
+    email = _email(user)
     state = await _proxy(handoff.state(interview_id))
-    state["is_your_handoff"] = (state.get("recruiter_email") or "").lower() == _email(user)
+    owner = (state.get("recruiter_email") or "").strip().lower()
+    # None when Pair-bot gave no recruiter (no handoff, or an off-contract
+    # reply): unknown, so the page lets claim decide rather than refusing.
+    state["is_your_handoff"] = (owner == email) if owner else None
+    if state["is_your_handoff"] is not True:
+        # Interview ids are sequential: other recruiters learn only whether
+        # the handoff is theirs, not who it belongs to.
+        state.pop("recruiter_email", None)
+        state.pop("claimed_by_email", None)
     return state
 
 

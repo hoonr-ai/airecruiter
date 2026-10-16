@@ -4,6 +4,7 @@ import {
   describeHandoffError,
   formatSecondsLeft,
   isCandidateParticipant,
+  isHandoffOver,
   joinViewFor,
 } from "./handoff.ts";
 
@@ -22,6 +23,16 @@ describe("joinViewFor", () => {
     for (const s of ["requested", "claimed", "joined"]) {
       assert.deepEqual(joinViewFor({ state: s, is_your_handoff: true }), { kind: "waiting" });
     }
+  });
+
+  it("lets claim decide when ownership is unknown", () => {
+    assert.deepEqual(joinViewFor({ state: "requested", is_your_handoff: null }), { kind: "waiting" });
+    assert.equal(joinViewFor({ state: "closed", is_your_handoff: null }).kind, "over");
+  });
+
+  it("knows which states are final", () => {
+    for (const s of ["closed", "missed", "cancelled"]) assert.equal(isHandoffOver(s), true);
+    for (const s of ["requested", "claimed", "joined", null]) assert.equal(isHandoffOver(s), false);
   });
 
   it("tells another recruiter it isn't theirs", () => {
