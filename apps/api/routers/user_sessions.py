@@ -43,12 +43,17 @@ class SessionPing(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    # The VM is internet-facing (nginx-upstreams.conf), so nginx's peer
-    # address, forwarded as X-Real-IP / X-Forwarded-For, is the client.
+    # The VM is internet-facing, so nginx's peer address is the client. nginx
+    # overwrites X-Real-IP with it, but appends to X-Forwarded-For
+    # ($proxy_add_x_forwarded_for), whose first entry is whatever the client
+    # sent — so only its last entry is trustworthy.
+    real = (request.headers.get("x-real-ip") or "").strip()
+    if real:
+        return real
     fwd = request.headers.get("x-forwarded-for") or ""
     if fwd:
-        return fwd.split(",")[0].strip()
-    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+        return fwd.split(",")[-1].strip()
+    return request.client.host if request.client else ""
 
 
 def _ping_sync(**kwargs) -> bool:
