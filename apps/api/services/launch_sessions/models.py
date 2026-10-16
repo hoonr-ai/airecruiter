@@ -19,6 +19,9 @@ class LaunchOptions(BaseModel):
     # path takes board ids (LaunchRequest has none).
     job_board_ids: List[Any] = Field(default_factory=list)
     batch_size: Optional[int] = Field(default=None, ge=1, le=200)
+    # Recruiter warm handoff (see routers.engagement.SendBulkInterviewRequest).
+    recruiter_handoff: bool = False
+    handoff_timeout_sec: Optional[int] = Field(default=None, ge=60, le=1800)
 
 
 class SearchAttempt(BaseModel):

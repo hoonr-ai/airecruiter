@@ -69,6 +69,16 @@ export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
   { type: "recruiter_assigned", label: "Recruiter Assigned", description: "You're newly added as a recruiter on a job." },
   { type: "zero_match_warning", label: "Zero Match Warning", description: "A full search you ran finishes with 0 matches." },
   { type: "daily_digest", label: "Daily Digest", description: "Your scheduled daily summary of unread Pass notifications." },
+  {
+    type: "recruiter_handoff_requested",
+    label: "Recruiter Handoff",
+    description: "A candidate finished the PAIR interview and is waiting for you to join the call.",
+  },
+  {
+    type: "recruiter_handoff_missed",
+    label: "Missed Handoff",
+    description: "Nobody joined a waiting candidate's call in time.",
+  },
 ];
 
 // Types that no longer have a row in the panel above and must not pop a

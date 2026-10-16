@@ -169,14 +169,21 @@ describe("buildSearchAttemptChain", () => {
 describe("create bodies", () => {
   test("launch options = runLaunchPair's flags", () => {
     assert.deepEqual(ls.buildLaunchOptions({ wizardMode: "edit", jobBoardIds: ["b1"], batchSize: 75 }), {
-      is_initial_launch: true, notify_recruiters: true, send_job_posting_email: true, job_board_ids: ["b1"], batch_size: 75,
+      is_initial_launch: true, notify_recruiters: true, send_job_posting_email: true, job_board_ids: ["b1"], batch_size: 75, recruiter_handoff: false,
     });
     assert.deepEqual(ls.buildLaunchOptions({ wizardMode: "source", jobBoardIds: [], batchSize: 75 }), {
-      is_initial_launch: false, notify_recruiters: true, send_job_posting_email: false, job_board_ids: [], batch_size: 75,
+      is_initial_launch: false, notify_recruiters: true, send_job_posting_email: false, job_board_ids: [], batch_size: 75, recruiter_handoff: false,
     });
     assert.deepEqual(ls.buildLaunchOptions({ wizardMode: "edit", isRetry: true, jobBoardIds: ["b1"], batchSize: 75 }), {
-      is_initial_launch: false, notify_recruiters: false, send_job_posting_email: false, job_board_ids: ["b1"], batch_size: 75,
+      is_initial_launch: false, notify_recruiters: false, send_job_posting_email: false, job_board_ids: ["b1"], batch_size: 75, recruiter_handoff: false,
     });
+  });
+
+  test("launch options carry the recruiter handoff choice", () => {
+    assert.equal(
+      ls.buildLaunchOptions({ wizardMode: "edit", jobBoardIds: [], batchSize: 75, recruiterHandoff: true }).recruiter_handoff,
+      true,
+    );
   });
 
   test("clampCount agrees with lib/launch-rules clampLaunchCount", () => {

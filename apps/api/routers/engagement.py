@@ -17,7 +17,7 @@ import html
 import inspect
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict, Tuple, AsyncIterator, Callable, Sequence
 import psycopg2.extras
 import json
@@ -950,6 +950,11 @@ class SendBulkInterviewRequest(BaseModel):
     # batch only.
     send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
+    # Recruiter warm handoff (Pair-bot docs/recruiter-handoff-pair-contract.md):
+    # after its last question the bot holds the call for the launch's
+    # recruiter (the server-resolved recruiter_email) instead of signing off.
+    recruiter_handoff: bool = False
+    handoff_timeout_sec: Optional[int] = Field(default=None, ge=60, le=1800)
 
 
 # ---------------------------------------------------------------------------
@@ -4074,6 +4079,15 @@ async def _send_bulk_interview_core(
                     # so /engage/send-bulk-interview callers cannot set it).
                     if recruiter_email:
                         payload_obj["recruiter_email"] = recruiter_email
+                    # Only the launch's recruiter can join, so a handoff
+                    # without one is refused by Pair-bot (422); send the flag
+                    # only when there is someone to hand off to.
+                    if request.recruiter_handoff and recruiter_email:
+                        payload_obj["recruiter_handoff"] = True
+                        if request.handoff_timeout_sec:
+                            payload_obj["handoff_timeout_sec"] = request.handoff_timeout_sec
+                    elif request.recruiter_handoff:
+                        logger.warning("recruiter_handoff requested without a recruiter_email; launching without handoff")
                 logger.info(f"📤 Sending bulk interview to {external_url} with bulk_id={client_bulk_id}")
 
                 async with _trace_span("pairbot_post", batch_idx=batch_idx):
@@ -4801,6 +4815,9 @@ class LaunchRequest(BaseModel):
     # launches. The default SSE path (LAUNCH_ASYNC off) has no run row to
     # carry it, so there it is only logged. No other behaviour change.
     launch_session_id: Optional[str] = None
+    # Recruiter warm handoff: see SendBulkInterviewRequest.
+    recruiter_handoff: bool = False
+    handoff_timeout_sec: Optional[int] = Field(default=None, ge=60, le=1800)
 
 
 # Backend batch size for the launch orchestrator's per-batch Pairbot calls.
@@ -5494,6 +5511,8 @@ async def _run_one_batch(
             notify_recruiters=False,       # fired once after the loop
             send_job_posting_email=False,  # fired once after the loop
             app_base_url=request.app_base_url,
+            recruiter_handoff=request.recruiter_handoff,
+            handoff_timeout_sec=request.handoff_timeout_sec,
         )
         # Launch-session hooks ride along only when set, so the legacy call
         # shape (and anything that stands in for the core) is unchanged.

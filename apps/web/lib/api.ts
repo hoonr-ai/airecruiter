@@ -776,7 +776,32 @@ export const api = {
       `${API_BASE}/api/v1/notifications/stream${sinceId ? `?since_id=${sinceId}` : ""}`,
   },
   launchSessions: launchSessionsApi,
+  // Recruiter warm handoff (services/recruiter_handoff.py). The backend acts
+  // as the logged-in recruiter; no email is sent from the browser.
+  handoff: {
+    state: (interviewId: number) => req<HandoffState>(`/api/v1/handoff/${interviewId}`),
+    claim: (interviewId: number) => req<HandoffClaim>(`/api/v1/handoff/${interviewId}/claim`, { method: "POST" }),
+    close: (interviewId: number, notes?: string) =>
+      req<{ state: string }>(`/api/v1/handoff/${interviewId}/close`, { method: "POST", body: { notes: notes || null } }),
+  },
 };
+
+export interface HandoffClaim {
+  livekit_url: string;
+  token: string;
+  room: string;
+  state: string;
+}
+
+export interface HandoffState {
+  interview_id: number;
+  state: "requested" | "claimed" | "joined" | "closed" | "missed" | "cancelled" | null;
+  recruiter_email?: string;
+  expires_at?: string | null;
+  claimed_by_email?: string | null;
+  close_reason?: string | null;
+  is_your_handoff?: boolean;
+}
 
 export interface NotificationItem {
   id: number;

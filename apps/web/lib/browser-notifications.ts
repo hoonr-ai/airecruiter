@@ -45,9 +45,17 @@ export function shouldShowBrowserPopup(
 //   what this is about" destination.
 // - neither id present (older row, malformed event): the notifications page
 //   itself, rather than just focusing the window and going nowhere.
+// - recruiter_handoff_requested: the live join page for that interview -
+//   the whole point of the notification is "the candidate is waiting now".
+export const HANDOFF_REQUESTED_TYPE = "recruiter_handoff_requested";
+
 export function notificationClickPath(
-  item: Pick<NotificationItem, "jobdiva_id" | "candidate_id">
+  item: Pick<NotificationItem, "jobdiva_id" | "candidate_id"> & Partial<Pick<NotificationItem, "type" | "metadata">>
 ): string {
+  const interviewId = Number(item.metadata?.interview_id);
+  if (item.type === HANDOFF_REQUESTED_TYPE && Number.isInteger(interviewId) && interviewId > 0) {
+    return `/handoff/${interviewId}`;
+  }
   if (item.jobdiva_id && item.candidate_id) {
     return `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`;
   }

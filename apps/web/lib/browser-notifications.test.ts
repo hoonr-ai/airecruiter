@@ -38,6 +38,26 @@ describe("shouldShowBrowserPopup", () => {
 });
 
 describe("notificationClickPath", () => {
+  it("sends a handoff request straight to the live join page", () => {
+    assert.equal(
+      notificationClickPath({
+        jobdiva_id: "26-14907", candidate_id: null,
+        type: "recruiter_handoff_requested", metadata: { interview_id: 4242 },
+      }),
+      "/handoff/4242"
+    );
+  });
+
+  it("ignores a handoff request with no usable interview id", () => {
+    assert.equal(
+      notificationClickPath({
+        jobdiva_id: "26-14907", candidate_id: null,
+        type: "recruiter_handoff_requested", metadata: { interview_id: "x" },
+      }),
+      "/jobs/26-14907/rankings"
+    );
+  });
+
   it("links straight to the candidate's report when both ids are present", () => {
     assert.equal(
       notificationClickPath({ jobdiva_id: "26-14907", candidate_id: "123" }),

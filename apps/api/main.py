@@ -249,6 +249,9 @@ async def lifespan(app: FastAPI):
         # In-app notifications table.
         if notifications_router is not None and hasattr(notifications_router, "init_notifications_schema"):
             steps.append(("notifications_schema_init", notifications_router.init_notifications_schema, 10))
+        # After notifications: its index is on that table.
+        if recruiter_handoff_router is not None and hasattr(recruiter_handoff_router, "init_recruiter_handoff_schema"):
+            steps.append(("recruiter_handoff_schema_init", recruiter_handoff_router.init_recruiter_handoff_schema, 10))
 
         # Imported inside each step so a broken module fails only its step.
         async def _scs_init():
@@ -602,6 +605,7 @@ apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
 notifications_router = _safe_import("notifications")
 pairbot_webhook_router = _safe_import("pairbot_webhook")
+recruiter_handoff_router = _safe_import("recruiter_handoff")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -666,6 +670,7 @@ _mount(campaigns_router, "campaigns", prefix="/api")
 _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
 _mount(pairbot_webhook_router, "pairbot_webhook")
+_mount(recruiter_handoff_router, "recruiter_handoff")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 _mount(notifications_router, "notifications", prefix="/api/v1/notifications")
 
