@@ -3353,25 +3353,31 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
             "enrich_contact: not re-buying %s for %s — a recent search found none (contact cache)",
             ",".join(final_missed), candidate_id,
         )
+        exa_telemetry.record_contact_lookup("final_miss", fields_final=",".join(final_missed))
+    elif request.confirm and not is_launch:
+        _rebuy = [f for f in _missing_contact() if _final_reason(f)]
+        if _rebuy:
+            exa_telemetry.record_contact_lookup("confirm_rebuy", fields_final=",".join(_rebuy))
 
     # A deep-search miss of the phone: the Apollo phone reveal (8 credits a
     # number) is not asked for it either.
     phone_deep_final = "phone" in final_missed and _final_reason("phone") == "deep"
 
-    async def _record_step(provider: str, *, missed=(), deep_missed=()) -> None:
-        """Cache what one paid step found (and which fields an Exa run answered
-        without) as soon as it answers, not minutes later at the end of the
-        chain, so a lookup of the same person meanwhile (another worker, a
-        second tab, Launch PAIR) reuses it. The final record below repeats it
-        (idempotent)."""
+    async def _record_step(provider: str) -> None:
+        """Cache what one paid step found as soon as it answers, not minutes
+        later at the end of the chain, so a lookup of the same person
+        meanwhile (another worker, a second tab, Launch PAIR) reuses it. The
+        Exa steps cache their own answer and misses (contact_enrichment.
+        exa_step, before the person's lookup lease is released). The final
+        record below repeats it (idempotent)."""
         email_key = next((k for k in ("workEmail", "personalEmail") if filled_by.get(k) == provider), "")
         email = str(extracted.get(email_key) or "").strip().lower() if email_key else ""
         phone = _normalise_phone(str(extracted.get("mobilePhone") or "")) if filled_by.get("mobilePhone") == provider else ""
-        if not (email or phone or missed or deep_missed):
+        if not (email or phone):
             return
         await contact_cache.record(
             linkedin_url, email=email, phone=phone, email_provider=provider, phone_provider=provider,
-            missed=missed, deep_missed=deep_missed,
+            missed=(), deep_missed=(),
         )
 
     # 0b. Kipplo by LinkedIn URL (services/kipplo.py). First provider: it
@@ -3541,26 +3547,32 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     normal_fields = tuple(f for f in exa_fields if f not in deep_first) if EXA_CONTACT_ENRICH_ENABLED else ()
     deep_follows = contact_enrichment.exa_deep_enabled()
     _late = {"candidate_id": candidate_id, "jobdiva_id": request.jobdiva_id or (_row0.get("jobdiva_id") if _row0 else None)}
+    # Each Exa step is contact_enrichment.exa_step: one paid lookup per person
+    # at a time across the workers (another lookup of the same person running
+    # meanwhile is waited on, its run polled for free), its answer cached as
+    # it comes, and a run still going after its windows watched in the
+    # background (that is the one place it is handed to the late watch).
+    _step_kw = {
+        "semaphore": contact_enrichment.ondemand_exa_semaphore(),
+        "cached": cached, "late": _late, "enrich": _exa_enrich_by_linkedin,
+    }
     if normal_fields:
-        async with contact_enrichment.ondemand_exa_semaphore():
-            _exa = await _exa_enrich_by_linkedin(
-                candidate_id, linkedin_url, candidate_name, candidate_company, fields=normal_fields,
-            )
+        _exa = await contact_enrichment.exa_step(
+            candidate_id, linkedin_url, candidate_name, candidate_company, fields=normal_fields, **_step_kw,
+        )
         exa_answered = bool(_exa.get("ok"))
         exa_stop = bool(_exa.get("fatal"))
-        # Still going after both windows: it is watched in the background,
-        # and no deep search is bought for its fields while it may answer.
-        if _exa.get("run_id"):
-            normal_still_going = normal_fields
-        contact_enrichment.watch_late_exa_run(
-            str(_exa.get("run_id") or ""), linkedin_url, fields=normal_fields, provider="exa", **_late
-        )
-        if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}, "exa"):
+        # Still going after both windows (ours, or another lookup's we waited
+        # on): no deep search is bought for those fields while it may answer.
+        # Only those: what the holder was not after was bought at once.
+        normal_still_going = tuple(f for f in normal_fields if f in (_exa.get("in_progress_fields") or ()))
+        # Fields can come without ``ok`` when one part answered and another
+        # failed (exa_step): what was found is kept, nothing is a miss.
+        if _exa.get("fields") and _merge_primary(_exa.get("fields") or {}, "exa"):
             exa_contributed = True
         exa_outcome = ",".join(f for f in normal_fields if f not in _missing_contact()) or (
             "miss" if exa_answered else str(_exa.get("message") or "failed")
         )
-        await _record_step("exa", missed=[f for f in normal_fields if exa_answered and f in _missing_contact()])
 
     # 3b. Exa deep search for what the normal run did not find.
     deep_fields: Tuple[str, ...] = ()
@@ -3571,26 +3583,18 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     if EXA_CONTACT_ENRICH_ENABLED and deep_follows and not exa_stop:
         deep_fields = tuple(f for f in exa_fields if f in _missing_contact() and f not in normal_still_going)
     if deep_fields:
-        async with contact_enrichment.ondemand_exa_semaphore():
-            _deep = await _exa_enrich_by_linkedin(
-                candidate_id, linkedin_url, candidate_name, candidate_company,
-                fields=deep_fields, deep=True, wait_retry=False,
-            )
+        _deep = await contact_enrichment.exa_step(
+            candidate_id, linkedin_url, candidate_name, candidate_company,
+            fields=deep_fields, deep=True, wait_retry=False, **_step_kw,
+        )
         deep_answered = bool(_deep.get("ok"))
         # Still going after EXA_CONTACT_DEEP_TIMEOUT_S: what it finds is kept
         # for the next Launch / phone click instead of being thrown away.
-        if _deep.get("run_id"):
-            deep_still_going = deep_fields
-        contact_enrichment.watch_late_exa_run(
-            str(_deep.get("run_id") or ""), linkedin_url, fields=deep_fields, provider="exa_deep", **_late
-        )
-        if _deep.get("ok") and _merge_primary(_deep.get("fields") or {}, "exa_deep"):
+        deep_still_going = tuple(f for f in deep_fields if f in (_deep.get("in_progress_fields") or ()))
+        if _deep.get("fields") and _merge_primary(_deep.get("fields") or {}, "exa_deep"):
             exa_deep_contributed = True
         exa_deep_outcome = ",".join(f for f in deep_fields if f not in _missing_contact()) or (
             "miss" if deep_answered else str(_deep.get("message") or "failed")
-        )
-        await _record_step(
-            "exa_deep", deep_missed=[f for f in deep_fields if deep_answered and f in _missing_contact()]
         )
 
     # Provider attribution = first source that contributed (execution order).
@@ -3693,8 +3697,8 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         phone=_new_phone,
         email_provider=email_provider or provider_used,
         phone_provider=phone_provider or provider_used,
-        missed=[f for f in normal_fields if exa_answered and f in _missing_contact()],
-        deep_missed=[f for f in deep_fields if deep_answered and f in _missing_contact()],
+        missed=[f for f in normal_fields if exa_answered and f in _missing_contact() and f not in normal_still_going],
+        deep_missed=[f for f in deep_fields if deep_answered and f in _missing_contact() and f not in deep_still_going],
     )
 
     logger.info(

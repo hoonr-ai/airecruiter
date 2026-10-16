@@ -38,8 +38,9 @@ import os
 import re
 import time
 import weakref
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -57,7 +58,7 @@ from core.config import (
     EXA_CONTACT_ENRICH_TIMEOUT_S,
     EXA_LATE_RESULT_WAIT_S,
 )
-from services import exa_telemetry
+from services import contact_cache, exa_telemetry
 from services.exa_errors import credit_tag
 from services.kipplo import enrich_by_linkedin as kipplo_enrich_by_linkedin
 from services.kipplo import supported_fields as kipplo_supported_fields
@@ -865,6 +866,10 @@ async def _exa_lookup(
         return {"ok": False, "message": f"Exa request failed: {e}"}
     if "result" in outcome:
         return outcome["result"]
+    if outcome.get("lease_lost"):
+        # exa_step's lease went to another lookup before this create was
+        # sent: nothing bought, exa_step follows that lookup instead.
+        return {"ok": False, "message": outcome.get("message") or "", "lease_lost": True}
     failed = {"ok": False, "message": outcome.get("message") or "Exa lookup failed"}
     if outcome.get("retry") == "":
         failed["fatal"] = True
@@ -968,17 +973,28 @@ async def keep_late_exa_result(
     jobdiva_id: Optional[str] = None,
     fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
     provider: str = "exa",
+    token: str = "",
+    slug: str = "",
+    wait_s: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Watch a run we stopped waiting for, up to EXA_LATE_RESULT_WAIT_S, and
-    keep what it finds. Returns the extracted fields ({} if nothing). Never
-    raises. Records one ExaCall (``late=True``) with the run's final cost."""
-    from services import contact_cache
+    """Watch a run we stopped waiting for, up to EXA_LATE_RESULT_WAIT_S (or
+    ``wait_s``), and keep what it finds. Returns the extracted fields ({} if
+    nothing). Never raises. Records one ExaCall (``late=True``) with the run's
+    final cost.
 
+    With the person's single-flight lease (``slug`` / ``token``: handed over
+    by exa_step, or taken by the orphan sweep) it renews the lease before its
+    first sleep and on every poll, and stops once someone else holds it (they
+    watch the run now). It fills the rows of every lookup that joined the
+    lease, then releases it. Cancelled (its worker is going away), it leaves
+    the lease to lapse so the next sweep adopts the run."""
     headers = {"Content-Type": "application/json", "x-api-key": EXA_API_KEY, "Exa-Beta": EXA_AGENT_BETA}
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + max(0, EXA_LATE_RESULT_WAIT_S)
+    deadline = loop.time() + max(0.0, float(EXA_LATE_RESULT_WAIT_S if wait_s is None else wait_s))
     started = time.monotonic()
     run: Dict[str, Any] = {}
+    lease = _Lease(slug, token) if slug and token else None
+    release_lease = lease is not None
 
     def _record(outcome: str, **kw: Any) -> None:
         meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
@@ -991,62 +1007,103 @@ async def keep_late_exa_result(
         )
 
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            while loop.time() < deadline:
-                await asyncio.sleep(_EXA_LATE_POLL_S)
-                g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
-                if g.status_code == 404:
-                    _record("not_found", http_status=404)
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                if lease is not None and not await lease.beat():
                     return {}
-                if g.status_code >= 400:
-                    continue
-                run = g.json() or {}
-                if run.get("status") in _EXA_TERMINAL_STATES:
-                    break
-    except Exception as e:
-        logger.info("Exa late watch of run %s ended: %s", run_id, e)
-        _record("poll_error", error_kind=type(e).__name__)
-        return {}
-    if run.get("status") != "completed":
-        _record(f"run_{run['status']}" if run.get("status") in _EXA_TERMINAL_STATES else "timeout")
-        return {}
-    extracted = extract_exa_contact_fields((run.get("output") or {}).get("structured"))
-    _record("completed", fields_found=_fields_found(extracted))
-    email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "") if "email" in fields else ""
-    phone = str(extracted.get("mobilePhone") or "") if "phone" in fields else ""
-    missed = [f for f, got in (("email", email), ("phone", phone)) if f in fields and not got]
-    await contact_cache.record(
-        linkedin_url, email=email, phone=phone, email_provider=provider, phone_provider=provider,
-        **({"deep_missed": missed} if provider == "exa_deep" else {"missed": missed}),
-    )
-    if (email or phone) and candidate_id:
+                while loop.time() < deadline:
+                    await asyncio.sleep(_EXA_LATE_POLL_S)
+                    if lease is not None and not await lease.beat():
+                        return {}
+                    g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
+                    if g.status_code == 404:
+                        _record("not_found", http_status=404)
+                        return {}
+                    if g.status_code >= 400:
+                        continue
+                    run = g.json() or {}
+                    if run.get("status") in _EXA_TERMINAL_STATES:
+                        break
+        except Exception as e:
+            logger.info("Exa late watch of run %s ended: %s", run_id, e)
+            _record("poll_error", error_kind=type(e).__name__)
+            return {}
+        if run.get("status") != "completed":
+            _record(f"run_{run['status']}" if run.get("status") in _EXA_TERMINAL_STATES else "timeout")
+            return {}
+        extracted = extract_exa_contact_fields((run.get("output") or {}).get("structured"))
+        _record("completed", fields_found=_fields_found(extracted))
+        email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "") if "email" in fields else ""
+        phone = str(extracted.get("mobilePhone") or "") if "phone" in fields else ""
+        missed = [f for f, got in (("email", email), ("phone", phone)) if f in fields and not got]
+        await contact_cache.record(
+            linkedin_url, email=email, phone=phone, email_provider=provider, phone_provider=provider,
+            **({"deep_missed": missed} if provider == "exa_deep" else {"missed": missed}),
+        )
+        joined: List[Dict[str, Any]] = []
+        if lease is not None:
+            release_lease = False
+            joined = await lease.release()
+        if email or phone:
+            own = [{"candidate_id": candidate_id, "jobdiva_id": jobdiva_id}] if candidate_id else []
+            await _fill_late_contexts([*own, *joined], email, phone)
+        # Never the LinkedIn URL (application logs go to New Relic): a sourcing
+        # lookup has no candidate id, and the run id names it.
+        logger.info(
+            "Exa late result kept for %s (run %s, %s): %s",
+            candidate_id or "a sourcing lookup", run_id, provider,
+            ",".join(f for f, got in (("email", email), ("phone", phone)) if got) or "nothing",
+        )
+        return {"email": email, "phone": phone}
+    except asyncio.CancelledError:
+        release_lease = False   # left to lapse: the next orphan sweep adopts the run
+        raise
+    finally:
+        if release_lease and lease is not None and not lease.lost:
+            await lease.release()
+
+
+async def _fill_late_contexts(
+    contexts: List[Dict[str, Any]], email: str, phone: str, skip: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a late answer to the sourced rows of each context (candidate_id /
+    jobdiva_id) still missing those fields; ``skip`` = the caller's own (it
+    saves its rows itself). Never raises."""
+    seen = set()
+    if skip and skip.get("candidate_id"):
+        seen.add((str(skip["candidate_id"]), skip.get("jobdiva_id") or None))
+    for ctx in contexts:
+        key = (str(ctx.get("candidate_id") or ""), ctx.get("jobdiva_id") or None)
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
         try:
             await asyncio.to_thread(_fill_sourced_rows_sync, {
                 "email": email or None, "phone": phone or None,
-                "candidate_id": candidate_id, "jobdiva_id": jobdiva_id or None,
+                "candidate_id": key[0], "jobdiva_id": key[1],
             })
         except Exception as e:
-            logger.warning("Exa late result for %s not written to sourced rows: %s", candidate_id, e)
-    # Never the LinkedIn URL (application logs go to New Relic): a sourcing
-    # lookup has no candidate id, and the run id names it.
-    logger.info(
-        "Exa late result kept for %s (run %s, %s): %s",
-        candidate_id or "a sourcing lookup", run_id, provider,
-        ",".join(f for f, got in (("email", email), ("phone", phone)) if got) or "nothing",
-    )
-    return {"email": email, "phone": phone}
+            logger.warning("Exa late result for %s not written to sourced rows: %s", key[0], e)
 
 
-def watch_late_exa_run(run_id: str, linkedin_url: str, **kw: Any) -> None:
-    """Start keep_late_exa_result in the background (no-op without a run id)."""
+def watch_late_exa_run(run_id: str, linkedin_url: str, **kw: Any) -> bool:
+    """Start keep_late_exa_result in the background. Whether it started (not
+    without a run id, a late wait or a running loop). exa_step is its one
+    caller (the orphan sweep starts its watches itself)."""
     if not run_id or EXA_LATE_RESULT_WAIT_S <= 0:
-        return
+        return False
+    return _start_late_watch(run_id, linkedin_url, **kw)
+
+
+def _start_late_watch(run_id: str, linkedin_url: str, **kw: Any) -> bool:
     try:
-        task = asyncio.get_running_loop().create_task(keep_late_exa_result(run_id, linkedin_url, **kw))
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
+        return False
+    task = loop.create_task(keep_late_exa_result(run_id, linkedin_url, **kw))
     _LATE_WATCHES.add(task)
     task.add_done_callback(_LATE_WATCHES.discard)
+    return True
 
 
 def _fields_found(extracted: Dict[str, Any]) -> str:
@@ -1089,7 +1146,9 @@ async def _exa_contact_attempt(
     no credits, which a retry would not fix). An out-of-credits 402 also trips
     the shared breaker (core/vendor_limiter.EXA).
 
-    Every return records one ExaCall event (cost from the terminal run JSON).
+    Every return records one ExaCall event (cost from the terminal run JSON),
+    except a create exa_step's lease stopped before it was sent
+    (``lease_lost``: nothing was called).
     """
     tele: Dict[str, Any] = {"outcome": "create_error"}  # every exit sets its own
     started = time.monotonic()
@@ -1102,18 +1161,19 @@ async def _exa_contact_attempt(
         run = tele.get("run") or {}
         meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
         terminal = run.get("status") in _EXA_TERMINAL_STATES
-        exa_telemetry.record_exa_call(
-            "contact", "agent_run", tele["outcome"],
-            effort=str(body.get("effort") or "") or None,
-            exa_run_id=str(run.get("id") or tele.get("run_id") or "") or None,
-            call_id=meta.get("call_id"),
-            http_status=tele.get("http_status"),
-            error_kind=tele.get("error_kind"),
-            fields_found=tele.get("fields_found"),
-            rewatch=bool(run_id) or None,
-            latency_ms=exa_telemetry.latency_ms(started),
-            **(exa_telemetry.cost_from_run_json(run) if terminal else {}),
-        )
+        if tele.get("outcome") != "lease_lost":
+            exa_telemetry.record_exa_call(
+                "contact", "agent_run", tele["outcome"],
+                effort=str(body.get("effort") or "") or None,
+                exa_run_id=str(run.get("id") or tele.get("run_id") or "") or None,
+                call_id=meta.get("call_id"),
+                http_status=tele.get("http_status"),
+                error_kind=tele.get("error_kind"),
+                fields_found=tele.get("fields_found"),
+                rewatch=bool(run_id) or None,
+                latency_ms=exa_telemetry.latency_ms(started),
+                **(exa_telemetry.cost_from_run_json(run) if terminal else {}),
+            )
 
 
 async def _exa_contact_attempt_impl(
@@ -1127,6 +1187,7 @@ async def _exa_contact_attempt_impl(
 ) -> Dict[str, Any]:
     """_exa_contact_attempt's body. ``tele`` collects what the ExaCall event
     reports (outcome, status, the last run JSON)."""
+    step = _STEP_RUN.get()
     try:
         found_run: Optional[Dict[str, Any]] = None
         if run_id:
@@ -1137,6 +1198,11 @@ async def _exa_contact_attempt_impl(
             from core.vendor_limiter import EXA as _exa_limit
 
             for attempt in range(3):
+                if step is not None and not await step.before_create():
+                    # Another lookup of this person holds its lease now
+                    # (exa_step): never two paid runs for one person.
+                    tele["outcome"] = "lease_lost"
+                    return {"message": "another lookup of this person took over", "retry": "", "lease_lost": True}
                 if not await _exa_limit.acquire():
                     tele["outcome"] = "no_slot"
                     return {"message": "Exa rate-limited (no slot)", "retry": "new"}
@@ -1163,6 +1229,8 @@ async def _exa_contact_attempt_impl(
         if found_run is not None:
             run = found_run
             run_id = str(run.get("id") or "")
+            if step is not None:
+                await step.run_started(run_id)
         elif not run_id:
             if r.status_code >= 400:
                 logger.warning(
@@ -1193,6 +1261,8 @@ async def _exa_contact_attempt_impl(
                 }
             run = r.json()
             run_id = str(run.get("id") or "")
+            if step is not None:
+                await step.run_started(run_id)
         tele["run"] = run
         tele["run_id"] = run_id
 
@@ -1236,6 +1306,697 @@ async def _exa_contact_attempt_impl(
         logger.info("Exa returned no usable contact fields for %s", candidate_id)
     tele.update(outcome="completed", fields_found=_fields_found(extracted))
     return {"result": {"ok": True, "fields": extracted}}
+
+
+# ---------------------------------------------------------------------------
+# exa_step: one paid Exa contact lookup per person at a time (2026-10-15)
+# ---------------------------------------------------------------------------
+#
+# The person cache stops sequential re-buys; this stops concurrent ones: two
+# tabs, a click during Launch PAIR, one person on two jobs, Launch PAIR on two
+# workers, a re-search while the first search's lookups still run. The
+# person's cache row doubles as a lease (contact_cache.claim):
+#
+#   leader       claims it once it holds a slot of its semaphore (a lookup
+#                still queued for a slot holds nobody up: a click or Launch
+#                PAIR never waits on a sourcing lookup that has not started),
+#                for the fields the cache still lacks with the slot in hand
+#                (the lease names exactly what its run asks), renews it
+#                every LEASE_HEARTBEAT_S and before each create (no
+#                create is sent once someone else holds the person), stamps
+#                the run it started, records the answer, then releases it. A
+#                run still going is handed, with the lease, to the late watch;
+#                one whose watcher dies with its worker is adopted by
+#                resume_orphaned_late_watches.
+#   follower     a lookup of the same person meanwhile. Fields the holder is
+#                not after it buys at once (a passthrough part); for the rest:
+#                when the holder's run covers them at the same tier it polls
+#                that run (free; no ExaCall, the owner reports it) and records
+#                what it finds, otherwise it re-reads the lease and the cache
+#                every FOLLOW_POLL_S and claims what is still unanswered once
+#                the lease is free. Out of time, it joins its late-fill
+#                context to the lease and answers ``in_progress`` for those
+#                fields (never a miss).
+#   passthrough  fields the holder is not looking for, the kill switch
+#                (CONTACT_LOOKUP_SINGLE_FLIGHT=false) or a DB error
+#                (lease_error): no lease, as before the lease existed.
+
+LEASE_HEARTBEAT_S = 20.0
+FOLLOW_POLL_S = 3.0
+# Orphaned runs one sweep of one worker adopts at most.
+ADOPT_LIMIT = 50
+
+# The shielded paid runs of exa_step and the lease heartbeats. Strong
+# references: a task only weakly referenced by the loop could vanish mid-run.
+_EXA_STEP_TASKS: set = set()
+
+
+def single_flight_enabled() -> bool:
+    """CONTACT_LOOKUP_SINGLE_FLIGHT (default on, read at call time): Exa
+    contact lookups of one person share one run across the workers
+    (exa_step). Off = each lookup buys its own, as before 2026-10-15."""
+    return os.getenv("CONTACT_LOOKUP_SINGLE_FLIGHT", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def run_horizon_s(tier: str) -> int:
+    """How long after its start a run of ``tier`` can still answer: its
+    windows (a normal run is waited on twice, a deep one once), the late watch
+    (EXA_LATE_RESULT_WAIT_S) and 30 s, at most 870 s. Nobody else buys the
+    person's contact while it lasts."""
+    deep = tier == "deep"
+    window = max(0, EXA_CONTACT_DEEP_TIMEOUT_S if deep else EXA_CONTACT_ENRICH_TIMEOUT_S) * (1 if deep else 2)
+    return int(min(contact_cache.MAX_RUN_HORIZON_S, window + max(0, EXA_LATE_RESULT_WAIT_S) + 30))
+
+
+def _horizons() -> Dict[str, int]:
+    return {"normal_horizon_s": run_horizon_s("normal"), "deep_horizon_s": run_horizon_s("deep")}
+
+
+def _keep_task(task: "asyncio.Future[Any]", tasks: Optional[set] = None) -> None:
+    held = _EXA_STEP_TASKS if tasks is None else tasks
+    held.add(task)
+    task.add_done_callback(held.discard)
+
+
+class _Lease:
+    """The single-flight lease one exa_step (or late watch) holds on a person."""
+
+    def __init__(self, slug: str, token: str) -> None:
+        self.slug = slug
+        self.token = token
+        self.lost = False
+        self._beats: Optional["asyncio.Task[None]"] = None
+
+    async def beat(self, run_id: str = "") -> bool:
+        """Renew it (stamping ``run_id`` when given). False once someone else
+        holds the person; a DB error counts as still held (fail open)."""
+        if not self.lost and await contact_cache.heartbeat(self.slug, self.token, run_id=run_id) == 0:
+            self.lost = True
+        return not self.lost
+
+    async def _beat_loop(self) -> None:
+        while not self.lost:
+            await asyncio.sleep(LEASE_HEARTBEAT_S)
+            await self.beat()
+
+    def start_beats(self) -> None:
+        if self._beats is None:
+            self._beats = asyncio.ensure_future(self._beat_loop())
+            _keep_task(self._beats)
+
+    def stop_beats(self) -> None:
+        if self._beats is not None:
+            self._beats.cancel()
+
+    async def release(self) -> List[Dict[str, Any]]:
+        """End it: the late-fill contexts joined to it ([] when none, or when
+        it is no longer ours)."""
+        self.stop_beats()
+        return (await contact_cache.release(self.slug, self.token)) or []
+
+    def release_soon(self) -> None:
+        """release() from a cancel handler, in the background so the cancel
+        is not held up."""
+        self.stop_beats()
+        _keep_task(asyncio.ensure_future(contact_cache.release(self.slug, self.token)))
+
+
+class _StepRun:
+    """What exa_step's paid run hears from inside exa_enrich_by_linkedin: a
+    create about to be sent (the lease is renewed first; False = do not send
+    it) and the run it started. Through the _STEP_RUN ContextVar, so neither
+    exa_enrich_by_linkedin nor _exa_contact_attempt changes signature (their
+    test fakes keep working)."""
+
+    __slots__ = ("lease", "run_id")
+
+    def __init__(self, lease: Optional[_Lease]) -> None:
+        self.lease = lease
+        self.run_id = ""
+
+    async def before_create(self) -> bool:
+        return self.lease is None or await self.lease.beat()
+
+    async def run_started(self, run_id: str) -> None:
+        self.run_id = run_id
+        if self.lease is not None and run_id:
+            await self.lease.beat(run_id)
+
+
+_STEP_RUN: ContextVar[Optional[_StepRun]] = ContextVar("exa_step_run", default=None)
+
+
+def _asked_contact(fields: Tuple[str, ...], found: Dict[str, Any]) -> Tuple[str, str]:
+    """The email / personal phone a lookup of ``fields`` found."""
+    email = str(found.get("workEmail") or found.get("personalEmail") or "").strip().lower() if "email" in fields else ""
+    phone = _normalise_phone(str(found.get("mobilePhone") or "")) if "phone" in fields else ""
+    if sum(1 for ch in phone if ch.isdigit()) < 7:
+        phone = ""
+    return email, phone
+
+
+def _contact_fields(values: Dict[str, str]) -> Dict[str, Any]:
+    """Lookup fields (extract_exa_contact_fields' shape) of an email / phone."""
+    email = values.get("email") or ""
+    personal = bool(email) and email.rsplit("@", 1)[-1].lower() in _PERSONAL_EMAIL_DOMAINS
+    phone = values.get("phone") or ""
+    return {
+        "mobilePhone": phone,
+        "workPhone": "",
+        "workEmail": "" if personal else email,
+        "personalEmail": email if personal else "",
+        "phoneCandidates": [phone] if phone else [],
+    }
+
+
+def _answered_since(
+    before: Dict[str, Any], after: Dict[str, Any], fields: Tuple[str, ...], deep: bool,
+) -> Dict[str, str]:
+    """Which of ``fields`` the cache answered between two reads: {field:
+    value}, or {field: ""} for a miss recorded meanwhile (a deep search's for
+    a deep lookup, any for a normal one). A miss it already held does not
+    count, so a re-buy the recruiter confirmed stays one."""
+    out: Dict[str, str] = {}
+    for f in fields:
+        if after.get(f):
+            out[f] = str(after[f])
+            continue
+        for kind in ("deep_missed",) if deep else ("missed", "deep_missed"):
+            if after.get(f"{f}_{kind}") and (
+                not before.get(f"{f}_{kind}") or after.get(f"{f}_{kind}_at") != before.get(f"{f}_{kind}_at")
+            ):
+                out[f] = ""
+                break
+    return out
+
+
+async def _keep_answer(
+    linkedin_url: str, fields: Tuple[str, ...], deep: bool, result: Dict[str, Any],
+) -> Tuple[str, str]:
+    """Cache what an Exa run found and, when it answered, which of ``fields``
+    it found nothing for (a deep search's miss for a deep run). Returns the
+    email / phone it found."""
+    answered = bool(result.get("ok"))
+    email, phone = _asked_contact(fields, (result.get("fields") or {}) if answered else {})
+    missed = [f for f, got in (("email", email), ("phone", phone)) if answered and f in fields and not got]
+    if email or phone or missed:
+        provider = "exa_deep" if deep else "exa"
+        await contact_cache.record(
+            linkedin_url, email=email, phone=phone, email_provider=provider, phone_provider=provider,
+            missed=[] if deep else missed, deep_missed=missed if deep else [],
+        )
+    return email, phone
+
+
+class _Step:
+    """One exa_step call."""
+
+    def __init__(self, **kw: Any) -> None:
+        self.__dict__.update(kw)
+        self.got: Dict[str, str] = {}     # fields the cache answered meanwhile ("" = a miss)
+        self.paid = False                 # a paid run of its own was started
+        self.bought = False               # ... and sent (not skipped, not stopped by the lease)
+        self.run_id = ""                  # the run it started (telemetry)
+        self.parts: List[Dict[str, Any]] = []   # answers of fields bought apart (partial overlap)
+        self.going: set = set()           # fields a run (ours or the holder's) may still answer
+
+
+async def exa_step(
+    candidate_id: str,
+    linkedin_url: str,
+    full_name: str = "",
+    company: str = "",
+    *,
+    fields: Tuple[str, ...] = EXA_CONTACT_FIELDS,
+    deep: bool = False,
+    wait_retry: bool = True,
+    semaphore: Any = None,
+    cached: Optional[Dict[str, Any]] = None,
+    late: Optional[Dict[str, Any]] = None,
+    enrich: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None,
+    tasks: Optional[set] = None,
+    on_unused: Optional[Callable[[], None]] = None,
+) -> Dict[str, Any]:
+    """One paid Exa contact step (the normal run, or the ``deep`` search) for
+    ``fields`` of one person, single-flight across the workers (see above).
+
+    Returns exa_enrich_by_linkedin's answer (``ok`` / ``fields`` / ``message``
+    / ``fatal`` / ``run_id`` / ``skipped``) plus ``role`` (leader / follower /
+    passthrough), ``from_cache`` (the cache answered meanwhile: nothing
+    bought), ``in_progress`` (another lookup's run for some of the fields is
+    still going: not an answer, never a miss) and ``in_progress_fields`` (the
+    fields a run, ours handed to the late watch or another lookup's, may
+    still answer; [] when none). Fields the holder is not after are bought at
+    once, so ``ok`` with ``fields`` can come together with ``in_progress``
+    for the rest; ``fields`` can also come without ``ok`` when one part
+    answered and the other failed. It caches the answer itself (before the
+    lease is released) and is the one place a run still going is handed to
+    the late watch.
+
+    ``semaphore``: the in-flight bound a paid run waits on (the lease is
+    claimed only with a slot in hand; a follower never holds one). ``cached``:
+    contact_cache.get() as the caller read it, against
+    which "answered meanwhile" is judged (read here when omitted). ``late``:
+    candidate_id / jobdiva_id of the rows a late answer fills. ``enrich``:
+    exa_enrich_by_linkedin, or a caller's alias of it. The paid run is
+    shielded (kept in ``tasks``): a cancelled caller never loses an answer
+    already paid for. ``on_unused`` is called once, synchronously, when this
+    step bought nothing itself: cancelled before its run started, answered
+    by the cache or another lookup's run, or skipped by the out-of-credits
+    breaker. Never raises except CancelledError.
+    """
+    wanted = tuple(f for f in EXA_CONTACT_FIELDS if f in (fields or ()))
+    step = _Step(
+        candidate_id=candidate_id, linkedin_url=linkedin_url, full_name=full_name or "",
+        company=company or "", wanted=wanted, deep=bool(deep), wait_retry=wait_retry,
+        tier="deep" if deep else "normal", semaphore=semaphore, before=cached,
+        late={k: late[k] for k in ("candidate_id", "jobdiva_id") if (late or {}).get(k)},
+        enrich=enrich or exa_enrich_by_linkedin, tasks=tasks,
+        slug=contact_cache.linkedin_slug(linkedin_url),
+    )
+    with exa_telemetry.scope(tier=step.tier, fields_asked=",".join(wanted)):
+        try:
+            if not (wanted and step.slug and EXA_API_KEY and single_flight_enabled() and contact_cache.enabled()):
+                result = await _passthrough(step, wanted, "off")
+            else:
+                if step.before is None:
+                    step.before = await contact_cache.get(linkedin_url)
+                result = await _single_flight(step)
+        except asyncio.CancelledError:
+            if not step.paid and on_unused is not None:
+                on_unused()
+            raise
+    # Nothing of its own was sent: answered by the cache or another lookup's
+    # run, skipped by the breaker, or its lease taken before the create.
+    if on_unused is not None and not step.bought:
+        on_unused()
+    return result
+
+
+async def _passthrough(
+    step: _Step, fields: Tuple[str, ...], reason: str, permit: Optional[_SlotPermit] = None, **attrs: Any,
+) -> Dict[str, Any]:
+    """A paid run without a lease (in ``permit``'s slot when one was taken)."""
+    with exa_telemetry.scope(role="passthrough"):
+        result = await _run_paid(step, fields, None, permit)
+    return _finish(step, result, "passthrough", "lease_error" if reason == "lease_error" else "passthrough",
+                   reason=reason, **attrs)
+
+
+async def _buy_part(step: _Step, fields: Tuple[str, ...]) -> None:
+    """Partial overlap: the fields the person's holder is not after, bought
+    at once without a lease (a passthrough) while the step waits for the
+    rest. Its answer is kept in ``step.parts`` (``_finish`` folds it in); one
+    ContactLookup (passthrough, ``reason`` partial_overlap)."""
+    own_run = step.run_id
+    with exa_telemetry.scope(role="passthrough", fields_asked=",".join(fields)):
+        result = await _run_paid(step, fields, None)
+        exa_telemetry.record_contact_lookup(
+            "passthrough", reason="partial_overlap", from_cache=bool(result.get("from_cache")) or None,
+            exa_run_id=str(result.get("run_id") or step.run_id or "") or None,
+        )
+    step.run_id = own_run   # the run of the rest, if it leads, names the step
+    step.parts.append(result)
+
+
+def _with_part(result: Dict[str, Any], part: Dict[str, Any]) -> Dict[str, Any]:
+    """``result`` (the fields another lookup was after) joined with ``part``
+    (the rest, bought apart): the fields either found; ``ok`` only when both
+    answered (or the first is still going: ``in_progress`` covers it), so no
+    field of a failed part is ever taken for a miss; ``fatal`` / the run
+    still going of either; ``from_cache`` / ``skipped`` only when both."""
+    out = dict(result)
+    found = dict(result.get("fields") or {})
+    for key, value in (part.get("fields") or {}).items():
+        if value and not found.get(key):
+            found[key] = value
+    if found:
+        out["fields"] = found
+    out["ok"] = bool(part.get("ok")) and bool(result.get("ok") or result.get("in_progress"))
+    if not out["ok"] and not out.get("message") and part.get("message"):
+        out["message"] = part["message"]
+    if part.get("fatal"):
+        out["fatal"] = True
+    if part.get("run_id") and not out.get("run_id"):
+        out["run_id"] = part["run_id"]
+    for flag in ("from_cache", "skipped"):
+        if not (result.get(flag) and part.get(flag)):
+            out.pop(flag, None)
+    return out
+
+
+def _finish(step: _Step, result: Dict[str, Any], role: str, outcome: str, **attrs: Any) -> Dict[str, Any]:
+    """The step's answer: ``result`` plus what the cache answered meanwhile
+    and what was bought apart (``step.parts``), with ``in_progress_fields``;
+    and its ContactLookup event (for ``result``'s part)."""
+    result = {**result, "role": role}
+    if step.got and result.get("ok"):
+        found = dict(result.get("fields") or {})
+        for key, value in _contact_fields(step.got).items():
+            if value and not found.get(key):
+                found[key] = value
+        result["fields"] = found
+    run_ref = attrs.pop("exa_run_id", "") or result.get("run_id") or step.run_id
+    exa_telemetry.record_contact_lookup(
+        outcome, from_cache=bool(result.get("from_cache")) or None, exa_run_id=str(run_ref or "") or None, **attrs,
+    )
+    for part in step.parts:
+        result = _with_part(result, part)
+    result["in_progress_fields"] = [f for f in step.wanted if f in step.going and f not in step.got]
+    return result
+
+
+async def _single_flight(step: _Step) -> Dict[str, Any]:
+    """exa_step with the lease: lead, follow or pass through."""
+    loop = asyncio.get_running_loop()
+    window = max(1, (EXA_CONTACT_DEEP_TIMEOUT_S if step.deep else EXA_CONTACT_ENRICH_TIMEOUT_S) * (
+        2 if (not step.deep and step.wait_retry and EXA_CONTACT_ENRICH_RETRY) else 1
+    ))
+    # The window starts once the person is first found held, so a lookup
+    # that queued for a slot before it found someone else had it still gets
+    # all of it.
+    deadline: Optional[float] = None
+    started = time.monotonic()
+    remaining = step.wanted
+    dead_runs: set = set()
+    lease_lost = False
+    followed = ""
+
+    async def _pause() -> None:
+        await asyncio.sleep(max(0.0, min(FOLLOW_POLL_S, deadline - loop.time())))
+
+    while True:
+        held = await contact_cache.holder(step.slug, **_horizons())
+        if held["state"] == "error":
+            return await _passthrough(step, remaining, "lease_error")
+        if held["state"] == "free":
+            status, token, permit, remaining = await _claim_with_slot(step, remaining)
+            if status == "cached":
+                # The cache answered the rest once the slot was in hand:
+                # nothing claimed, nothing bought.
+                return _finish(step, {"ok": True, "fields": {}, "from_cache": True}, "follower", "follower",
+                               lease_lost=lease_lost or None)
+            if status == "error":
+                return await _passthrough(step, remaining, "lease_error", permit)
+            if status == "won":
+                with exa_telemetry.scope(role="leader"):
+                    result = await _run_paid(step, remaining, _Lease(step.slug, token), permit)
+                if not result.get("lease_lost"):
+                    return _finish(step, result, "leader", "leader", lease_lost=lease_lost or None)
+                lease_lost = True  # another lookup holds the person now: follow it
+                step.paid = False  # nothing was sent
+                continue
+            # Another lookup claimed it first: read it on the next round.
+            deadline = loop.time() + window if deadline is None else deadline
+            await _pause()
+        else:
+            deadline = loop.time() + window if deadline is None else deadline
+            run_id = held.get("run_id") or ""
+            overlap = tuple(f for f in remaining if f in held["fields"])
+            if not overlap:
+                return await _passthrough(step, remaining, "no_overlap")
+            if overlap != remaining:
+                # What the holder is not after is bought now (Launch PAIR's
+                # phone behind a sourcing lookup of the email); only the
+                # overlap waits on it.
+                await _buy_part(step, tuple(f for f in remaining if f not in overlap))
+                remaining = overlap
+            elif run_id and run_id not in dead_runs and held["tier"] == step.tier:
+                # The holder's run asks what we want: wait for it (free polls).
+                followed = run_id
+                run = await _follow_run(run_id, deadline)
+                if run.get("status") == "completed":
+                    found = extract_exa_contact_fields((run.get("output") or {}).get("structured"))
+                    email, phone = _asked_contact(remaining, found)
+                    result = {"ok": True, "fields": _contact_fields({"email": email, "phone": phone})}
+                    # What the run did not find may be a field its holder stopped
+                    # asking for once the cache answered it: not a miss.
+                    unfound = tuple(f for f, got in (("email", email), ("phone", phone)) if f in remaining and not got)
+                    if unfound:
+                        step.got.update(_answered_since(
+                            step.before, await contact_cache.get(step.linkedin_url), unfound, step.deep,
+                        ))
+                    await _keep_answer(
+                        step.linkedin_url, tuple(f for f in remaining if f not in step.got), step.deep, result,
+                    )
+                    return _finish(step, result, "follower", "follower", exa_run_id=run_id,
+                                   waited_ms=exa_telemetry.latency_ms(started), lease_lost=lease_lost or None)
+                if run.get("status") in _EXA_TERMINAL_STATES:
+                    dead_runs.add(run_id)  # failed / cancelled: its holder may start another
+                elif loop.time() < deadline:
+                    # The run could not be read (Exa unreachable, a bad
+                    # answer): wait as any follower does, never spin.
+                    await _pause()
+            else:
+                await _pause()
+        # What the cache answered meanwhile (a holder records before it releases).
+        remaining = await _unanswered(step, remaining)
+        if not remaining:
+            return _finish(step, {"ok": True, "fields": {}, "from_cache": True}, "follower", "follower",
+                           waited_ms=exa_telemetry.latency_ms(started), lease_lost=lease_lost or None)
+        if loop.time() >= deadline:
+            joined = await contact_cache.join(step.slug, step.late)
+            if not joined:
+                # Nobody holds the person any more? Its holder may have
+                # recorded the answer and released since the read above.
+                remaining = await _unanswered(step, remaining)
+                if not remaining:
+                    return _finish(step, {"ok": True, "fields": {}, "from_cache": True}, "follower", "follower",
+                                   waited_ms=exa_telemetry.latency_ms(started), lease_lost=lease_lost or None)
+            step.going.update(remaining)
+            return _finish(
+                step,
+                {"ok": bool(step.got), "in_progress": True,
+                 "message": "Another lookup of this person is still running; its answer is kept"},
+                "follower", "in_progress", exa_run_id=followed, joined=joined or None,
+                waited_ms=exa_telemetry.latency_ms(started), lease_lost=lease_lost or None,
+            )
+
+
+async def _unanswered(step: _Step, fields: Tuple[str, ...]) -> Tuple[str, ...]:
+    """``fields`` less those the cache answered since the caller read it
+    (kept in ``step.got``)."""
+    if step.before is None:
+        return fields
+    step.got.update(_answered_since(step.before, await contact_cache.get(step.linkedin_url), fields, step.deep))
+    return tuple(f for f in fields if f not in step.got)
+
+
+def _give_back_claim(slug: str) -> Callable[["asyncio.Future[Tuple[str, str]]"], None]:
+    """Done-callback of a claim whose caller was cancelled while it ran: the
+    claim still commits in its thread, so a lease it won is released here
+    (else nobody holds or renews it, and every lookup of the person waits up
+    to contact_cache.LEASE_S for it to lapse)."""
+    def _done(claim: "asyncio.Future[Tuple[str, str]]") -> None:
+        if claim.cancelled() or claim.exception() is not None:
+            return
+        status, token = claim.result()
+        if status == "won":
+            _Lease(slug, token).release_soon()
+    return _done
+
+
+async def _claim_with_slot(
+    step: _Step, fields: Tuple[str, ...],
+) -> Tuple[str, str, Optional[_SlotPermit], Tuple[str, ...]]:
+    """A slot of the step's semaphore first, then the cache looked at again
+    with the slot in hand (a lookup of the same person that held the slot,
+    or any other lookup meanwhile, may have answered some of ``fields``),
+    then the person's lease for what is still unanswered: the lease names
+    exactly the fields its run asks, so a lookup of a field no run is after
+    never waits on it. A lookup still queued for a slot never holds the
+    person, so it never holds up one that could run now (a click or Launch
+    PAIR behind a queued sourcing lookup).
+
+    (status, token, permit, the fields to buy): ("won", token, permit, ...),
+    ("held", "", None, ...) (the slot given back), ("cached", "", None, ())
+    (the cache answered them all: nothing claimed, the slot given back) or
+    ("error", "", permit, ...) (fail open: run in that slot). A caller
+    cancelled while the claim runs releases the lease it took."""
+    permit: Optional[_SlotPermit] = None
+    if step.semaphore is not None:
+        await step.semaphore.acquire()
+        permit = _SlotPermit(step.semaphore)
+    claim: Optional["asyncio.Future[Tuple[str, str]]"] = None
+    try:
+        if permit is not None:
+            fields = await _unanswered(step, fields)
+            if not fields:
+                permit.release()
+                return "cached", "", None, ()
+        claim = asyncio.ensure_future(contact_cache.claim(
+            step.slug, fields, step.tier, ctx=step.late or None, **_horizons(),
+        ))
+        _keep_task(claim)
+        status, token = await asyncio.shield(claim)
+    except BaseException:
+        if permit is not None:
+            permit.release()
+        if claim is not None:
+            claim.add_done_callback(_give_back_claim(step.slug))
+        raise
+    if status == "held" and permit is not None:
+        permit.release()
+        permit = None
+    return status, token, permit, fields
+
+
+async def _follow_run(run_id: str, deadline: float) -> Dict[str, Any]:
+    """Poll another lookup's run until it ends or ``deadline``. GETs are free
+    and send no ExaCall (the run's owner reports it). The run JSON last seen
+    ({} when none could be read); a GET that fails ends it early (the caller
+    waits FOLLOW_POLL_S before it looks again)."""
+    headers = {"Content-Type": "application/json", "x-api-key": EXA_API_KEY, "Exa-Beta": EXA_AGENT_BETA}
+    loop = asyncio.get_running_loop()
+    run: Dict[str, Any] = {}
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            while loop.time() < deadline:
+                g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
+                if g.status_code == 404:
+                    return {"status": "failed"}
+                if g.status_code < 400:
+                    body = g.json()
+                    run = body if isinstance(body, dict) else {}
+                    if run.get("status") in _EXA_TERMINAL_STATES:
+                        return run
+                await asyncio.sleep(max(0.0, min(_EXA_POLL_INTERVAL_S, deadline - loop.time())))
+    except Exception as e:
+        logger.info("Exa run %s could not be followed: %s", run_id, e)
+    return run
+
+
+async def _run_paid(
+    step: _Step, fields: Tuple[str, ...], lease: Optional[_Lease], permit: Optional[_SlotPermit] = None,
+) -> Dict[str, Any]:
+    """A run of this step's own (the leader's, or one without a lease) in a
+    slot of the step's semaphore (``permit``: one already taken, the cache
+    looked at again by its taker, _claim_with_slot; else it is waited for
+    here and the cache looked at again with it in hand), then the run,
+    shielded. Its fields go in ``step.going`` while it is going. A leader's
+    ``fields`` are never narrowed here: its lease names them."""
+    if lease is not None:
+        lease.start_beats()
+    try:
+        if permit is None and step.semaphore is not None:
+            await step.semaphore.acquire()
+            permit = _SlotPermit(step.semaphore)
+            if lease is None:
+                # A lookup of the same person that held the slot (a
+                # re-search after Stop, another row of the person, a lookup
+                # without a lease) may have answered it meanwhile.
+                fields = await _unanswered(step, fields)
+                if not fields:
+                    permit.release()
+                    return {"ok": True, "fields": {}, "from_cache": True}
+        task = asyncio.ensure_future(_paid_run(step, fields, lease, permit))
+    except BaseException:
+        if permit is not None:
+            permit.release()
+        if lease is not None:
+            lease.release_soon()
+        raise
+    step.paid = True
+    if permit is not None:
+        # Gives the slot back should the task be cancelled before it ever
+        # runs (loop shutdown); a no-op once the task released it.
+        task.add_done_callback(permit.release)
+    _keep_task(task, step.tasks)
+    result = await asyncio.shield(task)
+    if result.get("run_id"):
+        step.going.update(fields)   # handed to the late watch: it may still answer
+    return result
+
+
+async def _paid_run(
+    step: _Step, fields: Tuple[str, ...], lease: Optional[_Lease], permit: Optional[_SlotPermit],
+) -> Dict[str, Any]:
+    """_run_paid's shielded part: the run, its answer cached, then the lease
+    released (the rows of lookups that joined it filled) or handed with a run
+    still going to the late watch. Never raises (but CancelledError)."""
+    run = _StepRun(lease)
+    ctx_token = _STEP_RUN.set(run)
+    keep_lease = False   # handed to the late watch, or left to the orphan sweep
+    released = False
+    try:
+        kw: Dict[str, Any] = {"fields": fields}
+        if step.deep:
+            kw["deep"] = True
+        if not step.wait_retry:
+            kw["wait_retry"] = False
+        try:
+            result = await step.enrich(step.candidate_id, step.linkedin_url, step.full_name, step.company, **kw)
+        except Exception as e:
+            logger.warning("Exa contact step raised for %s: %s", step.candidate_id, e)
+            result = {"ok": False, "message": f"Exa request failed: {e}"}
+        if result.get("lease_lost") or result.get("skipped"):
+            return result   # nothing was sent: nothing to remember
+        step.bought = True
+        email, phone = await _keep_answer(step.linkedin_url, fields, step.deep, result)
+        run_id = str(result.get("run_id") or "")
+        if run_id:
+            keep_lease = watch_late_exa_run(
+                run_id, step.linkedin_url, fields=fields, provider="exa_deep" if step.deep else "exa",
+                **step.late, **({"token": lease.token, "slug": lease.slug} if lease is not None else {}),
+            ) is True and lease is not None
+        if lease is not None and not keep_lease:
+            released = True
+            joined = await lease.release()
+            if email or phone:
+                await _fill_late_contexts(joined, email, phone, skip=step.late)
+        return result
+    except asyncio.CancelledError:
+        # Only the loop going away reaches this shielded task: a run already
+        # started is left to the orphan sweep (its lease lapses).
+        keep_lease = keep_lease or bool(run.run_id)
+        raise
+    finally:
+        _STEP_RUN.reset(ctx_token)
+        step.run_id = run.run_id or step.run_id
+        if permit is not None:
+            permit.release()
+        if lease is not None:
+            lease.stop_beats()
+            if not (keep_lease or released):
+                lease.release_soon()
+
+
+async def resume_orphaned_late_watches() -> int:
+    """APScheduler job (main.py), every 60 s in every worker: adopt the Exa
+    contact runs whose late watch died with its worker (a deploy, a recycle
+    under --limit-max-requests) while they can still answer, and watch each
+    until its horizon. Each orphan goes to one worker (FOR UPDATE SKIP
+    LOCKED), so no advisory lock. One WARNING and one ContactLookup
+    (``adopted``) per run. Returns how many it adopted; never raises."""
+    try:
+        from core.tasks import is_stopping
+
+        if is_stopping() or not single_flight_enabled() or not EXA_API_KEY or EXA_LATE_RESULT_WAIT_S <= 0:
+            return 0
+        adopted = 0
+        for row in await contact_cache.adopt_orphans(limit=ADOPT_LIMIT, **_horizons()):
+            if not (row["run_id"] and row["slug"] and row["token"]):
+                continue
+            fields = row["fields"] or EXA_CONTACT_FIELDS
+            with exa_telemetry.scope(path="late_sweep", role="adopted", tier=row["tier"], fields_asked=",".join(fields)):
+                # Never the profile (application logs go to New Relic): the run id names it.
+                logger.warning(
+                    "Exa contact run %s adopted: its watcher stopped with its worker (%ds left)",
+                    row["run_id"], int(row["remaining_s"]),
+                )
+                exa_telemetry.record_contact_lookup(
+                    "adopted", exa_run_id=row["run_id"], remaining_s=int(row["remaining_s"]),
+                )
+                if _start_late_watch(
+                    row["run_id"], contact_cache.profile_url(row["slug"]), fields=fields,
+                    provider="exa_deep" if row["tier"] == "deep" else "exa",
+                    token=row["token"], slug=row["slug"], wait_s=row["remaining_s"],
+                ):
+                    adopted += 1
+        return adopted
+    except Exception as e:  # noqa: BLE001 - a scheduler job never raises
+        logger.warning("Exa late-watch sweep failed: %s", e)
+        return 0
 
 
 ZOOMINFO_NEW_SEARCH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/search"
@@ -1600,9 +2361,9 @@ def reset_job_counter(jobdiva_id: str, *, include_lifetime: bool = False) -> Non
         _JOB_EXA_LIFETIME.pop(jobdiva_id, None)
 
 
-# Sourcing-time Exa lookups run as tasks of their own (see
-# _sourcing_exa_lookup). Strong references: a task only weakly referenced by
-# the loop could vanish mid-run.
+# Sourcing-time Exa runs: exa_step's shielded tasks, kept here so the
+# Step-5 stream closing never cancels a run already paid for. Strong
+# references: a task only weakly referenced by the loop could vanish mid-run.
 _SOURCING_EXA_TASKS: set = set()
 
 
@@ -1645,94 +2406,6 @@ def _cached_contact_answer(cached: Dict[str, Any], wanted: Any) -> Optional[Dict
         "workPhone": "",
         "provider_used": "cache",
     }
-
-
-# Per-worker single-flight of the sourcing Exa step: the person (LinkedIn
-# slug) -> (task, fields) of the _sourcing_exa_lookup buying their contact in
-# this worker right now. Another lookup of the same person meanwhile (a
-# re-search after Stop while an Exa slot is free, a second row of the same
-# person) waits for that run instead of buying a second one. Only in this
-# worker, and only until the run answers or is handed to the late watch.
-_SOURCING_EXA_INFLIGHT: Dict[str, Tuple["asyncio.Future[Dict[str, Any]]", Tuple[str, ...]]] = {}
-
-
-def _sourcing_run_in_flight(slug: str, fields: Tuple[str, ...]) -> "Optional[asyncio.Future[Dict[str, Any]]]":
-    """This worker's sourcing Exa run of ``slug`` still going and asking at
-    least ``fields``, or None."""
-    task, asked = _SOURCING_EXA_INFLIGHT.get(slug, (None, ()))
-    if task is None or task.done() or not set(fields) <= set(asked):
-        return None
-    return task
-
-
-def _track_sourcing_run(slug: str, task: "asyncio.Future[Dict[str, Any]]", fields: Tuple[str, ...]) -> None:
-    """``task`` is the person's sourcing Exa run in this worker until it ends."""
-    _SOURCING_EXA_INFLIGHT[slug] = (task, tuple(fields))
-
-    def _forget(done: "asyncio.Future[Dict[str, Any]]") -> None:
-        if _SOURCING_EXA_INFLIGHT.get(slug, (None, ()))[0] is done:
-            del _SOURCING_EXA_INFLIGHT[slug]
-
-    task.add_done_callback(_forget)
-
-
-async def _follow_sourcing_run(task: "asyncio.Future[Dict[str, Any]]", fields: Tuple[str, ...]) -> Dict[str, Any]:
-    """What another lookup's run of the same person found of ``fields``, as a
-    sourcing answer (provider_used "cache": that run caches it itself), or {}
-    (it found none and recorded the miss, it is still going, or the breaker
-    skipped it). Waits without cancelling that run: this caller's cancel (the
-    Step-5 stream closing) never reaches it."""
-    await asyncio.wait({task})
-    if task.cancelled() or task.exception() is not None:
-        return {}
-    result = task.result() or {}
-    found = (result.get("fields") or {}) if result.get("ok") else {}
-    return _cached_contact_answer({
-        "email": str(found.get("workEmail") or found.get("personalEmail") or ""),
-        "phone": str(found.get("mobilePhone") or ""),
-    }, fields) or {}
-
-
-async def _sourcing_exa_lookup(
-    label: str,
-    linkedin_url: str,
-    full_name: str,
-    company: str,
-    fields: Tuple[str, ...],
-    job_key: str,
-    permit: _SlotPermit,
-) -> Dict[str, Any]:
-    """The sourcing chain's paid Exa step, run as a task its caller awaits
-    through ``asyncio.shield`` once it holds an Exa slot (``permit``): when the
-    Step-5 stream closes and cancels the caller, the run (already billed)
-    still finishes here, and its answer goes to the contact cache before the
-    slot is given back, so a lookup of the same person queued for that slot
-    finds it there; a run still going after both windows is watched in the
-    background. Never raises."""
-    from services import contact_cache
-
-    try:
-        try:
-            result = await exa_enrich_by_linkedin(label, linkedin_url, full_name, company, fields=fields)
-        except Exception as e:
-            logger.warning("contact_enrichment Exa path raised for %s (job %s): %s", label, job_key, e)
-            return {"ok": False}
-        if result.get("skipped"):
-            return result  # nothing was sent: nothing to remember
-        found = (result.get("fields") or {}) if result.get("ok") else {}
-        await contact_cache.record(
-            linkedin_url,
-            email=str(found.get("workEmail") or found.get("personalEmail") or ""),
-            # Personal numbers only: the cache marks every phone it stores as personal.
-            phone=str(found.get("mobilePhone") or ""),
-            email_provider="exa",
-            phone_provider="exa",
-            missed=fields if result.get("ok") else (),
-        )
-        watch_late_exa_run(str(result.get("run_id") or ""), linkedin_url, fields=fields, provider="exa")
-        return result
-    finally:
-        permit.release()
 
 
 async def enrich_contact_for_sourcing(
@@ -2037,72 +2710,33 @@ async def enrich_contact_for_sourcing(
                 field for field, have in (("email", seed_email), ("phone", seed_phone))
                 if not have and (want_phone or field != "phone")
             )
-            # This person's contact is being bought by another sourcing
-            # lookup in this worker right now (a re-search after Stop, a
-            # second row of the same person): wait for that run instead of
-            # buying a second one, and give this lookup's cap slots back.
-            slug = contact_cache.linkedin_slug(linkedin_url)
-            lead = _sourcing_run_in_flight(slug, exa_fields)
-            if lead is not None:
-                _refund_exa_slots(job_key)
-                return await _follow_sourcing_run(lead, exa_fields)
-            # Wait for an Exa slot here, where the caller's cancel still wins:
-            # a lookup the closed Step-5 stream cancels while it is queued
-            # (up to EXA_SOURCING_CONTACT_CAP of them per search behind
-            # EXA_CONTACT_ENRICH_CONCURRENCY slots) buys nothing and gives its
-            # cap slots back.
-            sem = _exa_semaphore()
-            try:
-                await sem.acquire()
-            except BaseException:
-                _refund_exa_slots(job_key)
-                raise
-            permit = _SlotPermit(sem)
-            try:
-                # Looked at again with the slot in hand: a lookup of the same
-                # person queued ahead (a re-search after Stop, another row of
-                # the same person, another worker) may have bought it meanwhile.
-                fresh = await contact_cache.get(linkedin_url)
-                reuse = _cached_contact_answer(fresh, exa_fields)
-                if reuse or all(fresh.get(f"{f}_missed") for f in exa_fields):
-                    permit.release()
-                    _refund_exa_slots(job_key)
-                    return reuse or {}
-                # ...or started a run of them while this one waited (checked
-                # with no await before this lookup's own run is tracked).
-                lead = _sourcing_run_in_flight(slug, exa_fields)
-                if lead is not None:
-                    permit.release()
-                    _refund_exa_slots(job_key)
-                else:
-                    # A run of its own, holding the slot until its answer is
-                    # cached: the stream closing from here on cancels this
-                    # lookup, but the run still finishes and keeps its answer.
-                    exa_task = asyncio.ensure_future(_sourcing_exa_lookup(
-                        exa_label, linkedin_url, full_name or "", company or "", exa_fields, job_key, permit,
-                    ))
-            except BaseException:
-                permit.release()
-                _refund_exa_slots(job_key)
-                raise
-            if lead is not None:
-                return await _follow_sourcing_run(lead, exa_fields)
-            # Also gives the slot back should the task be cancelled before it
-            # ever runs (loop shutdown); a no-op once the task released it.
-            exa_task.add_done_callback(permit.release)
-            _SOURCING_EXA_TASKS.add(exa_task)
-            exa_task.add_done_callback(_SOURCING_EXA_TASKS.discard)
-            if slug:
-                _track_sourcing_run(slug, exa_task, exa_fields)
-            exa_result = await asyncio.shield(exa_task)
-            if exa_result.get("skipped"):
-                # Breaker opened while this lookup waited: nothing was sent,
-                # so the per-run and lifetime slots are refunded and no miss
-                # is recorded.
-                _refund_exa_slots(job_key)
-                return {}
+            # exa_step (single-flight per person across the workers): the
+            # Exa slot is waited for where the caller's cancel still wins (a
+            # lookup the closed Step-5 stream cancels while queued buys
+            # nothing), the cache is looked at again with the slot in hand (a
+            # lookup of the same person queued ahead may have bought it), and
+            # the run itself is shielded and caches its own answer, so the
+            # stream closing never loses a paid answer. Whenever this lookup
+            # buys nothing itself (cancelled while queued, answered by the
+            # cache or by another lookup's run, the out-of-credits breaker
+            # opened while it waited), its cap slots are given back.
+            exa_result = await exa_step(
+                exa_label, linkedin_url, full_name or "", company or "", fields=exa_fields,
+                semaphore=_exa_semaphore(), cached=cached, tasks=_SOURCING_EXA_TASKS,
+                on_unused=lambda: _refund_exa_slots(job_key),
+            )
+            if exa_result.get("from_cache"):
+                return _cached_contact_answer(
+                    {f: v for f, v in zip(("email", "phone"), _asked_contact(
+                        exa_fields, exa_result.get("fields") or {}))}, exa_fields,
+                ) or {}
+            if exa_result.get("skipped") or (exa_result.get("in_progress") and not exa_result.get("ok")):
+                return {}   # nothing was sent (or not ours): no miss is recorded
 
-            trace["exa_asked"] = exa_fields
+            # A field another lookup's run is still after is not a miss.
+            trace["exa_asked"] = tuple(
+                f for f in exa_fields if f not in (exa_result.get("in_progress_fields") or ())
+            )
             trace["exa_answered"] = bool(exa_result.get("ok"))
             if exa_result.get("ok") and _has_usable_field(exa_result.get("fields") or {}):
                 fields = exa_result["fields"]
