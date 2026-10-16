@@ -17,6 +17,8 @@ from utils.email_utils import is_placeholder_email
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
+from services import exa_telemetry
+from services.exa_errors import ExaOutOfCreditsError
 from services.location import (
     haversine_miles,
     inferred_region_states,
@@ -761,6 +763,14 @@ class UnifiedCandidateSearch:
         job_id = str(getattr(criteria, "job_id", "") or "")
         run_id = _pipeline_trace.new_run(job_id or "unknown")
         _search_job_id.set(job_id or None)
+        # Who is paying for this search's Exa calls (ExaCall `trigger`; the
+        # job comes from the pipeline run above). A bare set, like the two
+        # above: this is an async generator. A launch session's S1 has
+        # already bound launch_s1 and keeps it.
+        exa_telemetry.bind_if_unbound(
+            trigger="autosync" if _bi_rate_limit.in_background()
+            else f"step5_{str(getattr(criteria, 'search_mode', 'full') or 'full').lower()}",
+        )
         mark = bool(job_id) and not _bi_rate_limit.in_background()
         marker = _jobdiva_activity.active_job(job_id if mark else None)
         first = True
@@ -782,6 +792,8 @@ class UnifiedCandidateSearch:
         """
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
+        if "Exa" in (criteria.sources or []) or "Dice" in (criteria.sources or []):
+            exa_telemetry.record_config_once()
 
         # Fresh per-run enrichment budget. The provider caps
         # (PER_JOB_CAP / EXA_SOURCING_CONTACT_CAP) are in-process per-worker
@@ -1149,7 +1161,14 @@ class UnifiedCandidateSearch:
             exception is sanitized to its class name — raw error text can
             carry internal URLs/hosts and this reason renders verbatim in
             the recruiter-facing banner."""
-            if error is not None:
+            if isinstance(error, ExaOutOfCreditsError):
+                # Not "no matches": the source could not be searched at all.
+                status = "failed"
+                reason = (
+                    f"Exa is out of credits — {source} results are missing "
+                    "until it is topped up."
+                )
+            elif error is not None:
                 status = "failed"
                 if count > 0:
                     reason = (
@@ -2237,6 +2256,10 @@ class UnifiedCandidateSearch:
                         f"processed {len(ext_candidates)} {source_type} candidates: "
                         + ", ".join(f"{k}={v}" for k, v in sorted(_status_counts.items())),
                     )
+            except ExaOutOfCreditsError as e:
+                # Already logged once at ERROR by the breaker; no traceback.
+                _ext_error = e
+                logger.warning(f"{name} search skipped: {e}")
             except Exception as e:
                 _ext_error = e
                 logger.error(f"{name} search stage failed: {e}", exc_info=True)
@@ -8341,15 +8364,24 @@ class UnifiedCandidateSearch:
         """
         variants = self._location_criteria_variants(criteria)
         _sem = asyncio.Semaphore(3)
+        credits_errors: List[ExaOutOfCreditsError] = []
 
         async def _guarded(variant: SearchCriteria) -> Dict[str, Any]:
             async with _sem:
-                return await single_loc_fn(variant)
+                try:
+                    return await single_loc_fn(variant)
+                except ExaOutOfCreditsError as exc:
+                    # Exa sources only. Keep the other locations' rows; raise
+                    # (below) only when there are none.
+                    credits_errors.append(exc)
+                    return {}
 
         results = await asyncio.gather(*[_guarded(v) for v in variants])
         merged: List[Dict[str, Any]] = []
         for r in results:
             merged.extend(r.get("candidates") or [])
+        if credits_errors and not merged:
+            raise credits_errors[0]
         return {
             "candidates": self._deduplicate_candidates(merged),
             "source_type": source_type,
@@ -8599,6 +8631,8 @@ class UnifiedCandidateSearch:
                 keywords=criteria.keywords,
             )
             return {"candidates": candidates, "source_type": "Dice"}
+        except ExaOutOfCreditsError:
+            raise  # produce_external reports it as the source's status
         except Exception as e:
             logger.error(f"Dice search failed: {e}")
             return {"candidates": [], "source_type": "Dice"}
@@ -8671,6 +8705,8 @@ class UnifiedCandidateSearch:
                     logger.warning(f"Exa OTW enrichment skipped: {otw_exc}", exc_info=True)
             candidates = self._drop_client_employees(candidates, criteria, "LinkedIn-Exa")
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
+        except ExaOutOfCreditsError:
+            raise  # produce_external reports it as the source's status
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
             return {"candidates": [], "source_type": "LinkedIn-Exa"}

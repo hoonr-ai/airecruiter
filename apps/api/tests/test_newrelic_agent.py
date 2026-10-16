@@ -387,6 +387,41 @@ def test_to_thread_kill_switch():
     assert r["value_in_txn"] == 3 and r["raised_in_txn"] == "kaput"
 
 
+_RUN_IN_EXECUTOR = """
+from core import newrelic as nr
+nr.init()
+import asyncio
+import newrelic.agent as agent
+from newrelic.api.background_task import BackgroundTask
+from newrelic.api.application import application_instance
+
+def seen():
+    return agent.current_transaction()
+
+async def main():
+    loop = asyncio.get_running_loop()
+    out = {}
+    with BackgroundTask(application_instance(), "outer") as txn:
+        out["wrapped_saw_txn"] = (await loop.run_in_executor(None, nr.wrap_for_thread(seen))) is txn
+        out["bare_saw_txn"] = (await loop.run_in_executor(None, seen)) is txn
+    out["identity_outside"] = nr.wrap_for_thread(seen) is seen
+    return out
+
+print("RESULT " + json.dumps(asyncio.run(main())))
+"""
+
+
+def test_wrap_for_thread_carries_the_trace_into_run_in_executor():
+    # Pass A's Exa SDK calls run in the default executor (exa_service._exa_paced).
+    r = _run(_RUN_IN_EXECUTOR)
+    assert r == {"wrapped_saw_txn": True, "bare_saw_txn": False, "identity_outside": True}
+
+
+def test_wrap_for_thread_kill_switch():
+    r = _run(_RUN_IN_EXECUTOR, extra_env={"NEW_RELIC_PROPAGATE_TO_THREAD": "off"})
+    assert r["wrapped_saw_txn"] is False
+
+
 # ------------------------------------------------------------- events / metrics
 
 def test_custom_events_link_the_trace_and_metrics_work_outside_transactions():

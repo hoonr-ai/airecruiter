@@ -56,6 +56,8 @@ from core.config import (
     EXA_CONTACT_ENRICH_TIMEOUT_S,
     EXA_LATE_RESULT_WAIT_S,
 )
+from services import exa_telemetry
+from services.exa_errors import credit_tag
 from services.kipplo import enrich_by_linkedin as kipplo_enrich_by_linkedin
 from services.kipplo import supported_fields as kipplo_supported_fields
 from services.zoominfo_auth import (
@@ -711,10 +713,18 @@ async def exa_enrich_by_linkedin(
     (Fiber.ai by default). Should Exa refuse them (a 400), the deep search runs
     once more on web search alone rather than not at all.
     A failure a second run would hit too (disabled, no key, a 4xx such as a
-    bad key or no credits) comes back with ``fatal: True``; a run still going
-    when we stop waiting comes back with its ``run_id`` (see
-    watch_late_exa_run). ``wait_retry=False``: a run that runs out of time is
-    not watched for a second window (the caller has a next step).
+    bad key or no credits, the out-of-credits breaker open) comes back with
+    ``fatal: True``; a run still going when we stop waiting comes back with
+    its ``run_id`` (see watch_late_exa_run). ``wait_retry=False``: a run that
+    runs out of time is not watched for a second window (the caller has a
+    next step).
+
+    Each create carries run ``metadata`` (services/exa_telemetry.py, kill
+    switch EXA_RUN_METADATA_ENABLED). Guard, before the Fiber fallback and
+    whatever the error text says: a 400 on a body with metadata is re-sent
+    once, identical, without it; if that is accepted, metadata is switched
+    off for the process (ERROR once). A metadata rejection therefore never
+    silently costs the deep search its Fiber data source.
 
     Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
     ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
@@ -732,6 +742,30 @@ async def exa_enrich_by_linkedin(
         logger.warning("Exa enrichment skipped for %s: EXA_API_KEY not configured", candidate_id)
         return {"ok": False, "message": "EXA_API_KEY not configured", "fatal": True}
 
+    tier = "deep" if deep else "normal"
+    with exa_telemetry.scope(tier=tier, fields_asked=",".join(wanted)):
+        return await _exa_lookup(candidate_id, linkedin_url, full_name, company, wanted, deep, wait_retry)
+
+
+async def _exa_lookup(
+    candidate_id: str,
+    linkedin_url: str,
+    full_name: str,
+    company: str,
+    wanted: Tuple[str, ...],
+    deep: bool,
+    wait_retry: bool,
+) -> Dict[str, Any]:
+    """exa_enrich_by_linkedin's body, inside its telemetry scope."""
+    from core.vendor_limiter import EXA as _exa_limit
+
+    if await _exa_limit.no_credits_left() > 0:
+        # Nothing is sent: fatal, so no deep search follows, and never a
+        # cacheable miss (only an answered lookup records one). ``skipped``:
+        # a caller that took a budget slot for this lookup gives it back.
+        exa_telemetry.record_exa_call("contact", "agent_run", "breaker_open")
+        return {"ok": False, "message": "Exa out of credits", "fatal": True, "skipped": True}
+
     timeout_s = EXA_CONTACT_DEEP_TIMEOUT_S if deep else EXA_CONTACT_ENRICH_TIMEOUT_S
     headers = {
         "Content-Type": "application/json",
@@ -739,6 +773,7 @@ async def exa_enrich_by_linkedin(
         "Exa-Beta": EXA_AGENT_BETA,
     }
     sources = deep_data_sources() if deep else ()
+    use_metadata = exa_telemetry.run_metadata_enabled()
 
     def _body(with_sources: bool) -> Dict[str, Any]:
         via_fiber = with_sources and "fiber" in sources
@@ -751,6 +786,8 @@ async def exa_enrich_by_linkedin(
         }
         if with_sources and sources:
             body["dataSources"] = [{"provider": p} for p in sources]
+        if use_metadata and exa_telemetry.run_metadata_enabled():
+            body["metadata"] = exa_telemetry.agent_metadata("contact")
         return body
 
     body = _body(with_sources=True)
@@ -758,14 +795,28 @@ async def exa_enrich_by_linkedin(
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
+            if outcome.get("status") == 400 and "metadata" in body:
+                # Metadata guard (see exa_enrich_by_linkedin): the same body
+                # once more without metadata. A 400 refusal is not billed.
+                first_detail = str(outcome.get("detail") or "")
+                use_metadata = False
+                body = {k: v for k, v in body.items() if k != "metadata"}
+                outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
+                if _run_was_created(outcome):
+                    exa_telemetry.latch_metadata_off(first_detail)
+                    exa_telemetry.record_exa_call("contact", "agent_guard", "metadata_rejected", http_status=400)
             if sources and outcome.get("status") == 400:
                 logger.warning(
                     "Exa refused the deep search's data sources (%s) for %s: %s; "
                     "deep search on web search alone",
                     ",".join(sources), candidate_id, outcome.get("detail") or "",
                 )
+                exa_telemetry.record_exa_call("contact", "agent_guard", "sources_refused", http_status=400)
                 body = _body(with_sources=False)
                 outcome = await _exa_contact_attempt(client, headers, body, candidate_id, timeout_s=timeout_s)
+            if outcome.get("status") == 400:
+                # Refused with no metadata and no data sources left to drop.
+                exa_telemetry.record_exa_call("contact", "agent_guard", "rejected", http_status=400)
             if (
                 "result" not in outcome
                 and outcome.get("retry")
@@ -782,6 +833,8 @@ async def exa_enrich_by_linkedin(
                     "Exa contact lookup for %s: %s; %s", candidate_id, outcome.get("message"),
                     "waiting on the same run once more" if same_run else "retrying with one new run",
                 )
+                if not same_run:
+                    body = exa_telemetry.with_fresh_call_id(body)  # one call_id per billed run
                 outcome = await _exa_contact_attempt(
                     client, headers, body, candidate_id, run_id=same_run or "", timeout_s=timeout_s
                 )
@@ -796,6 +849,16 @@ async def exa_enrich_by_linkedin(
     if outcome.get("retry") == "wait" and outcome.get("run_id"):
         failed["run_id"] = outcome["run_id"]
     return failed
+
+
+def _run_was_created(outcome: Dict[str, Any]) -> bool:
+    """Whether an ``_exa_contact_attempt`` outcome means Exa accepted the
+    create (a run exists: finished, still going, or failed/cancelled)."""
+    return (
+        "result" in outcome
+        or bool(outcome.get("run_id"))
+        or str(outcome.get("message") or "").startswith("Exa run ")
+    )
 
 
 async def _find_started_run(client: Any, headers: Dict[str, str], query: str) -> Optional[Dict[str, Any]]:
@@ -858,19 +921,33 @@ async def keep_late_exa_result(
     provider: str = "exa",
 ) -> Dict[str, Any]:
     """Watch a run we stopped waiting for, up to EXA_LATE_RESULT_WAIT_S, and
-    keep what it finds. Returns the extracted fields ({} if nothing). Never raises."""
+    keep what it finds. Returns the extracted fields ({} if nothing). Never
+    raises. Records one ExaCall (``late=True``) with the run's final cost."""
     from services import contact_cache
 
     headers = {"Content-Type": "application/json", "x-api-key": EXA_API_KEY, "Exa-Beta": EXA_AGENT_BETA}
     loop = asyncio.get_event_loop()
     deadline = loop.time() + max(0, EXA_LATE_RESULT_WAIT_S)
+    started = time.monotonic()
     run: Dict[str, Any] = {}
+
+    def _record(outcome: str, **kw: Any) -> None:
+        meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        exa_telemetry.record_exa_call(
+            "contact", "agent_run", outcome, late=True, exa_run_id=run_id, call_id=meta.get("call_id"),
+            tier="deep" if provider == "exa_deep" else "normal", fields_asked=",".join(fields),
+            latency_ms=exa_telemetry.latency_ms(started),
+            **(exa_telemetry.cost_from_run_json(run) if run.get("status") in _EXA_TERMINAL_STATES else {}),
+            **kw,
+        )
+
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             while loop.time() < deadline:
                 await asyncio.sleep(_EXA_LATE_POLL_S)
                 g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
                 if g.status_code == 404:
+                    _record("not_found", http_status=404)
                     return {}
                 if g.status_code >= 400:
                     continue
@@ -879,10 +956,13 @@ async def keep_late_exa_result(
                     break
     except Exception as e:
         logger.info("Exa late watch of run %s ended: %s", run_id, e)
+        _record("poll_error", error_kind=type(e).__name__)
         return {}
     if run.get("status") != "completed":
+        _record(f"run_{run['status']}" if run.get("status") in _EXA_TERMINAL_STATES else "timeout")
         return {}
     extracted = extract_exa_contact_fields((run.get("output") or {}).get("structured"))
+    _record("completed", fields_found=_fields_found(extracted))
     email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "") if "email" in fields else ""
     phone = str(extracted.get("mobilePhone") or "") if "phone" in fields else ""
     missed = [f for f, got in (("email", email), ("phone", phone)) if f in fields and not got]
@@ -918,6 +998,16 @@ def watch_late_exa_run(run_id: str, linkedin_url: str, **kw: Any) -> None:
     task.add_done_callback(_LATE_WATCHES.discard)
 
 
+def _fields_found(extracted: Dict[str, Any]) -> str:
+    """"email,phone" / "email" / "phone" / "none" of an extracted contact (telemetry)."""
+    return ",".join(
+        f for f, got in (
+            ("email", extracted.get("workEmail") or extracted.get("personalEmail")),
+            ("phone", extracted.get("mobilePhone")),
+        ) if got
+    ) or "none"
+
+
 async def _exa_contact_attempt(
     client: Any,
     headers: Dict[str, str],
@@ -934,8 +1024,47 @@ async def _exa_contact_attempt(
     ``{"message", "retry", "run_id"}``: ``retry`` is "wait" (still running or the
     poll failed: watch the same run), "new" (failed/cancelled run, 5xx/429 on
     create, network error: a new run may work) or "" (a 4xx such as bad key or
-    no credits, which a retry would not fix).
+    no credits, which a retry would not fix). An out-of-credits 402 also trips
+    the shared breaker (core/vendor_limiter.EXA).
+
+    Every return records one ExaCall event (cost from the terminal run JSON).
     """
+    tele: Dict[str, Any] = {"outcome": "create_error"}  # every exit sets its own
+    started = time.monotonic()
+    try:
+        return await _exa_contact_attempt_impl(client, headers, body, candidate_id, run_id, timeout_s, tele)
+    except BaseException:
+        tele["outcome"] = "abandoned"  # cancelled mid-run: a billed run nobody watches
+        raise
+    finally:
+        run = tele.get("run") or {}
+        meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        terminal = run.get("status") in _EXA_TERMINAL_STATES
+        exa_telemetry.record_exa_call(
+            "contact", "agent_run", tele["outcome"],
+            effort=str(body.get("effort") or "") or None,
+            exa_run_id=str(run.get("id") or tele.get("run_id") or "") or None,
+            call_id=meta.get("call_id"),
+            http_status=tele.get("http_status"),
+            error_kind=tele.get("error_kind"),
+            fields_found=tele.get("fields_found"),
+            rewatch=bool(run_id) or None,
+            latency_ms=exa_telemetry.latency_ms(started),
+            **(exa_telemetry.cost_from_run_json(run) if terminal else {}),
+        )
+
+
+async def _exa_contact_attempt_impl(
+    client: Any,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    candidate_id: str,
+    run_id: str,
+    timeout_s: Optional[float],
+    tele: Dict[str, Any],
+) -> Dict[str, Any]:
+    """_exa_contact_attempt's body. ``tele`` collects what the ExaCall event
+    reports (outcome, status, the last run JSON)."""
     try:
         found_run: Optional[Dict[str, Any]] = None
         if run_id:
@@ -947,6 +1076,7 @@ async def _exa_contact_attempt(
 
             for attempt in range(3):
                 if not await _exa_limit.acquire():
+                    tele["outcome"] = "no_slot"
                     return {"message": "Exa rate-limited (no slot)", "retry": "new"}
                 try:
                     r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
@@ -978,6 +1108,21 @@ async def _exa_contact_attempt(
                     candidate_id, r.status_code, r.text[:200],
                 )
                 transient = r.status_code >= 500 or r.status_code == 429
+                tag = credit_tag(r.status_code, r.text)
+                if tag:
+                    # Out of credits: every worker skips Exa until the
+                    # breaker's TTL; this lookup stays a fatal 4xx.
+                    await _exa_limit.trip_no_credits(tag)
+                tele.update(
+                    http_status=r.status_code,
+                    error_kind=tag or None,
+                    outcome=(
+                        "out_of_credits" if tag
+                        else "rate_limited" if r.status_code == 429
+                        else "create_rejected" if r.status_code == 400
+                        else "create_error"
+                    ),
+                )
                 return {
                     "message": f"Exa create error ({r.status_code})",
                     "retry": "new" if transient else "",
@@ -986,6 +1131,8 @@ async def _exa_contact_attempt(
                 }
             run = r.json()
             run_id = str(run.get("id") or "")
+        tele["run"] = run
+        tele["run_id"] = run_id
 
         budget = EXA_CONTACT_ENRICH_TIMEOUT_S if timeout_s is None else timeout_s
         loop = asyncio.get_event_loop()
@@ -993,25 +1140,39 @@ async def _exa_contact_attempt(
         while run.get("status") not in _EXA_TERMINAL_STATES:
             if loop.time() >= deadline:
                 logger.info("Exa agent run timed out for %s (>%ss)", candidate_id, budget)
+                tele["outcome"] = "timeout"
                 return {"message": "Exa run timed out", "retry": "wait", "run_id": run_id}
             await asyncio.sleep(_EXA_POLL_INTERVAL_S)
             g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
             if g.status_code >= 400:
                 logger.warning("Exa agent poll non-2xx for %s: %s", candidate_id, g.status_code)
+                # A poll 429 is a rate limit like a create 429 (the Agent errors
+                # alert excludes rate_limited), not a broken poll.
+                tele.update(
+                    outcome="rate_limited" if g.status_code == 429 else "poll_error",
+                    http_status=g.status_code,
+                )
                 return {"message": f"Exa poll error ({g.status_code})", "retry": "wait", "run_id": run_id}
             run = g.json()
+            tele["run"] = run
     except Exception as e:
         logger.warning("Exa agent request failed for %s: %s", candidate_id, e)
+        # A network failure (ConnectError, a create timeout whose run was not
+        # found, a poll ReadTimeout) is a create / poll error like Pass B's,
+        # so the Agent errors alert sees it; error_kind names the exception.
+        tele.update(outcome="poll_error" if run_id else "create_error", error_kind=type(e).__name__)
         return {"message": f"Exa request failed: {e}", "retry": "wait" if run_id else "new", "run_id": run_id}
 
     status = run.get("status")
     if status != "completed":
         logger.info("Exa agent run %s for %s: %s", status, candidate_id, run.get("stopReason"))
+        tele["outcome"] = f"run_{status}"
         return {"message": f"Exa run {status}", "retry": "new"}
     output = run.get("output") or {}
     extracted = extract_exa_contact_fields(output.get("structured"))
     if not _has_usable_field(extracted):
         logger.info("Exa returned no usable contact fields for %s", candidate_id)
+    tele.update(outcome="completed", fields_found=_fields_found(extracted))
     return {"result": {"ok": True, "fields": extracted}}
 
 
@@ -1632,6 +1793,17 @@ async def enrich_contact_for_sourcing(
                         job_key, bool(seed_email), bool(seed_phone),
                     )
                     return {}
+            # Out of credits: skip BEFORE the per-job counters, which would
+            # otherwise be used up by free 402s and starve the job after the
+            # top-up. Nothing asked, so no miss is recorded either. A lookup
+            # already counted and queued on the Exa semaphore when the
+            # breaker trips is skipped inside exa_enrich_by_linkedin and gives
+            # its slots back below.
+            from core.vendor_limiter import EXA as _exa_limit
+
+            if await _exa_limit.no_credits_left() > 0:
+                exa_telemetry.record_exa_call("contact", "agent_run", "breaker_open")
+                return {}
             exa_cap = max(0, int(getattr(_sc, "EXA_SOURCING_CONTACT_CAP", 25) or 0))
             exa_lifetime_cap = max(
                 0, int(getattr(_sc, "EXA_SOURCING_CONTACT_LIFETIME_CAP", 100) or 0)
@@ -1688,6 +1860,15 @@ async def enrich_contact_for_sourcing(
                     exa_label, job_key, e,
                 )
                 exa_result = {"ok": False}
+            if exa_result.get("skipped"):
+                # Breaker opened while this lookup waited: nothing was sent,
+                # so the per-run and lifetime slots are refunded and no miss
+                # is recorded.
+                async with _JOB_ENRICH_LOCK:
+                    for counters in (_JOB_EXA_COUNTERS, _JOB_EXA_LIFETIME):
+                        if counters.get(job_key, 0) > 0:
+                            counters[job_key] -= 1
+                return {}
 
             trace["exa_asked"] = exa_fields
             trace["exa_answered"] = bool(exa_result.get("ok"))
@@ -1707,7 +1888,8 @@ async def enrich_contact_for_sourcing(
 
         return {}
 
-    result = await _providers()
+    with exa_telemetry.scope(path="sourcing"):
+        result = await _providers()
     provider = (result or {}).get("provider_used", "")
     await contact_cache.record(
         linkedin_url,

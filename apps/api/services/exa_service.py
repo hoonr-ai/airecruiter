@@ -2,9 +2,13 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
+from core.newrelic import wrap_for_thread
 from exa_py import Exa
+from services import exa_telemetry
+from services.exa_errors import ExaNoSlotError, ExaOutOfCreditsError, out_of_credits_tag
 from services.location import (
     is_broad_region_location,
     is_plausible_city_token,
@@ -619,14 +623,26 @@ async def _exa_paced(loop, fn, *args, max_wait_s: float = 15.0):
     worker waits out before its next Exa call. ``max_wait_s`` stays below the
     callers' ``wait_for`` timeouts (25-30 s), so a long cooldown gives up with
     a clear error instead of being cancelled mid-wait.
+
+    Out of credits (a 402 with a credit tag, services/exa_errors.py) trips the
+    shared breaker and raises ExaOutOfCreditsError; while the breaker is open
+    nothing is sent and the same error (``skipped``) is raised at once. The
+    call runs under the caller's New Relic trace, so Pass A shows in APM.
     """
+    if await _exa_limit.no_credits_left() > 0:
+        raise ExaOutOfCreditsError(skipped=True)
     if not await _exa_limit.acquire(max_wait_s=max_wait_s):
-        raise RuntimeError("Exa rate-limited: no slot within budget")
+        raise ExaNoSlotError("Exa rate-limited: no slot within budget")
     try:
-        return await loop.run_in_executor(None, fn, *args)
+        return await loop.run_in_executor(None, wrap_for_thread(fn), *args)
     except Exception as exc:
         if _is_exa_429(exc):
             await _exa_limit.note_429()
+        else:
+            tag = out_of_credits_tag(exc)
+            if tag:
+                await _exa_limit.trip_no_credits(tag)
+                raise ExaOutOfCreditsError(tag) from exc
         raise
 
 class ExaService:
@@ -651,9 +667,13 @@ class ExaService:
         representation in the capped result, then dedupes by normalised
         profile URL (the same person often matches sibling role queries).
         Per-query failures are logged and skipped — one bad query must not
-        sink the whole search.
+        sink the whole search — unless NO query succeeded and one of them
+        failed for credits: then ExaOutOfCreditsError is raised so Step 5
+        says "out of credits" instead of "no matches". One ExaCall event per
+        query (surface pass_a, or dice with ``include_domains``).
         """
         loop = asyncio.get_event_loop()
+        surface = "dice" if include_domains else "pass_a"
 
         def do_search(q: str):
             kwargs: Dict[str, Any] = dict(
@@ -669,19 +689,43 @@ class ExaService:
                 kwargs["include_domains"] = include_domains
             return self.exa.search_and_contents(q, **kwargs)
 
+        async def one_query(q: str):
+            started = time.monotonic()
+            try:
+                resp = await _exa_paced(loop, do_search, q)
+            except BaseException as exc:
+                exa_telemetry.record_exa_call(
+                    surface, "search", num_results=limit,
+                    latency_ms=exa_telemetry.latency_ms(started),
+                    **exa_telemetry.classify_exc(exc),
+                )
+                raise
+            exa_telemetry.record_exa_call(
+                surface, "search", "ok", num_results=limit,
+                n_results=len(getattr(resp, "results", None) or []),
+                latency_ms=exa_telemetry.latency_ms(started),
+                **exa_telemetry.cost_from_search_response(resp),
+            )
+            return resp
+
         responses = await asyncio.gather(
-            *[_exa_paced(loop, do_search, q) for q in queries],
+            *[one_query(q) for q in queries],
             return_exceptions=True,
         )
 
         per_query: List[List[Any]] = []
         failed_queries = 0
+        credits_error: Optional[ExaOutOfCreditsError] = None
         for q, resp in zip(queries, responses):
             if isinstance(resp, BaseException):
                 failed_queries += 1
+                if isinstance(resp, ExaOutOfCreditsError):
+                    credits_error = credits_error or resp
                 logger.warning("Exa people search failed for query %r: %s", q, resp)
                 continue
             per_query.append(list(getattr(resp, "results", None) or []))
+        if credits_error is not None and not per_query:
+            raise credits_error
         if failed_queries:
             # Loud one-liner: partial fan-out failure used to be invisible —
             # "Found 17 profiles" with 2 of 3 queries dead reads like a thin
@@ -767,6 +811,8 @@ class ExaService:
             logger.info(f"Exa search returned {len(results)} candidates.")
             return results
 
+        except ExaOutOfCreditsError:
+            raise  # reported as the source's "out of credits" status, not "no matches"
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
             return []
@@ -806,6 +852,7 @@ class ExaService:
                 livecrawl="fallback",
             )
 
+        started = time.monotonic()
         try:
             response = await asyncio.wait_for(
                 _exa_paced(loop, do_contents),
@@ -813,10 +860,24 @@ class ExaService:
             )
         except asyncio.TimeoutError:
             logger.warning("Exa deep_analyze timeout for %s", url)
+            exa_telemetry.record_exa_call(
+                "deep_analyze", "contents", "timeout", num_results=1,
+                latency_ms=exa_telemetry.latency_ms(started),
+            )
             return {}
         except Exception as e:
             logger.warning("Exa deep_analyze failed for %s: %s", url, e)
+            exa_telemetry.record_exa_call(
+                "deep_analyze", "contents", num_results=1,
+                latency_ms=exa_telemetry.latency_ms(started), **exa_telemetry.classify_exc(e),
+            )
             return {}
+        exa_telemetry.record_exa_call(
+            "deep_analyze", "contents", "ok", num_results=1,
+            n_results=len(getattr(response, "results", None) or []),
+            latency_ms=exa_telemetry.latency_ms(started),
+            **exa_telemetry.cost_from_search_response(response),
+        )
 
         try:
             results = getattr(response, "results", None) or []
@@ -1014,6 +1075,18 @@ class ExaService:
                 timeout_ms=timeout_s * 1000,
             )
 
+        # One ExaCall per run, at whichever exit it takes (Pass B ships off:
+        # this is only for a deliberate re-enable).
+        started = time.monotonic()
+
+        def _exit(outcome: str, run: Any = None, **kw: Any) -> None:
+            exa_telemetry.record_exa_call(
+                "pass_b", "agent_run", outcome, effort=effort, num_results=len(seeds),
+                latency_ms=exa_telemetry.latency_ms(started),
+                **exa_telemetry.cost_from_run_json(run), **kw,
+            )
+
+        run_id = None
         try:
             logger.info(
                 "Exa Agent create: effort=%s seeds=%d title=%r role=%r",
@@ -1026,12 +1099,18 @@ class ExaService:
             run_id = getattr(created, "id", None)
             if not run_id:
                 logger.warning("Exa Agent create returned no run id; response=%r", created)
+                _exit("create_error", error_kind="no_run_id")
                 return []
         except asyncio.TimeoutError:
             logger.warning("Exa Agent create timed out")
+            _exit("create_error", error_kind="timeout")
             return []
         except Exception as e:
             logger.warning("Exa Agent create failed: %s", e)
+            failure = exa_telemetry.classify_exc(e)
+            if failure.get("outcome") == "error":
+                failure["outcome"] = "create_error"
+            _exit(**failure)
             return []
 
         try:
@@ -1041,9 +1120,14 @@ class ExaService:
             )
         except asyncio.TimeoutError:
             logger.warning("Exa Agent poll timeout for run_id=%s", run_id)
+            _exit("timeout", exa_run_id=run_id)
             return []
         except Exception as e:
             logger.warning("Exa Agent poll failed for run_id=%s: %s", run_id, e)
+            failure = exa_telemetry.classify_exc(e)  # a 429 stays rate_limited
+            if failure.get("outcome") == "error":
+                failure["outcome"] = "poll_error"
+            _exit(exa_run_id=run_id, **failure)
             return []
 
         status = getattr(completed, "status", "")
@@ -1054,6 +1138,7 @@ class ExaService:
                 "Exa Agent finished with status=%s stop_reason=%s error=%r",
                 status, stop_reason, err,
             )
+            _exit(f"run_{status or 'unknown'}", completed, exa_run_id=run_id)
             return []
 
         cost = getattr(completed, "cost_dollars", None) or getattr(completed, "costDollars", None)
@@ -1061,13 +1146,12 @@ class ExaService:
             logger.info("Exa Agent run_id=%s cost=%s stop_reason=%s", run_id, cost, stop_reason)
 
         output = getattr(completed, "output", None)
-        if output is None:
-            return []
-        structured = getattr(output, "structured", None)
-        if not isinstance(structured, dict):
-            return []
-        candidates = structured.get("candidates") or []
+        structured = getattr(output, "structured", None) if output is not None else None
+        candidates = structured.get("candidates") if isinstance(structured, dict) else None
         if not isinstance(candidates, list):
+            candidates = []
+        _exit("completed", completed, exa_run_id=run_id, n_results=len(candidates))
+        if not candidates:
             return []
         logger.info("Exa Agent run_id=%s returned %d candidates", run_id, len(candidates))
         return candidates
@@ -1124,6 +1208,8 @@ class ExaService:
             logger.info(f"Dice-via-Exa returned {len(results)} candidates.")
             return results
 
+        except ExaOutOfCreditsError:
+            raise
         except Exception as e:
             logger.error(f"Dice (via Exa) search failed: {e}")
             return []
