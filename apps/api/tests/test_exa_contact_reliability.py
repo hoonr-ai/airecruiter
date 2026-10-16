@@ -543,3 +543,76 @@ def test_exa_retry_can_be_switched_off(monkeypatch):
 
     assert _lookup() == {"ok": False, "message": "Exa run failed"}
     assert len(server.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# A create whose answer was lost (2026-10-15): the run may be going and
+# billed, so the free run list is checked before a new run is bought
+# ---------------------------------------------------------------------------
+
+class _ListingExaServer(_ExaServer):
+    """_ExaServer that also answers the run list (GET /agent/runs)."""
+
+    def __init__(self, creates, runs, polls=()):
+        super().__init__(creates, polls)
+        self.runs = runs
+
+    async def get(self, url, headers=None, params=None):
+        if url.endswith("/agent/runs"):
+            self.calls.append(("list", (params or {}).get("limit")))
+            return _Resp(200, {"data": self.runs})
+        return await super().get(url, headers=headers)
+
+
+def _listing_exa(monkeypatch, creates, runs):
+    server = _ListingExaServer(creates, runs)
+    _exa(monkeypatch, [])
+    monkeypatch.setattr(ce.httpx, "AsyncClient", server)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(ce.asyncio, "sleep", lambda s, *a: real_sleep(0))
+    return server
+
+
+def _query():
+    return ce._build_exa_contact_query("Jane Doe", "", LINKEDIN, ce.EXA_CONTACT_FIELDS)
+
+
+def _ago(seconds):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def test_a_read_error_on_create_picks_up_the_started_run(monkeypatch):
+    runs = [{"id": "run-7", "status": "completed", "createdAt": _ago(20),
+             "request": {"query": _query()}, **{k: v for k, v in DONE.items() if k != "status"}}]
+    server = _listing_exa(monkeypatch, [httpx.ReadError("connection reset")], runs)
+
+    res = _lookup()
+
+    assert res["ok"] is True and res["fields"]["workEmail"] == "jane@acme.com"
+    assert server.calls == [("create", ""), ("list", 100)]     # no second paid run
+
+
+def test_a_read_error_with_no_started_run_buys_one_new_run(monkeypatch):
+    server = _listing_exa(monkeypatch, [httpx.RemoteProtocolError("peer closed"), _run("run-2", **DONE)], [])
+
+    assert _lookup()["ok"] is True
+    assert [kind for kind, _ in server.calls] == ["create", "list", "list", "create"]
+
+
+def test_a_connect_error_never_lists_runs(monkeypatch):
+    # The request never left: there is no run to find.
+    server = _listing_exa(monkeypatch, [httpx.ConnectError("refused"), _run("run-1", **DONE)], [])
+
+    assert _lookup()["ok"] is True
+    assert [kind for kind, _ in server.calls] == ["create", "create"]
+
+
+def test_an_older_run_with_the_same_query_is_an_earlier_lookup_not_this_one(monkeypatch):
+    runs = [{"id": "run-old", "status": "completed", "createdAt": _ago(30 * 60),
+             "request": {"query": _query()}, **{k: v for k, v in DONE.items() if k != "status"}}]
+    server = _listing_exa(monkeypatch, [httpx.WriteError("broken pipe"), _run("run-2", **DONE)], runs)
+
+    assert _lookup()["ok"] is True
+    assert [kind for kind, _ in server.calls] == ["create", "list", "list", "create"]

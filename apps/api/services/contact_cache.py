@@ -5,13 +5,17 @@ on many jobs and in every Step-5 re-run, and each time the chain (ZoomInfo ->
 Apollo -> paid Exa) was asked again, including for people whose lookup had
 already come back empty. This table remembers, per LinkedIn profile:
 
-  - the email / phone a provider found, and which provider (a hit, reused for
-    CONTACT_CACHE_HIT_TTL_DAYS);
-  - that a lookup found no email / phone (a miss, honoured for
-    CONTACT_CACHE_MISS_TTL_DAYS so the paid step is not re-bought): a miss of
-    the normal Exa run (``*_missed_at``) sends the next Launch straight to the
-    deep search, and a miss of the deep search (``*_deep_missed_at``, the end
-    of the chain) is not re-bought at all.
+  - the email / phone a provider found, and which provider (a hit, reused
+    for good by default: CONTACT_CACHE_HIT_TTL_DAYS, 0 = never expires);
+  - that a lookup found no email / phone (a miss): a miss of the normal Exa
+    run (``*_missed_at``) sends the next lookup straight to the deep search for
+    CONTACT_CACHE_MISS_TTL_DAYS, and a miss of the deep search
+    (``*_deep_missed_at``, the end of the chain) is final for
+    CONTACT_CACHE_DEEP_MISS_TTL_DAYS: Launch PAIR and sourcing never re-buy
+    it from Exa, and a recruiter's click re-buys it only once they confirm
+    (routers/candidates.py, CONTACT_CLICK_HONOUR_DEEP_MISS); the on-demand
+    chain still asks the cheaper providers. A normal-run miss inside that
+    window is final too when Exa runs but no deep search can follow.
 
 Only provider-found values are written, never the contact a row arrived with
 (LLM-extracted profile text is unreliable). A miss is recorded only when the
@@ -63,15 +67,25 @@ MIGRATE_SQL = """
     ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_deep_missed_at TIMESTAMPTZ
 """
 
+# Hit TTL 0 = a found value never expires. Miss TTL 0 = misses not honoured
+# (a normal-run miss is then not final either: *_missed_in_deep_ttl needs both).
 READ_SQL = """
     SELECT email, email_provider, phone, phone_provider,
-           email IS NOT NULL AND email_found_at > NOW() - make_interval(days => %(hit_days)s) AS email_fresh,
+           email_missed_at, phone_missed_at, email_deep_missed_at, phone_deep_missed_at,
+           email IS NOT NULL
+               AND (%(hit_days)s = 0 OR email_found_at > NOW() - make_interval(days => %(hit_days)s)) AS email_fresh,
            phone IS NOT NULL AND phone_personal IS TRUE
-               AND phone_found_at > NOW() - make_interval(days => %(hit_days)s) AS phone_fresh,
-           email_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_missed_recent,
-           phone_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_missed_recent,
-           email_deep_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_deep_missed_recent,
-           phone_deep_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_deep_missed_recent
+               AND (%(hit_days)s = 0 OR phone_found_at > NOW() - make_interval(days => %(hit_days)s)) AS phone_fresh,
+           %(miss_days)s > 0 AND email_missed_at > NOW() - make_interval(days => %(miss_days)s) AS email_missed_recent,
+           %(miss_days)s > 0 AND phone_missed_at > NOW() - make_interval(days => %(miss_days)s) AS phone_missed_recent,
+           %(miss_days)s > 0 AND %(deep_miss_days)s > 0
+               AND email_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS email_missed_in_deep_ttl,
+           %(miss_days)s > 0 AND %(deep_miss_days)s > 0
+               AND phone_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS phone_missed_in_deep_ttl,
+           %(deep_miss_days)s > 0
+               AND email_deep_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS email_deep_missed_recent,
+           %(deep_miss_days)s > 0
+               AND phone_deep_missed_at > NOW() - make_interval(days => %(deep_miss_days)s) AS phone_deep_missed_recent
     FROM contact_enrichment_cache
     WHERE linkedin_slug = %(slug)s
 """
@@ -125,13 +139,31 @@ def _int_env(name: str, default: int) -> int:
 
 
 def hit_ttl_days() -> int:
-    """Found contact goes stale (people change jobs): reuse for this long."""
-    return _int_env("CONTACT_CACHE_HIT_TTL_DAYS", 180)
+    """How long found contact is reused. 0 (the default, 2026-10-15: "never
+    pay twice for the same person") = for good; a positive value brings a TTL
+    back should stale work emails become a problem."""
+    return _int_env("CONTACT_CACHE_HIT_TTL_DAYS", 0)
 
 
 def miss_ttl_days() -> int:
-    """Don't re-buy a lookup that came back empty for this long."""
+    """How long a normal Exa run's miss sends the next lookup straight to the
+    deep search (and keeps sourcing from re-buying it). 0 = not honoured at
+    all (nor final when no deep search can follow)."""
     return _int_env("CONTACT_CACHE_MISS_TTL_DAYS", 30)
+
+
+def deep_miss_ttl_days() -> int:
+    """How long a deep-search miss is final (not re-bought by Launch PAIR or
+    sourcing; a click re-buys it only on confirm). 0 = not honoured."""
+    return _int_env("CONTACT_CACHE_DEEP_MISS_TTL_DAYS", 180)
+
+
+def click_honours_deep_miss() -> bool:
+    """Whether a recruiter's click (phone button, Rankings Get Contact) gets
+    "searched <date>, nothing found" for a final miss instead of re-buying it
+    unasked. False restores the 2026-09-28 rule (ca1c503b): a click always
+    re-runs the whole chain."""
+    return os.getenv("CONTACT_CLICK_HONOUR_DEEP_MISS", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def linkedin_slug(url: Any) -> str:
@@ -176,7 +208,10 @@ def _get_sync(slug: str) -> Optional[Dict[str, Any]]:
     try:
         _ensure_table(conn)
         with conn.cursor() as cur:
-            cur.execute(READ_SQL, {"slug": slug, "hit_days": hit_ttl_days(), "miss_days": miss_ttl_days()})
+            cur.execute(READ_SQL, {
+                "slug": slug, "hit_days": hit_ttl_days(), "miss_days": miss_ttl_days(),
+                "deep_miss_days": deep_miss_ttl_days(),
+            })
             row = cur.fetchone()
             cols = [d[0] for d in cur.description] if row else []
         conn.commit()
@@ -201,14 +236,27 @@ def _record_sync(params: Dict[str, Any]) -> None:
 def empty() -> Dict[str, Any]:
     return {"email": "", "phone": "", "email_provider": "", "phone_provider": "",
             "email_missed": False, "phone_missed": False,
-            "email_deep_missed": False, "phone_deep_missed": False}
+            "email_deep_missed": False, "phone_deep_missed": False,
+            "email_missed_in_deep_ttl": False, "phone_missed_in_deep_ttl": False,
+            "email_missed_at": "", "phone_missed_at": "",
+            "email_deep_missed_at": "", "phone_deep_missed_at": ""}
+
+
+def _iso(value: Any) -> str:
+    if value is None:
+        return ""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 async def get(linkedin_url: Any) -> Dict[str, Any]:
     """What we already know about this person. Always returns the full shape
-    (see ``empty``); ``*_missed`` is True for a recent miss (normal run or deep
-    search) with no fresh value, ``*_deep_missed`` only for a recent deep-search
-    miss."""
+    (see ``empty``). With no fresh value for the field: ``*_missed`` is True
+    for a normal-run miss within CONTACT_CACHE_MISS_TTL_DAYS or a deep-search
+    miss within CONTACT_CACHE_DEEP_MISS_TTL_DAYS, ``*_deep_missed`` only for
+    the latter, ``*_missed_in_deep_ttl`` for a normal-run miss within the
+    deep-miss TTL (final when Exa runs but no deep search can follow; never
+    with CONTACT_CACHE_MISS_TTL_DAYS=0). ``*_missed_at`` /
+    ``*_deep_missed_at`` are the last miss times (ISO 8601, "" = none)."""
     out = empty()
     slug = linkedin_slug(linkedin_url)
     if not slug or not _enabled():
@@ -230,6 +278,9 @@ async def get(linkedin_url: Any) -> Dict[str, Any]:
         deep = bool(row.get(f"{f}_deep_missed_recent")) and not out[f]
         out[f"{f}_deep_missed"] = deep
         out[f"{f}_missed"] = deep or (bool(row.get(f"{f}_missed_recent")) and not out[f])
+        out[f"{f}_missed_in_deep_ttl"] = bool(row.get(f"{f}_missed_in_deep_ttl")) and not out[f]
+        out[f"{f}_missed_at"] = _iso(row.get(f"{f}_missed_at"))
+        out[f"{f}_deep_missed_at"] = _iso(row.get(f"{f}_deep_missed_at"))
     return out
 
 

@@ -141,14 +141,16 @@ def facts_from_row(row: Dict[str, Any]) -> List[Tuple[str, str, str, str, Option
 
 
 def plan(rows: Iterable[Dict[str, Any]], *, now: Optional[_dt.datetime] = None) -> Dict[str, Dict[str, Any]]:
-    """Newest fresh value per person and field -> upsert params keyed by slug."""
+    """Newest fresh value per person and field -> upsert params keyed by slug.
+    With the hit TTL at 0 (found contact never expires) every value is fresh."""
     now = now or _dt.datetime.now(_dt.timezone.utc)
-    oldest = now - _dt.timedelta(days=contact_cache.hit_ttl_days())
+    ttl_days = contact_cache.hit_ttl_days()
+    oldest = now - _dt.timedelta(days=ttl_days) if ttl_days > 0 else None
     people: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         for slug, field, value, provider, at in facts_from_row(row):
             at = at or now
-            if at < oldest:
+            if oldest is not None and at < oldest:
                 continue  # already past the cache's reuse window
             p = people.setdefault(slug, {
                 "slug": slug, "email": None, "email_provider": None, "email_found_at": None,
