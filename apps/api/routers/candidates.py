@@ -967,6 +967,7 @@ def build_search_criteria(
         # more than it saves (pool + enrichment scale with it).
         sample_per_source=min(10, max(1, int(request.sample_per_source or 2))),
         assess_all_sources=bool(request.assess_all_sources),
+        defer_paid_contact=bool(getattr(request, "defer_paid_contact", False)),
     )
 
 
@@ -1263,6 +1264,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     max_experience_years=request.max_experience_years,
                     jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
                     jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
+                    defer_paid_contact=bool(getattr(request, "defer_paid_contact", False)),
                 )
 
                 for candidate in candidates:
@@ -3075,6 +3077,19 @@ def _contact_lookup_trigger(request: EnrichCandidateContactRequest) -> str:
     return "click_phone" if fields == {"phone"} else "click"
 
 
+def _lookup_outcome_enum(outcome: Any, *, still_going: bool = False) -> str:
+    """A contact step's ``lookup`` outcome as an enum (telemetry, the holdout
+    log): the fields it found ("email", "phone", "email,phone"), "miss", "-"
+    (not asked), "final_miss", "in_progress" (still going when the lookup
+    stopped waiting) or "failed" (any error message, which is free text)."""
+    text = str(outcome or "-").strip() or "-"
+    if text in ("-", "miss", "final_miss"):
+        return text
+    if all(part in ("email", "phone") for part in text.split(",")):
+        return text
+    return "in_progress" if still_going else "failed"
+
+
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """The on-demand contact chain (``_enrich_candidate_contact_chain``) under
     its telemetry context: who asked and for which job, unless an outer caller
@@ -3215,12 +3230,16 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     apollo_attempted = False
 
     # Contact the candidate already has (request or sourced row) - ZoomInfo's
-    # match key and the short-circuit signal.
+    # match key and the short-circuit signal. Launch PAIR sends the email a
+    # JobDiva row holds (it looks contact up before the row is saved), never
+    # the phone: a held number may be a work line, and a personal one is wanted.
     seed_email = (request.email or "").strip()
+    seed_email_from = "request" if seed_email else ""
     seed_phone = (request.phone or "").strip()
     if existing_rows and isinstance(existing_rows[0], dict):
         if not seed_email:
             seed_email = str(existing_rows[0].get("email") or "").strip()
+            seed_email_from = "row" if seed_email else ""
         if not seed_phone:
             seed_phone = str(existing_rows[0].get("phone") or "").strip()
     # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
@@ -3253,6 +3272,18 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
             seed_email, candidate_id,
         )
         seed_email = ""
+        seed_email_from = ""
+
+    def _held_phone() -> str:
+        """Where the candidate's held phone comes from: "seed" (the request's
+        or the row's, unless an earlier lookup saved it from a work line,
+        above), "found" (a provider's mobile number so far) or "" (none).
+        Each is checked on its own, so a junk seed ("N/A") never hides a
+        mobile found later; a work line (workPhone) never counts."""
+        for origin, raw in (("seed", seed_phone), ("found", extracted.get("mobilePhone"))):
+            if sum(1 for ch in _normalise_phone(str(raw or "")) if ch.isdigit()) >= 7:
+                return origin
+        return ""
 
     def _missing_contact() -> Tuple[str, ...]:
         """Which of the requested email / phone the candidate still lacks (seed +
@@ -3260,8 +3291,7 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         2026-09-28: "we only need personal phone number"): a work line found on
         the way does not stop the chain looking for the candidate's own."""
         have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
-        _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or "")
-        have_phone = sum(1 for ch in _p if ch.isdigit()) >= 7
+        have_phone = bool(_held_phone())
         return tuple(
             field for field, have in (("email", have_email), ("phone", have_phone))
             if not have and field in requested_fields
@@ -3582,11 +3612,44 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
     exa_deep_outcome = "-"
     if EXA_CONTACT_ENRICH_ENABLED and deep_follows and not exa_stop:
         deep_fields = tuple(f for f in exa_fields if f in _missing_contact() and f not in normal_still_going)
-    if deep_fields:
-        _deep = await contact_enrichment.exa_step(
-            candidate_id, linkedin_url, candidate_name, candidate_company,
-            fields=deep_fields, deep=True, wait_retry=False, **_step_kw,
+
+    # 3c. The Launch deep-email holdout (EXA_DEEP_SKIP_REACHABLE_PCT, user
+    #     2026-10-14). Launch PAIR's deep EMAIL run for someone who already
+    #     holds a personal phone (a seed, or the normal run's mobile) never
+    #     changes who can be launched (phone OR email): it buys a second
+    #     channel at ~$0.30 an email. Decided here, after the normal run and
+    #     before any deep create, and logged in both arms
+    #     (services/contact_holdout.py). The skip arm only drops that run:
+    #     nothing is recorded as a deep miss, so the next Launch decides again
+    #     (same arm) and a recruiter's click still buys it. Launch PAIR only,
+    #     by its trigger (not final_honoured, which may come to cover more).
+    from services import contact_holdout
+    deep_skip_pct = contact_enrichment.deep_skip_reachable_pct() if is_launch else 0
+    deep_skip_arm = "off"
+    held_phone_from = _held_phone()
+    if is_launch and "email" in deep_fields and held_phone_from:
+        deep_skip_arm = contact_enrichment.deep_skip_arm(linkedin_url, deep_skip_pct)
+    deep_skip_eligible = deep_skip_arm != "off"
+    first_exposure: Optional[bool] = None
+    if deep_skip_eligible:
+        first_exposure = await contact_holdout.record_decision(
+            linkedin_url, arm=deep_skip_arm, pct=deep_skip_pct,
+            jobdiva_id=_late["jobdiva_id"], candidate_id=candidate_id, phone_from=held_phone_from,
+            normal_outcome=_lookup_outcome_enum(exa_outcome, still_going=bool(normal_still_going)),
         )
+        if deep_skip_arm == "skip":
+            deep_fields = tuple(f for f in deep_fields if f != "email")
+            logger.info(
+                "enrich_contact: no deep email search for %s — a personal phone is held "
+                "(holdout arm skip at %d%%, EXA_DEEP_SKIP_REACHABLE_PCT)", candidate_id, deep_skip_pct,
+            )
+    if deep_fields:
+        # ExaCall / ContactLookup / run metadata of the control arm's run say so.
+        with exa_telemetry.scope(arm=deep_skip_arm if deep_skip_eligible else None):
+            _deep = await contact_enrichment.exa_step(
+                candidate_id, linkedin_url, candidate_name, candidate_company,
+                fields=deep_fields, deep=True, wait_retry=False, **_step_kw,
+            )
         deep_answered = bool(_deep.get("ok"))
         # Still going after EXA_CONTACT_DEEP_TIMEOUT_S: what it finds is kept
         # for the next Launch / phone click instead of being thrown away.
@@ -3595,6 +3658,14 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
             exa_deep_contributed = True
         exa_deep_outcome = ",".join(f for f in deep_fields if f not in _missing_contact()) or (
             "miss" if deep_answered else str(_deep.get("message") or "failed")
+        )
+    if deep_skip_arm == "control":
+        await contact_holdout.record_deep_outcome(
+            linkedin_url,
+            "email" if "email" not in _missing_contact()
+            else "in_progress" if "email" in deep_still_going
+            else "miss" if deep_answered
+            else "failed",
         )
 
     # Provider attribution = first source that contributed (execution order).
@@ -3616,13 +3687,13 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         provider_used = "exa_deep"
 
     logger.info(
-        "Contact enrich providers for %s | kipplo=%s zoominfo=%s apollo_called=%s apollo=%s "
-        "zoominfo_by_found_email=%s apollo_phone=%s exa_asked=%s exa=%s exa_deep_asked=%s "
-        "exa_deep=%s final_missed=%s confirm=%s | provider=%s",
-        candidate_id, kipplo_outcome, zoominfo_contributed, apollo_attempted,
-        apollo_contributed, zoominfo_followup_contributed, apollo_phone_state or "-",
+        "Contact enrich providers for %s | existing_rows=%d seed_email=%s kipplo=%s zoominfo=%s "
+        "apollo_called=%s apollo=%s zoominfo_by_found_email=%s apollo_phone=%s exa_asked=%s exa=%s "
+        "exa_deep_asked=%s exa_deep=%s deep_skip=%s final_missed=%s confirm=%s | provider=%s",
+        candidate_id, len(existing_rows), seed_email_from or "-", kipplo_outcome, zoominfo_contributed,
+        apollo_attempted, apollo_contributed, zoominfo_followup_contributed, apollo_phone_state or "-",
         ",".join(normal_fields) or "-", exa_outcome, ",".join(deep_fields) or "-",
-        exa_deep_outcome, ",".join(final_missed) or "-", bool(request.confirm), provider_used,
+        exa_deep_outcome, deep_skip_arm, ",".join(final_missed) or "-", bool(request.confirm), provider_used,
     )
 
     raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
@@ -3668,6 +3739,27 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
         # A final miss: not asked again (see final_missed_fields).
         "exa_deep": "final_miss" if (final_missed and exa_deep_outcome == "-") else exa_deep_outcome,
     }
+    if deep_skip_eligible:
+        # The holdout arm; a skipped deep email run leaves exa_deep at "-".
+        lookup["exa_deep_skip"] = deep_skip_arm
+    # One ContactLookup per lookup: what it held, asked and got, and the
+    # holdout decision. first_exposure marks the one event per person that
+    # matches their contact_deep_skip_holdout row (the sample-ratio check).
+    exa_telemetry.record_contact_lookup(
+        "lookup",
+        existing_rows=len(existing_rows),
+        seed_from=seed_email_from or "-",
+        normal_asked=",".join(normal_fields) or "-",
+        normal_outcome=_lookup_outcome_enum(exa_outcome, still_going=bool(normal_still_going)),
+        deep_asked=",".join(deep_fields) or "-",
+        deep_outcome=_lookup_outcome_enum(lookup["exa_deep"], still_going=bool(deep_still_going)),
+        deep_skip_eligible=deep_skip_eligible,
+        deep_skip_arm=deep_skip_arm if deep_skip_eligible else None,
+        deep_skip_pct=deep_skip_pct if is_launch else None,
+        first_exposure=first_exposure,
+        flags={"seeded_email": bool(seed_email), "has_name": bool(candidate_name),
+               "has_company": bool(candidate_company)},
+    )
     # What is still missing because a recent search found none: when it was
     # checked (the deep search's miss, or the normal run's when no deep search
     # can follow) and about what "Search again" (confirm) would cost. No
@@ -3719,6 +3811,13 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
 
     # Persist only when sourced candidate rows exist; Step 5 pre-save calls may
     # return enriched contact with updated_rows=0 and the FE will persist during save.
+    # The email Launch PAIR sent as held (a JobDiva row's own; placeholders
+    # were dropped above) stays the candidate's: a found one goes into the
+    # data blob and the contact cache, never over the row's email (the
+    # browser and S3 keep it too: interpretEnrichAnswer's heldEmail). A
+    # click's request email keeps the old behaviour (Rankings shows the
+    # answer's email).
+    row_email = None if (is_launch and seed_email_from == "request") else (enriched_email or None)
     updated_rows = 0
     if existing_rows and (enriched_phone or enriched_email):
         try:
@@ -3754,7 +3853,7 @@ async def _enrich_candidate_contact_chain(candidate_id: str, request: EnrichCand
                             """,
                             (
                                 enriched_phone or None,
-                                enriched_email or None,
+                                row_email,
                                 json.dumps(data_blob),
                                 row.get("id"),
                             ),
@@ -3891,11 +3990,19 @@ LAUNCH_ENRICH_CONCURRENCY = 20
 
 def _launch_enrich_request(item: Dict[str, Any], job_id: Any) -> EnrichCandidateContactRequest:
     """Exactly what Launch PAIR's enrichment pass sends per candidate
-    (page.tsx enrichRequest): candidate_id, jobdiva_id, source, linkedin_url,
-    trigger="launch" (the spend policy), match_score only when it is a number."""
+    (launch-rules.ts buildEnrichRequest / rules.build_enrich_request):
+    candidate_id, jobdiva_id, source, linkedin_url, trigger="launch" (the
+    spend policy), match_score only when it is a number, and the seeds it
+    holds (2026-10-15): the JobDiva email (rules.get_candidate_seed_email),
+    the name and the current company. Never a phone: a held number may be a
+    work line, and the lookup is how a personal one is found."""
     score = item.get("match_score")
     if isinstance(score, bool) or not isinstance(score, (int, float)):
         score = None
+
+    def _seed(key: str) -> Optional[str]:
+        return str(item.get(key) or "").strip() or None
+
     return EnrichCandidateContactRequest(
         candidate_id=str(item.get("candidate_id") or item.get("id") or "").strip() or None,
         jobdiva_id=str(job_id) if job_id else None,
@@ -3903,6 +4010,9 @@ def _launch_enrich_request(item: Dict[str, Any], job_id: Any) -> EnrichCandidate
         linkedin_url=str(item["linkedin_url"]) if item.get("linkedin_url") else None,
         trigger="launch",
         match_score=float(score) if score is not None else None,
+        email=_seed("email"),
+        full_name=_seed("full_name"),
+        company_name=_seed("company_name"),
     )
 
 
@@ -3950,8 +4060,9 @@ async def enrich_contacts_for_launch(
     trigger="launch", same request fields), ``concurrency`` lookups in flight.
 
     ``items`` are row dicts with candidate_id (or id), source, linkedin_url,
-    match_score. Yields one `_launch_enrich_answer` dict per candidate as its
-    lookup ends: ``{"index", "candidate_id", "result" (the endpoint's answer),
+    match_score and the seeds email / full_name / company_name
+    (rules.build_enrich_request). Yields one `_launch_enrich_answer` dict per
+    candidate as its lookup ends: ``{"index", "candidate_id", "result" (the endpoint's answer),
     "outcome", "phone", "email", "phone_provider", "email_provider",
     "looked_up", "kipplo"}``.
 

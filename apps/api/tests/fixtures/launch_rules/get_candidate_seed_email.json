@@ -1,0 +1,230 @@
+{
+  "function": "getCandidateSeedEmail",
+  "cases": [
+    {
+      "name": "JobDiva source, real email",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-TalentSearch",
+          "email": "Jane@Acme.com "
+        }
+      },
+      "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva by id, real email",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn",
+          "jobdiva_candidate_id": "123",
+          "email": "jane@acme.com"
+        }
+      },
+      "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva by sources list",
+      "input": {
+        "candidate": {
+          "source": "Exa",
+          "sources": [
+            "Exa",
+            "JobDiva-Applicants"
+          ],
+          "email": "jane@acme.com"
+        }
+      },
+      "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva synthetic Auto_ email",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "Auto_9@jobdiva.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva placeholder",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "test@example.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva not an email",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "Available upon request"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, email only nested",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "",
+          "data": {
+            "email": "jane@acme.com"
+          },
+          "enhanced_info": {
+            "email": "jane@acme.com"
+          }
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "LinkedIn row with an extracted email",
+      "input": {
+        "candidate": {
+          "source": "LinkedIn-Exa",
+          "email": "jane@acme.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva row holding another source's email from a merge",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-TalentSearch",
+          "sources": [
+            "JobDiva-TalentSearch",
+            "LinkedIn-Exa"
+          ],
+          "email": "jane.extracted@acme.com",
+          "email_source": "other"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva row holding another JobDiva row's email from a merge",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "jane@acme.com",
+          "email_source": "jobdiva"
+        }
+      },
+      "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva row, email_source not a string",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "jane@acme.com",
+          "email_source": 1
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "Dice row",
+      "input": {
+        "candidate": {
+          "source": "Dice",
+          "email": "jane@acme.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "no row",
+      "input": {
+        "candidate": null
+      },
+      "expected": ""
+    },
+    {
+      "name": "non-string email",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": 12345
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "whitespace-wrapped",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "\u00a0jane@acme.com\t"
+        }
+      },
+      "expected": "jane@acme.com"
+    },
+    {
+      "name": "JobDiva, a test@ local part the lookup drops",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-TalentSearch",
+          "email": "test@gmail.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, an example.org address",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-Applicants",
+          "email": "jane@example.org"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a test.com address",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "jane@test.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a .local address",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "jane@jobdiva.local"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a candidate@ local part",
+      "input": {
+        "candidate": {
+          "source": "JobDiva-JobAgent",
+          "email": "Candidate@acme.com"
+        }
+      },
+      "expected": ""
+    },
+    {
+      "name": "JobDiva, a real address that only looks like one",
+      "input": {
+        "candidate": {
+          "source": "JobDiva",
+          "email": "tester@localbank.com"
+        }
+      },
+      "expected": "tester@localbank.com"
+    }
+  ]
+}

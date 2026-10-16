@@ -6,13 +6,15 @@ LinkedIn URL (``rules.resolve_linkedin_url``: 7 fields + the résumé) is not
 looked up — "already reachable" when it has a phone or an email, else
 "missing LinkedIn". How: ``routers.candidates.enrich_contacts_for_launch``
 (the grouped endpoint's internals: same chain, same spend policy via
-trigger="launch", the browser's exact request fields) in groups of
+trigger="launch", the browser's exact request fields from
+``rules.build_enrich_request``, seeds included) in groups of
 LAUNCH_ENRICH_GROUP_SIZE with PAIR_LAUNCH_ENRICH_CONCURRENCY lookups in
 flight (the browser: 4 groups of 5). Each group is a paid unit: fenced by
 ``assert_owner`` before it starts. Each answer is read by
 ``rules.interpret_enrich_answer`` and stored on the row as it arrives
 (``contact.done`` = per-row checkpoint, so a resume never pays twice for a
-row); a found contact is an override that REPLACES the row's own.
+row); a found contact is an override that REPLACES the row's own, except
+the JobDiva email the lookup was seeded with (``rules.get_candidate_seed_email``).
 """
 
 from __future__ import annotations
@@ -68,9 +70,13 @@ def summarize(cands: List[Dict[str, Any]], total: int) -> Dict[str, Any]:
     return out
 
 
-def answer_contact(answer: Dict[str, Any], launchable_now: bool) -> Dict[str, Any]:
-    """The row's contact record for one lookup answer (browser rules)."""
-    read = rules.interpret_enrich_answer(answer.get("result") if isinstance(answer, dict) else None, launchable_now)
+def answer_contact(answer: Dict[str, Any], launchable_now: bool, held_email: str = "") -> Dict[str, Any]:
+    """The row's contact record for one lookup answer (browser rules): a
+    found contact overrides the row's own, but never the email the lookup
+    was seeded with (``held_email``)."""
+    read = rules.interpret_enrich_answer(
+        answer.get("result") if isinstance(answer, dict) else None, launchable_now, held_email,
+    )
     contact: Dict[str, Any] = {
         "done": True, "outcome": read["outcome"], "looked_up": bool(read.get("lookedUp")),
         "kipplo": read.get("kipplo") or "",
@@ -123,11 +129,9 @@ async def run(ctx: StageContext) -> StageResult:
 
     async def lookup_group(group: List[Dict[str, Any]]) -> None:
         await ctx.assert_owner()  # a paid unit: never start one we may not own
-        items = [
-            {"candidate_id": g["cid"], "source": g["row"].get("source"), "linkedin_url": g["linkedin"],
-             "match_score": g["row"].get("match_score")}
-            for g in group
-        ]
+        # The browser's request body, seeds included (the JobDiva email, the
+        # name, the current company; never the phone).
+        items = [rules.build_enrich_request(g["row"], g["cid"], g["linkedin"], ctx.job_ref) for g in group]
         answered: set = set()
         # ExaCall attribution; the lookups' tasks copy this context.
         with exa_telemetry.scope(trigger="launch_s3", launch_session_id=ctx.sid):
@@ -140,7 +144,8 @@ async def run(ctx: StageContext) -> StageResult:
                         continue
                     answered.add(idx)
                     g = group[idx]
-                    await ctx.set_states([{"candidate_id": g["cid"], "contact": answer_contact(answer, g["launchable"])}])
+                    contact = answer_contact(answer, g["launchable"], rules.get_candidate_seed_email(g["row"]))
+                    await ctx.set_states([{"candidate_id": g["cid"], "contact": contact}])
         # A lookup that never answered reads as failed (the browser's null).
         missing_answers = [
             {"candidate_id": g["cid"], "contact": answer_contact({"result": None}, g["launchable"])}

@@ -102,3 +102,20 @@ def _contact_chain_with_every_provider(monkeypatch):
 
     monkeypatch.setattr(sourcing_config, "CONTACT_LOOKUP_PROVIDERS", ("kipplo", "zoominfo", "apollo", "exa"))
     monkeypatch.setattr(contact_enrichment, "EXA_CONTACT_DEEP_EFFORT", "off")
+
+
+@pytest.fixture(autouse=True)
+def _no_deep_skip_holdout(monkeypatch):
+    """The Launch deep-email holdout (EXA_DEEP_SKIP_REACHABLE_PCT, 0 in code
+    until it starts; a local .env may set it) would put test slugs in its
+    skip arm, and its decision log is a table: off here, and its writes are
+    no-ops. tests/test_contact_ladder.py turns it on."""
+    from core import sourcing_config
+    from services import contact_holdout
+
+    async def _nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(sourcing_config, "EXA_DEEP_SKIP_REACHABLE_PCT", 0)
+    monkeypatch.setattr(contact_holdout, "record_decision", _nothing)
+    monkeypatch.setattr(contact_holdout, "record_deep_outcome", _nothing)

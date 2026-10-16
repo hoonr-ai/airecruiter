@@ -436,6 +436,12 @@ class SearchCriteria(BaseModel):
     # match_score (auto-launch takes every launchable candidate; scores only
     # order its safety cap).
     assess_all_sources: bool = False
+    # The search is about to be launched (Source & Launch's full run and its
+    # relaxed runs, a launch session's S1): LinkedIn rows' paid Exa email
+    # lookup is put off to Launch PAIR, which asks for the email and the
+    # phone in one run (_paid_contact_deferred; kill switch
+    # SOURCING_DEFER_PAID_CONTACT_ENABLED). Apollo still runs.
+    defer_paid_contact: bool = False
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -569,6 +575,23 @@ def _below_contact_score_floor(cand: Dict[str, Any]) -> bool:
     return score < float(getattr(_sc_floor, "CONTACT_ENRICH_MIN_SCORE", 60))
 
 
+def _paid_contact_deferred(cand: Dict[str, Any], criteria: Any) -> bool:
+    """Whether this LinkedIn row's paid (Exa) email lookup is put off to
+    Launch PAIR: the search is about to be launched (criteria
+    ``defer_paid_contact``: Source & Launch's full run, a launch session's
+    S1) and SOURCING_DEFER_PAID_CONTACT_ENABLED. Launch asks the normal run
+    for the email and the phone at once instead of buying a second run for
+    the phone minutes later, and nobody unlaunched is paid for. getattr
+    throughout: criteria built without the field (tests, older callers)
+    still enrich."""
+    from core import sourcing_config as _sc_defer
+    return (
+        bool(getattr(criteria, "defer_paid_contact", False))
+        and bool(getattr(_sc_defer, "SOURCING_DEFER_PAID_CONTACT_ENABLED", True))
+        and str(cand.get("source") or "").startswith("LinkedIn")
+    )
+
+
 # Job id of the search running in this task context; hydration reads it to
 # know which jd:active marker is its own.
 _search_job_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
@@ -684,7 +707,9 @@ class UnifiedCandidateSearch:
         contact run when ZoomInfo + Apollo both miss (``include_exa``): ZoomInfo
         can't match by LinkedIn URL and Apollo credits run dry, so URL-only
         profiles would otherwise stream in with no contact at all. Budgeted
-        separately inside the helper (EXA_SOURCING_CONTACT_CAP per job).
+        separately inside the helper (EXA_SOURCING_CONTACT_CAP per job). Not
+        on a search about to be launched (``_paid_contact_deferred``): Launch
+        PAIR buys the email together with the phone; Apollo still runs here.
         """
         profile_url = str(cand.get("profile_url") or "").strip()
         if "linkedin.com/in/" not in profile_url.lower():
@@ -695,6 +720,9 @@ class UnifiedCandidateSearch:
         if _below_contact_score_floor(cand):
             return
         source = str(cand.get("source") or "")
+        # Outside the try below: a mistake here must not turn into a row
+        # silently enriched by nobody.
+        include_exa = source.startswith("LinkedIn") and not _paid_contact_deferred(cand, criteria)
         # Scopes the ZoomInfo name search (an unscoped name is ambiguous) and
         # sharpens the Exa query. The LLM extraction has no `current_company`
         # key, so this reads the stored roles too.
@@ -704,7 +732,7 @@ class UnifiedCandidateSearch:
                 profile_url,
                 criteria.job_id,
                 full_name=str(cand.get("name") or "").strip() or None,
-                include_exa=source.startswith("LinkedIn"),
+                include_exa=include_exa,
                 company=company,
                 # What the candidate already has. Seeds the ZoomInfo
                 # match-by-email lookup (the cheap way to fill a missing phone)
@@ -770,6 +798,9 @@ class UnifiedCandidateSearch:
         exa_telemetry.bind_if_unbound(
             trigger="autosync" if _bi_rate_limit.in_background()
             else f"step5_{str(getattr(criteria, 'search_mode', 'full') or 'full').lower()}",
+            # A search about to be launched (its paid contact put off to
+            # Launch PAIR): ExaCall `defer`.
+            defer=True if getattr(criteria, "defer_paid_contact", False) else None,
         )
         mark = bool(job_id) and not _bi_rate_limit.in_background()
         marker = _jobdiva_activity.active_job(job_id if mark else None)
@@ -1052,7 +1083,10 @@ class UnifiedCandidateSearch:
 
             Running after emit means the score/location/dedup gates decide who
             gets a paid lookup, and the row paints without waiting on a lookup
-            that can take most of a minute (Exa phone runs)."""
+            that can take most of a minute (Exa phone runs). On a search about
+            to be launched the paid Exa step is left to Launch PAIR
+            (``paid_deferred`` on the span, ``exa_contact_deferred`` in the
+            summary)."""
             # Spend policy: LinkedIn sources at/above the score floor only.
             # emit_candidate's gate lets UNSCORED rows through for display, and
             # Unipile/Dice rows reach here too — neither may buy a lookup.
@@ -1064,8 +1098,13 @@ class UnifiedCandidateSearch:
                 logger.debug("contact lookup skipped for %s: %s", cand.get("candidate_id") or cand.get("id"), blocked)
                 return
             summary["contact_lookup_attempted"] = summary.get("contact_lookup_attempted", 0) + 1
+            deferred = _paid_contact_deferred(cand, criteria)
+            if deferred:
+                summary["exa_contact_deferred"] = summary.get("exa_contact_deferred", 0) + 1
             before = {k: str(cand.get(k) or "").strip() for k in ("email", "phone")}
-            async with _pipeline_trace.span("contact_enrichment", source=str(cand.get("source") or "")):
+            async with _pipeline_trace.span(
+                "contact_enrichment", source=str(cand.get("source") or ""), paid_deferred=deferred,
+            ):
                 await self._apply_contact_enrichment(cand, criteria, overwrite=overwrite)
             patch = {
                 k: cand[k] for k in ("email", "phone")
@@ -1136,6 +1175,10 @@ class UnifiedCandidateSearch:
                 "qualifications", "employee_status", "available",
                 "availability_status", "current_company", "scoring_mode",
                 "no_contact", "no_contact_reason", "no_contact_company",
+                # Where the row's email came from when a merge gave it
+                # another row's (_merge_candidate_best_of): Launch PAIR's
+                # getCandidateSeedEmail reads it.
+                "email_source",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -1456,9 +1499,11 @@ class UnifiedCandidateSearch:
                 "certifications", "skills", "urls", "experience_years",
                 "name", "title", "location", "email", "phone",
                 # Forward merged identity so a take-over reflects the unioned
-                # sources + absorbed contact/profile on the surviving row.
+                # sources + absorbed contact/profile on the surviving row, and
+                # where an absorbed email came from (email_source: Launch
+                # PAIR's getCandidateSeedEmail never seeds another source's).
                 "sources", "profile_url", "linkedin_url", "image_url",
-                "resume_id", "city", "state",
+                "resume_id", "city", "state", "email_source",
                 # Geo verdict → UI "~N mi away" badge on the location cell.
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
@@ -8766,6 +8811,8 @@ class UnifiedCandidateSearch:
         Returns a dict of the fields that changed, suitable for a UI patch.
         """
         changed: Dict[str, Any] = {}
+        # Before the sources / JobDiva id below can make it a JobDiva row.
+        dst_was_jobdiva = self._cand_is_jobdiva(dst)
 
         def _src_list(c: Dict[str, Any]) -> List[str]:
             out: List[str] = []
@@ -8802,6 +8849,21 @@ class UnifiedCandidateSearch:
         ):
             dst["email"] = s_email
             changed["email"] = s_email
+            # Where an adopted email came from ("jobdiva" | "other"), carried
+            # through later merges (launch-rules.ts deduplicateCandidatesUI
+            # does the same): Launch PAIR's getCandidateSeedEmail never sends
+            # one a JobDiva survivor took from a LinkedIn / Exa / Dice row as
+            # the email the candidate holds.
+            dst["email_source"] = src.get("email_source") or (
+                "jobdiva" if self._cand_is_jobdiva(src) else "other"
+            )
+            changed["email_source"] = dst["email_source"]
+        elif d_email and not dst_was_jobdiva and not dst.get("email_source") and self._cand_is_jobdiva(dst):
+            # A non-JobDiva survivor the merge just made a JobDiva row (its
+            # sources / JobDiva id) keeps its own extracted email: not one
+            # JobDiva holds.
+            dst["email_source"] = "other"
+            changed["email_source"] = "other"
 
         # Resume text: prefer a real, longer resume over a missing/placeholder one.
         def _bad_resume(r: str) -> bool:

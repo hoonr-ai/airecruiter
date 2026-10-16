@@ -33,6 +33,7 @@ Two surfaces:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -248,6 +249,45 @@ def rebuy_estimate_usd(fields: Tuple[str, ...], tier: str) -> float:
     if deep and "fiber" in deep_data_sources():
         usd += _EXA_FIBER_RUN_USD
     return round(usd, 2)
+
+
+# Launch PAIR's deep email run for a candidate already holding a personal
+# phone: a holdout (sourcing_config.EXA_DEEP_SKIP_REACHABLE_PCT). The bucket is
+# a hash of the LinkedIn slug, never Python's hash() (salted per process): a
+# person stays in one arm across the 8 workers and every restart.
+_DEEP_SKIP_SALT = b"deep_skip_reachable:"
+
+
+def deep_skip_reachable_pct() -> int:
+    """EXA_DEEP_SKIP_REACHABLE_PCT (sourcing_config, 0 until the experiment
+    starts), 0-100, read at call time: the share of Launch PAIR's reachable
+    people who skip it. A bad value is 0 (off: everyone keeps the run)."""
+    from core import sourcing_config as _sc
+
+    try:
+        pct = int(getattr(_sc, "EXA_DEEP_SKIP_REACHABLE_PCT", 0))
+    except (TypeError, ValueError):
+        return 0
+    return min(100, max(0, pct))
+
+
+def deep_skip_bucket(linkedin_url: Any) -> Optional[int]:
+    """The person's holdout bucket, 0-99 (None without a LinkedIn slug)."""
+    slug = contact_cache.linkedin_slug(linkedin_url)
+    if not slug:
+        return None
+    return int(hashlib.sha1(_DEEP_SKIP_SALT + slug.encode("utf-8")).hexdigest(), 16) % 100
+
+
+def deep_skip_arm(linkedin_url: Any, pct: int) -> str:
+    """The person's arm at ``pct``: "skip" (no deep email run while a
+    personal phone is held), "control" (the deep email run as before) or
+    "off" (pct 0, or no LinkedIn slug)."""
+    bucket = deep_skip_bucket(linkedin_url)
+    if pct <= 0 or bucket is None:
+        return "off"
+    return "skip" if bucket < pct else "control"
+
 
 _LINKEDIN_PROFILE_RE = re.compile(r"linkedin\.com/in/", re.IGNORECASE)
 
@@ -2447,7 +2487,11 @@ async def enrich_contact_for_sourcing(
             need this: ZoomInfo can't match by URL and Apollo credits run
             dry, so URL-only profiles otherwise stream in contactless.
             Gated by EXA_SOURCING_CONTACT_FALLBACK + EXA_CONTACT_ENRICH_ENABLED
-            and capped per job at EXA_SOURCING_CONTACT_CAP.
+            and capped per job at EXA_SOURCING_CONTACT_CAP. False for a search
+            that defers paid contact to Launch PAIR (Source & Launch's full
+            run, a launch session's S1: SearchCriteria.defer_paid_contact):
+            the cheap providers still run, and with Exa never asked no miss
+            is recorded, so Launch asks the normal run for both fields.
         company: candidate's current company, sharpens the Exa Agent query.
         seed_email / seed_phone: contact the candidate ALREADY has. Two uses:
             they seed the ZoomInfo match-by-email lookup, and they decide
