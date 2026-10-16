@@ -22,6 +22,7 @@ from services.feedback_metrics import FEEDBACK_COMPLETED_AGG_SQL, PAIR_SUBMITS_A
 from services.job_attribution import SCHEMA_STATEMENTS as ATTRIBUTION_SCHEMA_STATEMENTS, stamp_job_posted_by
 from services.job_step_time import SCHEMA_STATEMENTS as STEP_TIME_SCHEMA_STATEMENTS
 from services.recruiter_activity import SCHEMA_STATEMENTS as RECRUITER_ACTIVITY_SCHEMA_STATEMENTS
+from services.user_sessions import SCHEMA_STATEMENTS as USER_SESSIONS_SCHEMA_STATEMENTS
 from services.launch_timing import SCHEMA_STATEMENTS as LAUNCH_TIMING_SCHEMA_STATEMENTS
 from services.launch_effects_ledger import SCHEMA_STATEMENTS as LAUNCH_EFFECTS_SCHEMA_STATEMENTS
 from services.monitored_jobs_storage import MonitoredJobsStorage
@@ -257,6 +258,9 @@ def _ensure_monitored_jobs_schema() -> None:
             # Recruiter activity: actions + active time per surface
             # (services/recruiter_activity.py).
             *RECRUITER_ACTIVITY_SCHEMA_STATEMENTS,
+            # Login sessions: login/logout, duration, device
+            # (services/user_sessions.py).
+            *USER_SESSIONS_SCHEMA_STATEMENTS,
             # Launch timings (services/launch_timing.py): pair_added_at (T0,
             # DEFAULT now(), so every INSERT site below and elsewhere stamps
             # it without naming it), first_launch_clicked_at (T1) and

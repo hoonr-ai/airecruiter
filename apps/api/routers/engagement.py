@@ -1294,7 +1294,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             "jd": jd,
             "company_intro": raw_company_intro,
             "interview_duration": "20-25",
-            "source": "Curate"
+            "source": "pair"
         }
 
         payload_str = json.dumps(payload, indent=2)

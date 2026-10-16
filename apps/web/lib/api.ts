@@ -558,6 +558,23 @@ export const api = {
         keepalive: opts.keepalive,
       }),
   },
+  // Platform sessions (routers/user_sessions.py, lib/user-session.ts): one
+  // idempotent ping is the login, the keep-alive and the Sign Out.
+  sessions: {
+    ping: (
+      body: {
+        session_id: string;
+        active_ms: number;
+        end?: "logout";
+        user_name?: string;
+        screen?: string;
+        timezone?: string;
+        language?: string;
+        entry_path?: string;
+      },
+      opts: { keepalive?: boolean } = {},
+    ) => req<{ status?: string }>(`/api/v1/sessions/ping`, { method: "POST", body, keepalive: opts.keepalive }),
+  },
   candidates: {
     save: (body: unknown) =>
       req<any>(`/candidates/save`, { method: "POST", body }),
