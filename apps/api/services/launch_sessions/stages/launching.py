@@ -501,6 +501,7 @@ async def launch_pass(ctx: StageContext, ids: List[str]) -> None:
         job_id=ctx.job_ref, candidate_ids=list(claimed), is_initial_launch=False, notify_recruiters=False,
         send_job_posting_email=False, app_base_url=str(ctx.input.get("app_base_url") or ""),
         batch_size=int(opts.get("batch_size") or cfg.pairbot_batch_size()), launch_session_id=ctx.sid,
+        recruiter_handoff=bool(opts.get("recruiter_handoff")), handoff_timeout_sec=opts.get("handoff_timeout_sec") or None,
     )
     outreach_stopped: Optional[str] = None
     stop_error: Optional[BaseException] = None

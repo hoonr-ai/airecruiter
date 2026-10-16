@@ -1034,6 +1034,10 @@ function NewJobPageContent() {
   // OFF, Launch PAIR behaves exactly like production (look up + launch for
   // everyone). Has no effect outside QA (gated by IS_QA_ENV).
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
+  // Recruiter warm handoff: when ON, the PAIR bot asks you to join each
+  // candidate's call after its last question (you get a "Join now"
+  // notification). Off by default; sent with the launch.
+  const [recruiterHandoff, setRecruiterHandoff] = useState(false);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
   // Source & Launch auto-selection guard rails. The launch is confirmation-
@@ -6836,7 +6840,7 @@ function NewJobPageContent() {
   }, []);
 
   const serverLaunchOptions = () =>
-    buildLaunchOptions({ wizardMode, isRetry: false, jobBoardIds: selectedJobBoards, batchSize: LAUNCH_BATCH_SIZE });
+    buildLaunchOptions({ wizardMode, isRetry: false, jobBoardIds: selectedJobBoards, batchSize: LAUNCH_BATCH_SIZE, recruiterHandoff });
   const serverIdempotencyKey = () => newIdempotencyKey(typeof crypto !== "undefined" ? crypto : null);
   const goToRankings = () =>
     router.push(launchJobRef ? `/jobs/${encodeURIComponent(launchJobRef)}/rankings` : `/`);
@@ -8760,6 +8764,7 @@ function NewJobPageContent() {
             sendJobPostingEmail: selectedJobBoards.length > 0 && !options?.isRetry,
             appBaseUrl: typeof window !== "undefined" ? window.location.origin : "",
             batchSize: LAUNCH_BATCH_SIZE,
+            recruiterHandoff,
           },
           (evt) => {
             if (evt.type === "start") {
@@ -11341,6 +11346,30 @@ function NewJobPageContent() {
                     )}
                   </div>
                 )}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={recruiterHandoff}
+                  aria-label="Recruiter handoff"
+                  onClick={() => setRecruiterHandoff(v => !v)}
+                  disabled={isViewOnly || launchProgress.open}
+                  className="flex items-center gap-2 select-none disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={recruiterHandoff
+                    ? "Handoff ON - after the PAIR bot's last question you'll get a \"Join now\" notification to talk with the candidate live (skipped if they fail a hard filter, or outside working hours)"
+                    : "Handoff OFF - the PAIR bot closes each interview itself"}
+                >
+                  <span className="text-[12px] font-semibold text-slate-600">Recruiter handoff</span>
+                  <span
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${recruiterHandoff ? "bg-[#6366f1]" : "bg-slate-300"}`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${recruiterHandoff ? "translate-x-[18px]" : "translate-x-0.5"}`}
+                    />
+                  </span>
+                  <span className={`text-[11px] font-bold ${recruiterHandoff ? "text-[#6366f1]" : "text-slate-400"}`}>
+                    {recruiterHandoff ? "ON" : "OFF"}
+                  </span>
+                </button>
                 {IS_QA_ENV && (
                   <div className="flex items-center gap-4">
                   <button

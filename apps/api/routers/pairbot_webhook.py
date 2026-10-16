@@ -19,7 +19,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from routers.dnc_webhook import _verify_hmac_signature
+from core.webhook_auth import verify_hmac_signature
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ async def receive_pairbot_creation_webhook(
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
 ):
     raw_body = await request.body()
-    if not _verify_hmac_signature(raw_body, x_hub_signature_256):
+    if not verify_hmac_signature(raw_body, x_hub_signature_256):
         logger.warning("Pairbot creation webhook signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid signature")
     try:

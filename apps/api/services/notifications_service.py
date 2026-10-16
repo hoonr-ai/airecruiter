@@ -1,5 +1,8 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Nine types today:
+existing email notifications. Nine types today, plus the two recruiter-handoff
+types (recruiter_handoff_requested / recruiter_handoff_missed), which are
+created by services/recruiter_handoff.py from Pair-bot's handoff webhooks and
+documented there:
 
 - candidate_passed (create_candidate_passed_notifications): a candidate's
   interview result. Independent of the pass-email trigger in

@@ -10,11 +10,8 @@ ensuring PAIR's database is not repeatedly hit or queried.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
@@ -22,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from core.config import DATABASE_URL, SUPABASE_DB_URL
 from core.db import get_db_connection
+from core.webhook_auth import verify_hmac_signature
 from services.dnc_storage import invalidate_dnc_cache, suppress_contact_locally
 from utils.phone import normalize_phone
 from utils.pii import mask_email, mask_phone
@@ -31,44 +29,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/webhooks", tags=["Webhooks"])
 
 
-def _get_webhook_secret() -> str:
-    """Retrieve secret used to verify webhook HMAC SHA-256 signatures."""
-    secret = (
-        os.getenv("PAIR_WEBHOOK_SECRET", "")
-        or os.getenv("PAIR_API_KEY", "")
-    ).strip()
-    return secret
-
-
-def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
-    """Verify X-Hub-Signature-256: sha256=<hex_digest>."""
-    secret = _get_webhook_secret()
-    env = os.getenv("ENVIRONMENT", "dev").lower()
-
-    # Enforce HMAC unconditionally across production, staging, and QA
-    if env in {"production", "prod", "staging", "qa"}:
-        if not secret:
-            logger.error("DNC webhook rejected: neither PAIR_WEBHOOK_SECRET nor PAIR_API_KEY is configured in %s environment", env)
-            return False
-        if not signature_header or not signature_header.startswith("sha256="):
-            logger.warning("DNC webhook rejected: Missing or invalid X-Hub-Signature-256 in %s environment", env)
-            return False
-    elif not secret:
-        # In local development without secret configured, log warning and allow
-        logger.warning("DNC webhook accepted without secret in local %s environment", env)
-        return True
-
-    if not signature_header or not signature_header.startswith("sha256="):
-        return False
-
-    expected_digest = signature_header.split("sha256=", 1)[1].strip()
-    calculated = hmac.new(
-        secret.encode("utf-8"),
-        raw_body,
-        hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(calculated, expected_digest)
 
 
 class CandidateInfo(BaseModel):
@@ -104,7 +64,7 @@ async def receive_dnc_webhook(
     """Receive real-time DNC / candidate suppression event and persist locally."""
     raw_body = await request.body()
 
-    if not _verify_hmac_signature(raw_body, x_hub_signature_256):
+    if not verify_hmac_signature(raw_body, x_hub_signature_256):
         logger.warning("DNC webhook signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
