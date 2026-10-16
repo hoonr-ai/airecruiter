@@ -13,6 +13,7 @@ import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotificati
 import { playNotificationChime, unlockNotificationSound } from "@/lib/notification-sound";
 import { isDesktopTypeEnabled } from "@/lib/desktop-notification-preferences";
 import { getSafeLocalStorage } from "@/lib/safe-local-storage";
+import { shouldApplyRefreshResult } from "@/lib/notifications-refresh-guard";
 
 export type { BrowserNotificationPermission };
 
@@ -116,6 +117,21 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // optimistic update it just applied — the user sees the action "undo
   // itself," and only a second click (now racing nothing) actually sticks.
   const localMutationVersionRef = useRef(0);
+  // PR #831 review: the version check alone still missed one window — a
+  // refresh() that STARTS after a mutation's optimistic update (so it
+  // captures the already-bumped version) but whose GET reads the DB before
+  // that mutation's own POST has committed. Its response then matches the
+  // "current" version exactly, so the version check alone would wave it
+  // through. This counts the mutations whose own request is still in
+  // flight; refresh() also discards its response while this is non-zero.
+  const inFlightMutationCountRef = useRef(0);
+  // Set when refresh() discards a response for either reason above — tells
+  // whichever mutation is holding things up to kick off exactly one
+  // follow-up refresh once it (and any other concurrently in-flight
+  // mutation) settles, so the list doesn't sit on a stale/skipped snapshot
+  // until the next unrelated trigger (a visibility change, an SSE
+  // reconnect, a cross-tab signal) happens to come along.
+  const pendingReconcileRef = useRef(false);
   // Every id this tab has already applied a side effect for (unread bump +
   // desktop popup) — checked and updated OUTSIDE the setNotifications
   // updater (see handleRawSSEChunk below). React may invoke a state updater
@@ -238,6 +254,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     const versionAtStart = localMutationVersionRef.current;
     try {
       const data = await api.notifications.list({ limit: 50 });
+      // Advanced unconditionally, even on the discarded path below — both
+      // are append-only, idempotent bookkeeping (a pure "highest id seen" /
+      // "don't re-pop this one" record) regardless of whose response landed,
+      // so there's no correctness reason to gate them on freshness too.
       for (const n of data.notifications) {
         if (n.id > lastSeenIdRef.current) lastSeenIdRef.current = n.id;
         // Already surfaced via this fetch — an SSE push for the same id
@@ -245,11 +265,14 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         // the unread count or re-pop a desktop notification.
         notifiedIdsRef.current.add(n.id);
       }
-      if (localMutationVersionRef.current !== versionAtStart) {
-        // A markRead/markUnread/markAllRead/clearAll ran while this GET was
-        // in flight — this response was already stale the moment it landed.
-        // Applying it now would silently undo that more recent action; skip,
-        // and let the next refresh (or the live SSE stream) reconcile.
+      if (!shouldApplyRefreshResult(versionAtStart, localMutationVersionRef.current, inFlightMutationCountRef.current)) {
+        // Stale relative to a local mutation that started, or is still
+        // settling — applying it now would silently undo that more recent
+        // action. Skip, and flag it so that mutation's own finally block
+        // kicks off one follow-up refresh once it settles (see markRead and
+        // friends below) instead of leaving the list on this skipped
+        // snapshot until some unrelated trigger happens to re-sync it.
+        pendingReconcileRef.current = true;
         return;
       }
       setNotifications(data.notifications);
@@ -481,6 +504,26 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Wraps a mutation's own request: counted as in-flight (see
+  // inFlightMutationCountRef/shouldApplyRefreshResult above) for as long as
+  // it's pending, so a refresh() racing it can't apply a pre-commit read.
+  // Once it settles — and no OTHER mutation is still outstanding — fires
+  // exactly one follow-up refresh if one was discarded while this request
+  // was in flight (pendingReconcileRef), rather than leaving the list on
+  // that skipped snapshot until some unrelated trigger comes along.
+  const settleMutation = useCallback(async <T,>(request: () => Promise<T>): Promise<T> => {
+    inFlightMutationCountRef.current++;
+    try {
+      return await request();
+    } finally {
+      inFlightMutationCountRef.current--;
+      if (inFlightMutationCountRef.current === 0 && pendingReconcileRef.current) {
+        pendingReconcileRef.current = false;
+        refreshRef.current();
+      }
+    }
+  }, []);
+
   const markRead = useCallback(async (id: number) => {
     // Decided from the ref snapshot BEFORE touching state (see
     // notificationsRef above) rather than inside the setNotifications
@@ -493,12 +536,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     );
     setUnreadCount((prev) => Math.max(0, prev - 1));
     try {
-      await api.notifications.markRead(id);
+      await settleMutation(() => api.notifications.markRead(id));
     } catch (err) {
       console.error("Failed to mark notification read:", err);
       refreshRef.current();
     }
-  }, []);
+  }, [settleMutation]);
 
   const markUnread = useCallback(async (id: number) => {
     // Mirrors markRead above.
@@ -508,12 +551,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read_at: null } : n)));
     setUnreadCount((prev) => prev + 1);
     try {
-      await api.notifications.markUnread(id);
+      await settleMutation(() => api.notifications.markUnread(id));
     } catch (err) {
       console.error("Failed to mark notification unread:", err);
       refreshRef.current();
     }
-  }, []);
+  }, [settleMutation]);
 
   const markAllRead = useCallback(async () => {
     const now = new Date().toISOString();
@@ -521,12 +564,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     setNotifications((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })));
     setUnreadCount(0);
     try {
-      await api.notifications.markAllRead();
+      await settleMutation(() => api.notifications.markAllRead());
     } catch (err) {
       console.error("Failed to mark all notifications read:", err);
       refreshRef.current();
     }
-  }, []);
+  }, [settleMutation]);
 
   // Explicit, user-initiated removal — the only thing that makes a
   // notification go away. Read ones are never auto-hidden or expired on
@@ -538,7 +581,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     setNotifications([]);
     setUnreadCount(0);
     try {
-      await api.notifications.clear();
+      await settleMutation(() => api.notifications.clear());
     } catch (err) {
       console.error("Failed to clear notifications:", err);
       // Optimistic clear didn't stick server-side: surface it (clearError)
@@ -548,7 +591,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setClearError(true);
       refreshRef.current();
     }
-  }, []);
+  }, [settleMutation]);
 
   return (
     <NotificationsContext.Provider
