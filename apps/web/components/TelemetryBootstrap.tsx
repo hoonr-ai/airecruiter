@@ -5,6 +5,7 @@ import { useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { deriveAppEnv } from "@/lib/nr-config";
 import { setNrAppVersion, setNrAttribute, setNrUser } from "@/lib/newrelic";
+import { startUserSession } from "@/lib/user-session";
 
 // Labels the New Relic Browser data. The agent itself is started by
 // public/newrelic-browser-agent.js (before hydration) and records page views,
@@ -13,6 +14,7 @@ import { setNrAppVersion, setNrAttribute, setNrUser } from "@/lib/newrelic";
 export function TelemetryBootstrap() {
   const { accounts, inProgress } = useMsal();
   const username = accounts?.[0]?.username;
+  const displayName = accounts?.[0]?.name;
   // No account only means "signed out" once MSAL has finished starting up.
   const signedOut = !username && inProgress === InteractionStatus.None;
 
@@ -29,6 +31,11 @@ export function TelemetryBootstrap() {
     // does not drop the id for a moment.
     if (username || signedOut) void setNrUser(username).catch(() => {});
   }, [username, signedOut]);
+
+  useEffect(() => {
+    // Login time / device / time spent (lib/user-session.ts).
+    if (username) startUserSession(username, displayName || undefined);
+  }, [username, displayName]);
 
   return null;
 }
