@@ -63,7 +63,6 @@ from models import (
     JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
     JobSkillsSummaryResponse, ExternalJobCreateRequest, ManualCandidateRequest
 )
-from matcher import mock_match_candidates
 from services.extractor import llm_extractor
 from services import jobdiva_rate_limit
 from services.jobdiva import jobdiva_service
