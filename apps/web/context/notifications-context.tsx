@@ -106,6 +106,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     notificationsRef.current = notifications;
   }, [notifications]);
+  // Bumped at the start of every optimistic local mutation (markRead/
+  // markUnread/markAllRead/clearAll) — see refresh() below. refresh() is a
+  // full GET that unconditionally overwrites `notifications`/`unreadCount`,
+  // and it's kicked off from several places that race a user action: once
+  // on mount, on every tab visibility change, on SSE reconnect, and on a
+  // cross-tab cache-write signal. Without this guard, a slow refresh() that
+  // started BEFORE a click can resolve AFTER it and silently revert the
+  // optimistic update it just applied — the user sees the action "undo
+  // itself," and only a second click (now racing nothing) actually sticks.
+  const localMutationVersionRef = useRef(0);
   // Every id this tab has already applied a side effect for (unread bump +
   // desktop popup) — checked and updated OUTSIDE the setNotifications
   // updater (see handleRawSSEChunk below). React may invoke a state updater
@@ -225,11 +235,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // Truth-up fetch: initial load, and re-sync after any reconnect so nothing
   // dropped between a lost connection and the next one is lost for good.
   const refresh = useCallback(async () => {
+    const versionAtStart = localMutationVersionRef.current;
     try {
       const data = await api.notifications.list({ limit: 50 });
-      setNotifications(data.notifications);
-      setUnreadCount(data.unread_count);
-      setHasLoadError(false);
       for (const n of data.notifications) {
         if (n.id > lastSeenIdRef.current) lastSeenIdRef.current = n.id;
         // Already surfaced via this fetch — an SSE push for the same id
@@ -237,6 +245,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         // the unread count or re-pop a desktop notification.
         notifiedIdsRef.current.add(n.id);
       }
+      if (localMutationVersionRef.current !== versionAtStart) {
+        // A markRead/markUnread/markAllRead/clearAll ran while this GET was
+        // in flight — this response was already stale the moment it landed.
+        // Applying it now would silently undo that more recent action; skip,
+        // and let the next refresh (or the live SSE stream) reconcile.
+        return;
+      }
+      setNotifications(data.notifications);
+      setUnreadCount(data.unread_count);
+      setHasLoadError(false);
     } catch (err) {
       console.error("Failed to fetch notifications:", err);
       // Deliberately leave `notifications` as-is on failure (don't clear it
@@ -469,6 +487,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     // updater — keeps the updater itself pure and the no-op check exact.
     const current = notificationsRef.current.find((n) => n.id === id);
     if (!current || current.read_at) return;
+    localMutationVersionRef.current++;
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n))
     );
@@ -485,6 +504,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     // Mirrors markRead above.
     const current = notificationsRef.current.find((n) => n.id === id);
     if (!current || !current.read_at) return;
+    localMutationVersionRef.current++;
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read_at: null } : n)));
     setUnreadCount((prev) => prev + 1);
     try {
@@ -497,6 +517,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const markAllRead = useCallback(async () => {
     const now = new Date().toISOString();
+    localMutationVersionRef.current++;
     setNotifications((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })));
     setUnreadCount(0);
     try {
@@ -513,6 +534,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // reload keeps showing them) until this runs.
   const clearAll = useCallback(async () => {
     setClearError(false);
+    localMutationVersionRef.current++;
     setNotifications([]);
     setUnreadCount(0);
     try {
