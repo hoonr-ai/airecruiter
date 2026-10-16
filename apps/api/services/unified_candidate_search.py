@@ -8355,14 +8355,40 @@ class UnifiedCandidateSearch:
         criteria: SearchCriteria,
         single_loc_fn: Callable,
         source_type: str,
+        dedupe_key: Optional[Callable[[SearchCriteria], Any]] = None,
     ) -> Dict[str, Any]:
         """Fan out a single-location search function over all location variants.
 
         Uses asyncio.gather with bounded concurrency (3 parallel calls) to
         protect latency and provider quota. Deduplicates the merged results.
         Capped at _MAX_LOCATIONS total variants.
+
+        ``dedupe_key``: variants it maps to the same value would send the
+        provider the same request, so only the first is searched. The Exa
+        sources pass ``_search_location_for_source``: a Remote job searches
+        its country whatever the location, so its L locations used to buy the
+        same Exa searches L times for identical results.
         """
         variants = self._location_criteria_variants(criteria)
+        if dedupe_key is not None:
+            distinct: List[SearchCriteria] = []
+            seen_keys: set = set()
+            for variant in variants:
+                try:
+                    key = dedupe_key(variant)
+                except Exception:
+                    key = None  # unknown: search it
+                if key is not None and key in seen_keys:
+                    continue
+                if key is not None:
+                    seen_keys.add(key)
+                distinct.append(variant)
+            if len(distinct) < len(variants):
+                logger.info(
+                    "%s multi-location: %d locations, %d distinct searches",
+                    source_type, len(variants), len(distinct),
+                )
+            variants = distinct
         _sem = asyncio.Semaphore(3)
         credits_errors: List[ExaOutOfCreditsError] = []
 
@@ -8609,7 +8635,8 @@ class UnifiedCandidateSearch:
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
         if criteria.additional_locations:
             return await self._fan_out_multi_location_search(
-                criteria, self._search_dice, "Dice"
+                criteria, self._search_dice, "Dice",
+                dedupe_key=self._search_location_for_source,
             )
         try:
             # Structured criteria feed natural-language queries (one role per
@@ -8656,7 +8683,8 @@ class UnifiedCandidateSearch:
     async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
         if criteria.additional_locations:
             return await self._fan_out_multi_location_search(
-                criteria, self._search_exa, "LinkedIn-Exa"
+                criteria, self._search_exa, "LinkedIn-Exa",
+                dedupe_key=self._search_location_for_source,
             )
         try:
             # Floor at 30 so the Exa Research Pass B has a meaningful seed-URL
@@ -8664,6 +8692,9 @@ class UnifiedCandidateSearch:
             # 50 (Exa's per-call sweet spot for people search before relevance
             # falls off). Without the floor, page_size=10 → only 10 LinkedIn
             # candidates surface and the deep-search pass discovers little.
+            # Not shrunk for sample mode on purpose: the sample run asks Exa
+            # exactly what the full run will, so the full run is served from
+            # the Pass A search cache (services/exa_search_cache.py).
             requested = criteria.page_size or 30
             exa_limit = min(50, max(30, requested))
             # Structured criteria feed natural-language queries (one role per
