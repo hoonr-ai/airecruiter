@@ -14,7 +14,7 @@ from core.config import (
     AZURE_OPENAI_API_KEY,
     OPENAI_API_KEY, OPENAI_MODEL,
     LLM_CONCURRENCY,
-    SQLA_POOL_SIZE, SQLA_MAX_OVERFLOW,
+    SOURCED_CANDIDATES_POOL_SIZE, SOURCED_CANDIDATES_MAX_OVERFLOW,
 )
 import httpx
 from models import SourcedCandidate
@@ -45,8 +45,8 @@ def _get_engine() -> sqlalchemy.engine.Engine:
             raise RuntimeError("DATABASE_URL not configured for sourced_candidates_storage")
         _ENGINE = sqlalchemy.create_engine(
             url,
-            pool_size=SQLA_POOL_SIZE,
-            max_overflow=SQLA_MAX_OVERFLOW,
+            pool_size=SOURCED_CANDIDATES_POOL_SIZE,
+            max_overflow=SOURCED_CANDIDATES_MAX_OVERFLOW,
             pool_pre_ping=True,
             pool_recycle=1800,
             connect_args={"connect_timeout": 5},

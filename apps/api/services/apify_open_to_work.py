@@ -28,6 +28,7 @@ import httpx
 
 from core import config as _cfg
 from core.config import APIFY_API_TOKEN, APIFY_LINKEDIN_OTW_ACTOR
+from core.tasks import spawn
 
 log = logging.getLogger(__name__)
 
@@ -301,7 +302,6 @@ async def enqueue(urls: List[str]) -> None:
         len(to_fire),
         len(urls) - len(to_fire),
     )
-    from core.tasks import spawn
     for u in to_fire:
         spawn(fetch_open_to_work(u), name="apify_otw_fetch")
 

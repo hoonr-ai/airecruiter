@@ -132,6 +132,9 @@ def test_generate_payload_single_query_preserves_request_order(monkeypatch):
 
 
 def test_fetch_live_rows_dedupes_ids_and_selects_match_percentage():
+    # No schema-drift fallback any more: a database without the column fails
+    # here. The column is guaranteed by
+    # migrations/20261019_sourced_candidates_resume_match_percentage.sql.
     cur = _FakeCursor({"a": {"candidate_id": "a"}}, set())
     assert list(eng._fetch_live_sourced_rows(cur, ["a", "a", "b"])) == ["a"]
     live = [s for s in cur.executed if "FROM sourced_candidates" in s]

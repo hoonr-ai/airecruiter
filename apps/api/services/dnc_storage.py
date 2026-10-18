@@ -33,7 +33,7 @@ from typing import Optional, Set
 import sqlalchemy
 from sqlalchemy import text
 
-from core.config import DATABASE_URL, SUPABASE_DB_URL, SQLA_POOL_SIZE, SQLA_MAX_OVERFLOW
+from core.config import DATABASE_URL, SUPABASE_DB_URL, DNC_POOL_SIZE, DNC_MAX_OVERFLOW
 from utils.pii import mask_email, mask_phone
 
 logger = logging.getLogger(__name__)
@@ -53,8 +53,8 @@ def _get_engine() -> sqlalchemy.engine.Engine:
                     raise RuntimeError("DATABASE_URL not configured for dnc_storage")
                 _ENGINE = sqlalchemy.create_engine(
                     url,
-                    pool_size=SQLA_POOL_SIZE,
-                    max_overflow=SQLA_MAX_OVERFLOW,
+                    pool_size=DNC_POOL_SIZE,
+                    max_overflow=DNC_MAX_OVERFLOW,
                     pool_pre_ping=True,
                     pool_recycle=1800,
                     connect_args={"connect_timeout": 5},
