@@ -131,14 +131,11 @@ def test_generate_payload_single_query_preserves_request_order(monkeypatch):
     assert len(per_candidate) == 2  # one live ANY() + one DNC ANY(), not N+1
 
 
-def test_fetch_live_rows_schema_drift_fallback():
-    class Drift(_FakeCursor):
-        def execute(self, sql, params=None):
-            if "resume_match_percentage" in sql:
-                raise RuntimeError("column does not exist")
-            super().execute(sql, params)
-    cur = Drift({"a": {"candidate_id": "a"}}, set())
+def test_fetch_live_rows_dedupes_ids_and_selects_match_percentage():
+    cur = _FakeCursor({"a": {"candidate_id": "a"}}, set())
     assert list(eng._fetch_live_sourced_rows(cur, ["a", "a", "b"])) == ["a"]
+    live = [s for s in cur.executed if "FROM sourced_candidates" in s]
+    assert len(live) == 1 and "resume_match_percentage" in live[0]
 
 
 # ------------------------------------------------------- Fix 1 / Fix 2 ----

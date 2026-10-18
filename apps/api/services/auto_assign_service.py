@@ -1154,9 +1154,10 @@ class AutoAssignService:
             if newly_inserted_ids:
                 try:
                     from routers.engagement import auto_launch_for_candidates
-                    import asyncio as _asyncio
-                    _asyncio.create_task(
-                        auto_launch_for_candidates(newly_inserted_ids, target_job_id)
+                    from core.tasks import spawn
+                    spawn(
+                        auto_launch_for_candidates(newly_inserted_ids, target_job_id),
+                        name=f"auto_launch:{target_job_id}",
                     )
                 except Exception as launch_err:  # noqa: BLE001
                     logger.warning(

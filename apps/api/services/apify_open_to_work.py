@@ -301,8 +301,9 @@ async def enqueue(urls: List[str]) -> None:
         len(to_fire),
         len(urls) - len(to_fire),
     )
+    from core.tasks import spawn
     for u in to_fire:
-        asyncio.create_task(fetch_open_to_work(u))
+        spawn(fetch_open_to_work(u), name="apify_otw_fetch")
 
 
 def diagnostics() -> Dict[str, Any]:

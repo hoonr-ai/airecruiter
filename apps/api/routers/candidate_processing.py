@@ -182,8 +182,8 @@ async def extract_all_job_applicants(
             logger.info(f"Bulk extraction completed for job {jobdiva_id}: {processed} processed, {failed} failed")
         
         # Run processing in background
-        import asyncio
-        asyncio.create_task(process_all_candidates())
+        from core.tasks import spawn
+        spawn(process_all_candidates(), name=f"bulk_extraction:{jobdiva_id}")
         
         return {
             "status": "processing",
