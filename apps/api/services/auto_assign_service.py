@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from core.db import get_db_connection
+from core.tasks import spawn
 from services.feedback_metrics import count_feedback_metrics
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
@@ -1154,9 +1155,9 @@ class AutoAssignService:
             if newly_inserted_ids:
                 try:
                     from routers.engagement import auto_launch_for_candidates
-                    import asyncio as _asyncio
-                    _asyncio.create_task(
-                        auto_launch_for_candidates(newly_inserted_ids, target_job_id)
+                    spawn(
+                        auto_launch_for_candidates(newly_inserted_ids, target_job_id),
+                        name=f"auto_launch:{target_job_id}",
                     )
                 except Exception as launch_err:  # noqa: BLE001
                     logger.warning(

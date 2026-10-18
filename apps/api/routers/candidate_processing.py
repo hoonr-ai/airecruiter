@@ -14,6 +14,7 @@ from models import (
 from services.jobdiva import JobDivaService
 from services.location import sanitize_candidate_location
 from core.config import DATABASE_URL, SUPABASE_DB_URL, SQLA_POOL_SIZE, SQLA_MAX_OVERFLOW
+from core.tasks import spawn
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -182,8 +183,7 @@ async def extract_all_job_applicants(
             logger.info(f"Bulk extraction completed for job {jobdiva_id}: {processed} processed, {failed} failed")
         
         # Run processing in background
-        import asyncio
-        asyncio.create_task(process_all_candidates())
+        spawn(process_all_candidates(), name=f"bulk_extraction:{jobdiva_id}")
         
         return {
             "status": "processing",
@@ -355,7 +355,7 @@ async def get_candidates_for_job(jobdiva_id: str) -> Dict[str, Any]:
         candidates = candidates_storage.get_candidates_for_job(jobdiva_id)
         
         return {
-            "job_id": job_id,
+            "job_id": jobdiva_id,
             "candidates": candidates,
             "total": len(candidates),
             "source": "Local Sourced Candidates"
@@ -397,17 +397,17 @@ async def remove_candidate_from_job(jobdiva_id: str, candidate_id: str) -> Dict[
     Remove a candidate from a job.
     """
     try:
-        logger.info(f"Removing candidate {candidate_id} from job {job_id}")
+        logger.info(f"Removing candidate {candidate_id} from job {jobdiva_id}")
         
         # This should be implemented with actual removal logic
         return {
             "message": "Candidate removed successfully",
-            "job_id": job_id,
+            "job_id": jobdiva_id,
             "candidate_id": candidate_id
         }
         
     except Exception as e:
-        logger.error(f"Error removing candidate {candidate_id} from job {job_id}: {e}")
+        logger.error(f"Error removing candidate {candidate_id} from job {jobdiva_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/")

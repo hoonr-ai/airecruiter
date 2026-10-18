@@ -970,7 +970,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 
 _LIVE_SOURCED_ROWS_SQL = """
     SELECT DISTINCT ON (candidate_id)
-        candidate_id, name, email, phone, headline, location, data{extra}
+        candidate_id, name, email, phone, headline, location, data, resume_match_percentage
     FROM sourced_candidates
     WHERE candidate_id = ANY(%s)
       AND dnc_stopped_at IS NULL
@@ -981,19 +981,14 @@ _LIVE_SOURCED_ROWS_SQL = """
 def _fetch_live_sourced_rows(cur, candidate_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """Newest non-DNC sourced_candidates row per id, in one round-trip.
 
-    Keeps the schema-drift fallback: some environments still lack
-    `resume_match_percentage`, so retry without it after a rollback.
+    `resume_match_percentage` is guaranteed by
+    migrations/20261019_sourced_candidates_resume_match_percentage.sql.
     """
     ids = [c for c in dict.fromkeys(candidate_ids) if c]
     if not ids:
         return {}
-    try:
-        cur.execute(_LIVE_SOURCED_ROWS_SQL.format(extra=", resume_match_percentage"), (ids,))
-        rows = cur.fetchall()
-    except Exception:
-        cur.connection.rollback()
-        cur.execute(_LIVE_SOURCED_ROWS_SQL.format(extra=""), (ids,))
-        rows = cur.fetchall()
+    cur.execute(_LIVE_SOURCED_ROWS_SQL, (ids,))
+    rows = cur.fetchall()
     return {r["candidate_id"]: r for r in rows}
 
 
