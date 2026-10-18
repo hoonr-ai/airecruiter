@@ -582,7 +582,8 @@ OPENAI_EMBEDDING_MODEL = get_env_with_default(
 # per worker.
 EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "5000"))
 
-# Side SQLAlchemy engines (routers/candidate_processing.py, services/vetted.py),
+# Side SQLAlchemy engines (routers/candidate_processing.py, services/vetted.py,
+# services/sourced_candidates_storage.py, services/dnc_storage.py),
 # per worker, on top of core/db.py's psycopg2 pool. 3 + 2 keeps 8 workers well
 # under max_connections; raise via env if QueuePool timeouts show up under load.
 SQLA_POOL_SIZE = int(get_env_with_default("SQLA_POOL_SIZE", "3"))
