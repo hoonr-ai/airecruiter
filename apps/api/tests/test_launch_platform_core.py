@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from routers import engagement as eng
+from routers.engagement import bulk_send as eng_bulk_send, common as eng_common, launch as eng_launch, pairbot as eng_pairbot, payloads as eng_payloads, provisioning as eng_provisioning  # noqa: E402
 from services.engage_status import format_engage_status, LAUNCH_IN_FLIGHT_STATUSES
 
 
@@ -164,8 +165,8 @@ def pb(monkeypatch):
         "by_job_error": None, "wait_error": None,
         "posts": [], "by_job_calls": [], "spawned": [], "t2": [], "provisioned": [],
     }
-    monkeypatch.setattr(eng, "_get_db_connection", db.conn)
-    monkeypatch.setattr(eng, "_fetch_stored_employer_signals", lambda _c, _ids: {})
+    monkeypatch.setattr(eng_common, "_get_db_connection", db.conn)
+    monkeypatch.setattr(eng_payloads, "_fetch_stored_employer_signals", lambda _c, _ids: {})
 
     async def post(url, payload_obj, **_k):
         state["posts"].append(json.loads(json.dumps(payload_obj)))
@@ -198,12 +199,13 @@ def pb(monkeypatch):
         state["provisioned"].append((list(ids), job_id))
         return {"success": len(ids)}
 
-    monkeypatch.setattr(eng, "_post_to_pairbot", post)
-    monkeypatch.setattr(eng, "_wait_for_pairbot_creation", wait)
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", by_job)
-    monkeypatch.setattr(eng, "_spawn_task", spawn)
-    monkeypatch.setattr(eng, "_stamp_first_launch", lambda key: state["t2"].append(key))
-    monkeypatch.setattr(eng, "_provision_batch_to_jobdiva", provision)
+    monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", post)
+    monkeypatch.setattr(eng_pairbot, "_wait_for_pairbot_creation", wait)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", by_job)
+    monkeypatch.setattr(eng_bulk_send, "_spawn_task", spawn)
+    monkeypatch.setattr(eng_launch, "_spawn_task", spawn)
+    monkeypatch.setattr(eng_pairbot, "_stamp_first_launch", lambda key: state["t2"].append(key))
+    monkeypatch.setattr(eng_provisioning, "_provision_batch_to_jobdiva", provision)
     state["db"] = db
     return state
 
@@ -313,7 +315,7 @@ def test_twin_in_the_same_bulk_launches_one_and_blocks_the_other(pb):
 def test_proven_duplicate_whose_reconcile_write_failed_is_recorded_by_the_core(pb, monkeypatch):
     def broken(*_a, **_k):
         raise RuntimeError("deadlock detected")
-    monkeypatch.setattr(eng, "_record_reconciled_interviews", broken)
+    monkeypatch.setattr(eng_pairbot, "_record_reconciled_interviews", broken)
     pb["creation"] = {"status": "creation_completed", "data": [], "failed_interviews": [_dup(0, "iv-old")]}
     pb["by_job"] = {"bulk_in_progress": False,
                     "interviews": [{"interview_id": "iv-b", "source_candidate_id": "b"}]}
@@ -415,7 +417,7 @@ def test_every_post_is_preceded_by_the_send_claim(pb, monkeypatch):
     async def post(url, payload_obj, **k):
         claims_at_post.append(len(db.send_claims()))
         return await real_post(url, payload_obj, **k)
-    monkeypatch.setattr(eng, "_post_to_pairbot", post)
+    monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", post)
     pb["creation"] = {"status": "creation_completed", "data": [{"source_candidate_id": "a", "interview_id": "iv-a"}]}
     _send(["a", "b"])
     assert claims_at_post == [1]
@@ -477,7 +479,7 @@ def test_no_answer_from_pairbot_releases_the_held_rows(pb, monkeypatch, session)
 
     async def down(url, payload_obj, **_k):
         raise httpx.ConnectError("connection refused")
-    monkeypatch.setattr(eng, "_post_to_pairbot", down)
+    monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", down)
     pb["db"].claim_lost = {"b"}
     res = _send(["a", "b", "c"], claimed_session_id=session)
     assert res["success"] is False and "Server error" in res["message"]
@@ -488,7 +490,7 @@ def test_no_answer_from_pairbot_releases_the_held_rows(pb, monkeypatch, session)
 def test_a_cancel_during_the_post_releases_and_propagates(pb, monkeypatch):
     async def cancelled(url, payload_obj, **_k):
         raise asyncio.CancelledError()
-    monkeypatch.setattr(eng, "_post_to_pairbot", cancelled)
+    monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", cancelled)
     with pytest.raises(asyncio.CancelledError):
         _send(["a"], claimed_session_id="S-1")
     assert pb["db"].send_releases() == [{"keys": [JOB, REF], "ids": ["a"], "sid": "S-1"}]
@@ -497,7 +499,7 @@ def test_a_cancel_during_the_post_releases_and_propagates(pb, monkeypatch):
 def test_a_non_2xx_answer_fails_the_held_rows_through_the_audit_loop(pb, monkeypatch):
     async def rejected(url, payload_obj, **_k):
         return _Resp(422, {"detail": "bad payload"})
-    monkeypatch.setattr(eng, "_post_to_pairbot", rejected)
+    monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", rejected)
     res = _send(["a"])
     assert res["success"] is False
     assert ("failed", "", "a") in pb["db"].engage_writes()
@@ -507,7 +509,7 @@ def test_a_non_2xx_answer_fails_the_held_rows_through_the_audit_loop(pb, monkeyp
 def test_release_send_claim_is_fail_open(monkeypatch):
     def no_db():
         raise RuntimeError("pool exhausted")
-    monkeypatch.setattr(eng, "_get_db_connection", no_db)
+    monkeypatch.setattr(eng_common, "_get_db_connection", no_db)
     assert eng._release_send_claim((JOB, REF), ["a"], None) == 0
     assert eng._release_send_claim((JOB, REF), [], None) == 0
     assert eng._claim_rows_for_send(("", ""), ["a"], None) == ([], set(), {})
@@ -557,7 +559,7 @@ def test_legacy_processing_stamp_carries_the_bulk_id_too(pb):
 
 def test_stamp_without_bulk_id_keeps_the_old_statement(monkeypatch):
     db = FakeDB()
-    monkeypatch.setattr(eng, "_get_db_connection", db.conn)
+    monkeypatch.setattr(eng_common, "_get_db_connection", db.conn)
     eng._stamp_engage_status_batch(["a"], "failed", job_id_value=JOB, job_id_alt=REF)
     (sql, params), = db.log
     assert "engage_bulk_id" not in sql and params == ("failed", ["a"], JOB, REF)
@@ -662,7 +664,7 @@ def _bulk_status(monkeypatch, statuses):
         if isinstance(value, Exception):
             raise value
         return value
-    monkeypatch.setattr(eng, "_fetch_pairbot_bulk_status", status)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_bulk_status", status)
     return seen
 
 
@@ -727,16 +729,16 @@ class _StreamClient:
 ])
 def test_fetch_pairbot_bulk_status_reads_the_first_event(monkeypatch, chunks, expected):
     client = _StreamClient(_StreamResp(200, chunks))
-    monkeypatch.setattr(eng.httpx, "AsyncClient", client)
-    monkeypatch.setattr(eng, "get_pair_auth_headers", lambda *a, **k: {})
+    monkeypatch.setattr(eng_pairbot.httpx, "AsyncClient", client)
+    monkeypatch.setattr(eng_pairbot, "get_pair_auth_headers", lambda *a, **k: {})
     assert asyncio.run(eng._fetch_pairbot_bulk_status("bk-1")) == expected
     assert client.urls == [("GET", f"{eng.EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/bk-1/stream")]
 
 
 @pytest.mark.parametrize("resp", [_StreamResp(502, []), _StreamResp(200, [])])
 def test_fetch_pairbot_bulk_status_raises_when_it_cannot_tell(monkeypatch, resp):
-    monkeypatch.setattr(eng.httpx, "AsyncClient", _StreamClient(resp))
-    monkeypatch.setattr(eng, "get_pair_auth_headers", lambda *a, **k: {})
+    monkeypatch.setattr(eng_pairbot.httpx, "AsyncClient", _StreamClient(resp))
+    monkeypatch.setattr(eng_pairbot, "get_pair_auth_headers", lambda *a, **k: {})
     with pytest.raises(RuntimeError):
         asyncio.run(eng._fetch_pairbot_bulk_status("bk-1"))
 
@@ -764,7 +766,7 @@ def test_reconcile_never_reports_missing_when_by_job_failed(pb, monkeypatch):
         if job_key == REF:
             raise RuntimeError("Pairbot by-job check failed status=502")
         return {"interviews": [{"interview_id": "iv-a", "source_candidate_id": "a"}]}
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", flaky)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", flaky)
     out = _reconcile(pb, ["a", "b"])
     # What one key proved is still written; nothing is called missing.
     assert out["sent"] == {"a": "iv-a"} and out["missing"] == []
@@ -777,7 +779,7 @@ def test_reconcile_write_failure_reports_unrecorded_not_sent(pb, monkeypatch):
 
     def broken(*_a, **_k):
         raise RuntimeError("deadlock")
-    monkeypatch.setattr(eng, "_record_reconciled_interviews", broken)
+    monkeypatch.setattr(eng_pairbot, "_record_reconciled_interviews", broken)
     out = _reconcile(pb, ["a", "b"])
     assert out["sent"] == {} and out["unrecorded"] == {"a": "iv-a"}
     assert out["missing"] == ["b"] and "deadlock" in out["error"]
@@ -836,13 +838,13 @@ def test_claim_and_release_shapes(pb):
 def test_provision_sent_candidates_claims_then_provisions_in_chunks(pb, monkeypatch):
     async def ids_for(job):
         return ("123", REF)
-    monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", ids_for)
+    monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", ids_for)
     claimed_calls: List[tuple] = []
 
     def claim(keys, ids):
         claimed_calls.append((keys, ids))
         return [c for c in ids if c != "x-1"]
-    monkeypatch.setattr(eng, "_claim_rows_for_provisioning", claim)
+    monkeypatch.setattr(eng_provisioning, "_claim_rows_for_provisioning", claim)
     ids = [f"x-{i}" for i in range(30)]
     out = asyncio.run(eng.provision_sent_candidates(JOB, ids))
     assert claimed_calls == [([JOB, "123", REF], ids)]
@@ -857,9 +859,9 @@ def test_provisioning_failure_is_counted_never_raised(pb, monkeypatch):
 
     async def broken(ids, job_id, **_k):
         raise RuntimeError("JobDiva 500")
-    monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", ids_for)
-    monkeypatch.setattr(eng, "_claim_rows_for_provisioning", lambda keys, ids: list(ids))
-    monkeypatch.setattr(eng, "_provision_batch_to_jobdiva", broken)
+    monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", ids_for)
+    monkeypatch.setattr(eng_provisioning, "_claim_rows_for_provisioning", lambda keys, ids: list(ids))
+    monkeypatch.setattr(eng_provisioning, "_provision_batch_to_jobdiva", broken)
     out = asyncio.run(eng.provision_sent_candidates(JOB, ["a", "b"]))
     assert out["failed"] == 2 and out["success"] == 0
     assert asyncio.run(eng.provision_sent_candidates(JOB, []))["claimed"] == 0

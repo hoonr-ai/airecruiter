@@ -215,12 +215,12 @@ def test_verdict_missing_location_soft_keep_sentinel(svc):
     "Midwest Region",
 ])
 def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, location):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("broad region labels must not be treated as point locations")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, distance = svc._location_match_verdict(
         {"location": location}, _criteria()
     )
@@ -240,12 +240,12 @@ def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, 
 def test_verdict_named_region_outside_search_state_is_mismatch(svc, monkeypatch, location):
     """A LinkedIn metro whose states miss the search location is a confirmed
     mismatch, not an unverified keep. Tempe, AZ does not cover IL/CA/WA."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("broad region labels must not be treated as point locations")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, _distance = svc._location_match_verdict(
         {"location": location}, _criteria()
     )
@@ -253,12 +253,12 @@ def test_verdict_named_region_outside_search_state_is_mismatch(svc, monkeypatch,
 
 
 def test_broad_region_with_state_suffix_still_uses_state_but_not_radius(svc, monkeypatch):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("a broad region label must not be geocoded as a point")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, distance = svc._location_match_verdict(
         {"location": "San Francisco Bay Area, CA"},
         _criteria(location="Mountain View, CA 94043"),
@@ -327,12 +327,12 @@ def test_new_york_city_alias_closes_multi_location_soft_keep_leak(svc, monkeypat
     _location_match_verdict's precedence, by design). Fixing the alias makes
     the NYC anchor resolve offline like the other 4, so there is no longer any
     soft-keep left to win the race."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def boom(*a, **kw):
         raise AssertionError("all 5 anchors must resolve offline — no Nominatim needed")
 
-    monkeypatch.setattr(ucs, "within_radius", boom)
+    monkeypatch.setattr(ucs_location, "within_radius", boom)
 
     criteria = _criteria(
         location="Hartford, CT",
@@ -477,10 +477,10 @@ def test_hard_gate_allows_unknown_location_for_remote_job(svc):
 
 
 def test_hard_gate_soft_keeps_transient_geocoder_failure(svc, monkeypatch):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     monkeypatch.setattr(
-        ucs, "within_radius",
+        ucs_location, "within_radius",
         lambda *args, **kwargs: (False, "candidate_ungeocodable", None),
     )
     import services.location as loc
@@ -500,7 +500,7 @@ def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
     ("Tucson, AZ" here) is not consulted alongside it. (Superseded the
     2026-07-30 source-native-wins policy by product request: JobDiva agent
     records saying "US" for résumés headed "India" were being launched.)"""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     geocoded = []
 
@@ -508,7 +508,7 @@ def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
         geocoded.append(candidate_loc)
         raise AssertionError("a broad metro label must not be geocoded as an exact point")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -529,7 +529,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
     26-22448): the source-native location is authoritative and the
     LLM-extracted string is NOT consulted while `candidate.location` is
     present — it can neither rescue nor condemn the candidate."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
     from core import sourcing_config
 
     monkeypatch.setattr(sourcing_config, "RESUME_LOCATION_AUTHORITATIVE", False)
@@ -539,7 +539,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
         geocoded.append(candidate_loc)
         return True, "ok", 16.3
 
-    monkeypatch.setattr(ucs, "within_radius", fake_within_radius)
+    monkeypatch.setattr(ucs_location, "within_radius", fake_within_radius)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -559,7 +559,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
 def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monkeypatch):
     """A broad résumé location is displayable, but not precise enough to
     confirm or reject a configured radius."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     geocoded = []
 
@@ -567,7 +567,7 @@ def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monk
         geocoded.append(candidate_loc)
         raise AssertionError("broad metro label must not be geocoded")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -581,12 +581,12 @@ def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monk
 
 
 def test_verdict_all_signals_offline_skips_nominatim(svc, monkeypatch):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def boom(*a, **kw):
         raise AssertionError("Nominatim must not be called when all signals resolve offline")
 
-    monkeypatch.setattr(ucs, "within_radius", boom)
+    monkeypatch.setattr(ucs_location, "within_radius", boom)
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701"}, _criteria()
     )
@@ -703,12 +703,12 @@ def test_greater_philadelphia_inside_pennington_radius_stays_unverified(svc, mon
     The metro label must not hard-drop on the state line. Chicago is outside
     that circle, so it still drops.
     """
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("broad region labels must not be treated as point locations")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     pennington = _criteria(location="Pennington, NJ", within_miles=50)
     ok, reason, _distance = svc._location_match_verdict(
         {"location": "Greater Philadelphia Area"}, pennington

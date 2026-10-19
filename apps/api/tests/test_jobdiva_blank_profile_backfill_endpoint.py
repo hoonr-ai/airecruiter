@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import routers.engagement as eng
+from routers.engagement import common as eng_common, provisioning as eng_provisioning  # noqa: E402
 import services.jobdiva_profile_backfill as bf
 from core.auth import UserIdentity, get_current_user
 
@@ -64,10 +65,10 @@ def harness(monkeypatch):
     async def _job_ids(job):
         return 31920032, "26-1"
 
-    monkeypatch.setattr(eng, "_get_db_connection", lambda: _Conn(log))
-    monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
+    monkeypatch.setattr(eng_common, "_get_db_connection", lambda: _Conn(log))
+    monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", _job_ids)
     monkeypatch.setattr(bf, "backfill_blank_profile", _backfill)
-    monkeypatch.setattr(eng, "_utc_now_iso", lambda: "2026-09-25T12:00:00+00:00")
+    monkeypatch.setattr(eng_common, "_utc_now_iso", lambda: "2026-09-25T12:00:00+00:00")
     return {"log": log, "calls": calls}
 
 

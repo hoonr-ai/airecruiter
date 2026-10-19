@@ -93,16 +93,16 @@ def _calls_in_function(
 
 
 def test_assessment_endpoint_passes_headers_to_every_pair_call():
-    """engagement.py get_assessment_data fires 4 parallel client.get(...) calls
+    """engagement/routes.py get_assessment_data fires 4 parallel client.get(...) calls
     against pairbot; each one needs `headers=` or it goes out unauthenticated."""
     calls = _calls_in_function(
-        ROUTERS_DIR / "engagement.py", "get_assessment_data", "client", "get"
+        ROUTERS_DIR / "engagement" / "routes.py", "get_assessment_data", "client", "get"
     )
     assert len(calls) == 4, "expected 4 client.get(...) calls in get_assessment_data"
     for call in calls:
         keyword_names = {kw.arg for kw in call.keywords}
         assert "headers" in keyword_names, (
-            f"client.get(...) at line {call.lineno} in engagement.py's "
+            f"client.get(...) at line {call.lineno} in engagement/routes.py's "
             "get_assessment_data is missing headers= (PAIR API call would go out unauthenticated)"
         )
 

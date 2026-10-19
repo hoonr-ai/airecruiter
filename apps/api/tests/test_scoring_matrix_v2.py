@@ -28,7 +28,7 @@ from core.config import (  # noqa: E402
     SCORING_MATRIX_WEIGHTS,
     score_band,
 )
-import services.unified_candidate_search as ucs  # noqa: E402
+import services.unified_candidate_search.scoring as ucs_scoring  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     SearchCriteria,
     UnifiedCandidateSearch,
@@ -37,7 +37,7 @@ from services.unified_candidate_search import (  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _matrix_on(monkeypatch):
-    monkeypatch.setattr(ucs, "SCORING_MATRIX_V2", True)
+    monkeypatch.setattr(ucs_scoring, "SCORING_MATRIX_V2", True)
 
 
 @pytest.fixture

@@ -17,14 +17,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest  # noqa: E402
 
-import services.unified_candidate_search as ucs  # noqa: E402
+import services.unified_candidate_search.scoring as ucs_scoring  # noqa: E402
 from services import cross_submissions as cs  # noqa: E402
 from services.unified_candidate_search import SearchCriteria, title_relevance_gate  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _matrix_on(monkeypatch):
-    monkeypatch.setattr(ucs, "SCORING_MATRIX_V2", True)
+    monkeypatch.setattr(ucs_scoring, "SCORING_MATRIX_V2", True)
 
 
 DATA_ANALYST = [{

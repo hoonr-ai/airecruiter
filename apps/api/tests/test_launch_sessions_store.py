@@ -840,8 +840,9 @@ def test_pg_engage_facts_follow_the_d1_claims(pg, monkeypatch):
     """The runner reads / requeues rows that D1's session claim and send
     claim wrote: the same SQL predicates, on one real table."""
     from routers import engagement as eng
+    from routers.engagement import common as eng_common
 
-    monkeypatch.setattr(eng, "_get_db_connection", pg._raw)
+    monkeypatch.setattr(eng_common, "_get_db_connection", pg._raw)
     pg.add_job()
     keys = ("1001", "26-001")
     pg.sourced("26-001", "a")
@@ -869,8 +870,9 @@ def test_pg_finish_parks_a_posted_row_so_no_launch_path_can_post_it_again(pg, mo
     no-answer path put back to 'queued' is parked 'processing' at finish —
     neither a legacy send claim nor another session's claim can take it."""
     from routers import engagement as eng
+    from routers.engagement import common as eng_common
 
-    monkeypatch.setattr(eng, "_get_db_connection", pg._raw)
+    monkeypatch.setattr(eng_common, "_get_db_connection", pg._raw)
     pg.add_job()
     keys = ("1001", "26-001")
     pg.sourced("26-001", "c1")
