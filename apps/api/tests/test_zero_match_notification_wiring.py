@@ -1,6 +1,6 @@
 """Wiring tests for routers/candidates.py's _maybe_notify_zero_match — the
 gate that decides, from a /candidates/search "summary" event, whether to
-queue create_zero_match_notification. Covers the gating logic itself (full
+queue the zero-match notification. Covers the gating logic itself (full
 vs sample search, zero vs nonzero count, malformed event), plus (PR review
 follow-up) the actual event loop inside search_jobdiva_candidates's
 stream_candidates(), so a regression in the `event.get("type") ==
@@ -34,14 +34,14 @@ def _patch(monkeypatch):
     notif_calls = []
     spawn_calls = []
 
-    def fake_create_zero_match(**kwargs):
-        notif_calls.append(kwargs)
+    def fake_enqueue(task_name, job_id, searcher_email):
+        notif_calls.append({"task": task_name, "job_id": job_id, "searcher_email": searcher_email})
         return "sentinel-coro"
 
     def fake_spawn(coro, name=None):
         spawn_calls.append((coro, name))
 
-    monkeypatch.setattr(cand_module, "create_zero_match_notification", fake_create_zero_match)
+    monkeypatch.setattr(cand_module, "enqueue", fake_enqueue)
     monkeypatch.setattr(cand_module, "_spawn_task", fake_spawn)
     return notif_calls, spawn_calls
 
@@ -54,6 +54,7 @@ def test_queues_notification_on_zero_candidates_in_a_full_search(monkeypatch):
     cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user)
 
     assert len(notif_calls) == 1
+    assert notif_calls[0]["task"] == "zero_match_notification"
     assert notif_calls[0]["job_id"] == "J1"
     assert notif_calls[0]["searcher_email"] == "recruiter@x.com"
     assert len(spawn_calls) == 1
@@ -111,9 +112,9 @@ def test_does_not_queue_when_summary_is_malformed_or_missing_count(monkeypatch):
 
 def test_swallows_errors_without_raising(monkeypatch):
     """Must never break the NDJSON stream still being delivered to the client."""
-    def _boom(**kwargs):
+    def _boom(*args, **kwargs):
         raise RuntimeError("boom")
-    monkeypatch.setattr(cand_module, "create_zero_match_notification", _boom)
+    monkeypatch.setattr(cand_module, "enqueue", _boom)
     monkeypatch.setattr(cand_module, "_spawn_task", lambda *a, **k: None)
 
     request = SimpleNamespace(job_id="J1")
@@ -139,7 +140,7 @@ def test_does_not_queue_when_a_source_failed(monkeypatch):
 
 
 def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
-    """PR review follow-up: create_zero_match_notification(...) is a real
+    """PR review follow-up: enqueue(...) is a real
     coroutine object by the time _spawn_task sees it — if spawn itself
     raises (not the notification logic once running), the coroutine must
     be closed explicitly so it isn't left never-awaited."""
@@ -149,7 +150,7 @@ def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
         def close(self):
             closed.append(True)
 
-    monkeypatch.setattr(cand_module, "create_zero_match_notification", lambda **kwargs: _FakeCoro())
+    monkeypatch.setattr(cand_module, "enqueue", lambda *args, **kwargs: _FakeCoro())
 
     def _boom_spawn(coro, name=None):
         raise RuntimeError("no running event loop")
@@ -165,9 +166,9 @@ def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
 def test_logs_a_warning_not_a_debug_line_on_failure(monkeypatch):
     """PR review follow-up: a persistently broken hook should be visible in
     production logs, not only at debug level."""
-    def _boom(**kwargs):
+    def _boom(*args, **kwargs):
         raise RuntimeError("boom")
-    monkeypatch.setattr(cand_module, "create_zero_match_notification", _boom)
+    monkeypatch.setattr(cand_module, "enqueue", _boom)
     monkeypatch.setattr(cand_module, "_spawn_task", lambda *a, **k: None)
 
     warning_calls = []
@@ -223,6 +224,7 @@ def test_stream_fires_zero_match_on_a_real_zero_summary_event(monkeypatch):
     _consume(_request(), user)
 
     assert len(notif_calls) == 1
+    assert notif_calls[0]["task"] == "zero_match_notification"
     assert notif_calls[0]["job_id"] == "J1"
     assert notif_calls[0]["searcher_email"] == "recruiter@x.com"
     assert len(spawn_calls) == 1

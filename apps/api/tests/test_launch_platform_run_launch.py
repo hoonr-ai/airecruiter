@@ -152,7 +152,22 @@ def _install(monkeypatch) -> Dict[str, Any]:
 
     monkeypatch.setattr(eng_payloads, "_generate_payload_for", fake_generate)
     monkeypatch.setattr(eng_bulk_send, "_send_bulk_interview_core", fake_core)
+    def fake_enqueue(task_name, *args, **_kw):
+        # Side effects go through core.queue.enqueue; dispatch to the patched
+        # services the queue tasks call, with the same argument mapping.
+        if task_name == "sync_job_applicants":
+            (job_id,) = args
+            return eng_launch.auto_assign_service.synchronize_job_applicants(job_id)
+        if task_name == "send_pair_launch_email":
+            job_id, count, posting, url, relaunch = args
+            return eng_pairbot._send_pair_launch_email(
+                job_id=job_id, candidate_count=count, send_job_posting=posting,
+                app_base_url=url, relaunch=relaunch,
+            )
+        raise AssertionError(f"unexpected task {task_name}")
+
     monkeypatch.setattr(eng_launch, "_spawn_task", fake_spawn)
+    monkeypatch.setattr(eng_launch, "enqueue", fake_enqueue)
     monkeypatch.setattr(eng_pairbot, "_send_pair_launch_email", fake_email)
     monkeypatch.setattr(eng_launch, "auto_assign_service", _Sync())
     # The fire-once ledger (services/launch_effects_ledger) is pinned in

@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from routers._helpers import (
     get_db_connection,
 )
-from core.tasks import spawn as _spawn_task
+from core.queue import enqueue
+from core.queue_tasks import CREATE_JOBDIVA_PASS_NOTE, REFRESH_JOB_METRICS, UPDATE_JOBDIVA_QUALIFICATION
 from core.pipeline_trace import span as _trace_span
 from core.email import (
     notify_candidate_passed,
@@ -39,7 +40,7 @@ from services.profile_resume import (
     split_person_name,
 )
 from utils.email_utils import is_placeholder_email
-from services.auto_assign_service import auto_assign_service
+from services.auto_assign_service import auto_assign_service  # noqa: F401  (core.queue_tasks calls it through this module so tests can patch it)
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -1104,15 +1105,10 @@ async def _check_and_fire_candidate_passed_notification(
 
         # Update JobDiva Qualification: PAIR Candidates = PASS
         # We fire these asynchronously so they don't block the email or main flow
-        _spawn_task(
-            jobdiva_service.update_candidate_qualification(
-                candidate_id=jd_candidate_id,
-                qualification_name=JOBDIVA_PAIR_QUALIFICATION_NAME,
-                value=JOBDIVA_PASS_QUALIFICATION_VALUE,
-                recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
-                update_date=completion_ts,
-                qualification_type_id=JOBDIVA_PAIR_QUALIFICATION_ID
-            )
+        await enqueue(
+            UPDATE_JOBDIVA_QUALIFICATION,
+            str(jd_candidate_id), JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE,
+            JOBDIVA_PAIR_RECRUITER_ID, str(completion_ts), JOBDIVA_PAIR_QUALIFICATION_ID,
         )
 
         # Create JobDiva Note: PAIR Pass Candidate Report
@@ -1124,20 +1120,10 @@ async def _check_and_fire_candidate_passed_notification(
         safe_pair_job_title = html.escape(str(pair_job_title))
         note_text = f"Candidate completed Phone Screen for {safe_pair_job_title} position. <a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
-        async def create_and_pin_note():
-            note_res = await jobdiva_service.create_candidate_note(
-                candidate_id=jd_candidate_id,
-                job_id=jd_job_id,
-                action=JOBDIVA_PASS_ACTION_NAME,
-                note_text=note_text,
-                recruiter_id=JOBDIVA_PAIR_RECRUITER_ID
-            )
-            if note_res.get("status") == "success":
-                note_id = note_res.get("data")
-                if note_id:
-                    await jobdiva_service.pin_candidate_note(note_id=note_id, is_pinned=True)
-
-        _spawn_task(create_and_pin_note())
+        await enqueue(
+            CREATE_JOBDIVA_PASS_NOTE,
+            str(jd_candidate_id), str(jd_job_id), JOBDIVA_PASS_ACTION_NAME, note_text, JOBDIVA_PAIR_RECRUITER_ID,
+        )
 
         # The JobDiva profile the email links to: the same id the Cross
         # Submissions email and panel open (a JobDiva row's own id, else the
@@ -1170,7 +1156,7 @@ async def _check_and_fire_candidate_passed_notification(
         if success:
             # Flag was already set atomically before sending (race-condition-safe).
             # Refresh Performance Metrics for this job (e.g. Time to First Pass)
-            _spawn_task(auto_assign_service.refresh_job_performance_metrics(job_id))
+            await enqueue(REFRESH_JOB_METRICS, str(job_id), job_id=f"{REFRESH_JOB_METRICS}:{job_id}")
         else:
             logger.warning(f"⚠️ Email send failed for candidate {candidate_id} / job {job_id}. Rolling back dedup flag.")
             _rollback_passed_email_flag()

@@ -66,6 +66,12 @@ SKIP_LLM_IF_STRUCTURED = get_env_with_default("SKIP_LLM_IF_STRUCTURED", "false")
 REDIS_URL = get_env_with_default("REDIS_URL", "")
 LLM_CACHE_ENABLED = get_env_bool("LLM_CACHE_ENABLED", True)
 
+# ---- Durable job queue (arq on REDIS_URL) ----
+# Off by default: with it off, core.queue.enqueue runs tasks in-process via
+# core.tasks.spawn, as before. Turn on only after the airecruiter-worker
+# service is running, or queued jobs sit in Redis unprocessed.
+ARQ_ENABLED = get_env_bool("ARQ_ENABLED", False)
+
 # Debugging
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")

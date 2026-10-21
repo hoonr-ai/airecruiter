@@ -39,11 +39,12 @@ from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
 from services.notifications_service import (
     create_candidate_rejected_notifications,
-    create_zero_match_notification,
     create_candidate_internal_review_requested_notification,
     create_candidate_externally_submitted_notification,
 )
 from core.tasks import spawn as _spawn_task
+from core.queue import enqueue
+from core.queue_tasks import ZERO_MATCH_NOTIFICATION
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -1101,7 +1102,7 @@ def _maybe_notify_zero_match(
     user: UserIdentity,
     any_source_failed: bool = False,
 ) -> None:
-    """Fires create_zero_match_notification when a FULL search's terminal
+    """Queues the zero-match notification when a FULL search's terminal
     "summary" event reports total_candidates == 0 — not for a "sample"
     probe (the cheap pre-check the Step-5 UI runs before a recruiter
     approves a full search), where an empty result is a much weaker/
@@ -1134,7 +1135,7 @@ def _maybe_notify_zero_match(
         # closed if spawn itself raises (vs. just the notification call
         # failing once running) — otherwise a never-awaited coroutine would
         # leak and Python would warn about it.
-        coro = create_zero_match_notification(job_id=str(request.job_id), searcher_email=user.email)
+        coro = enqueue(ZERO_MATCH_NOTIFICATION, str(request.job_id), user.email)
         try:
             _spawn_task(coro, name="zero_match_notification")
         except Exception:

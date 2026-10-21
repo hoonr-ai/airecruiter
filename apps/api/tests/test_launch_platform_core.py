@@ -11,6 +11,7 @@ and that every path posts only what it won in the send claim. The DB is an
 SQL-dispatch fake (tests/test_launch_platform_sql_pg.py runs the same
 statements against a real Postgres, from two connections where it matters).
 """
+import core.tasks as core_tasks
 import asyncio
 import json
 from typing import Any, Dict, List, Optional
@@ -186,7 +187,7 @@ def pb(monkeypatch):
     def spawn(coro, name=None):
         qual = getattr(coro, "__qualname__", str(coro))
         state["spawned"].append(qual)
-        if "provisioning" in qual:
+        if "provisioning" in qual or "provision_jobdiva_batch" in qual:
             # Drive it inline (the fake provisioner never suspends) so the
             # ids it was handed are observable.
             try:
@@ -202,7 +203,9 @@ def pb(monkeypatch):
     monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", post)
     monkeypatch.setattr(eng_pairbot, "_wait_for_pairbot_creation", wait)
     monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", by_job)
-    monkeypatch.setattr(eng_bulk_send, "_spawn_task", spawn)
+    # Inline provisioning goes through core.queue.enqueue, whose fallback
+    # (ARQ_ENABLED off) spawns via core.tasks.spawn.
+    monkeypatch.setattr(core_tasks, "spawn", spawn)
     monkeypatch.setattr(eng_launch, "_spawn_task", spawn)
     monkeypatch.setattr(eng_pairbot, "_stamp_first_launch", lambda key: state["t2"].append(key))
     monkeypatch.setattr(eng_provisioning, "_provision_batch_to_jobdiva", provision)

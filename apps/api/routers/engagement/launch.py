@@ -13,8 +13,10 @@ from routers._helpers import (
     _verify_job_access_by_id,
 )
 from core.tasks import spawn as _spawn_task
+from core.queue import enqueue
+from core.queue_tasks import SEND_PAIR_LAUNCH_EMAIL, SYNC_JOB_APPLICANTS
 from core.pipeline_trace import new_run as _trace_new_run, span as _trace_span
-from services.auto_assign_service import auto_assign_service
+from services.auto_assign_service import auto_assign_service  # noqa: F401  (core.queue_tasks calls it through this module so tests can patch it)
 from core.auth import get_current_user
 
 from .common import logger
@@ -558,7 +560,7 @@ def fire_launch_side_effects(
         if initial:
             logger.info("launch: initial launch for job %s -> applicant sync", job_id)
             try:
-                _spawn_task(auto_assign_service.synchronize_job_applicants(job_id))
+                _spawn_task(enqueue(SYNC_JOB_APPLICANTS, str(job_id)), name=f"enqueue:{SYNC_JOB_APPLICANTS}")
             except Exception:
                 from services import launch_effects_ledger
 
@@ -566,13 +568,11 @@ def fire_launch_side_effects(
                 raise
             fired = True
         _spawn_task(
-            pairbot._send_pair_launch_email(
-                job_id=job_id,
-                candidate_count=sent_count,
-                send_job_posting=bool(job_posting),
-                app_base_url=app_base_url,
-                relaunch=bool(relaunch),
-            )
+            enqueue(
+                SEND_PAIR_LAUNCH_EMAIL,
+                str(job_id), int(sent_count), bool(job_posting), app_base_url or "", bool(relaunch),
+            ),
+            name=f"enqueue:{SEND_PAIR_LAUNCH_EMAIL}",
         )
         fired = True
     except Exception as _se_err:

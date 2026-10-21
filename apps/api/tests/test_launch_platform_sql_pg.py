@@ -10,6 +10,7 @@ TEMP tables inside one transaction that is always rolled back; the race tests
 Skipped when no Postgres is reachable: set LAUNCH_PLATFORM_TEST_DSN (falls
 back to LAUNCH_REPORT_TEST_DSN, then "dbname=postgres").
 """
+import core.tasks as core_tasks
 import asyncio
 import json
 import os
@@ -434,7 +435,9 @@ def _fake_pairbot(monkeypatch, *, by_job=None, failed_interviews=None, resolve_d
     monkeypatch.setattr(eng_pairbot, "_wait_for_pairbot_creation", wait)
     monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", fetch_by_job)
     monkeypatch.setattr(eng_payloads, "_fetch_stored_employer_signals", lambda _c, _ids: {})
-    monkeypatch.setattr(eng_bulk_send, "_spawn_task", spawn)
+    # Inline provisioning goes through core.queue.enqueue, whose fallback
+    # (ARQ_ENABLED off) spawns via core.tasks.spawn.
+    monkeypatch.setattr(core_tasks, "spawn", spawn)
     monkeypatch.setattr(eng_launch, "_spawn_task", spawn)
     monkeypatch.setattr(er, "resolve_employer_signals", resolve)
     monkeypatch.setattr(er, "stamp_resume_freshness", no_freshness)

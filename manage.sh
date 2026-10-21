@@ -70,6 +70,7 @@ show_status() {
     echo -e "${BLUE}📊 Service Status${NC}"
     echo "===================="
     check_service "airecruiter-api"
+    check_service "airecruiter-worker"
     check_service "airecruiter-web"
     check_service "nginx"
     echo ""
@@ -162,7 +163,7 @@ deploy_application() {
     
     # Stop services
     echo -e "${BLUE}🛑 Stopping services...${NC}"
-    sudo systemctl stop airecruiter-web airecruiter-api
+    sudo systemctl stop airecruiter-web airecruiter-api airecruiter-worker
     
     # Install dependencies
     echo -e "${BLUE}📦 Installing API dependencies...${NC}"
@@ -183,7 +184,7 @@ deploy_application() {
     # Reload systemd and restart services
     echo -e "${BLUE}🔄 Reloading services...${NC}"
     sudo systemctl daemon-reload
-    sudo systemctl start airecruiter-api
+    sudo systemctl start airecruiter-api airecruiter-worker
     sleep 3
     sudo systemctl start airecruiter-web
     
@@ -198,7 +199,7 @@ start_services() {
     echo -e "${BLUE}🚀 Starting services...${NC}"
     sudo systemctl start nginx
     sleep 2
-    sudo systemctl start airecruiter-api
+    sudo systemctl start airecruiter-api airecruiter-worker
     sleep 3
     sudo systemctl start airecruiter-web
     echo -e "${GREEN}✓ Services started${NC}"
@@ -206,14 +207,14 @@ start_services() {
 
 stop_services() {
     echo -e "${BLUE}🛑 Stopping services...${NC}"
-    sudo systemctl stop airecruiter-web airecruiter-api
+    sudo systemctl stop airecruiter-web airecruiter-api airecruiter-worker
     echo -e "${GREEN}✓ Application services stopped${NC}"
     echo "Azure Database for PostgreSQL continues running (managed service)"
 }
 
 restart_services() {
     echo -e "${BLUE}🔄 Restarting services...${NC}"
-    sudo systemctl restart airecruiter-api
+    sudo systemctl restart airecruiter-api airecruiter-worker
     sleep 3
     sudo systemctl restart airecruiter-web
     sudo systemctl reload nginx
@@ -222,7 +223,7 @@ restart_services() {
 
 show_logs() {
     echo -e "${BLUE}📋 Showing logs (Press Ctrl+C to stop)${NC}"
-    sudo journalctl -f -u airecruiter-api -u airecruiter-web -u nginx
+    sudo journalctl -f -u airecruiter-api -u airecruiter-worker -u airecruiter-web -u nginx
 }
 
 api_logs() {
@@ -330,6 +331,7 @@ monitor_dashboard() {
         echo ""
         echo -e "${BLUE}Service Status:${NC}"
         check_service "airecruiter-api"
+    check_service "airecruiter-worker"
         check_service "airecruiter-web"
         check_service "nginx"
         
@@ -339,7 +341,7 @@ monitor_dashboard() {
         sudo journalctl -u airecruiter-api --since "1 minute ago" | grep -c "INFO" || echo "0"
         
         echo "Error logs (last 5m):"
-        sudo journalctl -u airecruiter-api -u airecruiter-web --since "5 minutes ago" | grep -c "ERROR" || echo "0"
+        sudo journalctl -u airecruiter-api -u airecruiter-worker -u airecruiter-web --since "5 minutes ago" | grep -c "ERROR" || echo "0"
         
         sleep 5
     done

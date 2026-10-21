@@ -1,0 +1,33 @@
+[Unit]
+Description=AI Recruiter background job worker (arq)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/home/ubuntu/codebase/airecruiter/apps/api
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/codebase/airecruiter/apps/api
+Environment=PATH=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin
+Environment=PYTHONPATH=/home/ubuntu/codebase/airecruiter/apps/api
+# Runs the jobs core/queue.py enqueues. Start this before setting
+# ARQ_ENABLED=true for the API, or queued jobs sit in Redis unprocessed.
+ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/arq worker.WorkerSettings
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=airecruiter-worker
+
+NoNewPrivileges=true
+LimitNOFILE=65536
+TimeoutStartSec=60
+# Above WorkerSettings.job_completion_wait (600 s) so a restart lets the
+# running job finish instead of killing it mid-provisioning.
+TimeoutStopSec=660
+
+[Install]
+WantedBy=multi-user.target

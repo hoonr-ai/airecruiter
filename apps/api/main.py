@@ -550,6 +550,8 @@ async def lifespan(app: FastAPI):
     try:
         from core.tasks import drain as _drain_background_tasks
         await _drain_background_tasks()
+        from core.queue import close_pool as _close_queue_pool
+        await _close_queue_pool()
     except Exception as _drain_err:  # noqa: BLE001
         logger.warning("background task drain failed: %s", _drain_err)
     

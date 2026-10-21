@@ -7,8 +7,9 @@ from fastapi import HTTPException
 from typing import Optional, List, Any, Dict, Tuple, Callable
 import json
 from datetime import datetime, timezone
-from core.tasks import spawn as _spawn_task
 from core.pipeline_trace import span as _trace_span
+from core.queue import enqueue
+from core.queue_tasks import PROVISION_JOBDIVA_BATCH
 
 from .claims import LAUNCH_BLOCK_DUPLICATE_OTHER_JOB, LAUNCH_BLOCK_DUPLICATE_PERSON_THIS_JOB, LAUNCH_BLOCK_DUPLICATE_UNVERIFIED, _claim_rows_for_send, _launch_block_reason_text, _map_duplicate_interviews, _pairbot_rejected_ids, _person_duplicate_reason, _release_send_claim
 from .common import EXTERNAL_INTERVIEW_API_URL, _parse_json_list, logger
@@ -18,7 +19,6 @@ from . import common
 from . import models
 from . import pairbot
 from . import payloads
-from . import provisioning
 
 
 # Per candidate (any row under either job key): already sent, or blocked.
@@ -994,13 +994,9 @@ async def _send_bulk_interview_core(
             # already interviews) were not launched here: not provisioned.
             _batch_cids = [c for c in request.real_candidate_ids if c not in dup_blocked]
             if _batch_cids and provision_inline:
-                _batch_job_id = job_id_from_payload
-
-                async def _run_batch_provisioning() -> None:
-                    async with _trace_span("jobdiva_provisioning", n=len(_batch_cids)):
-                        await provisioning._provision_batch_to_jobdiva(_batch_cids, _batch_job_id)
-
-                _spawn_task(_run_batch_provisioning())
+                # Durable when ARQ_ENABLED (the worker runs it and retries
+                # after a crash); otherwise spawned in-process as before.
+                await enqueue(PROVISION_JOBDIVA_BATCH, [str(c) for c in _batch_cids], str(job_id_from_payload))
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
                 if str(candidate_id) in dup_proven:
