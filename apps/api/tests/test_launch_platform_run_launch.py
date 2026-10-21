@@ -17,6 +17,7 @@ import pytest
 import core.config as cfg
 from core import tasks as core_tasks
 from routers import engagement as eng
+from routers.engagement import bulk_send as eng_bulk_send, launch as eng_launch, pairbot as eng_pairbot, payloads as eng_payloads, routes as eng_routes  # noqa: E402
 
 
 # Captured from routers/engagement.py at 9f5a71de with the fakes below.
@@ -87,8 +88,9 @@ GOLDEN = json.loads(r'''{
 def _install(monkeypatch) -> Dict[str, Any]:
     """The faked pipeline the golden capture ran against."""
     rec: Dict[str, Any] = {"core_calls": [], "spawned": [], "emails": [], "syncs": []}
-    monkeypatch.setattr(eng, "_LAUNCH_BATCH_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr(eng, "_trace_new_run", lambda job_id: "RUN-FIXED")
+    monkeypatch.setattr(eng_launch, "_LAUNCH_BATCH_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(eng_routes, "_trace_new_run", lambda job_id: "RUN-FIXED")
+    monkeypatch.setattr(eng_launch, "_trace_new_run", lambda job_id: "RUN-FIXED")
     monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
     monkeypatch.setattr(cfg, "LAUNCH_BATCH_PARALLELISM", 1)
     monkeypatch.setattr(cfg, "LAUNCH_ASYNC", False)
@@ -148,18 +150,33 @@ def _install(monkeypatch) -> Dict[str, Any]:
                 return None
             return _noop()
 
-    monkeypatch.setattr(eng, "_generate_payload_for", fake_generate)
-    monkeypatch.setattr(eng, "_send_bulk_interview_core", fake_core)
-    monkeypatch.setattr(eng, "_spawn_task", fake_spawn)
-    monkeypatch.setattr(eng, "_send_pair_launch_email", fake_email)
-    monkeypatch.setattr(eng, "auto_assign_service", _Sync())
+    monkeypatch.setattr(eng_payloads, "_generate_payload_for", fake_generate)
+    monkeypatch.setattr(eng_bulk_send, "_send_bulk_interview_core", fake_core)
+    def fake_enqueue(task_name, *args, **_kw):
+        # Side effects go through core.queue.enqueue; dispatch to the patched
+        # services the queue tasks call, with the same argument mapping.
+        if task_name == "sync_job_applicants":
+            (job_id,) = args
+            return eng_launch.auto_assign_service.synchronize_job_applicants(job_id)
+        if task_name == "send_pair_launch_email":
+            job_id, count, posting, url, relaunch = args
+            return eng_pairbot._send_pair_launch_email(
+                job_id=job_id, candidate_count=count, send_job_posting=posting,
+                app_base_url=url, relaunch=relaunch,
+            )
+        raise AssertionError(f"unexpected task {task_name}")
+
+    monkeypatch.setattr(eng_launch, "_spawn_task", fake_spawn)
+    monkeypatch.setattr(eng_launch, "enqueue", fake_enqueue)
+    monkeypatch.setattr(eng_pairbot, "_send_pair_launch_email", fake_email)
+    monkeypatch.setattr(eng_launch, "auto_assign_service", _Sync())
     # The fire-once ledger (services/launch_effects_ledger) is pinned in
     # tests/test_launch_effects_ledger_pg.py; here every requested effect is
     # this job's first launch.
     def decide(job_id, *, is_initial_launch, send_job_posting_email, launch_started_at):
         rec.setdefault("ledger", []).append((job_id, is_initial_launch, send_job_posting_email))
         return is_initial_launch, send_job_posting_email, False
-    monkeypatch.setattr(eng, "_decide_launch_effects", decide)
+    monkeypatch.setattr(eng_launch, "_decide_launch_effects", decide)
     return rec
 
 
@@ -205,14 +222,14 @@ def test_endpoint_wire_output_is_byte_identical_to_before_the_extraction(monkeyp
 
 def test_async_path_records_wire_events_without_internal(monkeypatch):
     _install(monkeypatch)
-    monkeypatch.setattr(eng, "_spawn_task", core_tasks.spawn)  # the launch itself must run
+    monkeypatch.setattr(eng_launch, "_spawn_task", core_tasks.spawn)  # the launch itself must run
     monkeypatch.setattr(cfg, "LAUNCH_ASYNC", True)
     writes: List[tuple] = []
 
     def fake_db(sql, params, fetch=False):
         writes.append((sql, params))
         return [] if fetch else None
-    monkeypatch.setattr(eng, "_launch_db", fake_db)
+    monkeypatch.setattr(eng_launch, "_launch_db", fake_db)
 
     async def go():
         await eng.launch_bulk_interviews(eng.LaunchRequest(**SCENARIOS["mixed"], async_launch=True))
@@ -255,12 +272,12 @@ def test_run_launch_events_carry_internal_per_candidate_outcome(monkeypatch):
 def test_should_stop_leaves_unstarted_batches_resumable(monkeypatch):
     rec = _install(monkeypatch)
     started = {"n": 0}
-    real_core = eng._send_bulk_interview_core
+    real_core = eng_bulk_send._send_bulk_interview_core
 
     async def counting_core(req, *a, **k):
         started["n"] += 1
         return await real_core(req, *a, **k)
-    monkeypatch.setattr(eng, "_send_bulk_interview_core", counting_core)
+    monkeypatch.setattr(eng_bulk_send, "_send_bulk_interview_core", counting_core)
 
     events = _events(
         eng.LaunchRequest(job_id="J1", candidate_ids=["z-0", "z-1", "z-2", "z-3", "z-4"], batch_size=2),
@@ -342,8 +359,8 @@ def test_bulk_id_for_without_launch_id_still_passes_the_batch_index(monkeypatch)
 def test_given_run_id_is_adopted_not_replaced(monkeypatch):
     _install(monkeypatch)
     adopted: List[tuple] = []
-    monkeypatch.setattr(eng, "_adopt_trace_run", lambda rid, job: adopted.append((rid, job)))
-    monkeypatch.setattr(eng, "_trace_new_run", lambda job_id: pytest.fail("minted a new run id"))
+    monkeypatch.setattr(eng_launch, "_adopt_trace_run", lambda rid, job: adopted.append((rid, job)))
+    monkeypatch.setattr(eng_launch, "_trace_new_run", lambda job_id: pytest.fail("minted a new run id"))
     events = _events(eng.LaunchRequest(job_id="J1", candidate_ids=["z-0"]), run_id="S-RUN")
     assert events[0]["run_id"] == "S-RUN" and adopted == [("S-RUN", "J1")]
 
@@ -363,7 +380,7 @@ def test_run_launch_cancellation_runs_cleanup_and_propagates(monkeypatch):
 
     async def hang(*_a, **_k):
         await asyncio.sleep(60)
-    monkeypatch.setattr(eng, "_run_one_batch", hang)
+    monkeypatch.setattr(eng_launch, "_run_one_batch", hang)
     import services.jobdiva_activity as ja
 
     async def clear(job_id):
@@ -412,7 +429,7 @@ def test_fire_launch_side_effects_reports_a_spawn_failure(monkeypatch):
     def broken_spawn(coro, name=None):
         coro.close()
         raise RuntimeError("no loop")
-    monkeypatch.setattr(eng, "_spawn_task", broken_spawn)
+    monkeypatch.setattr(eng_launch, "_spawn_task", broken_spawn)
     assert eng.fire_launch_side_effects("J", sent_count=1, notify_recruiters=True, send_job_posting_email=False,
                                         is_initial_launch=False, app_base_url="") is False
 
@@ -434,7 +451,7 @@ class _RunsDB:
 def _async_launch(monkeypatch, db, **kw):
     _install(monkeypatch)
     monkeypatch.setattr(cfg, "LAUNCH_ASYNC", True)
-    monkeypatch.setattr(eng, "_launch_db", db)
+    monkeypatch.setattr(eng_launch, "_launch_db", db)
 
     async def go():
         resp = await eng.launch_bulk_interviews(eng.LaunchRequest(
@@ -482,7 +499,7 @@ def test_ddl_adds_the_session_column():
 
 def test_register_session_launch_run_uses_the_session_status(monkeypatch):
     db = _RunsDB()
-    monkeypatch.setattr(eng, "_launch_db", db)
+    monkeypatch.setattr(eng_launch, "_launch_db", db)
     eng.register_session_launch_run("L1", "J1", requested_by=" Me@X.com ",
                                     launch_session_id="6f1c2b9e-1d1a-4c55-9f43-2b1f4a0f8e11")
     (sql, params), = db.calls
@@ -492,7 +509,7 @@ def test_register_session_launch_run_uses_the_session_status(monkeypatch):
 
 def test_sweep_and_finalize_only_ever_touch_running_runs(monkeypatch):
     db = _RunsDB()
-    monkeypatch.setattr(eng, "_launch_db", db)
+    monkeypatch.setattr(eng_launch, "_launch_db", db)
     eng._sweep_stale_launch_runs()
     eng._launch_finalize("L1", "completed")
     for sql, _p in db.calls:

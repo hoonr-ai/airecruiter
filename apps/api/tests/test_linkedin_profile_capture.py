@@ -9,7 +9,10 @@ and contact details LinkedIn itself shares are used before any paid lookup.
 import asyncio
 
 import services.sourced_candidates_storage as storage
-import services.unified_candidate_search as ucs
+import services.unified_candidate_search.enrichment as ucs_enrichment
+import services.unified_candidate_search.search_external_producers as ucs_external
+import services.unified_candidate_search.scoring as ucs_scoring
+import services.unified_candidate_search.service as ucs_service
 from services.unified_candidate_search import SearchCriteria, UnifiedCandidateSearch
 
 RAW_PROFILE = {
@@ -36,7 +39,7 @@ class _FakeUnipile:
 def _run_linkedin_search(monkeypatch, profile):
     # These tests cover the retained Unipile result-enrichment path, which is
     # intentionally disabled for normal sourcing by default.
-    monkeypatch.setattr(ucs, "LINKEDIN_UNIPILE_SEARCH_ENABLED", True)
+    monkeypatch.setattr(ucs_service, "LINKEDIN_UNIPILE_SEARCH_ENABLED", True)
     svc = UnifiedCandidateSearch()
     search_row = {
         "id": "unipile_AEMAA1", "provider_id": "AEMAA1", "name": "Ada Lovelace",
@@ -69,7 +72,9 @@ def _run_linkedin_search(monkeypatch, profile):
     svc.apply_scoring_policy = _policy
     svc._apply_contact_enrichment = _paid_chain
     monkeypatch.setattr(storage, "process_linkedin_candidate", _llm_extraction)
-    monkeypatch.setattr(ucs, "apply_no_contact_flag", lambda cand: False)
+    monkeypatch.setattr(ucs_external, "apply_no_contact_flag", lambda cand: False)
+    monkeypatch.setattr(ucs_enrichment, "apply_no_contact_flag", lambda cand: False)
+    monkeypatch.setattr(ucs_scoring, "apply_no_contact_flag", lambda cand: False)
 
     async def _collect():
         criteria = SearchCriteria(job_id="job-li", sources=["LinkedIn"])

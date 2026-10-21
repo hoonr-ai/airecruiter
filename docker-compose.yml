@@ -37,6 +37,21 @@ services:
     depends_on:
       - redis
 
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    env_file:
+      - ./apps/api/.env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+    volumes:
+      - ./apps/api:/app
+      - ~/.config/gcloud:/root/.config/gcloud
+    command: arq worker.WorkerSettings
+    depends_on:
+      - redis
+
   redis:
     image: redis:alpine
     ports:

@@ -13,6 +13,7 @@ import core.config as cfg
 from core import tasks as core_tasks
 from core.auth import UserIdentity
 from routers import engagement as eng
+from routers.engagement import launch as eng_launch, routes as eng_routes  # noqa: E402
 
 
 class FakeLaunchDB:
@@ -79,6 +80,8 @@ class FakeLaunchDB:
 @pytest.fixture
 def db(monkeypatch):
     fake = FakeLaunchDB()
+    monkeypatch.setattr(eng_launch, "_launch_db", fake)
+    # routers/pairbot_webhook.py imports _launch_db from the package at call time.
     monkeypatch.setattr(eng, "_launch_db", fake)
     return fake
 
@@ -130,11 +133,11 @@ def test_append_event_is_idempotent_per_seq(db):
 def test_cancelled_async_launch_writes_failed(monkeypatch, db):
     monkeypatch.setattr(cfg, "LAUNCH_ASYNC", True)
     monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
-    monkeypatch.setattr(eng, "_LAUNCH_BATCH_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(eng_launch, "_LAUNCH_BATCH_DELAY_SECONDS", 0.0)
 
     async def hang(*a, **k):
         await asyncio.sleep(60)
-    monkeypatch.setattr(eng, "_run_one_batch", hang)
+    monkeypatch.setattr(eng_launch, "_run_one_batch", hang)
 
     async def go():
         resp = await eng.launch_bulk_interviews(eng.LaunchRequest(
@@ -183,7 +186,7 @@ def _stream(launch_id):
 def test_launch_stream_requires_authentication(monkeypatch, db):
     def unauth(_req, _hdr):
         raise HTTPException(status_code=401, detail="Authentication required.")
-    monkeypatch.setattr(eng, "get_current_user", unauth)
+    monkeypatch.setattr(eng_launch, "get_current_user", unauth)
     db.runs["A"] = {"status": "completed", "job_id": "J", "requested_by": "me@x.com", "stale": False}
     with pytest.raises(HTTPException) as e:
         _stream("A")
@@ -192,13 +195,13 @@ def test_launch_stream_requires_authentication(monkeypatch, db):
 
 def test_launch_stream_access_rules(monkeypatch, db):
     current = {"user": UserIdentity(email="me@x.com", role="recruiter")}
-    monkeypatch.setattr(eng, "get_current_user", lambda _r, _h: current["user"])
+    monkeypatch.setattr(eng_launch, "get_current_user", lambda _r, _h: current["user"])
     job_checks: List[str] = []
 
     def deny(job_id, user, **_k):
         job_checks.append(job_id)
         raise HTTPException(status_code=403, detail="no")
-    monkeypatch.setattr(eng, "_verify_job_access_by_id", deny)
+    monkeypatch.setattr(eng_launch, "_verify_job_access_by_id", deny)
     db.runs["A"] = {"status": "completed", "job_id": "J", "requested_by": "me@x.com", "stale": False}
 
     assert _stream("A").media_type == "text/event-stream"  # requester
@@ -208,7 +211,7 @@ def test_launch_stream_access_rules(monkeypatch, db):
     with pytest.raises(HTTPException) as e:
         _stream("A")
     assert e.value.status_code == 403 and job_checks == ["J"]
-    monkeypatch.setattr(eng, "_verify_job_access_by_id", lambda *a, **k: None)
+    monkeypatch.setattr(eng_launch, "_verify_job_access_by_id", lambda *a, **k: None)
     assert _stream("A").media_type == "text/event-stream"  # has job access
     with pytest.raises(HTTPException) as e:
         _stream("missing")
@@ -218,7 +221,7 @@ def test_launch_stream_access_rules(monkeypatch, db):
 def test_async_launch_records_requester(monkeypatch, db):
     monkeypatch.setattr(cfg, "LAUNCH_ASYNC", True)
     monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
-    monkeypatch.setattr(eng, "get_current_user",
+    monkeypatch.setattr(eng_routes, "get_current_user",
                         lambda _r, _h: UserIdentity(email="Me@X.com", role="recruiter"))
 
     async def one(idx, batch, **_k):
@@ -226,7 +229,7 @@ def test_async_launch_records_requester(monkeypatch, db):
                 "no_interview": 0, "employer_unverified_count": 0, "employer_unverified": [],
                 "skipped": [], "excluded_records": [], "excluded_count": 0,
                 "event": {"type": "batch", "index": idx}}
-    monkeypatch.setattr(eng, "_run_one_batch", one)
+    monkeypatch.setattr(eng_launch, "_run_one_batch", one)
 
     async def go():
         resp = await eng.launch_bulk_interviews(

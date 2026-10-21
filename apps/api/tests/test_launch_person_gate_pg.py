@@ -11,6 +11,7 @@ import json
 import pytest
 
 from routers import engagement as eng
+from routers.engagement import common as eng_common, pairbot as eng_pairbot  # noqa: E402
 from tests.test_launch_platform_sql_pg import (  # noqa: F401 — fixtures
     JOB,
     REF,
@@ -174,8 +175,8 @@ def test_settle_sweep_settles_parked_legacy_rows_against_by_job(pg, monkeypatch)
             {"interview_id": "iv-twin", "source_candidate_id": "twin-other-id"},
         ]}
 
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", by_job)
-    monkeypatch.setattr(eng, "jobdiva_provisioning_enabled", lambda: False)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", by_job)
+    monkeypatch.setattr(eng_common, "jobdiva_provisioning_enabled", lambda: False)
     real_reconcile = eng.reconcile_with_pairbot
 
     async def reconcile(keys, ids, **kw):
@@ -183,7 +184,7 @@ def test_settle_sweep_settles_parked_legacy_rows_against_by_job(pg, monkeypatch)
         out = await real_reconcile(keys, ids, existing_interview_ids={"twin": "iv-twin"}, **kw)
         return out
 
-    monkeypatch.setattr(eng, "reconcile_with_pairbot", reconcile)
+    monkeypatch.setattr(eng_pairbot, "reconcile_with_pairbot", reconcile)
     out = asyncio.run(eng.settle_parked_legacy_rows())
     assert out["checked"] == 5
     assert _data(pg, "proven", job=REF)["engage_status"] == "sent"

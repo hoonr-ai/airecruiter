@@ -19,7 +19,7 @@ from core.config import (  # noqa: E402
     SCORING_WEIGHTS_DEFAULT,
     SCORING_WEIGHTS_BY_FAMILY,
 )
-import services.unified_candidate_search as ucs  # noqa: E402
+import services.unified_candidate_search.scoring as ucs_scoring  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     UnifiedCandidateSearch,
     SearchCriteria,
@@ -28,7 +28,7 @@ from services.unified_candidate_search import (  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _legacy_scorer(monkeypatch):
-    monkeypatch.setattr(ucs, "SCORING_MATRIX_V2", False)
+    monkeypatch.setattr(ucs_scoring, "SCORING_MATRIX_V2", False)
 
 
 @pytest.fixture

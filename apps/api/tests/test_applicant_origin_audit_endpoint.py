@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from core.auth import UserIdentity, get_current_user
 import routers.engagement as eng
+from routers.engagement import common as eng_common, provisioning as eng_provisioning  # noqa: E402
 
 
 class _Cursor:
@@ -69,8 +70,8 @@ def sql_log(monkeypatch):
     async def _job_ids(job):
         return 31920032, "26-1"
 
-    monkeypatch.setattr(eng, "_get_db_connection", _conn)
-    monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
+    monkeypatch.setattr(eng_common, "_get_db_connection", _conn)
+    monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", _job_ids)
     return {"store": store, "conns": conns}
 
 

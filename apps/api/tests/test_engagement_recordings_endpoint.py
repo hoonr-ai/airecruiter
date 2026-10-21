@@ -1,4 +1,4 @@
-"""Auth guard on GET /interviews/{interview_id}/recordings (engagement.py).
+"""Auth guard on GET /interviews/{interview_id}/recordings (engagement/routes.py).
 
 Call recordings are presigned S3 playback links for candidate call audio —
 sensitive PII. The route previously required only a signed-in user, with no
@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from core.auth import UserIdentity
 from routers import engagement, _helpers
 
-ROUTER_PATH = Path(__file__).resolve().parents[1] / "routers" / "engagement.py"
+ROUTER_PATH = Path(__file__).resolve().parents[1] / "routers" / "engagement" / "routes.py"
 
 
 def _func_body(name: str) -> str:
@@ -126,14 +126,14 @@ def _run_recordings(interview_id, user):
 def _enable_recordings():
     with patch("services.call_recordings.is_enabled", return_value=True), \
          patch("services.call_recordings.find_recordings", return_value={"recordings": [], "unavailable": False}), \
-         patch("routers.engagement.httpx.AsyncClient", _FakeAsyncClient):
+         patch("routers.engagement.routes.httpx.AsyncClient", _FakeAsyncClient):
         yield
 
 
 def test_non_assigned_recruiter_gets_403():
     """A recruiter not on the job's recruiter_emails must be denied, even
     though they're logged in and the interview genuinely exists."""
-    with patch("routers.engagement._recording_audit_row", return_value=_audit_row("job-1")), \
+    with patch("routers.engagement.routes._recording_audit_row", return_value=_audit_row("job-1")), \
          patch("routers._helpers._get_job_draft_sync", return_value=_job_draft(["someone-else@example.com"])):
         with pytest.raises(HTTPException) as exc_info:
             _run_recordings("interview-1", _recruiter("me@example.com"))
@@ -143,7 +143,7 @@ def test_non_assigned_recruiter_gets_403():
 def test_non_admin_with_no_jobdiva_id_gets_403():
     """No jobdiva_id on the audit row means the interview can't be scoped to
     any job — a non-admin must be denied rather than default-allowed."""
-    with patch("routers.engagement._recording_audit_row", return_value=_audit_row(None)):
+    with patch("routers.engagement.routes._recording_audit_row", return_value=_audit_row(None)):
         with pytest.raises(HTTPException) as exc_info:
             _run_recordings("interview-2", _recruiter("me@example.com"))
     assert exc_info.value.status_code == 403
@@ -151,7 +151,7 @@ def test_non_admin_with_no_jobdiva_id_gets_403():
 
 def test_assigned_recruiter_gets_200():
     """A recruiter on the job's recruiter_emails list can read it."""
-    with patch("routers.engagement._recording_audit_row", return_value=_audit_row("job-1")), \
+    with patch("routers.engagement.routes._recording_audit_row", return_value=_audit_row("job-1")), \
          patch("routers._helpers._get_job_draft_sync", return_value=_job_draft(["me@example.com"])):
         result = _run_recordings("interview-3", _recruiter("me@example.com"))
     assert result["success"] is True
@@ -160,7 +160,7 @@ def test_assigned_recruiter_gets_200():
 
 def test_admin_gets_200_even_with_no_jobdiva_id():
     """Admins bypass job scoping entirely, including the unresolvable case."""
-    with patch("routers.engagement._recording_audit_row", return_value=_audit_row(None)):
+    with patch("routers.engagement.routes._recording_audit_row", return_value=_audit_row(None)):
         result = _run_recordings("interview-4", _admin())
     assert result["success"] is True
     assert result["enabled"] is True
@@ -168,7 +168,7 @@ def test_admin_gets_200_even_with_no_jobdiva_id():
 
 def test_recording_response_hashes_s3_key_and_omits_raw_key():
     raw_key = "recordings/2026-10-05/job-1/0001/1234_session.ogg"
-    with patch("routers.engagement._recording_audit_row", return_value=_audit_row(None)), \
+    with patch("routers.engagement.routes._recording_audit_row", return_value=_audit_row(None)), \
          patch(
              "services.call_recordings.find_recordings",
              return_value={
@@ -204,9 +204,9 @@ def test_denied_access_is_checked_against_the_audit_rows_job_and_short_circuits(
             client_instantiations.append((args, kwargs))
             super().__init__(*args, **kwargs)
 
-    with patch("routers.engagement._recording_audit_row", return_value=_audit_row(jobdiva_id)), \
-         patch("routers.engagement._verify_job_access_by_id", verify_mock), \
-         patch("routers.engagement.httpx.AsyncClient", _TrackedAsyncClient), \
+    with patch("routers.engagement.routes._recording_audit_row", return_value=_audit_row(jobdiva_id)), \
+         patch("routers.engagement.routes._verify_job_access_by_id", verify_mock), \
+         patch("routers.engagement.routes.httpx.AsyncClient", _TrackedAsyncClient), \
          patch("services.call_recordings.find_recordings") as find_mock:
         with pytest.raises(HTTPException) as exc_info:
             _run_recordings("interview-99", user)

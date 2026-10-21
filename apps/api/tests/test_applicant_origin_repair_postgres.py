@@ -27,6 +27,7 @@ psycopg2 = pytest.importorskip("psycopg2")
 
 from core.auth import UserIdentity, get_current_user  # noqa: E402
 import routers.engagement as eng  # noqa: E402
+from routers.engagement import common as eng_common, provisioning as eng_provisioning  # noqa: E402
 
 JOB = "26-1"
 OTHER_JOB = "26-9"
@@ -78,8 +79,8 @@ def db(pg_uri, monkeypatch):
     async def _job_ids(job):
         return (31920032, JOB) if job == JOB else (None, job)
 
-    monkeypatch.setattr(eng, "_get_db_connection", _connect)
-    monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
+    monkeypatch.setattr(eng_common, "_get_db_connection", _connect)
+    monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", _job_ids)
     yield conn
     conn.close()
 
