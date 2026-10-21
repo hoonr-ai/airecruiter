@@ -10,6 +10,7 @@ import asyncio
 
 import services.sourced_candidates_storage as storage
 import services.unified_candidate_search.enrichment as ucs_enrichment
+import services.unified_candidate_search.search_external_producers as ucs_external
 import services.unified_candidate_search.scoring as ucs_scoring
 import services.unified_candidate_search.service as ucs_service
 from services.unified_candidate_search import SearchCriteria, UnifiedCandidateSearch
@@ -71,7 +72,7 @@ def _run_linkedin_search(monkeypatch, profile):
     svc.apply_scoring_policy = _policy
     svc._apply_contact_enrichment = _paid_chain
     monkeypatch.setattr(storage, "process_linkedin_candidate", _llm_extraction)
-    monkeypatch.setattr(ucs_service, "apply_no_contact_flag", lambda cand: False)
+    monkeypatch.setattr(ucs_external, "apply_no_contact_flag", lambda cand: False)
     monkeypatch.setattr(ucs_enrichment, "apply_no_contact_flag", lambda cand: False)
     monkeypatch.setattr(ucs_scoring, "apply_no_contact_flag", lambda cand: False)
 
