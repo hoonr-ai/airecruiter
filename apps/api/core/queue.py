@@ -13,12 +13,17 @@ before the queue existed. Turn ``ARQ_ENABLED`` on only once the worker is
 deployed, or queued jobs will sit in Redis unprocessed.
 
 Task bodies may run more than once (retry after a crash, fallback after a
-failed enqueue that actually landed), so each one must be idempotent. Pass a
-``job_id`` to enqueue to have arq drop a duplicate while one is queued.
+failed enqueue that actually landed), so tasks with ``max_tries > 1`` must be
+idempotent. For a ``max_tries=1`` task the fallback runs only when the job
+never reached Redis (the pool could not connect); if ``enqueue_job`` itself
+fails the outcome is unknown, so `enqueue` returns ``"failed"`` rather than
+risk running it twice. Pass a ``job_id`` to have arq drop a duplicate while
+one is queued.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -38,6 +43,7 @@ class _Task:
 
 _REGISTRY: Dict[str, _Task] = {}
 _pool: Any = None
+_pool_lock: Optional[asyncio.Lock] = None
 
 
 def task(name: str, *, max_tries: int = 1, timeout_s: int = 1800) -> Callable:
@@ -71,11 +77,15 @@ def redis_settings() -> Any:
 
 
 async def _get_pool() -> Any:
-    global _pool
+    global _pool, _pool_lock
     if _pool is None:
-        from arq import create_pool
+        if _pool_lock is None:
+            _pool_lock = asyncio.Lock()
+        async with _pool_lock:
+            if _pool is None:
+                from arq import create_pool
 
-        _pool = await create_pool(redis_settings())
+                _pool = await create_pool(redis_settings())
     return _pool
 
 
@@ -92,7 +102,9 @@ async def close_pool() -> None:
 async def enqueue(name: str, *args: Any, job_id: Optional[str] = None, **kwargs: Any) -> str:
     """Queue task ``name``; fall back to an in-process spawn if the queue is unavailable.
 
-    Returns ``"queued"``, ``"duplicate"`` (arq already holds ``job_id``) or ``"spawned"``.
+    Returns ``"queued"``, ``"duplicate"`` (arq already holds ``job_id``),
+    ``"spawned"``, or ``"failed"`` (a ``max_tries=1`` task whose enqueue may or
+    may not have landed; it is not run, to avoid a duplicate side effect).
     """
     t = _REGISTRY.get(name)
     if t is None:
@@ -101,14 +113,22 @@ async def enqueue(name: str, *args: Any, job_id: Optional[str] = None, **kwargs:
     if queue_enabled():
         try:
             pool = await _get_pool()
-            job = await pool.enqueue_job(name, *args, _job_id=job_id, **kwargs)
-            if job is None:
-                logger.info("queue_enqueue_duplicate task=%s job_id=%s", name, job_id)
-                return "duplicate"
-            logger.info("queue_enqueued task=%s job_id=%s", name, job.job_id)
-            return "queued"
         except Exception as exc:  # noqa: BLE001
-            logger.error("queue_enqueue_failed task=%s error=%s; running in-process", name, exc)
+            logger.error("queue_pool_failed task=%s error=%s; running in-process", name, exc)
+        else:
+            try:
+                job = await pool.enqueue_job(name, *args, _job_id=job_id, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                if t.max_tries <= 1:
+                    logger.error("queue_enqueue_failed task=%s error=%s; not retry-safe, dropped", name, exc)
+                    return "failed"
+                logger.error("queue_enqueue_failed task=%s error=%s; running in-process", name, exc)
+            else:
+                if job is None:
+                    logger.info("queue_enqueue_duplicate task=%s job_id=%s", name, job_id)
+                    return "duplicate"
+                logger.info("queue_enqueued task=%s job_id=%s", name, job.job_id)
+                return "queued"
 
     from core.tasks import spawn
 

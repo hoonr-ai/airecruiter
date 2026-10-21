@@ -76,6 +76,27 @@ def test_enqueue_failure_falls_back_to_spawn(monkeypatch, spawned):
     assert spawned == ["provision_jobdiva_batch:k"]
 
 
+def test_ambiguous_enqueue_failure_does_not_rerun_a_run_once_task(monkeypatch, spawned):
+    # The job may have landed in Redis; spawning too could send the email twice.
+    _enable(monkeypatch, _FakePool(error=TimeoutError("no reply")))
+    out = asyncio.run(queue.enqueue(queue_tasks.ZERO_MATCH_NOTIFICATION, "J1", "a@x.com"))
+    assert out == "failed"
+    assert spawned == []
+
+
+def test_pool_failure_spawns_even_a_run_once_task(monkeypatch, spawned):
+    monkeypatch.setattr(queue._cfg, "ARQ_ENABLED", True, raising=False)
+    monkeypatch.setattr(queue._cfg, "REDIS_URL", "redis://localhost:6379/0")
+
+    async def get_pool():
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(queue, "_get_pool", get_pool)
+    out = asyncio.run(queue.enqueue(queue_tasks.ZERO_MATCH_NOTIFICATION, "J1", "a@x.com"))
+    assert out == "spawned"
+    assert spawned == ["zero_match_notification:inline"]
+
+
 def test_unknown_task_raises():
     with pytest.raises(KeyError):
         asyncio.run(queue.enqueue("no_such_task"))

@@ -308,6 +308,12 @@ def _resume_file_stem(name: str) -> str:
     return f"{stem[:80]}_Resume"
 
 
+async def provision_batch_to_jobdiva(candidate_ids: List[str], job_id_internal: str) -> Dict[str, Any]:
+    """Public entry point for core.queue_tasks; resolves the private helper at
+    call time so tests that patch it still intercept."""
+    return await _provision_batch_to_jobdiva(candidate_ids, job_id_internal)
+
+
 async def _provision_batch_to_jobdiva(
     candidate_ids: List[str],
     job_id_internal: str,

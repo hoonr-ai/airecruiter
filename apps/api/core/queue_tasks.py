@@ -26,7 +26,7 @@ async def provision_jobdiva_batch(candidate_ids: List[str], job_id: str) -> Dict
     from routers.engagement import provisioning
 
     async with _trace_span("jobdiva_provisioning", n=len(candidate_ids)):
-        return await provisioning._provision_batch_to_jobdiva(list(candidate_ids), str(job_id))
+        return await provisioning.provision_batch_to_jobdiva(list(candidate_ids), str(job_id))
 
 
 # The tasks below reach their service objects through the module that called

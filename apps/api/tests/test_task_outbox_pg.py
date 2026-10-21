@@ -147,6 +147,49 @@ def test_stale_running_rows_are_reaped_by_retry_policy(pg, tasks):
     assert _rows(pg) == [("safe", "done", 2, False), ("once", "dead", 1, True)]
 
 
+def test_claimed_rows_run_concurrently(pg, monkeypatch):
+    # Each task waits for the other; run one at a time this would time out.
+    seen = []
+
+    async def fn(x):
+        seen.append(x)
+        while len(seen) < 2:
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(queue, "_REGISTRY", {"w": queue._Task("w", fn, max_tries=1, timeout_s=2)})
+    with pg.cursor() as cur:
+        task_outbox.add(cur, "w", 1)
+        task_outbox.add(cur, "w", 2)
+    out = asyncio.run(task_outbox.relay_once())
+    assert out == {"claimed": 2, "done": 2, "failed": 0}
+
+
+def test_heartbeat_keeps_a_long_running_row_from_being_reaped(pg, tasks):
+    with pg.cursor() as cur:
+        task_outbox.add(cur, "once", "o")
+        cur.execute(
+            "UPDATE task_outbox SET status = 'running', attempts = 1, locked_at = now() - interval '1 hour'"
+        )
+        cur.execute("SELECT id FROM task_outbox")
+        (row_id,) = cur.fetchone()
+    task_outbox._heartbeat([row_id])
+    with pg.cursor() as cur:
+        cur.execute(task_outbox._REAP_SQL)
+    assert _rows(pg) == [("once", "running", 1, False)]
+
+
+def test_purge_and_lag(pg, tasks):
+    with pg.cursor() as cur:
+        task_outbox.add(cur, "safe", "old")
+        task_outbox.add(cur, "safe", "waiting")
+        cur.execute(
+            "UPDATE task_outbox SET status = 'done', updated_at = now() - interval '30 days' WHERE args = '[\"old\"]'"
+        )
+        cur.execute("UPDATE task_outbox SET available_at = now() - interval '20 minutes' WHERE status = 'pending'")
+    assert task_outbox.purge_old() == 1
+    assert task_outbox.oldest_pending_age_seconds() > 1000
+
+
 # --- passed-candidate flow: flag and JobDiva side effects commit together ----
 
 _PASS_FIXTURE_SQL = """

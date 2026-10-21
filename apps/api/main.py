@@ -210,6 +210,17 @@ async def lifespan(app: FastAPI):
             background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
             "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
         )
+        scheduler.add_job(
+            background_transaction("scheduler/task_outbox_purge")(_task_outbox_relay.purge_old),
+            "cron", hour=3, minute=17, id="task_outbox_purge", max_instances=1, coalesce=True,
+        )
+    # Runs in the API either way: with ARQ_ENABLED a dead worker would
+    # otherwise stop outbox delivery silently.
+    from services import task_outbox as _task_outbox_lag
+    scheduler.add_job(
+        _task_outbox_lag.check_lag, "interval", minutes=5, id="task_outbox_lag_check",
+        max_instances=1, coalesce=True,
+    )
 
     # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
     # EXCLUSIVE, so running it in all 8 workers (and again on every worker
