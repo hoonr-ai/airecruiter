@@ -200,6 +200,17 @@ async def lifespan(app: FastAPI):
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
 
+    # Transactional outbox relay (services/task_outbox.py). The arq worker
+    # runs it when ARQ_ENABLED; otherwise every API worker does, and
+    # FOR UPDATE SKIP LOCKED keeps them from claiming the same row.
+    from core.queue import queue_enabled as _queue_enabled
+    if not _queue_enabled():
+        from services import task_outbox as _task_outbox_relay
+        scheduler.add_job(
+            background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
+            "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
+        )
+
     # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
     # EXCLUSIVE, so running it in all 8 workers (and again on every worker
     # recycle) queued them behind each other. One worker runs the steps under
@@ -281,6 +292,9 @@ async def lifespan(app: FastAPI):
         # Launch; docs/launch-sessions.md). New tables only: no ALTER on a
         # hot table.
         steps.append(("launch_sessions_schema_init", _launch_sessions_init, 10))
+        # task_outbox (services/task_outbox.py). New table only.
+        from services import task_outbox as _task_outbox
+        steps.append(("task_outbox_schema_init", _task_outbox.init_task_outbox_schema, 10))
 
         ok = True
         for name, fn, timeout in steps:

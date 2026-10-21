@@ -10,7 +10,7 @@ import functools
 import logging
 from typing import Any, Callable
 
-from arq import func as arq_func
+from arq import cron, func as arq_func
 
 import core.queue_tasks  # noqa: F401  (registers the tasks)
 from core.queue import redis_settings, registered_tasks
@@ -27,6 +27,12 @@ def _strip_ctx(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+async def _relay_outbox(ctx: dict) -> None:
+    from services import task_outbox
+
+    await task_outbox.relay_once()
+
+
 async def _startup(ctx: dict) -> None:
     logger.info("arq worker started with tasks: %s", ", ".join(sorted(registered_tasks())))
 
@@ -38,6 +44,8 @@ class WorkerSettings:
     ]
     redis_settings = redis_settings()
     on_startup = _startup
+    # Transactional outbox relay (services/task_outbox.py), every 10 s.
+    cron_jobs = [cron(_relay_outbox, second=set(range(0, 60, 10)), run_at_startup=True, unique=True)]
     max_jobs = 4
     # Let a job finish during a deploy restart instead of being cancelled and retried.
     job_completion_wait = 600

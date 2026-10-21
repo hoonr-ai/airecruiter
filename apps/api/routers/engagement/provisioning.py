@@ -11,6 +11,7 @@ from routers._helpers import (
     get_db_connection,
 )
 from core.queue import enqueue
+from services import task_outbox
 from core.queue_tasks import CREATE_JOBDIVA_PASS_NOTE, REFRESH_JOB_METRICS, UPDATE_JOBDIVA_QUALIFICATION
 from core.pipeline_trace import span as _trace_span
 from core.email import (
@@ -910,6 +911,30 @@ async def _check_and_fire_candidate_passed_notification(
             except Exception as r_err:
                 logger.error(f"Failed to rollback engage_passed_email_sent flag: {r_err}")
 
+        # The JobDiva side effects of a pass (qualification PASS + pinned
+        # report note) are written to the task outbox in the same transaction
+        # as the flag below, so they can't be lost if the process dies after
+        # the commit. The outbox relay runs them (services/task_outbox.py).
+        _flag_cand_data = cand_row.get("data") or {}
+        jd_candidate_id = candidate_id
+        if _flag_cand_data and (_flag_cand_data.get("jobdiva_candidate_id") or _flag_cand_data.get("candidate_id")):
+            potential_id = _flag_cand_data.get("jobdiva_candidate_id") or _flag_cand_data.get("candidate_id")
+            if str(potential_id).isdigit():
+                jd_candidate_id = str(potential_id)
+        jd_job_id = str(job_row.get("jobdiva_id") or job_id)
+
+        completion_ts = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
+        if not completion_ts:
+            completion_ts = datetime.now(timezone.utc).isoformat()
+
+        # This function has no request to read an app base URL from.
+        base_url = resolve_app_base_url("")
+        pair_job_title = job_row.get("enhanced_title") or job_row.get("title") or "the"
+        report_link = candidate_report_link(base_url, jd_job_id, candidate_id)
+        safe_report_link = html.escape(report_link, quote=True)
+        safe_pair_job_title = html.escape(str(pair_job_title))
+        note_text = f"Candidate completed Phone Screen for {safe_pair_job_title} position. <a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
+
         cur.execute("""
             UPDATE sourced_candidates
             SET data = COALESCE(data, '{}'::jsonb) || '{"engage_passed_email_sent": true}'::jsonb,
@@ -920,6 +945,17 @@ async def _check_and_fire_candidate_passed_notification(
             RETURNING id
         """, (candidate_id, jobdiva_id_for_dedup))
         updated = cur.fetchone()
+        if updated:
+            task_outbox.add(
+                cur, UPDATE_JOBDIVA_QUALIFICATION,
+                str(jd_candidate_id), JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE,
+                JOBDIVA_PAIR_RECRUITER_ID, str(completion_ts), JOBDIVA_PAIR_QUALIFICATION_ID,
+            )
+            task_outbox.add(
+                cur, CREATE_JOBDIVA_PASS_NOTE,
+                str(jd_candidate_id), jd_job_id, JOBDIVA_PASS_ACTION_NAME, note_text, JOBDIVA_PAIR_RECRUITER_ID,
+                dedupe_key=f"jobdiva_pass_note:{jd_candidate_id}:{jd_job_id}",
+            )
         conn.commit()
 
         if not updated:
@@ -1040,12 +1076,6 @@ async def _check_and_fire_candidate_passed_notification(
                     "value": ev.get("answer", ev.get("status", "—"))
                 })
 
-        # Resolve Numeric Candidate ID for JobDiva API calls
-        jd_candidate_id = candidate_id
-        if cand_data and (cand_data.get("jobdiva_candidate_id") or cand_data.get("candidate_id")):
-            potential_id = cand_data.get("jobdiva_candidate_id") or cand_data.get("candidate_id")
-            if str(potential_id).isdigit():
-                jd_candidate_id = str(potential_id)
 
         # 6. Prepare attachment (resume text as Word-compatible .doc fallback)
         resume_bytes = None
@@ -1093,37 +1123,10 @@ async def _check_and_fire_candidate_passed_notification(
             resume_filename = f"Resume_{safe_name}_{job_id}.doc"
         
         app_job_id = str(job_row.get("job_id") or job_id)
-        jd_job_id = str(job_row.get("jobdiva_id") or job_id)
 
         # 7. Fire the email & Update JobDiva Qualification
         recruiter_emails = _parse_json_list(job_row.get("recruiter_emails", []))
         
-        # Determine the completion timestamp for the qualification update
-        completion_ts = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
-        if not completion_ts:
-            completion_ts = datetime.now(timezone.utc).isoformat()
-
-        # Update JobDiva Qualification: PAIR Candidates = PASS
-        # We fire these asynchronously so they don't block the email or main flow
-        await enqueue(
-            UPDATE_JOBDIVA_QUALIFICATION,
-            str(jd_candidate_id), JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE,
-            JOBDIVA_PAIR_RECRUITER_ID, str(completion_ts), JOBDIVA_PAIR_QUALIFICATION_ID,
-        )
-
-        # Create JobDiva Note: PAIR Pass Candidate Report
-        # Note: We use the job title from job_row for the message
-        base_url = resolve_app_base_url(request.app_base_url if 'request' in locals() else "")
-        pair_job_title = job_row.get("enhanced_title") or job_row.get("title") or "the"
-        report_link = candidate_report_link(base_url, jd_job_id, candidate_id)
-        safe_report_link = html.escape(report_link, quote=True)
-        safe_pair_job_title = html.escape(str(pair_job_title))
-        note_text = f"Candidate completed Phone Screen for {safe_pair_job_title} position. <a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
-        
-        await enqueue(
-            CREATE_JOBDIVA_PASS_NOTE,
-            str(jd_candidate_id), str(jd_job_id), JOBDIVA_PASS_ACTION_NAME, note_text, JOBDIVA_PAIR_RECRUITER_ID,
-        )
 
         # The JobDiva profile the email links to: the same id the Cross
         # Submissions email and panel open (a JobDiva row's own id, else the
