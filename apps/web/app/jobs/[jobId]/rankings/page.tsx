@@ -640,6 +640,17 @@ export default function CandidateRankingsPage() {
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
   type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
+  // STATUS buckets the backend can filter on (GET /jobs/{id}/candidates?status=),
+  // via engage_display_sql() — the same Pass/Fail/Pending/In Progress rule the
+  // header stat and launch report use. "n/a" / "duplicate_candidate" /
+  // "invalid_contact" are drop-reason/contact-based, not engage-status-based,
+  // and stay filtered client-side in filteredCandidates below.
+  const STATUS_FILTER_QUERY_VALUES: Partial<Record<StatusFilter, string>> = {
+    pass: "pass",
+    fail: "fail",
+    pending: "pending",
+    in_progress: "in_progress",
+  };
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status" | "engage_completed_at";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -1652,6 +1663,10 @@ export default function CandidateRankingsPage() {
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
+    const statusQueryValue = STATUS_FILTER_QUERY_VALUES[statusFilter];
+    if (statusQueryValue) {
+      query.set("status", statusQueryValue);
+    }
     const candData = await api.jobs.getCandidates(jobId as string, query.toString());
     if (activeJobIdRef.current !== jobId || isStale?.()) return;
 
@@ -1715,7 +1730,24 @@ export default function CandidateRankingsPage() {
       }
       return prev;
     });
-  }, [CANDIDATE_PAGE_SIZE, jobId, normalizeCandidateRows]);
+  }, [CANDIDATE_PAGE_SIZE, jobId, normalizeCandidateRows, statusFilter]);
+
+  // A backend-filtered STATUS bucket (pass/fail/pending/in_progress) only
+  // covers whatever page fetchCandidatesPage sent it with — switching the
+  // dropdown has to reload from offset 0 with the new value, not keep
+  // filtering client-side over rows fetched under the previous filter (or
+  // under none). Skipped on mount: the [jobId] effect above already loads
+  // the initial "all" page.
+  const statusFilterMountRef = useRef(statusFilter);
+  useEffect(() => {
+    if (statusFilterMountRef.current === statusFilter) return;
+    statusFilterMountRef.current = statusFilter;
+    if (!jobId) return;
+    setCandidates([]);
+    setCandidateOffset(0);
+    setHasMoreCandidates(false);
+    fetchCandidatesPage(0, true);
+  }, [statusFilter, jobId, fetchCandidatesPage]);
 
   const loadMoreCandidates = useCallback(async () => {
     if (!jobId || isLoading || isLoadingMore || !hasMoreCandidates) return;

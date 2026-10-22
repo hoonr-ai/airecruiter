@@ -1380,13 +1380,22 @@ async def get_job_candidates(
     job_id_or_ref: str,
     limit: Optional[int] = Query(default=None, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    status: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
 ):
     """
     Fetches all sourced candidates tied to a specific job.
     Supports both numeric job_id and reference jobdiva_id.
+
+    ``status`` (optional) restricts the result to one Rankings STATUS bucket —
+    "pass" / "fail" / "pending" / "in_progress" — filtered in SQL via
+    engage_display_sql() (the same label rule as the header stat and
+    _launched_status_filter below), so pagination and the reported total only
+    ever cover matching candidates instead of the caller filtering whatever
+    page happened to load client-side.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
+    status_label = _LAUNCHED_STATUS_FILTER_LABELS.get((status or "").strip().lower())
     try:
         from psycopg2.extras import RealDictCursor
 
@@ -1419,12 +1428,19 @@ async def get_job_candidates(
         conn = get_db_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Status-scoped total: when a STATUS filter is active, "total_candidates"
+                # (the pagination total and the "Matching N of total" count) must count
+                # only the matching candidates — duplicate_candidate_count and
+                # invalid_contact_count are separate summary tiles and stay unfiltered.
+                status_total_filter_sql = (
+                    f"FILTER (WHERE {engage_display_sql('sc.data')} = %s)" if status_label else ""
+                )
                 cur.execute(
-                    """
+                    f"""
                     SELECT
-                        COUNT(DISTINCT sc.candidate_id) AS total_candidates,
+                        COUNT(DISTINCT sc.candidate_id) {status_total_filter_sql} AS total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
-                            WHERE sc.data->>'_stage' = 'dropped' 
+                            WHERE sc.data->>'_stage' = 'dropped'
                               AND sc.data->>'_drop_reason' = 'cross_source_duplicate'
                         ) AS duplicate_candidate_count,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
@@ -1473,10 +1489,11 @@ async def get_job_candidates(
                           )
                       )
                     """,
-                    (resolved_jobdiva_id, str(resolved_numeric_job_id),
+                    ([status_label] if status_label else []) +
+                    [resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id),
                      _TERMINAL_STATUSES,
-                     resolved_jobdiva_id, str(resolved_numeric_job_id)),
+                     resolved_jobdiva_id, str(resolved_numeric_job_id)],
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
@@ -1491,6 +1508,13 @@ async def get_job_candidates(
                 invalid_contact_count = int(counts_row.get("invalid_contact_count") or 0)
 
                 pagination_clause = ""
+                # Same engage_display_sql() label check as total_candidates above,
+                # applied after dedup so it reads the one row per candidate the
+                # response actually returns — this is what makes "Matching N of
+                # total" and the page contents agree for N > CANDIDATE_PAGE_SIZE.
+                status_where_sql = (
+                    f"WHERE {engage_display_sql('sc.data')} = %s" if status_label else ""
+                )
                 params: List[Any] = [
                     str(resolved_jobdiva_id),
                     str(resolved_numeric_job_id),
@@ -1501,6 +1525,8 @@ async def get_job_candidates(
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
                 ]
+                if status_label:
+                    params.append(status_label)
                 if limit is not None:
                     pagination_clause = " LIMIT %s OFFSET %s"
                     params.extend([int(limit), int(offset)])
@@ -1588,6 +1614,7 @@ async def get_job_candidates(
                         ON cei.candidate_id = sc.candidate_id
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
+                    {status_where_sql}
                     ORDER BY sc.created_at DESC, sc.id DESC
                     {pagination_clause};
                 """,
