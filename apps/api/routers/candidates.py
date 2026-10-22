@@ -1395,7 +1395,12 @@ async def get_job_candidates(
     page happened to load client-side.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
-    status_label = _LAUNCHED_STATUS_FILTER_LABELS.get((status or "").strip().lower())
+    # Tests call this endpoint function directly (bypassing FastAPI's request
+    # parsing) without passing `status`, so it falls back to its raw parameter
+    # default — the Query(default=None) sentinel object itself, not a str —
+    # same as a caller could in principle pass any non-string value here.
+    status_value = status if isinstance(status, str) else None
+    status_label = _LAUNCHED_STATUS_FILTER_LABELS.get(status_value.strip().lower() if status_value else "")
     try:
         from psycopg2.extras import RealDictCursor
 
