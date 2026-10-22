@@ -1400,7 +1400,16 @@ async def get_job_candidates(
     # default — the Query(default=None) sentinel object itself, not a str —
     # same as a caller could in principle pass any non-string value here.
     status_value = status if isinstance(status, str) else None
-    status_label = _LAUNCHED_STATUS_FILTER_LABELS.get(status_value.strip().lower() if status_value else "")
+    status_value = status_value.strip() if status_value else ""
+    status_label = _LAUNCHED_STATUS_FILTER_LABELS.get(status_value.lower()) if status_value else None
+    if status_value and status_label is None:
+        # An unrecognised value (typo, stale client) is a caller error, not
+        # "no filter" — silently falling back to the unfiltered list would
+        # read as the filter being broken rather than the request being wrong.
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown status filter: {status_value!r}",
+        )
     try:
         from psycopg2.extras import RealDictCursor
 
@@ -1437,9 +1446,47 @@ async def get_job_candidates(
                 # (the pagination total and the "Matching N of total" count) must count
                 # only the matching candidates — duplicate_candidate_count and
                 # invalid_contact_count are separate summary tiles and stay unfiltered.
+                #
+                # The NOT EXISTS clause restricts the FILTER to one row per
+                # candidate_id *within this job* — whichever sourced_candidates
+                # row the dedup below (`ORDER BY candidate_id, created_at DESC,
+                # id DESC`) would also pick as that candidate's row for this
+                # job. Without it, a candidate with several sourced_candidates
+                # rows for this job (re-sourced from a second source, say)
+                # could have one row read Pass and another Pending;
+                # COUNT(...) FILTER evaluates every row, so it would count
+                # that candidate_id as matching even though the single row
+                # the page query returns for them does not, and "Matching N
+                # of total" would read N higher than what ever appears in the
+                # table. The jobdiva_id condition on `newer` matters just as
+                # much as the ordering: the same candidate_id can also carry a
+                # separate, newer row sourced for a *different* job, and that
+                # row must never suppress this one.
                 status_total_filter_sql = (
-                    f"FILTER (WHERE {engage_display_sql('sc.data')} = %s)" if status_label else ""
+                    f"""FILTER (
+                        WHERE {engage_display_sql('sc.data')} = %s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM sourced_candidates newer
+                              WHERE newer.candidate_id = sc.candidate_id
+                                AND (newer.jobdiva_id = %s OR newer.jobdiva_id = %s)
+                                AND (newer.created_at, newer.id) > (sc.created_at, sc.id)
+                          )
+                    )""" if status_label else ""
                 )
+                # Built incrementally, in the order each %s appears in the SQL
+                # text below: the status FILTER's own %s sits in the SELECT
+                # list, ahead of the WHERE clause's params, so status_label
+                # and the NOT EXISTS clause's own jobdiva_id pair (when
+                # present) have to come first here too.
+                count_params: List[Any] = []
+                if status_label:
+                    count_params.extend([status_label, resolved_jobdiva_id, str(resolved_numeric_job_id)])
+                count_params.extend([
+                    resolved_jobdiva_id, str(resolved_numeric_job_id),
+                    resolved_jobdiva_id, str(resolved_numeric_job_id),
+                    _TERMINAL_STATUSES,
+                    resolved_jobdiva_id, str(resolved_numeric_job_id),
+                ])
                 cur.execute(
                     f"""
                     SELECT
@@ -1494,11 +1541,7 @@ async def get_job_candidates(
                           )
                       )
                     """,
-                    ([status_label] if status_label else []) +
-                    [resolved_jobdiva_id, str(resolved_numeric_job_id),
-                     resolved_jobdiva_id, str(resolved_numeric_job_id),
-                     _TERMINAL_STATUSES,
-                     resolved_jobdiva_id, str(resolved_numeric_job_id)],
+                    count_params,
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
