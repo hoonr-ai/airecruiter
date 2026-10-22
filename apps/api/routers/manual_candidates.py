@@ -1,9 +1,15 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import List, Dict, Any, Optional
 import logging
 
+from core.auth import UserIdentity, get_current_user
 from models import ManualCandidateRequest
 from routers._helpers import get_db_connection
+# This app has no global auth middleware — every route guards itself (see
+# tests/test_candidates_router_auth.py). Both routes here write into
+# sourced_candidates for an arbitrary job, so they need the user AND the
+# job-access check.
+from routers.jobs import _verify_job_access_by_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -225,13 +231,18 @@ def _guess_name_from_resume(text: str, fallback_filename: str) -> str:
 
 
 @router.post("/jobs/{job_id}/manual-candidate")
-async def add_manual_candidate(job_id: str, req: ManualCandidateRequest):
+async def add_manual_candidate(
+    job_id: str,
+    req: ManualCandidateRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """
     Accept a pasted resume for a job (intended for External/non-JobDiva jobs,
     but works for any job). Runs the same LLM enrichment and rubric scoring
     used on JobDiva applicants, and saves the record into sourced_candidates
     with source='JobDiva' so it shows up under the standard JobDiva pill.
     """
+    _verify_job_access_by_id(job_id, user)
     try:
         import psycopg2.extras
 
@@ -272,13 +283,18 @@ async def add_manual_candidate(job_id: str, req: ManualCandidateRequest):
 
 
 @router.post("/jobs/{job_id}/bulk-resumes")
-async def bulk_upload_resumes(job_id: str, files: List[UploadFile] = File(...)):
+async def bulk_upload_resumes(
+    job_id: str,
+    files: List[UploadFile] = File(...),
+    user: UserIdentity = Depends(get_current_user),
+):
     """
     Accept a multipart upload of multiple resume files (PDF/DOCX/TXT), extract
     text from each, and run the same LLM enrichment + rubric scoring used on
     JobDiva applicants. Saves each as source='upload-resume' so it appears in
     a dedicated filter pill on the frontend.
     """
+    _verify_job_access_by_id(job_id, user)
     try:
         import psycopg2.extras
         if not files:
