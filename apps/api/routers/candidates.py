@@ -1515,11 +1515,8 @@ async def get_job_candidates(
                     f"""
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) {status_total_filter_sql} AS total_candidates,
-                        -- Always the job's whole candidate count, status filter
-                        -- or not — the Rankings header's "Matching N of total"
-                        -- denominator reads this, not the (possibly
-                        -- status-scoped) total_candidates above, so N stays
-                        -- comparable across every STATUS bucket.
+                        -- Unfiltered twin of total_candidates — the "Matching N
+                        -- of total" denominator, constant across STATUS buckets.
                         COUNT(DISTINCT sc.candidate_id) AS job_total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE sc.data->>'_stage' = 'dropped'
@@ -1952,10 +1949,7 @@ async def get_job_candidates(
                 "offset": effective_offset,
                 "returned": len(candidates),
                 "total": total_candidates,
-                # Unlike "total" above (status-scoped when a STATUS filter is
-                # active, so pagination knows when that bucket is exhausted),
-                # this is always the job's whole candidate count — the
-                # Rankings header displays this as "Matching N of job_total".
+                # Always the whole job's count, unlike "total" above.
                 "job_total": job_total_candidates,
                 "has_more": has_more,
             },

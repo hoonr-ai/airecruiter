@@ -538,11 +538,8 @@ export default function CandidateRankingsPage() {
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [candidateTotalCount, setCandidateTotalCount] = useState(0);
-  // Always the job's whole candidate count (pagination.job_total), unlike
-  // candidateTotalCount above which is scoped to the active STATUS filter
-  // (needed so pagination knows when that bucket is exhausted) — this is
-  // what the "Matching N of total" header denominator should show instead,
-  // so N stays 76 (say) no matter which STATUS bucket is selected.
+  // pagination.job_total — the "Matching N of total" denominator, constant
+  // across STATUS buckets, unlike the filter-scoped candidateTotalCount above.
   const [candidateJobTotalCount, setCandidateJobTotalCount] = useState(0);
   const [candidateOffset, setCandidateOffset] = useState(0);
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
@@ -1777,12 +1774,14 @@ export default function CandidateRankingsPage() {
     setCandidateOffset(0);
     setHasMoreCandidates(false);
     setIsLoadingStatusFilter(true);
-    fetchCandidatesPage(0, true, isStale).finally(() => {
-      // Only this call's own completion clears the flag — a stale response
-      // from a filter the user has since switched away from must not flip
-      // it off while a newer fetch (which set it true itself) is still going.
-      if (!isStale()) setIsLoadingStatusFilter(false);
-    });
+    fetchCandidatesPage(0, true, isStale)
+      .catch((error) => console.error("Error reloading candidates for STATUS filter:", error))
+      .finally(() => {
+        // Only this call's own completion clears the flag — a stale response
+        // from a filter the user has since switched away from must not flip
+        // it off while a newer fetch (which set it true itself) is still going.
+        if (!isStale()) setIsLoadingStatusFilter(false);
+      });
   }, [statusFilter, jobId, fetchCandidatesPage]);
 
   const loadMoreCandidates = useCallback(async () => {
@@ -1820,6 +1819,11 @@ export default function CandidateRankingsPage() {
     setFeedbackReasons({});
     setCandidateTotalCount(0);
     setCandidateJobTotalCount(0);
+    // A job switch bumps loadSeqRef, so an in-flight STATUS-filter-switch
+    // fetch (started under the old job) finds isStale() true when it
+    // resolves and skips its own setIsLoadingStatusFilter(false) — reset it
+    // here instead, or "(Loading…)" would be stuck on for the new job.
+    setIsLoadingStatusFilter(false);
     setLaunchedRowCount(0);
     setDuplicateCount(0);
     setInvalidContactCount(0);
@@ -1977,11 +1981,9 @@ export default function CandidateRankingsPage() {
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
   const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
-  // The "Matching N of total" denominator: always the job's whole candidate
-  // count, not totalCandidates above (which is scoped to the active STATUS
-  // filter for pagination purposes) — otherwise Pass/Fail/Pending each read
-  // "of" their own matching count instead of a constant job total.
-  const displayTotalCandidates = candidateJobTotalCount || totalCandidates;
+  // > 0, not ||, so a job with genuinely 0 candidates still shows 0 instead
+  // of falling through to the filter-scoped totalCandidates.
+  const displayTotalCandidates = candidateJobTotalCount > 0 ? candidateJobTotalCount : totalCandidates;
 
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">

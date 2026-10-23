@@ -9,6 +9,7 @@ catch a misordered bind param or a missing WHERE/FILTER clause without a real
 Postgres instance.
 """
 import asyncio
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -207,3 +208,13 @@ def test_job_total_is_always_the_whole_job_not_the_status_filtered_count(
 
     counts_sql, _ = _calls(mock_db_connection)[1].args
     assert "job_total_candidates" in counts_sql
+
+    # job_total_candidates must never gain a status FILTER — that's the one
+    # way this column could silently start tracking total_candidates again.
+    # Asserted by shape, not just presence: the COUNT feeding it is followed
+    # directly by its AS alias, with no "FILTER (...)" in between — unlike
+    # total_candidates just above it, which always has one when a status
+    # filter is active.
+    assert re.search(
+        r"COUNT\(DISTINCT sc\.candidate_id\)\s+AS job_total_candidates", counts_sql
+    )
