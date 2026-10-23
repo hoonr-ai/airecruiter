@@ -473,7 +473,24 @@ class LocationMixin:
         country = self._target_country(criteria)
         if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
             return self._country_display_name(country)
-        return self._scope_location_to_country(criteria.location, country)
+        location = self._resolve_bare_zip_for_external_source(criteria.location)
+        return self._scope_location_to_country(location, country)
+
+    @staticmethod
+    def _resolve_bare_zip_for_external_source(location: Any) -> Any:
+        """A bare ZIP loses all signal once exa_service.py strips its digits
+        out before composing the NL query text — resolve it to "City, ST"
+        first, same backfill _resolve_jobdiva_geo already does for JobDiva.
+        """
+        text = str(location or "").strip()
+        # Deferred like this file's other zip_index imports (lines 95, 370,
+        # 735, 1127) — no circular-import requirement, just this file's
+        # convention.
+        from services import zip_index
+        entry = zip_index.lookup_zip(text)
+        if not entry:
+            return location
+        return f"{entry['city']}, {entry['state']}"
 
     def _search_location_for_deep_research(self, criteria: SearchCriteria) -> str:
         """Location string for the Exa Pass B agent (a single prompt-based

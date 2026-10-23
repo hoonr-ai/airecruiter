@@ -2,6 +2,7 @@
 import asyncio
 import time
 from typing import List, Dict, Any, Optional
+from services.jobdiva_boolean_translator import strip_multi_location_or_group
 from ..common import (
     LocationEntry,
     SearchCriteria,
@@ -240,11 +241,19 @@ class JobdivaTalentMixin:
                     "within_miles": loc_miles,
                     "additional_locations": [],
                 })
-                # Build a per-location boolean WITHOUT the multi-location OR
-                # clause so the text filter doesn't conflict with the geo radius.
+                # Strip just the multi-location OR group from the recruiter's
+                # own boolean_string, so jobdiva.py's count_location_clauses()
+                # gate — meant for the ONE combined primary-location call —
+                # doesn't also fire here and skip this call's own zip+radius
+                # anchor. Preferred over rebuilding from alt_criteria, which
+                # would silently drop any hand-edit the recruiter made (see
+                # PR review). Falls back to a rebuild only when there was
+                # nothing to strip (e.g. boolean_string is empty).
+                stripped_boolean = strip_multi_location_or_group(criteria.boolean_string or "")
                 loc_boolean = (
-                    criteria.boolean_string
-                    or self._build_boolean_string(alt_criteria, dialect="jobdiva")
+                    stripped_boolean
+                    if stripped_boolean != (criteria.boolean_string or "")
+                    else self._build_boolean_string(alt_criteria, dialect="jobdiva")
                 )
                 alt_countries, alt_states, alt_geo_zip = self._resolve_jobdiva_geo(alt_criteria)
                 if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
