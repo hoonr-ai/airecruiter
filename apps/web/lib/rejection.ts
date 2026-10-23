@@ -21,4 +21,6 @@ export const REJECTION_REASONS = [
   "Not eligible for rehire",
   "Past performance concern (Internal note as per past Pyramid client feedback)",
   "Candidate does not want to work with the same client",
+  "Candidate is not interested in the role/job responsibilities",
+  "Already submitted to the same client/hiring manager by another team member",
 ];
