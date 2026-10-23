@@ -1515,6 +1515,9 @@ async def get_job_candidates(
                     f"""
                     SELECT
                         COUNT(DISTINCT sc.candidate_id) {status_total_filter_sql} AS total_candidates,
+                        -- Unfiltered twin of total_candidates — the "Matching N
+                        -- of total" denominator, constant across STATUS buckets.
+                        COUNT(DISTINCT sc.candidate_id) AS job_total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE sc.data->>'_stage' = 'dropped'
                               AND sc.data->>'_drop_reason' = 'cross_source_duplicate'
@@ -1569,6 +1572,7 @@ async def get_job_candidates(
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
+                job_total_candidates = int(counts_row.get("job_total_candidates") or 0)
                 # UI "Candidates Launched" is candidate grain: one per launched
                 # person, latest interview. It is the SAME population the
                 # outreach-stats header buckets and the launch report are computed
@@ -1945,6 +1949,8 @@ async def get_job_candidates(
                 "offset": effective_offset,
                 "returned": len(candidates),
                 "total": total_candidates,
+                # Always the whole job's count, unlike "total" above.
+                "job_total": job_total_candidates,
                 "has_more": has_more,
             },
         }
