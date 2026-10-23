@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
@@ -66,8 +67,8 @@ _BACKOFF_SECONDS = (30, 120, 600)
 _ERROR_MAX_CHARS = 2000
 
 _INSERT_SQL = """
-    INSERT INTO task_outbox (task, args, dedupe_key, max_attempts)
-    VALUES (%s, %s::jsonb, %s, %s)
+    INSERT INTO task_outbox (task, args, dedupe_key, max_attempts, available_at)
+    VALUES (%s, %s::jsonb, %s, %s, COALESCE(%s, now()))
     ON CONFLICT (dedupe_key) DO NOTHING
     RETURNING id
 """
@@ -136,11 +137,16 @@ def init_task_outbox_schema() -> None:
         conn.close()
 
 
-def add(cur: Any, task_name: str, *args: Any, dedupe_key: Optional[str] = None) -> Optional[int]:
+def add(
+    cur: Any, task_name: str, *args: Any, dedupe_key: Optional[str] = None,
+    available_at: Optional[datetime] = None,
+) -> Optional[int]:
     """Queue ``task_name(*args)`` on the caller's cursor, inside its transaction.
 
     The caller commits. Returns the row id, or None when ``dedupe_key`` is
-    already taken. Args must be JSON-serialisable.
+    already taken. Args must be JSON-serialisable. ``available_at`` defers
+    the row past the default "now" — e.g. a reminder that must fire some
+    fixed amount of time before a recruiter-chosen future moment.
     """
     import core.queue_tasks  # noqa: F401  (registers the tasks)
     from core.queue import registered_tasks
@@ -148,7 +154,7 @@ def add(cur: Any, task_name: str, *args: Any, dedupe_key: Optional[str] = None) 
     t = registered_tasks().get(task_name)
     if t is None:
         raise KeyError(f"unknown queue task {task_name!r}")
-    cur.execute(_INSERT_SQL, (task_name, json.dumps(list(args)), dedupe_key, t.max_tries))
+    cur.execute(_INSERT_SQL, (task_name, json.dumps(list(args)), dedupe_key, t.max_tries, available_at))
     row = cur.fetchone()
     if row is None:
         logger.info("outbox_add_duplicate task=%s dedupe_key=%s", task_name, dedupe_key)

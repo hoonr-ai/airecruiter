@@ -1,5 +1,5 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Nine types today, plus the two recruiter-handoff
+existing email notifications. Ten types today, plus the two recruiter-handoff
 types (recruiter_handoff_requested / recruiter_handoff_missed), which are
 created by services/recruiter_handoff.py from Pair-bot's handoff webhooks and
 documented there:
@@ -113,6 +113,18 @@ documented there:
   dedupe via a same-minute pre-insert check
   (_candidate_level_duplicate_in_last_minute), not a permanent index: a
   genuine second review cycle must still notify.
+
+- candidate_callback_reminder (create_candidate_callback_reminder_notification):
+  fires ~5 minutes before a recruiter's own self-scheduled callback time
+  (save_candidate_feedback's feedback_type == "Callback Scheduled"). Unlike
+  every other type above, this one is never created immediately — it's
+  queued via task_outbox.add's `available_at` for that future moment, and
+  only the outbox relay actually calls it when that time comes. Candidate-
+  level, single recipient (the recruiter who scheduled it) — its own sync
+  helper rather than reusing _create_candidate_notification_for_recipient_sync
+  because the body needs the formatted callback time, not just a title — with
+  no duplicate check of its own, since task_outbox's dedupe_key already
+  guarantees the underlying task runs at most once.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -1279,3 +1291,71 @@ async def create_candidate_externally_submitted_notification(
             "create_candidate_externally_submitted_notification_failed candidate=%s job=%s: %s",
             candidate_id, job_id, e, exc_info=True,
         )
+
+
+_TITLE_CALLBACK_REMINDER = "Callback reminder: call {candidate_name} for {job_title}"
+
+
+def _create_candidate_callback_reminder_notification_sync(
+    job_id: str, candidate_id: str, recruiter_email: str, callback_at: str
+) -> None:
+    recipient = (recruiter_email or "").strip().lower()
+    if not recipient:
+        return
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id)
+            if not job_row or not cand_row:
+                return
+            candidate_name = cand_row.get("name") or "A candidate"
+            job_title = _resolve_job_title(job_row, job_id)
+            try:
+                when_label = datetime.fromisoformat(callback_at.replace("Z", "+00:00")).strftime("%-I:%M %p")
+            except ValueError:
+                when_label = "shortly"
+            jobdiva_id = job_row.get("jobdiva_id") or job_id
+            app_job_id = job_row.get("job_id") or job_id
+            inserted = _insert_notification(
+                cur,
+                notification_type="candidate_callback_reminder",
+                conflict_clause=None,
+                recipient_email=recipient,
+                job_id=app_job_id,
+                jobdiva_id=jobdiva_id,
+                candidate_id=candidate_id,
+                title=_TITLE_CALLBACK_REMINDER.format(candidate_name=candidate_name, job_title=job_title),
+                body=f"Scheduled callback at {when_label}.",
+                score=None,
+            )
+            conn.commit()
+            if inserted:
+                logger.info(
+                    "notification_created type=candidate_callback_reminder candidate=%s job=%s recipient=%s",
+                    candidate_id, jobdiva_id, recipient,
+                )
+    finally:
+        conn.close()
+
+
+async def create_candidate_callback_reminder_notification(
+    *, job_id: str, candidate_id: str, recruiter_email: str, callback_at: str
+) -> None:
+    """Fires ~5 minutes before a recruiter's self-scheduled callback time
+    (save_candidate_feedback's 'Callback Scheduled' feedback_type schedules
+    this via task_outbox.add's available_at, not immediately like every
+    other notification in this module).
+
+    Deliberately does NOT swallow its own exceptions the way the rest of
+    this file's create_* functions do — those are fire-and-forget
+    BackgroundTasks where an exception would just be an unhandled task
+    error, but this one runs under task_outbox's relay, which retries a
+    failure up to CANDIDATE_CALLBACK_REMINDER's max_tries. Swallowing here
+    would turn a transient DB blip into a silently-dropped reminder.
+    """
+    if not job_id or not candidate_id or not recruiter_email:
+        return
+    await asyncio.to_thread(
+        _create_candidate_callback_reminder_notification_sync,
+        job_id, candidate_id, recruiter_email, callback_at,
+    )

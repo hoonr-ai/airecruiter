@@ -7,7 +7,7 @@ import contextlib
 import html
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 import os
 import re
@@ -5914,14 +5914,33 @@ async def save_candidate_feedback(
         if not _manager_email_allowed(manager_email):
             raise HTTPException(status_code=400, detail="manager_email domain is not allowed")
 
+    callback_dt: Optional[datetime] = None
+    if request.feedback_type == "Callback Scheduled":
+        callback_at_raw = (request.callback_at or "").strip()
+        if not callback_at_raw:
+            raise HTTPException(status_code=400, detail="callback_at is required for Callback Scheduled")
+        try:
+            callback_dt = datetime.fromisoformat(callback_at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="callback_at must be a valid ISO 8601 datetime")
+        if callback_dt.tzinfo is None:
+            callback_dt = callback_dt.replace(tzinfo=timezone.utc)
+        if callback_dt <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="callback_at must be in the future")
+
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
         f"{request.feedback_type} (submission_type={submission_type}, by {user.email})"
     )
     _record_recruiter_action(
         user,
-        {"submit": "feedback_submit", "reject": "feedback_reject", "unreachable": "feedback_unreachable"}.get(
-            str(request.feedback_type or "").strip().lower(), "feedback_other"),
+        {
+            "submit": "feedback_submit",
+            "reject": "feedback_reject",
+            "unreachable": "feedback_unreachable",
+            "allotment slot filled": "feedback_allotment_slot_filled",
+            "callback scheduled": "feedback_callback_scheduled",
+        }.get(str(request.feedback_type or "").strip().lower(), "feedback_other"),
         job_id_or_ref, candidate_id=candidate_id,
         attrs={"submission_type": submission_type} if request.feedback_type == "Submit" else None,
     )
@@ -6086,6 +6105,8 @@ async def save_candidate_feedback(
                     # unrelated external submission doesn't notify a stale
                     # requester.
                     feedback_data["internal_review_requested_by"] = None
+            elif request.feedback_type == "Callback Scheduled":
+                feedback_data["callback_scheduled_at"] = callback_dt.isoformat()
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved
@@ -6104,6 +6125,26 @@ async def save_candidate_feedback(
                                      SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                                ))""",
                     (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                )
+            if request.feedback_type == "Callback Scheduled":
+                # Queued on this same cursor/transaction (see task_outbox's own
+                # docstring) so the reminder and the feedback write commit or
+                # roll back together — a DB failure here must not leave a
+                # recruiter believing a callback was scheduled when no
+                # reminder will ever fire.
+                from services import task_outbox
+                from core.queue_tasks import CANDIDATE_CALLBACK_REMINDER
+
+                remind_at = callback_dt - timedelta(minutes=5)
+                task_outbox.add(
+                    _cur2,
+                    CANDIDATE_CALLBACK_REMINDER,
+                    str(app_job_ref or job_id_or_ref),
+                    jd_candidate_id,
+                    user.email,
+                    callback_dt.isoformat(),
+                    available_at=remind_at,
+                    dedupe_key=f"callback_reminder:{jd_candidate_id}:{job_id_or_ref}:{callback_dt.isoformat()}",
                 )
             _conn2.commit()
         _conn2.close()
@@ -6186,8 +6227,8 @@ async def save_candidate_feedback(
     report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
     safe_report_link = html.escape(report_link, quote=True)
 
-    if request.feedback_type == "Unreachable":
-        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
+    if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):
+        logger.info("ℹ️ Skipping JobDiva note for '%s' status.", request.feedback_type)
         jobdiva_result = {"status": "success"}
     else:
         jobdiva_result = await jobdiva_service.create_candidate_note(
