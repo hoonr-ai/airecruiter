@@ -1462,6 +1462,20 @@ async def get_job_candidates(
                 # much as the ordering: the same candidate_id can also carry a
                 # separate, newer row sourced for a *different* job, and that
                 # row must never suppress this one.
+                # "Pending" is format_engage_status()'s catch-all, so it also
+                # matches never-launched candidates (the N/A bucket) — restrict
+                # to the launched population, same definition as
+                # services/launched_candidates.py and the header's own count.
+                _pending_launched_filter = (
+                    " AND (COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''"
+                    " OR EXISTS ("
+                    "SELECT 1 FROM engage_interview_audit ea"
+                    " WHERE ea.candidate_id = sc.candidate_id"
+                    " AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)"
+                    " AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''"
+                    "))"
+                    if status_label == "Pending" else ""
+                )
                 status_total_filter_sql = (
                     f"""FILTER (
                         WHERE {engage_display_sql('sc.data')} = %s
@@ -1471,16 +1485,20 @@ async def get_job_candidates(
                                 AND (newer.jobdiva_id = %s OR newer.jobdiva_id = %s)
                                 AND (newer.created_at, newer.id) > (sc.created_at, sc.id)
                           )
+                          {_pending_launched_filter}
                     )""" if status_label else ""
                 )
                 # Built incrementally, in the order each %s appears in the SQL
                 # text below: the status FILTER's own %s sits in the SELECT
-                # list, ahead of the WHERE clause's params, so status_label
-                # and the NOT EXISTS clause's own jobdiva_id pair (when
-                # present) have to come first here too.
+                # list, ahead of the WHERE clause's params, so status_label,
+                # the NOT EXISTS clause's jobdiva_id pair, and (for Pending
+                # only) the launched-check's own jobdiva_id pair all have to
+                # come first here too, in that order.
                 count_params: List[Any] = []
                 if status_label:
                     count_params.extend([status_label, resolved_jobdiva_id, str(resolved_numeric_job_id)])
+                    if status_label == "Pending":
+                        count_params.extend([resolved_jobdiva_id, str(resolved_numeric_job_id)])
                 count_params.extend([
                     resolved_jobdiva_id, str(resolved_numeric_job_id),
                     resolved_jobdiva_id, str(resolved_numeric_job_id),
@@ -1560,8 +1578,25 @@ async def get_job_candidates(
                 # applied after dedup so it reads the one row per candidate the
                 # response actually returns — this is what makes "Matching N of
                 # total" and the page contents agree for N > CANDIDATE_PAGE_SIZE.
+                #
+                # Pending's launched-only restriction, same as the count query
+                # above. Deliberately an EXISTS over every audit row, not
+                # `la.interview_id` (this query's own join, the single newest
+                # row only) — a failed relaunch after an earlier success would
+                # leave la.interview_id blank and the two queries would
+                # disagree on this candidate again otherwise.
+                _pending_launched_where = (
+                    " AND (COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''"
+                    " OR EXISTS ("
+                    "SELECT 1 FROM engage_interview_audit ea"
+                    " WHERE ea.candidate_id = sc.candidate_id"
+                    " AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)"
+                    " AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''"
+                    "))"
+                    if status_label == "Pending" else ""
+                )
                 status_where_sql = (
-                    f"WHERE {engage_display_sql('sc.data')} = %s" if status_label else ""
+                    f"WHERE {engage_display_sql('sc.data')} = %s{_pending_launched_where}" if status_label else ""
                 )
                 params: List[Any] = [
                     str(resolved_jobdiva_id),
@@ -1575,6 +1610,8 @@ async def get_job_candidates(
                 ]
                 if status_label:
                     params.append(status_label)
+                    if status_label == "Pending":
+                        params.extend([resolved_jobdiva_id, str(resolved_numeric_job_id)])
                 if limit is not None:
                     pagination_clause = " LIMIT %s OFFSET %s"
                     params.extend([int(limit), int(offset)])
