@@ -468,11 +468,12 @@ class ManualCandidateRequest(BaseModel):
     resume_text: str
 
 class CandidateFeedbackRequest(BaseModel):
-    feedback_type: str # 'Submit', 'Reject', or 'Unreachable'
+    feedback_type: str # 'Submit', 'Reject', 'Unreachable', 'Allotment Slot Filled', or 'Callback Scheduled'
     reason: Optional[str] = Field(None, max_length=500)
     submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
     manager_email: Optional[str] = None
     recruiter_notes: Optional[str] = None
+    callback_at: Optional[str] = None # ISO 8601 datetime, required when feedback_type == 'Callback Scheduled'
 
 
 class NotificationItem(BaseModel):

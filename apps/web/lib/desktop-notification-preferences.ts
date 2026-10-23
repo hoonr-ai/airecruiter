@@ -79,6 +79,11 @@ export const DESKTOP_NOTIFICATION_TYPES: DesktopNotificationTypeInfo[] = [
     label: "Missed Handoff",
     description: "Nobody joined a waiting candidate's call in time.",
   },
+  {
+    type: "candidate_callback_reminder",
+    label: "Callback Reminder",
+    description: "5 minutes before a callback time you scheduled on a candidate.",
+  },
 ];
 
 // Types that no longer have a row in the panel above and must not pop a

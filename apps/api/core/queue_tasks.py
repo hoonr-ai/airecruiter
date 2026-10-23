@@ -127,3 +127,23 @@ async def zero_match_notification(job_id: str, searcher_email: str) -> None:
     from services.notifications_service import create_zero_match_notification
 
     await create_zero_match_notification(job_id=job_id, searcher_email=searcher_email)
+
+
+CANDIDATE_CALLBACK_REMINDER = "candidate_callback_reminder"
+
+
+@task(CANDIDATE_CALLBACK_REMINDER, max_tries=3, timeout_s=120)
+async def candidate_callback_reminder(
+    job_id: str, candidate_id: str, recruiter_email: str, callback_at: str,
+) -> None:
+    """Scheduled ~5 minutes before the recruiter's own callback_at (see
+    save_candidate_feedback's 'Callback Scheduled' feedback_type) via
+    task_outbox.add's available_at — unlike every other task here, this one
+    is deliberately retried (max_tries=3): a missed reminder is a missed
+    call, so a transient DB blip must not silently drop it.
+    """
+    from services.notifications_service import create_candidate_callback_reminder_notification
+
+    await create_candidate_callback_reminder_notification(
+        job_id=job_id, candidate_id=candidate_id, recruiter_email=recruiter_email, callback_at=callback_at,
+    )
