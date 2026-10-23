@@ -478,21 +478,15 @@ class LocationMixin:
 
     @staticmethod
     def _resolve_bare_zip_for_external_source(location: Any) -> Any:
-        """A bare ZIP (e.g. "07310") carries no usable signal once it reaches
-        Exa/Dice: their NL query strips every digit out of the location text
-        (exa_service._strip_zip_for_query — LinkedIn profile location lines
-        never show a zip), so "07310, United States" degenerates to just
-        "United States" and the search loses its location entirely. Resolve
-        it to "City, ST" first, the same way JobDiva's own geo resolution
-        already backfills a place name from a bare zip
-        (_resolve_jobdiva_geo) — the zip itself still drives the offline
-        radius post-filter untouched, this only fixes what reaches Exa's
-        query text.
+        """A bare ZIP loses all signal once exa_service.py strips its digits
+        out before composing the NL query text — resolve it to "City, ST"
+        first, same backfill _resolve_jobdiva_geo already does for JobDiva.
         """
         text = str(location or "").strip()
+        # Deferred like this file's other zip_index imports (lines 95, 370,
+        # 735, 1127) — no circular-import requirement, just this file's
+        # convention.
         from services import zip_index
-        if not zip_index.is_known_zip(text):
-            return location
         entry = zip_index.lookup_zip(text)
         if not entry:
             return location

@@ -2,6 +2,7 @@
 import asyncio
 import time
 from typing import List, Dict, Any, Optional
+from services.jobdiva_boolean_translator import strip_multi_location_or_group
 from ..common import (
     LocationEntry,
     SearchCriteria,
@@ -240,15 +241,20 @@ class JobdivaTalentMixin:
                     "within_miles": loc_miles,
                     "additional_locations": [],
                 })
-                # Build a per-location boolean WITHOUT the multi-location OR
-                # clause so the text filter doesn't conflict with the geo radius.
-                # Never reuse criteria.boolean_string here — the wizard sends it
-                # non-empty, with every location OR'd in, which makes
-                # jobdiva.py's count_location_clauses() gate see 2+ clauses and
-                # skip this call's own precise zip+radius anchor (see PR for
-                # this fix). alt_criteria has additional_locations=[], so this
-                # always rebuilds a boolean scoped to just this one location.
-                loc_boolean = self._build_boolean_string(alt_criteria, dialect="jobdiva")
+                # Strip just the multi-location OR group from the recruiter's
+                # own boolean_string, so jobdiva.py's count_location_clauses()
+                # gate — meant for the ONE combined primary-location call —
+                # doesn't also fire here and skip this call's own zip+radius
+                # anchor. Preferred over rebuilding from alt_criteria, which
+                # would silently drop any hand-edit the recruiter made (see
+                # PR review). Falls back to a rebuild only when there was
+                # nothing to strip (e.g. boolean_string is empty).
+                stripped_boolean = strip_multi_location_or_group(criteria.boolean_string or "")
+                loc_boolean = (
+                    stripped_boolean
+                    if stripped_boolean != (criteria.boolean_string or "")
+                    else self._build_boolean_string(alt_criteria, dialect="jobdiva")
+                )
                 alt_countries, alt_states, alt_geo_zip = self._resolve_jobdiva_geo(alt_criteria)
                 if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
                     alt_geo_zip = ""
