@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { REJECTION_REASONS } from "@/lib/rejection";
+import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -937,14 +938,14 @@ export default function CandidateEvaluationReportPage() {
       />
 
       {integrationModalOpen === 'reject' && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 no-print">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 no-print select-none">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
                 <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={() => { setIntegrationModalOpen(null); setRejectReason(""); }} className="text-slate-400 hover:text-slate-600">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
@@ -952,23 +953,16 @@ export default function CandidateEvaluationReportPage() {
                   </p>
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${candidate?.name || "report"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
-                    <select
+                    <RejectionReasonSelect
                       id={`reject-reason-${candidate?.name || "report"}`}
-                      aria-label="Rejection Reason"
-                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
-                    >
-                      <option value="" disabled>Select a reason...</option>
-                      {REJECTION_REASONS.map((r) => (
-                        <option key={r} value={r}>{r}</option>
-                      ))}
-                    </select>
+                      onChange={setRejectReason}
+                    />
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <button 
-                    onClick={() => setIntegrationModalOpen(null)} 
+                    onClick={() => { setIntegrationModalOpen(null); setRejectReason(""); }}
                     className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-all"
                   >
                     Cancel
