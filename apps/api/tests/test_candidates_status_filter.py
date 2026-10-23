@@ -127,7 +127,14 @@ def test_status_pending_adds_a_launched_only_restriction(
     own Pending count), status=pending pulls those rows in too and
     "Matching N of total" reads far higher than the header's Pending figure.
 
-    Verified against a real QA job (26-28758): without this restriction,
+    Both queries check for ANY engage_interview_audit row with an interview
+    id, not just the latest one (`la.interview_id`, this query's own join) —
+    a failed relaunch attempt after an earlier successful one leaves the
+    latest row's interview id blank, and checking only that row would make
+    the two queries disagree on this candidate, the same symptom this fix is
+    for.
+
+    Verified against a real QA job (26-28758): without the restriction,
     status=pending returned 64; the header's Pending figure was 25; the
     other 39 were exactly the job's N/A-bucket (never-launched) candidates.
     """
@@ -138,12 +145,12 @@ def test_status_pending_adds_a_launched_only_restriction(
 
     # "FROM engage_interview_audit ea" also appears once, unconditionally, in
     # the pre-existing invalid_contact_count subquery — Pending's own EXISTS
-    # clause makes it two.
+    # clause makes it two. The main query has no unconditional occurrence
+    # (its own latest_audit CTE isn't aliased "ea"), so one there is entirely
+    # Pending's own clause.
     assert counts_sql.count("FROM engage_interview_audit ea") == 2
+    assert main_sql.count("FROM engage_interview_audit ea") == 1
     assert "engage_interview_id" in counts_sql
-    # "la.interview_id" is also in the SELECT list unconditionally (as
-    # audit_interview_id) — Pending's own OR clause makes it two.
-    assert main_sql.count("la.interview_id") == 2
     assert "engage_interview_id" in main_sql
 
     # Counts query: SELECT-list order is status_label, the dedup NOT EXISTS's
@@ -153,9 +160,9 @@ def test_status_pending_adds_a_launched_only_restriction(
         "jobdiva_123", "job_123",  # dedup NOT EXISTS
         "jobdiva_123", "job_123",  # launched-check EXISTS
     ]
-    # Main query: la is already this query's own job-scoped join, so the
-    # launched check adds no new params — "Pending" is still the last one.
-    assert list(main_params)[-1] == "Pending"
+    # Main query: the status WHERE's own %s comes right after the dedup CTE,
+    # followed immediately by the launched-check EXISTS's own jobdiva pair.
+    assert list(main_params)[-3:] == ["Pending", "jobdiva_123", "job_123"]
 
 
 @pytest.mark.parametrize("status", ["fail", "in_progress"])
@@ -170,6 +177,6 @@ def test_other_statuses_do_not_get_the_pending_launched_restriction(
     counts_sql, _ = _calls(mock_db_connection)[1].args
     main_sql, _ = _calls(mock_db_connection)[2].args
     # Exactly the pre-existing, unconditional occurrence from
-    # invalid_contact_count / the SELECT list — not the Pending-only extra one.
+    # invalid_contact_count — not the Pending-only extra one.
     assert counts_sql.count("FROM engage_interview_audit ea") == 1
-    assert main_sql.count("la.interview_id") == 1
+    assert main_sql.count("FROM engage_interview_audit ea") == 0

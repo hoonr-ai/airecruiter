@@ -1462,19 +1462,10 @@ async def get_job_candidates(
                 # much as the ordering: the same candidate_id can also carry a
                 # separate, newer row sourced for a *different* job, and that
                 # row must never suppress this one.
-                # format_engage_status()'s "Pending" is a catch-all for any
-                # engage_status it doesn't otherwise recognise — which is also
-                # what a candidate who was NEVER launched looks like (no
-                # engage_status at all), and what a launch attempt that failed
-                # before an interview ever existed looks like (engage_status
-                # 'failed' with no score). services/launched_candidates.py
-                # defines "launched" as having a real interview id from either
-                # side, and the Rankings header's own "Pending" count is only
-                # over that launched population — so without this same
-                # restriction, status=pending here pulls in every never-
-                # launched / invalid-contact / duplicate / dropped candidate
-                # too (the frontend's N/A bucket), and "Matching N of total"
-                # reads N far higher than the header's Pending figure.
+                # "Pending" is format_engage_status()'s catch-all, so it also
+                # matches never-launched candidates (the N/A bucket) — restrict
+                # to the launched population, same definition as
+                # services/launched_candidates.py and the header's own count.
                 _pending_launched_filter = (
                     " AND (COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''"
                     " OR EXISTS ("
@@ -1588,14 +1579,20 @@ async def get_job_candidates(
                 # response actually returns — this is what makes "Matching N of
                 # total" and the page contents agree for N > CANDIDATE_PAGE_SIZE.
                 #
-                # Pending also needs the same launched-only restriction as the
-                # count query above (see its comment): `la` is already this
-                # query's own latest_audit join, scoped to this job, so no
-                # extra params are needed here the way the count query's
-                # equivalent EXISTS subquery needs its own jobdiva_id pair.
+                # Pending's launched-only restriction, same as the count query
+                # above. Deliberately an EXISTS over every audit row, not
+                # `la.interview_id` (this query's own join, the single newest
+                # row only) — a failed relaunch after an earlier success would
+                # leave la.interview_id blank and the two queries would
+                # disagree on this candidate again otherwise.
                 _pending_launched_where = (
                     " AND (COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''"
-                    " OR COALESCE(NULLIF(la.interview_id, ''), '') <> '')"
+                    " OR EXISTS ("
+                    "SELECT 1 FROM engage_interview_audit ea"
+                    " WHERE ea.candidate_id = sc.candidate_id"
+                    " AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)"
+                    " AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''"
+                    "))"
                     if status_label == "Pending" else ""
                 )
                 status_where_sql = (
@@ -1613,6 +1610,8 @@ async def get_job_candidates(
                 ]
                 if status_label:
                     params.append(status_label)
+                    if status_label == "Pending":
+                        params.extend([resolved_jobdiva_id, str(resolved_numeric_job_id)])
                 if limit is not None:
                     pagination_clause = " LIMIT %s OFFSET %s"
                     params.extend([int(limit), int(offset)])
