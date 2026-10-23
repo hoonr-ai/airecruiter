@@ -112,3 +112,64 @@ def test_status_is_case_and_whitespace_insensitive(
 
     counts_params = _calls(mock_db_connection)[1].args[1]
     assert counts_params[0] == expected
+
+
+def test_status_pending_adds_a_launched_only_restriction(
+    mock_db_connection, mock_verify_job_access, mock_count_launched
+):
+    """format_engage_status()'s "Pending" is a catch-all that also matches a
+    candidate who was never launched at all (no engage_status) and a launch
+    attempt that failed before an interview ever existed (engage_status
+    'failed', no score) — exactly the population the frontend's N/A bucket
+    covers. Without restricting to the launched population (a real interview
+    id from sourced_candidates.data or engage_interview_audit, same
+    definition as services/launched_candidates.py and the Rankings header's
+    own Pending count), status=pending pulls those rows in too and
+    "Matching N of total" reads far higher than the header's Pending figure.
+
+    Verified against a real QA job (26-28758): without this restriction,
+    status=pending returned 64; the header's Pending figure was 25; the
+    other 39 were exactly the job's N/A-bucket (never-launched) candidates.
+    """
+    _run(mock_db_connection, mock_verify_job_access, mock_count_launched, status="pending")
+
+    counts_sql, counts_params = _calls(mock_db_connection)[1].args
+    main_sql, main_params = _calls(mock_db_connection)[2].args
+
+    # "FROM engage_interview_audit ea" also appears once, unconditionally, in
+    # the pre-existing invalid_contact_count subquery — Pending's own EXISTS
+    # clause makes it two.
+    assert counts_sql.count("FROM engage_interview_audit ea") == 2
+    assert "engage_interview_id" in counts_sql
+    # "la.interview_id" is also in the SELECT list unconditionally (as
+    # audit_interview_id) — Pending's own OR clause makes it two.
+    assert main_sql.count("la.interview_id") == 2
+    assert "engage_interview_id" in main_sql
+
+    # Counts query: SELECT-list order is status_label, the dedup NOT EXISTS's
+    # jobdiva pair, then the launched-check EXISTS's own jobdiva pair.
+    assert counts_params[0] == "Pending"
+    assert counts_params[1:5] == [
+        "jobdiva_123", "job_123",  # dedup NOT EXISTS
+        "jobdiva_123", "job_123",  # launched-check EXISTS
+    ]
+    # Main query: la is already this query's own job-scoped join, so the
+    # launched check adds no new params — "Pending" is still the last one.
+    assert list(main_params)[-1] == "Pending"
+
+
+@pytest.mark.parametrize("status", ["fail", "in_progress"])
+def test_other_statuses_do_not_get_the_pending_launched_restriction(
+    mock_db_connection, mock_verify_job_access, mock_count_launched, status
+):
+    """Fail and In Progress only ever come from a recognised, explicitly-set
+    engage_status — never a never-launched candidate's blank one — so they
+    don't need (and must not get) the extra launched-only clause."""
+    _run(mock_db_connection, mock_verify_job_access, mock_count_launched, status=status)
+
+    counts_sql, _ = _calls(mock_db_connection)[1].args
+    main_sql, _ = _calls(mock_db_connection)[2].args
+    # Exactly the pre-existing, unconditional occurrence from
+    # invalid_contact_count / the SELECT list — not the Pending-only extra one.
+    assert counts_sql.count("FROM engage_interview_audit ea") == 1
+    assert main_sql.count("la.interview_id") == 1
