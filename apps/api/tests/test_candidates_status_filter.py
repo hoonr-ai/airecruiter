@@ -9,6 +9,7 @@ catch a misordered bind param or a missing WHERE/FILTER clause without a real
 Postgres instance.
 """
 import asyncio
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,7 +23,10 @@ def mock_db_connection():
         cur = conn.cursor.return_value.__enter__.return_value
         cur.fetchone.side_effect = [
             ("jobdiva_123", "job_123", "", ""),
-            {"total_candidates": 0, "duplicate_candidate_count": 0, "invalid_contact_count": 0},
+            # total_candidates (10, status-scoped when a filter is active) and
+            # job_total_candidates (76, always the whole job) deliberately
+            # differ, so a test that conflates them fails loudly.
+            {"total_candidates": 10, "job_total_candidates": 76, "duplicate_candidate_count": 0, "invalid_contact_count": 0},
         ]
         cur.fetchall.return_value = []
         yield mock_conn
@@ -180,3 +184,37 @@ def test_other_statuses_do_not_get_the_pending_launched_restriction(
     # invalid_contact_count — not the Pending-only extra one.
     assert counts_sql.count("FROM engage_interview_audit ea") == 1
     assert main_sql.count("FROM engage_interview_audit ea") == 0
+
+
+@pytest.mark.parametrize("status", [None, "pass", "fail", "pending", "in_progress"])
+def test_job_total_is_always_the_whole_job_not_the_status_filtered_count(
+    mock_db_connection, mock_verify_job_access, mock_count_launched, status
+):
+    """pagination.total is status-scoped (10, for pagination's own "have I
+    loaded everything matching this filter" bookkeeping); pagination.job_total
+    must stay the job's whole count (76) regardless of which STATUS bucket is
+    active — the Rankings header's "Matching N of total" denominator reads
+    job_total, not total, so N doesn't silently become "of itself" for every
+    STATUS value except the client-filtered ones (N/A, duplicate, invalid).
+
+    Reproduces the real QA observation: "Matching 10 of 10" for Pass instead
+    of "Matching 10 of 76" — the fix is a second, always-unfiltered count
+    column (job_total_candidates) alongside the existing status-scoped one.
+    """
+    result = _run(mock_db_connection, mock_verify_job_access, mock_count_launched, status=status)
+
+    assert result["pagination"]["total"] == 10
+    assert result["pagination"]["job_total"] == 76
+
+    counts_sql, _ = _calls(mock_db_connection)[1].args
+    assert "job_total_candidates" in counts_sql
+
+    # job_total_candidates must never gain a status FILTER — that's the one
+    # way this column could silently start tracking total_candidates again.
+    # Asserted by shape, not just presence: the COUNT feeding it is followed
+    # directly by its AS alias, with no "FILTER (...)" in between — unlike
+    # total_candidates just above it, which always has one when a status
+    # filter is active.
+    assert re.search(
+        r"COUNT\(DISTINCT sc\.candidate_id\)\s+AS job_total_candidates", counts_sql
+    )

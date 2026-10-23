@@ -528,9 +528,17 @@ export default function CandidateRankingsPage() {
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [candidateTotalCount, setCandidateTotalCount] = useState(0);
+  // pagination.job_total — the "Matching N of total" denominator, constant
+  // across STATUS buckets, unlike the filter-scoped candidateTotalCount above.
+  const [candidateJobTotalCount, setCandidateJobTotalCount] = useState(0);
   const [candidateOffset, setCandidateOffset] = useState(0);
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  // True only while a STATUS-filter switch's fetch is in flight — distinct
+  // from isLoadingMore (infinite-scroll) and isLoading (the whole-job
+  // reload), neither of which cover this transition, so without this the
+  // header briefly reads "Matching 0 of 0" with no loading indicator.
+  const [isLoadingStatusFilter, setIsLoadingStatusFilter] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
   const [duplicateCount, setDuplicateCount] = useState(0);
   const [invalidContactCount, setInvalidContactCount] = useState(0);
@@ -1700,6 +1708,10 @@ export default function CandidateRankingsPage() {
     if (Number.isFinite(total)) {
       setCandidateTotalCount(total);
     }
+    const jobTotal = Number(candData?.pagination?.job_total);
+    if (Number.isFinite(jobTotal)) {
+      setCandidateJobTotalCount(jobTotal);
+    }
 
     setHasMoreCandidates(Boolean(candData?.pagination?.has_more));
     setCandidateOffset(offset + pageRows.length);
@@ -1745,7 +1757,15 @@ export default function CandidateRankingsPage() {
     setCandidates([]);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
-    fetchCandidatesPage(0, true, isStale);
+    setIsLoadingStatusFilter(true);
+    fetchCandidatesPage(0, true, isStale)
+      .catch((error) => console.error("Error reloading candidates for STATUS filter:", error))
+      .finally(() => {
+        // Only this call's own completion clears the flag — a stale response
+        // from a filter the user has since switched away from must not flip
+        // it off while a newer fetch (which set it true itself) is still going.
+        if (!isStale()) setIsLoadingStatusFilter(false);
+      });
   }, [statusFilter, jobId, fetchCandidatesPage]);
 
   const loadMoreCandidates = useCallback(async () => {
@@ -1782,6 +1802,12 @@ export default function CandidateRankingsPage() {
     setFeedbacks({});
     setFeedbackReasons({});
     setCandidateTotalCount(0);
+    setCandidateJobTotalCount(0);
+    // A job switch bumps loadSeqRef, so an in-flight STATUS-filter-switch
+    // fetch (started under the old job) finds isStale() true when it
+    // resolves and skips its own setIsLoadingStatusFilter(false) — reset it
+    // here instead, or "(Loading…)" would be stuck on for the new job.
+    setIsLoadingStatusFilter(false);
     setLaunchedRowCount(0);
     setDuplicateCount(0);
     setInvalidContactCount(0);
@@ -1939,6 +1965,9 @@ export default function CandidateRankingsPage() {
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
   const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
+  // > 0, not ||, so a job with genuinely 0 candidates still shows 0 instead
+  // of falling through to the filter-scoped totalCandidates.
+  const displayTotalCandidates = candidateJobTotalCount > 0 ? candidateJobTotalCount : totalCandidates;
 
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
@@ -2385,9 +2414,9 @@ export default function CandidateRankingsPage() {
               {(totalCandidates > 0 || hasActiveFilters) && (
                 <span className="text-[13px] font-medium text-slate-500 whitespace-nowrap">
                   {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900 font-semibold">{hasActiveFilters ? displayedCount : totalCandidates}</span>
-                  {hasActiveFilters && <> of <span className="text-slate-900 font-semibold">{totalCandidates}</span></>}
+                  {hasActiveFilters && <> of <span className="text-slate-900 font-semibold">{displayTotalCandidates}</span></>}
                   {" "}total candidates
-                  {isPartiallyLoaded && <span className="ml-1 text-[11px] text-slate-400">(Loading…)</span>}
+                  {(isPartiallyLoaded || isLoadingStatusFilter) && <span className="ml-1 text-[11px] text-slate-400">(Loading…)</span>}
                 </span>
               )}
             </div>
