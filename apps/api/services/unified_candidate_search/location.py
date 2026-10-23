@@ -473,7 +473,30 @@ class LocationMixin:
         country = self._target_country(criteria)
         if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
             return self._country_display_name(country)
-        return self._scope_location_to_country(criteria.location, country)
+        location = self._resolve_bare_zip_for_external_source(criteria.location)
+        return self._scope_location_to_country(location, country)
+
+    @staticmethod
+    def _resolve_bare_zip_for_external_source(location: Any) -> Any:
+        """A bare ZIP (e.g. "07310") carries no usable signal once it reaches
+        Exa/Dice: their NL query strips every digit out of the location text
+        (exa_service._strip_zip_for_query — LinkedIn profile location lines
+        never show a zip), so "07310, United States" degenerates to just
+        "United States" and the search loses its location entirely. Resolve
+        it to "City, ST" first, the same way JobDiva's own geo resolution
+        already backfills a place name from a bare zip
+        (_resolve_jobdiva_geo) — the zip itself still drives the offline
+        radius post-filter untouched, this only fixes what reaches Exa's
+        query text.
+        """
+        text = str(location or "").strip()
+        from services import zip_index
+        if not zip_index.is_known_zip(text):
+            return location
+        entry = zip_index.lookup_zip(text)
+        if not entry:
+            return location
+        return f"{entry['city']}, {entry['state']}"
 
     def _search_location_for_deep_research(self, criteria: SearchCriteria) -> str:
         """Location string for the Exa Pass B agent (a single prompt-based

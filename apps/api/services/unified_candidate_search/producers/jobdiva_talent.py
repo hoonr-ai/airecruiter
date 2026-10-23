@@ -242,10 +242,13 @@ class JobdivaTalentMixin:
                 })
                 # Build a per-location boolean WITHOUT the multi-location OR
                 # clause so the text filter doesn't conflict with the geo radius.
-                loc_boolean = (
-                    criteria.boolean_string
-                    or self._build_boolean_string(alt_criteria, dialect="jobdiva")
-                )
+                # Never reuse criteria.boolean_string here — the wizard sends it
+                # non-empty, with every location OR'd in, which makes
+                # jobdiva.py's count_location_clauses() gate see 2+ clauses and
+                # skip this call's own precise zip+radius anchor (see PR for
+                # this fix). alt_criteria has additional_locations=[], so this
+                # always rebuilds a boolean scoped to just this one location.
+                loc_boolean = self._build_boolean_string(alt_criteria, dialect="jobdiva")
                 alt_countries, alt_states, alt_geo_zip = self._resolve_jobdiva_geo(alt_criteria)
                 if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
                     alt_geo_zip = ""
