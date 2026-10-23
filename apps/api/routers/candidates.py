@@ -1100,7 +1100,7 @@ def _maybe_notify_zero_match(
     criteria: Any,
     summary_event: Dict[str, Any],
     user: UserIdentity,
-    any_source_failed: bool = False,
+    all_sources_failed: bool = False,
 ) -> None:
     """Queues the zero-match notification when a FULL search's terminal
     "summary" event reports total_candidates == 0 — not for a "sample"
@@ -1108,15 +1108,17 @@ def _maybe_notify_zero_match(
     approves a full search), where an empty result is a much weaker/
     noisier signal that would false-alarm on routine probes.
 
-    any_source_failed: True if ANY "source_status" event earlier in this
-    same stream reported status == "failed" (see
-    unified_candidate_search.py's emit_source_status). A 0-candidate
-    summary caused by a broken/timed-out source pool is NOT the same
-    signal as a search that genuinely ran clean and found nobody — telling
-    the recruiter to loosen their filters when the real problem is a
-    failed upstream call would be a false alarm, so this suppresses the
-    notification in that case (the stream's own source_status event
-    already surfaces the real failure to the UI).
+    Matches the Step-5 UI's own "No candidates found with the current
+    filters" message: that message reads the same whether every source
+    searched cleanly or one of them errored out, so one failed source among
+    several no longer suppresses this on its own.
+
+    all_sources_failed is narrower: when every attempted source failed, the
+    search couldn't run at all — a 0-candidate summary there means "the
+    search broke", not "nobody matched", and telling the recruiter to
+    loosen their filters would be the wrong advice. That case is still
+    suppressed (its own "source_status" events already surface the real
+    failure to the UI).
 
     Called from stream_candidates() for every "summary" event (there's at
     most one per search, the stream's terminal event) — fire-and-forget via
@@ -1124,7 +1126,7 @@ def _maybe_notify_zero_match(
     NDJSON stream still being delivered to the client.
     """
     try:
-        if any_source_failed:
+        if all_sources_failed:
             return
         if str(getattr(criteria, "search_mode", "full")).lower() != "full":
             return
@@ -1179,18 +1181,22 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         _schedule_cross_submissions(str(request.job_id), criteria)
 
         async def stream_candidates():
-            # Tracks whether any source pool reported status == "failed"
-            # (see unified_candidate_search.py's emit_source_status) before
-            # the terminal "summary" event — passed to _maybe_notify_zero_match
-            # so a broken/timed-out source isn't mistaken for a clean search
-            # that genuinely found nobody.
-            any_source_failed = False
+            # Counts, not a single flag: "all failed" only means something
+            # once at least one source actually reported in. Passed to
+            # _maybe_notify_zero_match on the terminal "summary" event.
+            sources_seen = 0
+            sources_failed = 0
             async with contextlib.aclosing(_search_event_stream(criteria)) as events:
                 async for event in events:
-                    if event.get("type") == "source_status" and (event.get("data") or {}).get("status") == "failed":
-                        any_source_failed = True
+                    if event.get("type") == "source_status":
+                        sources_seen += 1
+                        if (event.get("data") or {}).get("status") == "failed":
+                            sources_failed += 1
                     elif event.get("type") == "summary":
-                        _maybe_notify_zero_match(request, criteria, event, user, any_source_failed)
+                        _maybe_notify_zero_match(
+                            request, criteria, event, user,
+                            all_sources_failed=sources_seen > 0 and sources_failed == sources_seen,
+                        )
                     try:
                         line = json.dumps(event) + "\n"
                     except Exception as e:  # noqa: BLE001 — e.g. a datetime/Decimal value
