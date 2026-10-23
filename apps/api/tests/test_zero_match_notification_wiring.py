@@ -123,20 +123,25 @@ def test_swallows_errors_without_raising(monkeypatch):
     cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user)  # no exception = pass
 
 
-def test_does_not_queue_when_a_source_failed(monkeypatch):
-    """PR review follow-up: a 0-candidate summary caused by a broken/timed-
-    out source pool (see unified_candidate_search.py's emit_source_status)
-    is not the same signal as a search that genuinely ran clean and found
-    nobody — must not tell the recruiter to loosen filters when the real
-    problem is a failed upstream call."""
+def test_queues_notification_regardless_of_source_failures(monkeypatch):
+    """A 0-candidate summary caused by a broken/timed-out source pool (see
+    unified_candidate_search.py's emit_source_status) still gets the
+    recruiter notified — the Step-5 UI's "No candidates found with the
+    current filters" message shows the same way whether every source
+    searched cleanly or one of them errored out, so the notification has to
+    match that, not a stricter bar. A source failure still has its own
+    source_status event surfaced to the UI independently.
+    _maybe_notify_zero_match no longer takes an any_source_failed argument
+    at all (removed from both the function and stream_candidates()'s call
+    site, see test_stream_* below for the end-to-end version)."""
     notif_calls, spawn_calls = _patch(monkeypatch)
     request = SimpleNamespace(job_id="J1")
     criteria = SimpleNamespace(search_mode="full")
 
-    cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user, any_source_failed=True)
+    cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user)
 
-    assert notif_calls == []
-    assert spawn_calls == []
+    assert len(notif_calls) == 1
+    assert len(spawn_calls) == 1
 
 
 def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
@@ -230,11 +235,12 @@ def test_stream_fires_zero_match_on_a_real_zero_summary_event(monkeypatch):
     assert len(spawn_calls) == 1
 
 
-def test_stream_suppresses_zero_match_after_a_failed_source_status(monkeypatch):
-    """A source_status(status="failed") event ahead of the summary must
-    suppress the notification — the real end-to-end path for the Medium
-    review finding, not just _maybe_notify_zero_match called directly with
-    any_source_failed=True."""
+def test_stream_fires_zero_match_even_after_a_failed_source_status(monkeypatch):
+    """A source_status(status="failed") event ahead of the summary no
+    longer suppresses the notification — stream_candidates() doesn't track
+    or pass any_source_failed any more. A source failure still has its own
+    source_status event surfaced to the UI independently; it just no
+    longer silences the zero-match signal too."""
     notif_calls, spawn_calls = _patch(monkeypatch)
     _install_fake_search(monkeypatch, [
         {"type": "source_status", "data": {"source": "JobDiva-JobAgent", "status": "failed", "count": 0, "reason": "boom"}},
@@ -244,15 +250,14 @@ def test_stream_suppresses_zero_match_after_a_failed_source_status(monkeypatch):
     user = UserIdentity(email="recruiter@x.com", role="recruiter")
     _consume(_request(), user)
 
-    assert notif_calls == []
-    assert spawn_calls == []
+    assert len(notif_calls) == 1
+    assert len(spawn_calls) == 1
 
 
-def test_stream_does_not_fire_when_a_different_source_ok_follows_a_failure(monkeypatch):
-    """Once any source has failed during this search, the whole summary is
-    suspect — a later "ok" status from a different source must not clear
-    that, since the 0 total still reflects the failed source's missing
-    contribution."""
+def test_stream_fires_zero_match_with_a_mix_of_failed_and_ok_sources(monkeypatch):
+    """A mix of failed/ok sources ahead of the summary still reaches a
+    genuine 0 total, and the recruiter still gets notified — matching the
+    "No candidates found" message the UI shows regardless of this mix."""
     notif_calls, spawn_calls = _patch(monkeypatch)
     _install_fake_search(monkeypatch, [
         {"type": "source_status", "data": {"source": "Dice", "status": "failed", "count": 0, "reason": "boom"}},
@@ -263,5 +268,5 @@ def test_stream_does_not_fire_when_a_different_source_ok_follows_a_failure(monke
     user = UserIdentity(email="recruiter@x.com", role="recruiter")
     _consume(_request(), user)
 
-    assert notif_calls == []
-    assert spawn_calls == []
+    assert len(notif_calls) == 1
+    assert len(spawn_calls) == 1

@@ -1100,7 +1100,6 @@ def _maybe_notify_zero_match(
     criteria: Any,
     summary_event: Dict[str, Any],
     user: UserIdentity,
-    any_source_failed: bool = False,
 ) -> None:
     """Queues the zero-match notification when a FULL search's terminal
     "summary" event reports total_candidates == 0 — not for a "sample"
@@ -1108,15 +1107,13 @@ def _maybe_notify_zero_match(
     approves a full search), where an empty result is a much weaker/
     noisier signal that would false-alarm on routine probes.
 
-    any_source_failed: True if ANY "source_status" event earlier in this
-    same stream reported status == "failed" (see
-    unified_candidate_search.py's emit_source_status). A 0-candidate
-    summary caused by a broken/timed-out source pool is NOT the same
-    signal as a search that genuinely ran clean and found nobody — telling
-    the recruiter to loosen their filters when the real problem is a
-    failed upstream call would be a false alarm, so this suppresses the
-    notification in that case (the stream's own source_status event
-    already surfaces the real failure to the UI).
+    Matches the Step-5 UI's own "No candidates found with the current
+    filters" message exactly: that message shows whenever the raw candidate
+    list is empty, regardless of whether every source searched cleanly or
+    one of them errored out along the way — a recruiter looking at "No
+    candidates found" should always get the notification, full stop. (A
+    source failure still gets its own, separate "source_status" event
+    surfaced to the UI independently of this.)
 
     Called from stream_candidates() for every "summary" event (there's at
     most one per search, the stream's terminal event) — fire-and-forget via
@@ -1124,8 +1121,6 @@ def _maybe_notify_zero_match(
     NDJSON stream still being delivered to the client.
     """
     try:
-        if any_source_failed:
-            return
         if str(getattr(criteria, "search_mode", "full")).lower() != "full":
             return
         summary = ((summary_event.get("data") or {}).get("summary")) or {}
@@ -1179,18 +1174,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         _schedule_cross_submissions(str(request.job_id), criteria)
 
         async def stream_candidates():
-            # Tracks whether any source pool reported status == "failed"
-            # (see unified_candidate_search.py's emit_source_status) before
-            # the terminal "summary" event — passed to _maybe_notify_zero_match
-            # so a broken/timed-out source isn't mistaken for a clean search
-            # that genuinely found nobody.
-            any_source_failed = False
             async with contextlib.aclosing(_search_event_stream(criteria)) as events:
                 async for event in events:
-                    if event.get("type") == "source_status" and (event.get("data") or {}).get("status") == "failed":
-                        any_source_failed = True
-                    elif event.get("type") == "summary":
-                        _maybe_notify_zero_match(request, criteria, event, user, any_source_failed)
+                    if event.get("type") == "summary":
+                        _maybe_notify_zero_match(request, criteria, event, user)
                     try:
                         line = json.dumps(event) + "\n"
                     except Exception as e:  # noqa: BLE001 — e.g. a datetime/Decimal value
