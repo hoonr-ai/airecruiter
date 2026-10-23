@@ -16,6 +16,8 @@ AttributeError, same as the rest of that file.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from core.auth import UserIdentity
 from models import CandidateSearchRequest
 from routers import candidates as cand_module
@@ -123,17 +125,14 @@ def test_swallows_errors_without_raising(monkeypatch):
     cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user)  # no exception = pass
 
 
-def test_queues_notification_regardless_of_source_failures(monkeypatch):
-    """A 0-candidate summary caused by a broken/timed-out source pool (see
-    unified_candidate_search.py's emit_source_status) still gets the
-    recruiter notified — the Step-5 UI's "No candidates found with the
-    current filters" message shows the same way whether every source
-    searched cleanly or one of them errored out, so the notification has to
-    match that, not a stricter bar. A source failure still has its own
-    source_status event surfaced to the UI independently.
-    _maybe_notify_zero_match no longer takes an any_source_failed argument
-    at all (removed from both the function and stream_candidates()'s call
-    site, see test_stream_* below for the end-to-end version)."""
+def test_queues_notification_when_only_some_sources_failed(monkeypatch):
+    """A 0-candidate summary caused by one source among several failing is
+    not the same as the whole search breaking (see
+    test_does_not_queue_when_all_sources_failed below) — the recruiter still
+    gets notified, matching the Step-5 UI's "No candidates found" message,
+    which reads the same whether every source searched cleanly or one
+    errored out. any_source_failed no longer exists as a concept here; the
+    all_sources_failed param defaults to False."""
     notif_calls, spawn_calls = _patch(monkeypatch)
     request = SimpleNamespace(job_id="J1")
     criteria = SimpleNamespace(search_mode="full")
@@ -142,6 +141,20 @@ def test_queues_notification_regardless_of_source_failures(monkeypatch):
 
     assert len(notif_calls) == 1
     assert len(spawn_calls) == 1
+
+
+def test_does_not_queue_when_all_sources_failed(monkeypatch):
+    """When every attempted source failed, the search couldn't run at all —
+    a 0-candidate summary there means "the search broke", not "nobody
+    matched", so the recruiter isn't told to loosen their filters."""
+    notif_calls, spawn_calls = _patch(monkeypatch)
+    request = SimpleNamespace(job_id="J1")
+    criteria = SimpleNamespace(search_mode="full")
+
+    cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user, all_sources_failed=True)
+
+    assert notif_calls == []
+    assert spawn_calls == []
 
 
 def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
@@ -235,38 +248,42 @@ def test_stream_fires_zero_match_on_a_real_zero_summary_event(monkeypatch):
     assert len(spawn_calls) == 1
 
 
-def test_stream_fires_zero_match_even_after_a_failed_source_status(monkeypatch):
-    """A source_status(status="failed") event ahead of the summary no
-    longer suppresses the notification — stream_candidates() doesn't track
-    or pass any_source_failed any more. A source failure still has its own
-    source_status event surfaced to the UI independently; it just no
-    longer silences the zero-match signal too."""
+@pytest.mark.parametrize(
+    "source_events,expect_notified",
+    [
+        pytest.param(
+            [{"source": "JobDiva-JobAgent", "status": "failed"}],
+            False,
+            id="single_source_and_it_failed",
+        ),
+        pytest.param(
+            [{"source": "Dice", "status": "failed"}, {"source": "LinkedIn", "status": "failed"}],
+            False,
+            id="two_sources_both_failed",
+        ),
+        pytest.param(
+            [{"source": "Dice", "status": "failed"}, {"source": "LinkedIn", "status": "ok"}],
+            True,
+            id="one_of_two_failed",
+        ),
+    ],
+)
+def test_stream_zero_match_depends_on_whether_every_source_failed(monkeypatch, source_events, expect_notified):
+    """Exercises the actual source_status/summary event loop inside
+    stream_candidates(), which now counts sources seen vs. failed itself
+    (not a single any-failed flag) — only "every source that reported in,
+    failed" suppresses the notification; any surviving source still gets
+    the recruiter notified of the genuine 0 total."""
     notif_calls, spawn_calls = _patch(monkeypatch)
     _install_fake_search(monkeypatch, [
-        {"type": "source_status", "data": {"source": "JobDiva-JobAgent", "status": "failed", "count": 0, "reason": "boom"}},
+        {"type": "source_status", "data": {**e, "count": 0, "reason": "boom"} if e["status"] == "failed" else {**e, "count": 0}}
+        for e in source_events
+    ] + [
         {"type": "summary", "data": {"summary": {"total_candidates": 0}}},
     ])
 
     user = UserIdentity(email="recruiter@x.com", role="recruiter")
     _consume(_request(), user)
 
-    assert len(notif_calls) == 1
-    assert len(spawn_calls) == 1
-
-
-def test_stream_fires_zero_match_with_a_mix_of_failed_and_ok_sources(monkeypatch):
-    """A mix of failed/ok sources ahead of the summary still reaches a
-    genuine 0 total, and the recruiter still gets notified — matching the
-    "No candidates found" message the UI shows regardless of this mix."""
-    notif_calls, spawn_calls = _patch(monkeypatch)
-    _install_fake_search(monkeypatch, [
-        {"type": "source_status", "data": {"source": "Dice", "status": "failed", "count": 0, "reason": "boom"}},
-        {"type": "source_status", "data": {"source": "LinkedIn", "status": "ok", "count": 0}},
-        {"type": "summary", "data": {"summary": {"total_candidates": 0}}},
-    ])
-
-    user = UserIdentity(email="recruiter@x.com", role="recruiter")
-    _consume(_request(), user)
-
-    assert len(notif_calls) == 1
-    assert len(spawn_calls) == 1
+    assert len(notif_calls) == (1 if expect_notified else 0)
+    assert len(spawn_calls) == (1 if expect_notified else 0)
