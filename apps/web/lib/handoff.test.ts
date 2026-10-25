@@ -6,6 +6,7 @@ import {
   handoffOutcomeLabel,
   mergeSuggestions,
   reviewSpeakerLabel,
+  safeRecordingUrl,
   describeHandoffError,
   formatElapsed,
   loadCopilotPrefs,
@@ -163,5 +164,16 @@ describe("handoff review", () => {
   it("names the recruiter in a reviewed transcript", () => {
     assert.equal(reviewSpeakerLabel("recruiter"), "Recruiter");
     assert.equal(reviewSpeakerLabel("agent"), "PAIR");
+  });
+});
+
+describe("safeRecordingUrl", () => {
+  it("keeps only https URLs", () => {
+    assert.equal(safeRecordingUrl("https://r2.example.com/a.ogg?sig=1"), "https://r2.example.com/a.ogg?sig=1");
+    assert.equal(safeRecordingUrl("http://r2.example.com/a.ogg"), null);
+    assert.equal(safeRecordingUrl("javascript:alert(1)"), null);
+    assert.equal(safeRecordingUrl("/relative.ogg"), null);
+    assert.equal(safeRecordingUrl(""), null);
+    assert.equal(safeRecordingUrl(null), null);
   });
 });

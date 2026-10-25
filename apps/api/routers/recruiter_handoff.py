@@ -181,25 +181,27 @@ async def get_handoff_resume(interview_id: int, user: UserIdentity = Depends(get
 # audit row and are refused, so ids from another tenant are never proxied.
 
 async def _optional_read(coro):
-    """A copilot read, or None when there is none (404) or Pair-bot fails."""
+    """A copilot read as (body, failed): (None, False) when there is none
+    (404), (None, True) when Pair-bot failed, so the page can say so."""
     try:
-        return await coro
+        return await coro, False
     except handoff.PairbotHandoffError as exc:
-        if exc.status != 404:
-            logger.warning("handoff review read failed status=%s detail=%s", exc.status, exc.detail)
-        return None
+        if exc.status == 404:
+            return None, False
+        logger.warning("handoff review read failed status=%s detail=%s", exc.status, exc.detail)
+        return None, True
 
 
 def _review_access_sync(interview_id: int, user: UserIdentity) -> None:
-    from routers._helpers import _verify_job_access_by_id
-    from routers.engagement.recordings import _recording_audit_row
+    from routers._helpers import verify_job_access_by_id
+    from routers.engagement.recordings import recording_audit_row
 
-    row = _recording_audit_row(str(int(interview_id)))
+    row = recording_audit_row(str(int(interview_id)))
     if not row:
         raise HTTPException(status_code=404, detail="Interview not found")
     jobdiva_id = (row.get("jobdiva_id") or "").strip()
     if jobdiva_id:
-        _verify_job_access_by_id(jobdiva_id, user)
+        verify_job_access_by_id(jobdiva_id, user)
     elif not user.is_admin:
         raise HTTPException(status_code=403, detail="Access denied. You do not have permission to access this interview.")
 
@@ -217,18 +219,18 @@ async def get_handoff_review(interview_id: int, user: UserIdentity = Depends(get
         "claimed_at": st.get("claimed_at"),
         "closed_at": st.get("closed_at"),
         "close_reason": st.get("close_reason"),
-        # Pair-bot keeps close notes but does not return them yet; shown
-        # once its state reply carries them.
         "close_notes": st.get("close_notes"),
         "transcript": None,
         "recording": None,
+        "transcript_error": False,
+        "recording_error": False,
     }
     if not out["state"]:
         return out
     acting = (st.get("recruiter_email") or st.get("claimed_by_email") or "").strip().lower()
     if not acting:
         return out
-    tr, rec = await asyncio.gather(
+    (tr, out["transcript_error"]), (rec, out["recording_error"]) = await asyncio.gather(
         _optional_read(handoff.transcript(interview_id, acting)),
         _optional_read(handoff.recording(interview_id, acting)),
     )

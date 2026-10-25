@@ -847,6 +847,9 @@ export interface HandoffReview {
   close_notes?: string | null;
   transcript: { lines: HandoffTranscriptLine[]; suggestions: HandoffSuggestionBatch[] } | null;
   recording: HandoffRecording | null;
+  /** Pair-bot failed to return these (not merely absent). */
+  transcript_error?: boolean;
+  recording_error?: boolean;
 }
 
 export interface HandoffRecording {

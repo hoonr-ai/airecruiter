@@ -176,6 +176,25 @@ def test_audit_payload_drops_raw_resume_text():
     assert payload["resumes"][0]["raw_resume_text"] == "secret"
 
 
+def test_every_audit_write_serializes_the_payload_without_resume_text():
+    """Each engage_interview_audit insert in bulk_send must go through
+    _audit_payload_json; a raw json.dumps(payload_obj) would store every
+    candidate's résumé in every audit row."""
+    import inspect
+    import re
+
+    payload = {"resumes": [{"source_candidate_id": "a", "raw_resume_text": "secret"}]}
+    assert "raw_resume_text" not in eng_bulk_send._audit_payload_json(payload)
+
+    src = inspect.getsource(eng_bulk_send)
+    inserts = [m.start() for m in re.finditer(r"INSERT INTO engage_interview_audit", src)]
+    assert inserts, "no audit writes found"
+    for start in inserts:
+        call = src[start:start + 600]  # the statement and its parameters
+        assert "_audit_payload_json(payload_obj)" in call, src[start:start + 300]
+    assert not re.search(r"json\.dumps\(\s*payload_obj\b", src)
+
+
 def test_fetch_live_rows_dedupes_ids_and_selects_match_percentage():
     # No schema-drift fallback any more: a database without the column fails
     # here. The column is guaranteed by

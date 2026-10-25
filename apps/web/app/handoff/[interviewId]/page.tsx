@@ -39,6 +39,7 @@ import {
   mergeSuggestions,
   mergeTranscript,
   parseCopilotPacket,
+  safeRecordingUrl,
   saveCopilotPrefs,
   type CopilotLine,
   type CopilotPrefs,
@@ -194,7 +195,7 @@ export default function HandoffJoinPage() {
   useEffect(() => {
     if (!mine || !(phase === "ended" || over)) return;
     let live = true;
-    void optional(api.handoff.recording(interviewId)).then((r) => live && setRecording(r?.url ? r : null));
+    void optional(api.handoff.recording(interviewId)).then((r) => live && setRecording(safeRecordingUrl(r?.url) ? r : null));
     void optional(api.handoff.transcript(interviewId)).then((t) => {
       if (!live || !t) return;
       setLines((cur) => mergeTranscript(cur, t.lines ?? []));

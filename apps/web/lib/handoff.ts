@@ -267,3 +267,14 @@ export function reviewSpeakerLabel(role: string | null | undefined): string {
   const label = speakerLabel(role);
   return label === "You" ? "Recruiter" : label;
 }
+
+// The recording URL comes from Pair-bot via Pair's API; only a well-formed
+// https URL is put into an <audio src>.
+export function safeRecordingUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}

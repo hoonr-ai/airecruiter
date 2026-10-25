@@ -177,11 +177,13 @@ def _base_url() -> str:
     return os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
 
 
-async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None,
+                headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     url = f"{_base_url()}{path}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.request(method, url, json=body, headers=get_pair_auth_headers(json_content_type=True))
+            resp = await client.request(method, url, json=body,
+                                        headers={**get_pair_auth_headers(json_content_type=True), **(headers or {})})
     except httpx.HTTPError as exc:
         logger.warning("pairbot handoff %s %s failed: %s", method, path, exc)
         raise PairbotHandoffError(502, "PAIR-bot is unreachable") from exc
@@ -219,23 +221,26 @@ async def state(interview_id: int) -> Dict[str, Any]:
 
 # Recruiter copilot reads (Pair-bot docs/recruiter-copilot-design.md §4).
 # Pair-bot allows only the handoff's own recruiter; the login email rides as
-# a query parameter on these GETs, exactly as claim/close carry it in the body.
+# an X-Recruiter-Email header on these GETs (kept out of URLs and access
+# logs), as claim/close carry it in the body.
 
-def _as(recruiter_email: str) -> str:
-    from urllib.parse import quote
-    return f"?recruiter_email={quote(recruiter_email)}"
+def _as(recruiter_email: str) -> Dict[str, str]:
+    return {"X-Recruiter-Email": recruiter_email}
 
 
 async def context(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
-    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/context{_as(recruiter_email)}")
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/context",
+                       headers=_as(recruiter_email))
 
 
 async def transcript(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
-    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/transcript{_as(recruiter_email)}")
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/transcript",
+                       headers=_as(recruiter_email))
 
 
 async def recording(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
-    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/recording{_as(recruiter_email)}")
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/recording",
+                       headers=_as(recruiter_email))
 
 
 # ---------------------------------------------------------------------------
@@ -263,13 +268,14 @@ def resume_for_interview_sync(interview_id: int) -> Optional[Dict[str, Any]]:
             if not audit:
                 return None
             candidate_id, jobdiva_id, candidate_name = audit[0], audit[1], audit[2]
-            # The launch's own job row first; any row for the candidate otherwise.
+            # Only the launch's own job row: another job's resume may be a
+            # different version, or one this recruiter has no access to.
             cur.execute(
                 """
                 SELECT name, resume_text
                   FROM sourced_candidates
-                 WHERE candidate_id = %s AND COALESCE(resume_text, '') <> ''
-                 ORDER BY (jobdiva_id = %s) DESC
+                 WHERE candidate_id = %s AND jobdiva_id = %s
+                   AND COALESCE(resume_text, '') <> ''
                  LIMIT 1
                 """,
                 (str(candidate_id), str(jobdiva_id or "")),

@@ -232,7 +232,7 @@ def review_env(as_recruiter, monkeypatch):
     import routers.engagement.recordings as recordings
 
     env = {"audit": {"jobdiva_id": "26-1"}, "access": [], "deny": False, "reads": []}
-    monkeypatch.setattr(recordings, "_recording_audit_row", lambda iid: env["audit"])
+    monkeypatch.setattr(recordings, "recording_audit_row", lambda iid: env["audit"])
 
     def verify(job_id, user):
         env["access"].append((job_id, user.email))
@@ -240,7 +240,7 @@ def review_env(as_recruiter, monkeypatch):
             from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="no")
 
-    monkeypatch.setattr(helpers, "_verify_job_access_by_id", verify)
+    monkeypatch.setattr(helpers, "verify_job_access_by_id", verify)
 
     async def fake_state(interview_id):
         return {"interview_id": interview_id, "state": "closed", "recruiter_email": "owner@example.com",
@@ -268,6 +268,17 @@ def test_review_lets_a_teammate_with_job_access_read_as_the_launch_recruiter(rev
     assert body["state"] == "closed" and body["claimed_by_email"] == "owner@example.com"
     assert body["transcript"]["suggestions"][0]["id"] == "s1"
     assert body["recording"] is None  # 404 = none
+    assert body["transcript_error"] is False and body["recording_error"] is False
+
+
+def test_review_flags_a_pairbot_failure_apart_from_absence(review_env, monkeypatch):
+    async def broken(interview_id, email):
+        raise handoff.PairbotHandoffError(503, "down")
+
+    monkeypatch.setattr(handoff, "transcript", broken)
+    body = client.get("/api/v1/handoff/4242/review").json()
+    assert body["transcript"] is None and body["transcript_error"] is True
+    assert body["recording"] is None and body["recording_error"] is False
 
 
 def test_review_refuses_without_job_access(review_env):
@@ -341,9 +352,10 @@ def test_launch_models_accept_and_bound_the_handoff_fields():
     assert LaunchOptions(recruiter_handoff=True).model_dump()["recruiter_handoff"] is True
 
 
-def test_payload_flag_is_gated_on_a_recruiter_email():
+def test_payload_flag_is_gated_on_a_recruiter_email(monkeypatch):
     """Only the launch's recruiter can join, so the flag goes out only
     alongside their email."""
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
     req = eng.SendBulkInterviewRequest.model_construct(recruiter_handoff=True, handoff_timeout_sec=600)
     payload = {}
     eng._apply_handoff_fields(payload, req, "rec@example.com")
@@ -355,6 +367,47 @@ def test_payload_flag_is_gated_on_a_recruiter_email():
     payload = {}
     eng._apply_handoff_fields(payload, off, "rec@example.com")
     assert payload == {}
+
+
+@pytest.mark.parametrize("env", ["production", "prod", " Production "])
+def test_payload_flag_is_dropped_in_production(monkeypatch, caplog, env):
+    """The UI hides handoff in prod; the API must not send it either."""
+    monkeypatch.setenv("ENVIRONMENT", env)
+    req = eng.SendBulkInterviewRequest.model_construct(recruiter_handoff=True, handoff_timeout_sec=600)
+    payload = {}
+    with caplog.at_level("WARNING"):
+        eng._apply_handoff_fields(payload, req, "rec@example.com")
+    assert payload == {}
+    assert "production" in caplog.text
+
+
+def test_payload_flag_is_sent_outside_production(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "qa")
+    req = eng.SendBulkInterviewRequest.model_construct(recruiter_handoff=True, handoff_timeout_sec=None)
+    payload = {}
+    eng._apply_handoff_fields(payload, req, "rec@example.com")
+    assert payload == {"recruiter_handoff": True}
+
+
+def test_pairbot_reads_carry_the_recruiter_in_a_header_not_the_url(monkeypatch):
+    import asyncio
+
+    sent = []
+
+    async def fake_call(method, path, body=None, headers=None):
+        sent.append((method, path, headers))
+        return {}
+
+    monkeypatch.setattr(handoff, "_call", fake_call)
+    for read in (handoff.context, handoff.transcript, handoff.recording):
+        asyncio.run(read(4242, "rec@example.com"))
+    assert [p for _, p, _ in sent] == [
+        "/api/interviews/4242/handoff/context",
+        "/api/interviews/4242/handoff/transcript",
+        "/api/interviews/4242/handoff/recording",
+    ]
+    assert all(h == {"X-Recruiter-Email": "rec@example.com"} for _, _, h in sent)
+    assert not any("recruiter_email" in p for _, p, _ in sent)
 
 
 # --- webhook processing against a real Postgres (opt-in) ------------------------------
@@ -460,6 +513,11 @@ def test_resume_lookup_maps_the_interview_to_the_launch_candidate(pg):
         assert handoff.resume_for_interview_sync(4242) == {
             "candidate_name": "Ada Lovelace", "resume_text": "launch job resume"}
         assert handoff.resume_for_interview_sync(9999) is None
+        # No resume on the launch's own job: never another job's.
+        cur_conn = pg.cursor()
+        cur_conn.execute("UPDATE sourced_candidates SET resume_text = NULL WHERE jobdiva_id = 'J1'")
+        cur_conn.close()
+        assert handoff.resume_for_interview_sync(4242) == {"candidate_name": "Ada Lovelace", "resume_text": None}
     finally:
         with pg.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS engage_interview_audit, sourced_candidates")

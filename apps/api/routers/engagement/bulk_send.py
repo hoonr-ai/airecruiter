@@ -6,6 +6,7 @@ import uuid
 from fastapi import HTTPException
 from typing import Optional, List, Any, Dict, Tuple, Callable
 import json
+import os
 from datetime import datetime, timezone
 from core.pipeline_trace import span as _trace_span
 from core.queue import enqueue
@@ -44,10 +45,23 @@ _ENGAGE_IDEMPOTENCY_SQL = """
 """
 
 
+def _is_production() -> bool:
+    return os.getenv("ENVIRONMENT", "").strip().lower() in {"production", "prod"}
+
+
+def _audit_payload_json(payload_obj: Any) -> str:
+    """Serialize a launch payload for an audit row, without résumé text."""
+    return json.dumps(payloads._payload_without_resume_text(payload_obj))
+
+
 def _apply_handoff_fields(payload_obj: dict, request, recruiter_email: Optional[str]) -> None:
     """Only the launch's recruiter can join, so a handoff without one is
     refused by Pair-bot (422); send the flag only when there is someone to
-    hand off to."""
+    hand off to. Handoff is not enabled in production yet (the UI hides the
+    toggle there), so the flag is dropped server-side too."""
+    if request.recruiter_handoff and _is_production():
+        logger.warning("recruiter_handoff requested in production; launching without handoff")
+        return
     if request.recruiter_handoff and recruiter_email:
         payload_obj["recruiter_handoff"] = True
         if request.handoff_timeout_sec:
@@ -1018,7 +1032,7 @@ async def _send_bulk_interview_core(
                         candidate_id,
                         _job_resolved,
                         _existing_iid,
-                        json.dumps(payloads._payload_without_resume_text(payload_obj)),
+                        _audit_payload_json(payload_obj),
                         json.dumps(_dup_item),
                         "Initiated",
                     ))
@@ -1043,7 +1057,7 @@ async def _send_bulk_interview_core(
                         candidate_id,
                         _job_resolved,
                         "",
-                        json.dumps(payloads._payload_without_resume_text(payload_obj)),
+                        _audit_payload_json(payload_obj),
                         json.dumps(_dup_item),
                         "duplicate_this_job" if _reason == LAUNCH_BLOCK_DUPLICATE_PERSON_THIS_JOB
                         else "duplicate_other_job",
@@ -1117,7 +1131,7 @@ async def _send_bulk_interview_core(
                     interview_id,
                     candidate_name,
                     candidate_email,
-                    json.dumps(payloads._payload_without_resume_text(payload_obj)),
+                    _audit_payload_json(payload_obj),
                     json.dumps(interview_info),
                     audit_status
                 ))
@@ -1163,7 +1177,7 @@ async def _send_bulk_interview_core(
                 """, (
                     candidate_id,
                     job_id_resolved,
-                    json.dumps(payloads._payload_without_resume_text(payload_obj)),
+                    _audit_payload_json(payload_obj),
                     json.dumps(response_data),
                     "failed"
                 ))

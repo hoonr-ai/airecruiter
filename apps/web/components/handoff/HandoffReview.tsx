@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { Headset } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { api, type HandoffReview as HandoffReviewData } from "@/lib/api";
-import { cleanSuggestionBatches, handoffOutcomeLabel, reviewSpeakerLabel } from "@/lib/handoff";
+import { cleanSuggestionBatches, handoffOutcomeLabel, reviewSpeakerLabel, safeRecordingUrl } from "@/lib/handoff";
 import { SuggestionsPanel, TranscriptPanel } from "@/components/handoff/CopilotPanels";
 
 export function HandoffReview({ interviewId, open = true }: { interviewId: string | null; open?: boolean }) {
@@ -38,6 +38,8 @@ export function HandoffReview({ interviewId, open = true }: { interviewId: strin
   const lines = data.transcript?.lines ?? [];
   const suggestions = cleanSuggestionBatches(data.transcript?.suggestions);
   const joinedBy = data.claimed_by_email || null;
+  const recordingUrl = safeRecordingUrl(data.recording?.url);
+  const failed = [data.transcript_error && "transcript", data.recording_error && "recording"].filter(Boolean);
 
   return (
     <section aria-labelledby="handoff-review-title" className="mb-5 rounded-xl border border-slate-200 bg-white">
@@ -60,11 +62,11 @@ export function HandoffReview({ interviewId, open = true }: { interviewId: strin
           </div>
         )}
 
-        {data.recording?.url && (
+        {recordingUrl && (
           <div>
             <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Handoff recording</p>
             {/* Presigned and short-lived: reopening the view fetches a fresh URL. */}
-            <audio controls preload="metadata" src={data.recording.url} className="w-full">
+            <audio controls preload="metadata" src={recordingUrl} className="w-full">
               <track kind="captions" />
             </audio>
           </div>
@@ -89,7 +91,11 @@ export function HandoffReview({ interviewId, open = true }: { interviewId: strin
             />
           </div>
         ) : (
-          !data.recording?.url && <p className="text-sm text-slate-400">No recording or transcript is available for this handoff.</p>
+          !recordingUrl &&
+          failed.length === 0 && <p className="text-sm text-slate-400">No recording or transcript is available for this handoff.</p>
+        )}
+        {failed.length > 0 && (
+          <p className="text-xs text-amber-700">Couldn&apos;t load the handoff {failed.join(" or ")}. Try again later.</p>
         )}
       </div>
     </section>
