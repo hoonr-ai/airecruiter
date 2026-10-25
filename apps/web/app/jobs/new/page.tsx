@@ -222,6 +222,8 @@ import { nrMeasure } from "@/lib/newrelic";
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
 
+const IS_PROD_ENV = process.env.NEXT_PUBLIC_APP_ENV === "prod";
+
 // Contact validity, the launch email/phone getters and the streamed-phone
 // guard (betterPhoneUI) live in lib/launch-rules.ts, shared with the
 // server-side launch runner (services/launch_sessions/rules.py).
@@ -11346,6 +11348,7 @@ function NewJobPageContent() {
                     )}
                   </div>
                 )}
+                {!IS_PROD_ENV && (
                 <button
                   type="button"
                   role="switch"
@@ -11370,6 +11373,7 @@ function NewJobPageContent() {
                     {recruiterHandoff ? "ON" : "OFF"}
                   </span>
                 </button>
+                )}
                 {IS_QA_ENV && (
                   <div className="flex items-center gap-4">
                   <button
