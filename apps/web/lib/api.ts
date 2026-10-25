@@ -783,6 +783,14 @@ export const api = {
     claim: (interviewId: number) => req<HandoffClaim>(`/api/v1/handoff/${interviewId}/claim`, { method: "POST" }),
     close: (interviewId: number, notes?: string) =>
       req<{ state: string }>(`/api/v1/handoff/${interviewId}/close`, { method: "POST", body: { notes: notes || null } }),
+    // Recruiter copilot. context/transcript/recording may 404 while Pair-bot
+    // hasn't shipped them; callers treat a 404 as "not available".
+    context: (interviewId: number) => req<HandoffContext>(`/api/v1/handoff/${interviewId}/context`),
+    transcript: (interviewId: number) => req<HandoffTranscript>(`/api/v1/handoff/${interviewId}/transcript`),
+    recording: (interviewId: number) => req<HandoffRecording>(`/api/v1/handoff/${interviewId}/recording`),
+    resume: (interviewId: number) => req<HandoffResume>(`/api/v1/handoff/${interviewId}/resume`),
+    // After the fact, for anyone with access to the interview's job.
+    review: (interviewId: number) => req<HandoffReview>(`/api/v1/handoff/${interviewId}/review`),
   },
 };
 
@@ -791,6 +799,68 @@ export interface HandoffClaim {
   token: string;
   room: string;
   state: string;
+}
+
+export interface HandoffContextQuestion {
+  question: string;
+  answer?: string | null;
+  score?: number | null;
+  notes?: string | null;
+}
+
+export interface HandoffContext {
+  candidate_name?: string | null;
+  role_position?: string | null;
+  overall_score?: number | null;
+  hard_filter?: unknown;
+  questions?: HandoffContextQuestion[];
+  ai_transcript?: { role: string; text: string }[];
+}
+
+export interface HandoffTranscriptLine {
+  role: string;
+  text: string;
+  t?: number | string | null;
+  seq: number;
+}
+
+export interface HandoffSuggestionBatch {
+  id: string;
+  t?: number | string | null;
+  items: { question: string; why?: string | null }[];
+}
+
+export interface HandoffTranscript {
+  lines: HandoffTranscriptLine[];
+  state?: string | null;
+  suggestions?: HandoffSuggestionBatch[];
+}
+
+export interface HandoffReview {
+  interview_id: number;
+  state: HandoffState["state"];
+  recruiter_email?: string | null;
+  claimed_by_email?: string | null;
+  claimed_at?: string | null;
+  closed_at?: string | null;
+  close_reason?: string | null;
+  close_notes?: string | null;
+  transcript: { lines: HandoffTranscriptLine[]; suggestions: HandoffSuggestionBatch[] } | null;
+  recording: HandoffRecording | null;
+  /** Pair-bot failed to return these (not merely absent). */
+  transcript_error?: boolean;
+  recording_error?: boolean;
+}
+
+export interface HandoffRecording {
+  url: string;
+  expires_at?: string | null;
+}
+
+export interface HandoffResume {
+  interview_id: number;
+  candidate_name?: string | null;
+  resume_text?: string | null;
 }
 
 export interface HandoffState {

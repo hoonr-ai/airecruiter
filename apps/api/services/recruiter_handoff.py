@@ -1,7 +1,7 @@
 """Recruiter warm handoff — Pair's side of the contract with Pair-bot.
 
 Pair-bot holds a candidate's call open after its last question and asks the
-launch's recruiter to join (Pair-bot docs/recruiter-handoff-pair-contract.md).
+launch's recruiter to join.
 This module:
 
   * records the signed `handoff_*` webhooks, once each (Pair-bot retries, and
@@ -177,11 +177,13 @@ def _base_url() -> str:
     return os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
 
 
-async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None,
+                headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     url = f"{_base_url()}{path}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.request(method, url, json=body, headers=get_pair_auth_headers(json_content_type=True))
+            resp = await client.request(method, url, json=body,
+                                        headers={**get_pair_auth_headers(json_content_type=True), **(headers or {})})
     except httpx.HTTPError as exc:
         logger.warning("pairbot handoff %s %s failed: %s", method, path, exc)
         raise PairbotHandoffError(502, "PAIR-bot is unreachable") from exc
@@ -215,3 +217,71 @@ async def close(interview_id: int, recruiter_email: str, notes: Optional[str]) -
 
 async def state(interview_id: int) -> Dict[str, Any]:
     return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff")
+
+
+# Recruiter copilot reads (Pair-bot docs/recruiter-copilot-design.md §4).
+# Pair-bot allows only the handoff's own recruiter; the login email rides as
+# an X-Recruiter-Email header on these GETs (kept out of URLs and access
+# logs), as claim/close carry it in the body.
+
+def _as(recruiter_email: str) -> Dict[str, str]:
+    return {"X-Recruiter-Email": recruiter_email}
+
+
+async def context(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/context",
+                       headers=_as(recruiter_email))
+
+
+async def transcript(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/transcript",
+                       headers=_as(recruiter_email))
+
+
+async def recording(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/recording",
+                       headers=_as(recruiter_email))
+
+
+# ---------------------------------------------------------------------------
+# Resume, from Pair's own DB
+# ---------------------------------------------------------------------------
+
+def resume_for_interview_sync(interview_id: int) -> Optional[Dict[str, Any]]:
+    """The candidate's resume for a Pair-bot interview id, or None when Pair
+    never launched it. engage_interview_audit maps interview_id -> (candidate,
+    job) at launch; sourced_candidates holds resume_text per (candidate, job).
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT candidate_id, jobdiva_id, candidate_name
+                  FROM engage_interview_audit
+                 WHERE interview_id = %s
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (str(int(interview_id)),),
+            )
+            audit = cur.fetchone()
+            if not audit:
+                return None
+            candidate_id, jobdiva_id, candidate_name = audit[0], audit[1], audit[2]
+            # Only the launch's own job row: another job's resume may be a
+            # different version, or one this recruiter has no access to.
+            cur.execute(
+                """
+                SELECT name, resume_text
+                  FROM sourced_candidates
+                 WHERE candidate_id = %s AND jobdiva_id = %s
+                   AND COALESCE(resume_text, '') <> ''
+                 LIMIT 1
+                """,
+                (str(candidate_id), str(jobdiva_id or "")),
+            )
+            row = cur.fetchone()
+    return {
+        "candidate_name": (row[0] if row else None) or candidate_name,
+        "resume_text": (row[1] if row else None) or None,
+    }

@@ -673,12 +673,45 @@ def _extract_pair_error_message(response_data: Dict[str, Any], status_code: int)
 
 _LIVE_SOURCED_ROWS_SQL = """
     SELECT DISTINCT ON (candidate_id)
-        candidate_id, name, email, phone, headline, location, data, resume_match_percentage
+        candidate_id, name, email, phone, headline, location, data, resume_match_percentage,
+        resume_text
     FROM sourced_candidates
     WHERE candidate_id = ANY(%s)
       AND dnc_stopped_at IS NULL
     ORDER BY candidate_id, updated_at DESC
 """
+
+
+# Pair-bot's bulk model caps `raw_resume_text` with a Pydantic max_length; one
+# over-long résumé 422s the WHOLE batch, so truncate before sending.
+PAIRBOT_RAW_RESUME_TEXT_MAX_CHARS = 100_000
+
+
+def _raw_resume_text_for_pair(value: Any) -> Optional[str]:
+    """Stored résumé text, trimmed to Pair-bot's cap; None when empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:PAIRBOT_RAW_RESUME_TEXT_MAX_CHARS]
+
+
+def _payload_without_resume_text(payload_obj: Any) -> Any:
+    """Copy of a bulk payload with `raw_resume_text` dropped from each resume.
+
+    Audit rows store the whole batch payload once per candidate; carrying every
+    résumé there would multiply storage by the batch size (and leak other
+    candidates' résumés into each candidate's report).
+    """
+    if not isinstance(payload_obj, dict) or not isinstance(payload_obj.get("resumes"), list):
+        return payload_obj
+    out = dict(payload_obj)
+    out["resumes"] = [
+        {k: v for k, v in r.items() if k != "raw_resume_text"} if isinstance(r, dict) else r
+        for r in payload_obj["resumes"]
+    ]
+    return out
 
 
 def _fetch_live_sourced_rows(cur, candidate_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -795,10 +828,9 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                         row.get("gender_updated_at")
                         or data_blob.get("gender_updated_at")
                     ),
-                    # NOTE: résumé/experience/summary/skills/education are intentionally
-                    # NOT built here — the emitted payload uses `final_resumes` below,
-                    # which carries only unique per-candidate identity + scores. Pairbot
-                    # does not receive résumé content, so fetching it was dead work.
+                    # Structured résumé fields are not built; Pair-bot gets the
+                    # raw stored text (for Recruiter Copilot suggestions).
+                    "raw_resume_text": _raw_resume_text_for_pair(row.get("resume_text")),
                     "match_score": match_score,
                     "resume_screening_score": match_score,
                 })
@@ -941,7 +973,8 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
 
         resolved_genders = await asyncio.gather(*[_resolve_gender(r) for r in resumes])
 
-        # Build resumes list using raw_resume_text
+        # Build the per-candidate resumes list: identity + scores, plus the
+        # stored raw résumé text (truncated; omitted when empty).
         final_resumes = []
         for r, gender in zip(resumes, resolved_genders):
             candidate_name = r.get("name") or "Unknown"
@@ -954,6 +987,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                 "gender_label": gender.gender_label,
                 "match_score": r.get("match_score"),
                 "resume_screening_score": r.get("resume_screening_score"),
+                **({"raw_resume_text": r["raw_resume_text"]} if r.get("raw_resume_text") else {}),
             })
 
         raw_company_intro = (job_row.get("bot_introduction") or "") if job_row else ""

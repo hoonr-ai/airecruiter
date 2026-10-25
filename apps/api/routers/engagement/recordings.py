@@ -12,6 +12,11 @@ from services.pair_auth import get_pair_auth_headers
 from .common import EXTERNAL_INTERVIEW_API_URL, logger
 
 
+def recording_audit_row(interview_id: str) -> Optional[Dict[str, Any]]:
+    """The latest launch audit row (jobdiva_id, created_at) for an interview."""
+    return _recording_audit_row(interview_id)
+
+
 def _recording_audit_row(interview_id: str) -> Optional[Dict[str, Any]]:
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
