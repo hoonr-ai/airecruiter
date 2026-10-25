@@ -1,4 +1,4 @@
-"""Recruiter warm handoff routes (Pair-bot docs/recruiter-handoff-pair-contract.md).
+"""Recruiter warm handoff routes.
 
   POST /api/v1/webhooks/pairbot/handoff     signed handoff_* events from Pair-bot
   GET  /api/v1/handoff/{interview_id}       current state, for the join page

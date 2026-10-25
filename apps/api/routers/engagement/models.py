@@ -26,7 +26,7 @@ class SendBulkInterviewRequest(BaseModel):
     # batch only.
     send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
-    # Recruiter warm handoff (Pair-bot docs/recruiter-handoff-pair-contract.md):
+    # Recruiter warm handoff:
     # after its last question the bot holds the call for the launch's
     # recruiter (the server-resolved recruiter_email) instead of signing off.
     recruiter_handoff: bool = False

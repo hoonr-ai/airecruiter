@@ -1,7 +1,5 @@
 """Recruiter warm handoff: the signed Pair-bot webhook, the join routes, and
 the launch flag reaching Pair-bot.
-
-Contract: Pair-bot docs/recruiter-handoff-pair-contract.md.
 """
 
 import hashlib

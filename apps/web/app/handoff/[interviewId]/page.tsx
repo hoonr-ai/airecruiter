@@ -1,7 +1,6 @@
 "use client";
 
-// Recruiter warm handoff join page (Pair-bot docs/recruiter-handoff-pair-contract.md,
-// docs/recruiter-copilot-design.md).
+// Recruiter warm handoff join page (design: Pair-bot docs/recruiter-copilot-design.md).
 //
 // Reached from the "Join now" notification, email or Teams card. Claims the
 // handoff as the logged-in recruiter (the backend sends their login email,

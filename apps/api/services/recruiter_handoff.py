@@ -1,7 +1,7 @@
 """Recruiter warm handoff — Pair's side of the contract with Pair-bot.
 
 Pair-bot holds a candidate's call open after its last question and asks the
-launch's recruiter to join (Pair-bot docs/recruiter-handoff-pair-contract.md).
+launch's recruiter to join.
 This module:
 
   * records the signed `handoff_*` webhooks, once each (Pair-bot retries, and
