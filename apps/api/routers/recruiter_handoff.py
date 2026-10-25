@@ -4,6 +4,9 @@
   GET  /api/v1/handoff/{interview_id}       current state, for the join page
   POST /api/v1/handoff/{interview_id}/claim join: returns {livekit_url, token, room}
   POST /api/v1/handoff/{interview_id}/close the recruiter's End interview
+  GET  /api/v1/handoff/{interview_id}/context|transcript|recording
+                                            copilot reads, proxied as the recruiter
+  GET  /api/v1/handoff/{interview_id}/resume the candidate's resume (Pair's own DB)
 
 The webhook is authenticated exactly like the creation and DNC webhooks
 (HMAC SHA-256 of the raw body in X-Hub-Signature-256). The join routes act as
@@ -126,3 +129,38 @@ async def claim_handoff(interview_id: int, user: UserIdentity = Depends(get_curr
 @router.post("/api/v1/handoff/{interview_id}/close")
 async def close_handoff(interview_id: int, body: CloseBody, user: UserIdentity = Depends(get_current_user)):
     return await _proxy(handoff.close(interview_id, _email(user), body.notes))
+
+
+async def _require_own_handoff(interview_id: int, email: str) -> None:
+    """Pair-side ownership check for data Pair serves itself: only the
+    recruiter whose handoff it is. Unknown ownership is refused here (unlike
+    the join view), since nothing downstream would decide it."""
+    state = await _proxy(handoff.state(interview_id))
+    owner = (state.get("recruiter_email") or "").strip().lower()
+    if not owner or owner != email:
+        raise HTTPException(status_code=403, detail="Only the recruiter who launched this interview can view it.")
+
+
+@router.get("/api/v1/handoff/{interview_id}/context")
+async def get_handoff_context(interview_id: int, user: UserIdentity = Depends(get_current_user)):
+    return await _proxy(handoff.context(interview_id, _email(user)))
+
+
+@router.get("/api/v1/handoff/{interview_id}/transcript")
+async def get_handoff_transcript(interview_id: int, user: UserIdentity = Depends(get_current_user)):
+    return await _proxy(handoff.transcript(interview_id, _email(user)))
+
+
+@router.get("/api/v1/handoff/{interview_id}/recording")
+async def get_handoff_recording(interview_id: int, user: UserIdentity = Depends(get_current_user)):
+    return await _proxy(handoff.recording(interview_id, _email(user)))
+
+
+@router.get("/api/v1/handoff/{interview_id}/resume")
+async def get_handoff_resume(interview_id: int, user: UserIdentity = Depends(get_current_user)):
+    email = _email(user)
+    await _require_own_handoff(interview_id, email)
+    found = await asyncio.to_thread(handoff.resume_for_interview_sync, interview_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="No PAIR launch found for this interview.")
+    return {"interview_id": interview_id, **found}

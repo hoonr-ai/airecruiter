@@ -73,3 +73,124 @@ export function formatSecondsLeft(expiresAt: string | null | undefined, now: num
   if (!Number.isFinite(left)) return null;
   return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
 }
+
+// ---------------------------------------------------------------------------
+// Recruiter copilot (Pair-bot docs/recruiter-copilot-design.md)
+// ---------------------------------------------------------------------------
+
+/** LiveKit data topic Pair-bot sends transcript/suggestions on (recruiter only),
+ * and the page sends its copilot settings on. */
+export const COPILOT_TOPIC = "handoff_copilot";
+
+export interface CopilotLine {
+  role: string;
+  text: string;
+  t?: number | string | null;
+  seq: number;
+}
+
+export interface CopilotSuggestion {
+  question: string;
+  why?: string | null;
+}
+
+export interface CopilotSuggestionBatch {
+  id: string;
+  items: CopilotSuggestion[];
+  t?: number | string | null;
+}
+
+export type CopilotPacket =
+  | ({ type: "transcript" } & CopilotLine)
+  | ({ type: "suggestions" } & CopilotSuggestionBatch);
+
+/** Merge new transcript lines into the current list: one line per `seq`
+ * (the live stream and the /transcript backfill overlap), ordered by `seq`.
+ * Returns the same array when nothing changed, so React can skip a render. */
+export function mergeTranscript(current: CopilotLine[], incoming: CopilotLine[]): CopilotLine[] {
+  const seen = new Set(current.map((l) => l.seq));
+  const fresh = incoming.filter((l) => Number.isFinite(l.seq) && !seen.has(l.seq) && (seen.add(l.seq), true));
+  if (fresh.length === 0) return current;
+  return [...current, ...fresh].sort((a, b) => a.seq - b.seq);
+}
+
+/** Decode a `handoff_copilot` data packet; null for anything off-contract. */
+export function parseCopilotPacket(raw: string): CopilotPacket | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  if (d.type === "transcript") {
+    const seq = Number(d.seq);
+    if (!Number.isFinite(seq) || typeof d.text !== "string") return null;
+    return { type: "transcript", role: String(d.role ?? ""), text: d.text, t: d.t as number | null, seq };
+  }
+  if (d.type === "suggestions" && Array.isArray(d.items)) {
+    const items = d.items
+      .filter((i): i is Record<string, unknown> => !!i && typeof i === "object" && typeof (i as { question?: unknown }).question === "string")
+      .map((i) => ({ question: i.question as string, why: typeof i.why === "string" ? i.why : null }));
+    return { type: "suggestions", id: String(d.id ?? ""), items, t: d.t as number | null };
+  }
+  return null;
+}
+
+/** Who said a transcript line, from the recruiter's point of view. */
+export function speakerLabel(role: string | null | undefined): string {
+  switch ((role ?? "").toLowerCase()) {
+    case "recruiter":
+      return "You";
+    case "assistant":
+    case "agent":
+    case "bot":
+      return "PAIR";
+    default:
+      return "Candidate";
+  }
+}
+
+export interface CopilotPrefs {
+  showTranscript: boolean;
+  suggestions: boolean;
+}
+
+/** Both on by default (design doc: Decisions). */
+export const DEFAULT_COPILOT_PREFS: CopilotPrefs = { showTranscript: true, suggestions: true };
+
+type PrefStorage = Pick<Storage, "getItem" | "setItem">;
+
+export const copilotPrefsKey = (email: string | null | undefined): string =>
+  `pair.handoffCopilot.v1:${(email ?? "").trim().toLowerCase() || "anon"}`;
+
+/** The recruiter's remembered toggles. Storage may be missing or throw
+ * (private mode, blocked site data): fall back to the defaults. */
+export function loadCopilotPrefs(storage: PrefStorage | null, email: string | null | undefined): CopilotPrefs {
+  try {
+    const raw = storage?.getItem(copilotPrefsKey(email));
+    if (!raw) return { ...DEFAULT_COPILOT_PREFS };
+    const p = JSON.parse(raw) as Partial<CopilotPrefs>;
+    return {
+      showTranscript: typeof p.showTranscript === "boolean" ? p.showTranscript : DEFAULT_COPILOT_PREFS.showTranscript,
+      suggestions: typeof p.suggestions === "boolean" ? p.suggestions : DEFAULT_COPILOT_PREFS.suggestions,
+    };
+  } catch {
+    return { ...DEFAULT_COPILOT_PREFS };
+  }
+}
+
+export function saveCopilotPrefs(storage: PrefStorage | null, email: string | null | undefined, prefs: CopilotPrefs): void {
+  try {
+    storage?.setItem(copilotPrefsKey(email), JSON.stringify(prefs));
+  } catch {
+    // Remembering is a convenience; the toggle still works this session.
+  }
+}
+
+/** "12:05" for the in-call timer. */
+export function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}

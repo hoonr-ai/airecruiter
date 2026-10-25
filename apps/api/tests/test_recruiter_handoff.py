@@ -169,6 +169,63 @@ def test_close_and_state(as_recruiter, monkeypatch):
     assert state["is_your_handoff"] is True
 
 
+@pytest.mark.parametrize("route", ["context", "transcript", "recording"])
+def test_copilot_reads_proxy_as_the_login(as_recruiter, monkeypatch, route):
+    calls = []
+
+    async def fake(interview_id, email):
+        calls.append((interview_id, email))
+        return {"ok": route}
+
+    monkeypatch.setattr(handoff, route, fake)
+    resp = client.get(f"/api/v1/handoff/4242/{route}?recruiter_email=spoof@evil.com")
+    assert resp.status_code == 200 and resp.json() == {"ok": route}
+    assert calls == [(4242, "rec@example.com")]
+
+
+@pytest.mark.parametrize("route", ["context", "transcript", "recording"])
+def test_copilot_reads_map_errors_like_claim(as_recruiter, monkeypatch, route):
+    async def not_deployed(*a):
+        raise handoff.PairbotHandoffError(404, "Not Found")
+
+    async def broken(*a):
+        raise handoff.PairbotHandoffError(401, "service key")
+
+    monkeypatch.setattr(handoff, route, not_deployed)
+    assert client.get(f"/api/v1/handoff/4242/{route}").status_code == 404
+    monkeypatch.setattr(handoff, route, broken)
+    assert client.get(f"/api/v1/handoff/4242/{route}").status_code == 502
+
+
+def _owned_by(monkeypatch, owner):
+    async def fake_state(interview_id):
+        return {"interview_id": interview_id, "state": "requested", "recruiter_email": owner}
+
+    monkeypatch.setattr(handoff, "state", fake_state)
+
+
+def test_resume_is_served_to_the_owning_recruiter(as_recruiter, monkeypatch):
+    _owned_by(monkeypatch, "rec@example.com")
+    monkeypatch.setattr(handoff, "resume_for_interview_sync",
+                        lambda iid: {"candidate_name": "Ada", "resume_text": "Analytical engines"})
+    body = client.get("/api/v1/handoff/4242/resume").json()
+    assert body == {"interview_id": 4242, "candidate_name": "Ada", "resume_text": "Analytical engines"}
+
+
+@pytest.mark.parametrize("owner", ["other@example.com", None])
+def test_resume_is_refused_to_anyone_else(as_recruiter, monkeypatch, owner):
+    _owned_by(monkeypatch, owner)
+    monkeypatch.setattr(handoff, "resume_for_interview_sync",
+                        lambda iid: pytest.fail("must not read the resume"))
+    assert client.get("/api/v1/handoff/4242/resume").status_code == 403
+
+
+def test_resume_404_when_pair_never_launched_it(as_recruiter, monkeypatch):
+    _owned_by(monkeypatch, "rec@example.com")
+    monkeypatch.setattr(handoff, "resume_for_interview_sync", lambda iid: None)
+    assert client.get("/api/v1/handoff/4242/resume").status_code == 404
+
+
 def test_join_routes_require_login():
     app.dependency_overrides.pop(get_current_user, None)
     assert client.post("/api/v1/handoff/4242/claim").status_code in (401, 403)
@@ -322,3 +379,22 @@ def test_missed_notifies_the_recruiter_and_the_cc_list(pg):
     assert missed == ["lead@example.com", "rec@example.com"]
     requested = [r for r in rows if r[1] == handoff.NOTIFY_REQUESTED]
     assert requested[0][4] is not None  # the join-now was retired
+
+
+def test_resume_lookup_maps_the_interview_to_the_launch_candidate(pg):
+    with pg.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS engage_interview_audit, sourced_candidates")
+        cur.execute("""CREATE TABLE engage_interview_audit (id SERIAL PRIMARY KEY, candidate_id TEXT,
+                       jobdiva_id TEXT, interview_id TEXT, candidate_name TEXT)""")
+        cur.execute("CREATE TABLE sourced_candidates (candidate_id TEXT, jobdiva_id TEXT, name TEXT, resume_text TEXT)")
+        cur.execute("""INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, candidate_name)
+                       VALUES ('c1', 'J1', '4242', 'Ada L')""")
+        cur.execute("""INSERT INTO sourced_candidates VALUES ('c1', 'J0', 'Ada', 'other job resume'),
+                       ('c1', 'J1', 'Ada Lovelace', 'launch job resume'), ('c2', 'J1', 'Bob', 'not hers')""")
+    try:
+        assert handoff.resume_for_interview_sync(4242) == {
+            "candidate_name": "Ada Lovelace", "resume_text": "launch job resume"}
+        assert handoff.resume_for_interview_sync(9999) is None
+    finally:
+        with pg.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS engage_interview_audit, sourced_candidates")

@@ -215,3 +215,67 @@ async def close(interview_id: int, recruiter_email: str, notes: Optional[str]) -
 
 async def state(interview_id: int) -> Dict[str, Any]:
     return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff")
+
+
+# Recruiter copilot reads (Pair-bot docs/recruiter-copilot-design.md §4).
+# Pair-bot allows only the handoff's own recruiter; the login email rides as
+# a query parameter on these GETs, exactly as claim/close carry it in the body.
+
+def _as(recruiter_email: str) -> str:
+    from urllib.parse import quote
+    return f"?recruiter_email={quote(recruiter_email)}"
+
+
+async def context(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/context{_as(recruiter_email)}")
+
+
+async def transcript(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/transcript{_as(recruiter_email)}")
+
+
+async def recording(interview_id: int, recruiter_email: str) -> Dict[str, Any]:
+    return await _call("GET", f"/api/interviews/{int(interview_id)}/handoff/recording{_as(recruiter_email)}")
+
+
+# ---------------------------------------------------------------------------
+# Resume, from Pair's own DB
+# ---------------------------------------------------------------------------
+
+def resume_for_interview_sync(interview_id: int) -> Optional[Dict[str, Any]]:
+    """The candidate's resume for a Pair-bot interview id, or None when Pair
+    never launched it. engage_interview_audit maps interview_id -> (candidate,
+    job) at launch; sourced_candidates holds resume_text per (candidate, job).
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT candidate_id, jobdiva_id, candidate_name
+                  FROM engage_interview_audit
+                 WHERE interview_id = %s
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (str(int(interview_id)),),
+            )
+            audit = cur.fetchone()
+            if not audit:
+                return None
+            candidate_id, jobdiva_id, candidate_name = audit[0], audit[1], audit[2]
+            # The launch's own job row first; any row for the candidate otherwise.
+            cur.execute(
+                """
+                SELECT name, resume_text
+                  FROM sourced_candidates
+                 WHERE candidate_id = %s AND COALESCE(resume_text, '') <> ''
+                 ORDER BY (jobdiva_id = %s) DESC
+                 LIMIT 1
+                """,
+                (str(candidate_id), str(jobdiva_id or "")),
+            )
+            row = cur.fetchone()
+    return {
+        "candidate_name": (row[0] if row else None) or candidate_name,
+        "resume_text": (row[1] if row else None) or None,
+    }
