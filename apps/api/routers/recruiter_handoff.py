@@ -7,6 +7,8 @@
   GET  /api/v1/handoff/{interview_id}/context|transcript|recording
                                             copilot reads, proxied as the recruiter
   GET  /api/v1/handoff/{interview_id}/resume the candidate's resume (Pair's own DB)
+  GET  /api/v1/handoff/{interview_id}/review after-the-fact view for anyone with
+                                            access to the interview's job
 
 The webhook is authenticated exactly like the creation and DNC webhooks
 (HMAC SHA-256 of the raw body in X-Hub-Signature-256). The join routes act as
@@ -164,3 +166,77 @@ async def get_handoff_resume(interview_id: int, user: UserIdentity = Depends(get
     if found is None:
         raise HTTPException(status_code=404, detail="No PAIR launch found for this interview.")
     return {"interview_id": interview_id, **found}
+
+
+# ---------------------------------------------------------------------------
+# Post-handoff review (candidate/interview view)
+# ---------------------------------------------------------------------------
+#
+# The copilot routes above act as the logged-in recruiter, and Pair-bot only
+# lets the launch recruiter or the claimer read a handoff. Reviewing a past
+# handoff is wider than that: any teammate who can see the interview's job can
+# see its AI call, so they can see the handoff too. Pair checks that job
+# access itself (the same rule as the call-recordings route), then reads from
+# Pair-bot as the launch recruiter. Interviews Pair never launched have no
+# audit row and are refused, so ids from another tenant are never proxied.
+
+async def _optional_read(coro):
+    """A copilot read, or None when there is none (404) or Pair-bot fails."""
+    try:
+        return await coro
+    except handoff.PairbotHandoffError as exc:
+        if exc.status != 404:
+            logger.warning("handoff review read failed status=%s detail=%s", exc.status, exc.detail)
+        return None
+
+
+def _review_access_sync(interview_id: int, user: UserIdentity) -> None:
+    from routers._helpers import _verify_job_access_by_id
+    from routers.engagement.recordings import _recording_audit_row
+
+    row = _recording_audit_row(str(int(interview_id)))
+    if not row:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    jobdiva_id = (row.get("jobdiva_id") or "").strip()
+    if jobdiva_id:
+        _verify_job_access_by_id(jobdiva_id, user)
+    elif not user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied. You do not have permission to access this interview.")
+
+
+@router.get("/api/v1/handoff/{interview_id}/review")
+async def get_handoff_review(interview_id: int, user: UserIdentity = Depends(get_current_user)):
+    _email(user)
+    await asyncio.to_thread(_review_access_sync, interview_id, user)
+    st = await _proxy(handoff.state(interview_id))
+    out = {
+        "interview_id": interview_id,
+        "state": st.get("state"),
+        "recruiter_email": st.get("recruiter_email"),
+        "claimed_by_email": st.get("claimed_by_email"),
+        "claimed_at": st.get("claimed_at"),
+        "closed_at": st.get("closed_at"),
+        "close_reason": st.get("close_reason"),
+        # Pair-bot keeps close notes but does not return them yet; shown
+        # once its state reply carries them.
+        "close_notes": st.get("close_notes"),
+        "transcript": None,
+        "recording": None,
+    }
+    if not out["state"]:
+        return out
+    acting = (st.get("recruiter_email") or st.get("claimed_by_email") or "").strip().lower()
+    if not acting:
+        return out
+    tr, rec = await asyncio.gather(
+        _optional_read(handoff.transcript(interview_id, acting)),
+        _optional_read(handoff.recording(interview_id, acting)),
+    )
+    if isinstance(tr, dict):
+        out["transcript"] = {
+            "lines": tr.get("lines") if isinstance(tr.get("lines"), list) else [],
+            "suggestions": tr.get("suggestions") if isinstance(tr.get("suggestions"), list) else [],
+        }
+    if isinstance(rec, dict) and rec.get("url"):
+        out["recording"] = {"url": rec["url"], "expires_at": rec.get("expires_at")}
+    return out

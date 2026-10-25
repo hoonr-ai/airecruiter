@@ -789,6 +789,8 @@ export const api = {
     transcript: (interviewId: number) => req<HandoffTranscript>(`/api/v1/handoff/${interviewId}/transcript`),
     recording: (interviewId: number) => req<HandoffRecording>(`/api/v1/handoff/${interviewId}/recording`),
     resume: (interviewId: number) => req<HandoffResume>(`/api/v1/handoff/${interviewId}/resume`),
+    // After the fact, for anyone with access to the interview's job.
+    review: (interviewId: number) => req<HandoffReview>(`/api/v1/handoff/${interviewId}/review`),
   },
 };
 
@@ -822,9 +824,29 @@ export interface HandoffTranscriptLine {
   seq: number;
 }
 
+export interface HandoffSuggestionBatch {
+  id: string;
+  t?: number | string | null;
+  items: { question: string; why?: string | null }[];
+}
+
 export interface HandoffTranscript {
   lines: HandoffTranscriptLine[];
   state?: string | null;
+  suggestions?: HandoffSuggestionBatch[];
+}
+
+export interface HandoffReview {
+  interview_id: number;
+  state: HandoffState["state"];
+  recruiter_email?: string | null;
+  claimed_by_email?: string | null;
+  claimed_at?: string | null;
+  closed_at?: string | null;
+  close_reason?: string | null;
+  close_notes?: string | null;
+  transcript: { lines: HandoffTranscriptLine[]; suggestions: HandoffSuggestionBatch[] } | null;
+  recording: HandoffRecording | null;
 }
 
 export interface HandoffRecording {

@@ -226,6 +226,73 @@ def test_resume_404_when_pair_never_launched_it(as_recruiter, monkeypatch):
     assert client.get("/api/v1/handoff/4242/resume").status_code == 404
 
 
+# --- post-handoff review: job access, read as the launch recruiter ---------------
+
+@pytest.fixture
+def review_env(as_recruiter, monkeypatch):
+    import routers._helpers as helpers
+    import routers.engagement.recordings as recordings
+
+    env = {"audit": {"jobdiva_id": "26-1"}, "access": [], "deny": False, "reads": []}
+    monkeypatch.setattr(recordings, "_recording_audit_row", lambda iid: env["audit"])
+
+    def verify(job_id, user):
+        env["access"].append((job_id, user.email))
+        if env["deny"]:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=403, detail="no")
+
+    monkeypatch.setattr(helpers, "_verify_job_access_by_id", verify)
+
+    async def fake_state(interview_id):
+        return {"interview_id": interview_id, "state": "closed", "recruiter_email": "owner@example.com",
+                "claimed_by_email": "owner@example.com", "close_reason": "recruiter_closed"}
+
+    async def fake_transcript(interview_id, email):
+        env["reads"].append(("transcript", email))
+        return {"lines": [{"role": "candidate", "text": "hi", "seq": 1}], "state": "closed",
+                "suggestions": [{"id": "s1", "t": 3, "items": [{"question": "Q?", "why": "W"}]}]}
+
+    async def fake_recording(interview_id, email):
+        env["reads"].append(("recording", email))
+        raise handoff.PairbotHandoffError(404, "no recording")
+
+    monkeypatch.setattr(handoff, "state", fake_state)
+    monkeypatch.setattr(handoff, "transcript", fake_transcript)
+    monkeypatch.setattr(handoff, "recording", fake_recording)
+    return env
+
+
+def test_review_lets_a_teammate_with_job_access_read_as_the_launch_recruiter(review_env):
+    body = client.get("/api/v1/handoff/4242/review").json()
+    assert review_env["access"] == [("26-1", " Rec@Example.com ")]
+    assert sorted(review_env["reads"]) == [("recording", "owner@example.com"), ("transcript", "owner@example.com")]
+    assert body["state"] == "closed" and body["claimed_by_email"] == "owner@example.com"
+    assert body["transcript"]["suggestions"][0]["id"] == "s1"
+    assert body["recording"] is None  # 404 = none
+
+
+def test_review_refuses_without_job_access(review_env):
+    review_env["deny"] = True
+    assert client.get("/api/v1/handoff/4242/review").status_code == 403
+    assert review_env["reads"] == []
+
+
+def test_review_404s_interviews_pair_never_launched(review_env):
+    review_env["audit"] = None
+    assert client.get("/api/v1/handoff/4242/review").status_code == 404
+    assert review_env["access"] == []
+
+
+def test_review_without_a_handoff_reads_nothing_else(review_env, monkeypatch):
+    async def no_handoff(interview_id):
+        return {"interview_id": interview_id, "state": None, "recruiter_handoff": False}
+
+    monkeypatch.setattr(handoff, "state", no_handoff)
+    body = client.get("/api/v1/handoff/4242/review").json()
+    assert body["state"] is None and body["transcript"] is None and review_env["reads"] == []
+
+
 def test_join_routes_require_login():
     app.dependency_overrides.pop(get_current_user, None)
     assert client.post("/api/v1/handoff/4242/claim").status_code in (401, 403)

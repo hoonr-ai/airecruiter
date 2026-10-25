@@ -29,6 +29,11 @@ export function hardFilterLabel(hf: unknown): { text: string; ok: boolean } | nu
   if (typeof hf === "string") return { text: `Hard filters: ${hf}`, ok: /pass/i.test(hf) };
   if (typeof hf === "object") {
     const o = hf as Record<string, unknown>;
+    // Pair-bot's /context shape: {overall: "PASSED"|"FAILED"|null, needs_review, failed: [...]}
+    if (typeof o.overall === "string") {
+      const ok = /pass/i.test(o.overall);
+      return { text: `Hard filters ${ok ? "passed" : "failed"}${o.needs_review ? " (needs review)" : ""}`, ok };
+    }
     if (typeof o.passed === "boolean") return hardFilterLabel(o.passed);
     if (typeof o.status === "string") return hardFilterLabel(o.status);
   }

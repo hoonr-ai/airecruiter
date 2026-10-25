@@ -1018,7 +1018,7 @@ async def _send_bulk_interview_core(
                         candidate_id,
                         _job_resolved,
                         _existing_iid,
-                        json.dumps(payload_obj),
+                        json.dumps(payloads._payload_without_resume_text(payload_obj)),
                         json.dumps(_dup_item),
                         "Initiated",
                     ))
@@ -1043,7 +1043,7 @@ async def _send_bulk_interview_core(
                         candidate_id,
                         _job_resolved,
                         "",
-                        json.dumps(payload_obj),
+                        json.dumps(payloads._payload_without_resume_text(payload_obj)),
                         json.dumps(_dup_item),
                         "duplicate_this_job" if _reason == LAUNCH_BLOCK_DUPLICATE_PERSON_THIS_JOB
                         else "duplicate_other_job",
@@ -1117,7 +1117,7 @@ async def _send_bulk_interview_core(
                     interview_id,
                     candidate_name,
                     candidate_email,
-                    json.dumps(payload_obj),
+                    json.dumps(payloads._payload_without_resume_text(payload_obj)),
                     json.dumps(interview_info),
                     audit_status
                 ))
@@ -1163,7 +1163,7 @@ async def _send_bulk_interview_core(
                 """, (
                     candidate_id,
                     job_id_resolved,
-                    json.dumps(payload_obj),
+                    json.dumps(payloads._payload_without_resume_text(payload_obj)),
                     json.dumps(response_data),
                     "failed"
                 ))

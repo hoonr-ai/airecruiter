@@ -2,6 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_COPILOT_PREFS,
+  cleanSuggestionBatches,
+  handoffOutcomeLabel,
+  mergeSuggestions,
+  reviewSpeakerLabel,
   describeHandoffError,
   formatElapsed,
   loadCopilotPrefs,
@@ -123,5 +127,41 @@ describe("copilot helpers", () => {
   it("formats the call timer", () => {
     assert.equal(formatElapsed(0), "0:00");
     assert.equal(formatElapsed(725_000), "12:05");
+  });
+});
+
+describe("handoff suggestions backfill", () => {
+  it("cleans stored batches and drops malformed items", () => {
+    const out = cleanSuggestionBatches([
+      { id: "a", t: 4, items: [{ question: "Q1", why: "W" }, { why: "no question" }] },
+      { id: "b", items: [] },
+      null,
+      "junk",
+    ]);
+    assert.deepEqual(out, [{ id: "a", t: 4, items: [{ question: "Q1", why: "W" }] }]);
+    assert.deepEqual(cleanSuggestionBatches(undefined), []);
+  });
+
+  it("merges by batch id, keeping the newest batches", () => {
+    const a = { id: "a", items: [{ question: "Q" }] };
+    const b = { id: "b", items: [{ question: "Q" }] };
+    const cur = [a];
+    assert.equal(mergeSuggestions(cur, [a]), cur);
+    assert.deepEqual(mergeSuggestions(cur, [a, b]).map((x) => x.id), ["a", "b"]);
+    assert.deepEqual(mergeSuggestions([a], [b], 1).map((x) => x.id), ["b"]);
+  });
+});
+
+describe("handoff review", () => {
+  it("hides the section without a handoff and labels outcomes", () => {
+    assert.equal(handoffOutcomeLabel(null), null);
+    assert.equal(handoffOutcomeLabel("weird"), null);
+    assert.equal(handoffOutcomeLabel("closed", "recruiter_closed"), "Ended by the recruiter");
+    assert.match(handoffOutcomeLabel("missed") ?? "", /Missed/);
+  });
+
+  it("names the recruiter in a reviewed transcript", () => {
+    assert.equal(reviewSpeakerLabel("recruiter"), "Recruiter");
+    assert.equal(reviewSpeakerLabel("agent"), "PAIR");
   });
 });

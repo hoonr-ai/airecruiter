@@ -36,6 +36,8 @@ import {
   isHandoffOver,
   joinViewFor,
   loadCopilotPrefs,
+  cleanSuggestionBatches,
+  mergeSuggestions,
   mergeTranscript,
   parseCopilotPacket,
   saveCopilotPrefs,
@@ -194,7 +196,11 @@ export default function HandoffJoinPage() {
     if (!mine || !(phase === "ended" || over)) return;
     let live = true;
     void optional(api.handoff.recording(interviewId)).then((r) => live && setRecording(r?.url ? r : null));
-    void optional(api.handoff.transcript(interviewId)).then((t) => live && t && setLines((cur) => mergeTranscript(cur, t.lines ?? [])));
+    void optional(api.handoff.transcript(interviewId)).then((t) => {
+      if (!live || !t) return;
+      setLines((cur) => mergeTranscript(cur, t.lines ?? []));
+      setSuggestions((cur) => mergeSuggestions(cur, cleanSuggestionBatches(t.suggestions)));
+    });
     return () => {
       live = false;
     };
@@ -231,6 +237,7 @@ export default function HandoffJoinPage() {
   const backfill = useCallback(async () => {
     const t = await optional(api.handoff.transcript(interviewId));
     if (t?.lines) setLines((cur) => mergeTranscript(cur, t.lines));
+    if (t) setSuggestions((cur) => mergeSuggestions(cur, cleanSuggestionBatches(t.suggestions)));
   }, [interviewId]);
 
   const join = async () => {
@@ -265,7 +272,7 @@ export default function HandoffJoinPage() {
         if (packet.type === "transcript") {
           setLines((cur) => mergeTranscript(cur, [packet]));
         } else if (packet.items.length > 0) {
-          setSuggestions((cur) => (cur.some((b) => b.id && b.id === packet.id) ? cur : [...cur, packet].slice(-10)));
+          setSuggestions((cur) => mergeSuggestions(cur, [packet]));
         }
       });
       room.on(RoomEvent.Reconnected, () => {

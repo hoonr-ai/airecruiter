@@ -114,6 +114,40 @@ export function mergeTranscript(current: CopilotLine[], incoming: CopilotLine[])
   return [...current, ...fresh].sort((a, b) => a.seq - b.seq);
 }
 
+/** Keep only well-formed suggestion items (stored batches come from Pair-bot's
+ * /transcript backfill and may be partial). */
+export function cleanSuggestionBatches(raw: unknown): CopilotSuggestionBatch[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((b): b is Record<string, unknown> => !!b && typeof b === "object" && Array.isArray((b as { items?: unknown }).items))
+    .map((b) => ({
+      id: String(b.id ?? ""),
+      t: (b.t as number | string | null | undefined) ?? null,
+      items: (b.items as unknown[])
+        .filter((i): i is Record<string, unknown> => !!i && typeof i === "object" && typeof (i as { question?: unknown }).question === "string")
+        .map((i) => ({ question: i.question as string, why: typeof i.why === "string" ? i.why : null })),
+    }))
+    .filter((b) => b.items.length > 0);
+}
+
+/** Add suggestion batches (live packets or backfill) without duplicating a
+ * batch id; keeps the newest `limit`. Same array back when nothing changed. */
+export function mergeSuggestions(
+  current: CopilotSuggestionBatch[],
+  incoming: CopilotSuggestionBatch[],
+  limit = 10,
+): CopilotSuggestionBatch[] {
+  const seen = new Set(current.map((b) => b.id).filter(Boolean));
+  const fresh: CopilotSuggestionBatch[] = [];
+  for (const b of incoming) {
+    if (b.id && seen.has(b.id)) continue;
+    if (b.id) seen.add(b.id);
+    fresh.push(b);
+  }
+  if (fresh.length === 0) return current;
+  return [...current, ...fresh].slice(-limit);
+}
+
 /** Decode a `handoff_copilot` data packet; null for anything off-contract. */
 export function parseCopilotPacket(raw: string): CopilotPacket | null {
   let data: unknown;
@@ -193,4 +227,43 @@ export function saveCopilotPrefs(storage: PrefStorage | null, email: string | nu
 export function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Post-handoff review (interview view)
+// ---------------------------------------------------------------------------
+
+/** Plain-language outcome of a handoff for the interview view; null when the
+ * interview had no handoff (the section is hidden). */
+export function handoffOutcomeLabel(state: string | null | undefined, closeReason?: string | null): string | null {
+  switch (state) {
+    case "requested":
+      return "Waiting for a recruiter";
+    case "claimed":
+    case "joined":
+      return "Recruiter on the call";
+    case "missed":
+      return "Missed - nobody joined in time";
+    case "cancelled":
+      return "Candidate left before a recruiter joined";
+    case "closed":
+      switch (closeReason) {
+        case "max_duration":
+          return "Ended - time limit reached";
+        case "recruiter_left":
+          return "Ended - recruiter left the call";
+        case "candidate_left":
+          return "Ended - candidate left the call";
+        default:
+          return "Ended by the recruiter";
+      }
+    default:
+      return null;
+  }
+}
+
+/** Who said a line, for someone reviewing the call afterwards (not "You"). */
+export function reviewSpeakerLabel(role: string | null | undefined): string {
+  const label = speakerLabel(role);
+  return label === "You" ? "Recruiter" : label;
 }

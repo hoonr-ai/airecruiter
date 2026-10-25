@@ -132,6 +132,50 @@ def test_generate_payload_single_query_preserves_request_order(monkeypatch):
     assert len(per_candidate) == 2  # one live ANY() + one DNC ANY(), not N+1
 
 
+def test_generate_payload_sends_truncated_raw_resume_text(monkeypatch):
+    def row(cid, resume_text):
+        return {"candidate_id": cid, "name": cid, "email": f"{cid}@x.com",
+                "phone": "5551234567", "headline": "", "location": "", "data": {},
+                "resume_text": resume_text}
+    cap = eng_payloads.PAIRBOT_RAW_RESUME_TEXT_MAX_CHARS
+    live = {
+        "short": row("short", "  Python dev, 5 yrs  "),
+        "long": row("long", "x" * (cap + 50)),
+        "empty": row("empty", "   "),
+        "none": row("none", None),
+    }
+    cur = _FakeCursor(live, dnc=set())
+    monkeypatch.setattr(eng_common, "_get_db_connection", lambda: _FakeConn(cur))
+
+    from types import SimpleNamespace
+
+    async def _no_gender(*_a, **_k):
+        return SimpleNamespace(gender_label="default", confidence=0.0, source="test")
+    monkeypatch.setattr(eng_payloads, "infer_gender_from_name_ai", _no_gender, raising=False)
+
+    res = _run(eng._generate_payload_for(
+        eng.GeneratePayloadRequest(candidate_ids=["short", "long", "empty", "none", "ghost"], job_id="J1")
+    ))
+    by_id = {r["source_candidate_id"]: r for r in json.loads(res["payload"])["resumes"]}
+    assert by_id["short"]["raw_resume_text"] == "Python dev, 5 yrs"
+    assert len(by_id["long"]["raw_resume_text"]) == cap
+    for cid in ("empty", "none", "ghost"):
+        assert "raw_resume_text" not in by_id[cid]
+    live_sql = [s for s in cur.executed if "DISTINCT ON (candidate_id)" in s]
+    assert "resume_text" in live_sql[0]
+
+
+def test_audit_payload_drops_raw_resume_text():
+    payload = {"jd": {"job_id": "J"}, "resumes": [
+        {"source_candidate_id": "a", "raw_resume_text": "secret"},
+        {"source_candidate_id": "b"},
+    ]}
+    stripped = eng_payloads._payload_without_resume_text(payload)
+    assert stripped["resumes"] == [{"source_candidate_id": "a"}, {"source_candidate_id": "b"}]
+    # The payload actually sent is untouched.
+    assert payload["resumes"][0]["raw_resume_text"] == "secret"
+
+
 def test_fetch_live_rows_dedupes_ids_and_selects_match_percentage():
     # No schema-drift fallback any more: a database without the column fails
     # here. The column is guaranteed by
