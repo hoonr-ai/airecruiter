@@ -1,21 +1,13 @@
-"""_fetch_job_and_candidate's candidate lookup against a real Postgres.
-
-Regression: sourced_candidates' own unique constraint is (jobdiva_id,
-candidate_id, source) — a multi-sourced candidate (JobDiva + LinkedIn +
-manual, …) genuinely has more than one row for the same candidate_id +
-jobdiva_id. _fetch_job_and_candidate used to run `... LIMIT 1` with no
-ORDER BY, so which of those rows came back was up to Postgres, not which one
-was actually just updated. A candidate_callback_reminder's own stale-
-reminder check reads that row's callback_scheduled_at — landing on a stale
-duplicate instead of the just-rescheduled one made it look superseded and
-skip firing, even though the reschedule had, in fact, just succeeded.
-
-A fake-cursor test can't catch this (it never asks a real planner which row
-"LIMIT 1" without ORDER BY actually returns), hence a real database here —
-modeled on test_upcoming_callbacks_pg.py's own DSN precedence/fixture shape.
+"""_fetch_job_and_candidate's candidate lookup against a real Postgres — see
+its own docstring in services/notifications_service.py for the regression
+this guards. A fake-cursor test can't catch it (it never asks a real planner
+which row "LIMIT 1" without ORDER BY actually returns), hence a real
+database here — modeled on test_upcoming_callbacks_pg.py's own DSN
+precedence/fixture shape.
 
 Skipped when no Postgres is reachable (LAUNCH_PLATFORM_TEST_DSN, then
-LAUNCH_REPORT_TEST_DSN, then "dbname=postgres").
+LAUNCH_REPORT_TEST_DSN, then "dbname=postgres"); CI provides one (see
+.github/workflows/deploy.yml's test-api `postgres` service).
 """
 import json
 import os
@@ -57,6 +49,12 @@ def pg_cursor():
         conn.close()
 
 
+# Arbitrary, distinct callback_scheduled_at values used only as labels to
+# tell the two rows' `data` apart in assertions below — not meaningful dates.
+_OLD_CALLBACK_AT = "2026-01-01T15:00:00+00:00"
+_NEW_CALLBACK_AT = "2026-01-01T18:00:00+00:00"
+
+
 def test_picks_the_most_recently_updated_duplicate_row(pg_cursor):
     conn, cur = pg_cursor
     # Two rows for the SAME candidate_id + jobdiva_id, different `source` —
@@ -67,12 +65,12 @@ def test_picks_the_most_recently_updated_duplicate_row(pg_cursor):
     cur.execute(
         "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source, updated_at) "
         "VALUES ('C1', '26-100', 'Jane Doe', %s::jsonb, 'jobdiva', now() - interval '1 hour')",
-        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": "2026-01-01T15:00:00+00:00"}),),
+        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": _OLD_CALLBACK_AT}),),
     )
     cur.execute(
         "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source, updated_at) "
         "VALUES ('C1', '26-100', 'Jane Doe', %s::jsonb, 'linkedin', now())",
-        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": "2026-01-01T18:00:00+00:00"}),),
+        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": _NEW_CALLBACK_AT}),),
     )
     conn.commit()
 
@@ -81,4 +79,28 @@ def test_picks_the_most_recently_updated_duplicate_row(pg_cursor):
     assert job_row is not None
     assert cand_row is not None
     # The just-updated (rescheduled) row's time, not the older duplicate's.
-    assert cand_row["data"]["callback_scheduled_at"] == "2026-01-01T18:00:00+00:00"
+    assert cand_row["data"]["callback_scheduled_at"] == _NEW_CALLBACK_AT
+
+
+def test_a_null_updated_at_loses_to_any_real_timestamp(pg_cursor):
+    """Exercises the NULLS LAST branch: a row that has never been touched
+    since creation (updated_at never set) must not win over one that has a
+    real, even old, timestamp — NULLS LAST, not NULLS FIRST, is what makes
+    that true."""
+    conn, cur = pg_cursor
+    cur.execute(
+        "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source, updated_at) "
+        "VALUES ('C2', '26-100', 'John Roe', %s::jsonb, 'jobdiva', NULL)",
+        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": _OLD_CALLBACK_AT}),),
+    )
+    cur.execute(
+        "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source, updated_at) "
+        "VALUES ('C2', '26-100', 'John Roe', %s::jsonb, 'linkedin', now() - interval '30 days')",
+        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": _NEW_CALLBACK_AT}),),
+    )
+    conn.commit()
+
+    _job_row, cand_row = _fetch_job_and_candidate(cur, "100", "C2")
+
+    assert cand_row is not None
+    assert cand_row["data"]["callback_scheduled_at"] == _NEW_CALLBACK_AT

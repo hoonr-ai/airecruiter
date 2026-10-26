@@ -22,6 +22,33 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # The *_pg.py suite (test_upcoming_callbacks_pg.py,
+    # test_notification_candidate_lookup_ordering_pg.py, test_task_outbox_pg.py,
+    # etc.) exists specifically because a fake-cursor mock can't catch
+    # real-engine-only behavior (JSONB filter/sort semantics, which row an
+    # unordered duplicate-row query actually returns, ON CONFLICT target
+    # resolution). Without a reachable Postgres, every one of those tests
+    # self-skips (pytest.skip / pytest.importorskip's connection check) — so
+    # this job was silently running everything EXCEPT the suite built to
+    # catch the bugs a mock can't (PR #851 review).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      LAUNCH_PLATFORM_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      LAUNCH_REPORT_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      NOTIFICATIONS_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

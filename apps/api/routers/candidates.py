@@ -6154,16 +6154,23 @@ async def save_candidate_feedback(
                 feedback_data["callback_scheduled_at"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
-                # Fast path: update exactly the row we resolved
+                # Fast path: update exactly the row we resolved. updated_at
+                # is set explicitly (PR #851 review) — there is no trigger
+                # on this table bumping it automatically, and
+                # notifications_service._fetch_job_and_candidate orders a
+                # multi-sourced candidate's duplicate rows by updated_at to
+                # find the one this write just touched; without this, that
+                # ordering would reflect whatever the sync pipeline last
+                # touched instead of this feedback write.
                 _cur2.execute(
-                    "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                    "UPDATE sourced_candidates SET data = data || %s::jsonb, updated_at = now() WHERE id = %s",
                     (feedback_payload, sc_row_id)
                 )
             else:
                 # Fallback: match by candidate_id + job ref
                 _cur2.execute(
                     """UPDATE sourced_candidates
-                          SET data = data || %s::jsonb
+                          SET data = data || %s::jsonb, updated_at = now()
                         WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
                           AND (jobdiva_id = %s
                                OR jobdiva_id IN (
@@ -6477,7 +6484,7 @@ async def mark_candidate_callback_done(
             cur.execute(
                 """
                 UPDATE sourced_candidates
-                SET data = data || %s::jsonb
+                SET data = data || %s::jsonb, updated_at = now()
                 WHERE id = %s AND LOWER(TRIM(data->>'feedback_type')) = 'callback scheduled'
                 """,
                 (json.dumps({"callback_done_at": datetime.now(timezone.utc).isoformat()}), sc_row_id),
@@ -6523,7 +6530,7 @@ async def cancel_candidate_callback(
             cur.execute(
                 """
                 UPDATE sourced_candidates
-                SET data = data || %s::jsonb
+                SET data = data || %s::jsonb, updated_at = now()
                 WHERE id = %s AND LOWER(TRIM(data->>'feedback_type')) = 'callback scheduled'
                 """,
                 (json.dumps({
