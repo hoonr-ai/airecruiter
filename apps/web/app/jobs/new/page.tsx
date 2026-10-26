@@ -5526,33 +5526,39 @@ function NewJobPageContent() {
     setIsAddingSourceLocation(true);
     setSourceLocationError("");
     try {
-      // A bare zip ("77002") or ZIP+4 ("77002-1234") — digits and dashes
-      // only, no city name looks like this — is always meant as a zip. A
-      // wrong shape (2-3/6+ digits, a malformed dash) is rejected
-      // immediately, no round trip: the backend doesn't recognize these as
-      // a zip attempt at all (see
+      // A bare zip ("77002") or ZIP+4 ("77002-1234") — one or more digits,
+      // optionally a dash then more digits; no city name looks like this —
+      // is always meant as a zip. PR #860 review: requiring a leading
+      // digit (not just "digits and dashes") better expresses that intent
+      // and correctly excludes a bare "-"/"--". A wrong shape (2-3/6+
+      // digits, a malformed ZIP+4 like "77002-12") is rejected immediately,
+      // no round trip: the backend doesn't recognize these as a zip
+      // attempt at all (see
       // test_parse_location_short_numeric_string_is_not_recognized_as_a_zip).
       // A recognized shape extracts its 5-digit part for a real lookup,
       // since the shape alone doesn't confirm it's assigned (QA
-      // regression: "99999"; ZIP+4 follow-up: "99999-1234" the same way).
+      // regression: "99999"; ZIP+4 follow-up: "99999-1234" the same way) —
+      // messages below still show the user's own typed value, not just
+      // that extracted part, so "99999-1234" reads back as itself rather
+      // than the bare "99999" that was actually looked up.
       let unverifiedWarning = "";
-      if (/^[\d-]+$/.test(cleanValue)) {
+      if (/^\d+(-\d*)?$/.test(cleanValue)) {
         const zip5 = cleanValue.match(/^(\d{5})(?:-\d{4})?$/)?.[1];
         if (!zip5) {
-          setSourceLocationError("Zip codes must be 5 digits");
+          setSourceLocationError("Enter a 5-digit zip or ZIP+4 (e.g. 77002-1234)");
           return;
         }
         try {
           const res = await api.candidates.lookupZip(zip5);
           if (!res?.valid) {
-            setSourceLocationError(`"${zip5}" isn't a recognized US zip code`);
+            setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
             return;
           }
         } catch {
           // A network/5xx failure here shouldn't block adding the
           // location, but failing open silently is the original bug from
           // a different trigger — surface it instead of saying nothing.
-          unverifiedWarning = `Couldn't verify "${zip5}" — added anyway`;
+          unverifiedWarning = `Couldn't verify "${cleanValue}" — added anyway`;
         }
       }
       excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));

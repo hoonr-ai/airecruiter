@@ -21,6 +21,7 @@ from services.jobdiva_boolean_translator import (  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     UnifiedCandidateSearch,
     SearchCriteria,
+    _UNKNOWN_DISTANCE_SENTINEL,
 )
 
 
@@ -737,23 +738,39 @@ def test_verdict_unresolvable_search_zip_is_consistent_regardless_of_candidate_s
 
     precise = {"location": "Houston, TX"}
     assert svc._single_location_match_verdict(precise, criteria) == (
-        False, "search_location_unresolvable", 9999.0,
+        False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL,
     )
 
     broad = {"location": "Dallas-Fort Worth Metroplex"}
     assert svc._single_location_match_verdict(broad, criteria) == (
-        False, "search_location_unresolvable", 9999.0,
+        False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL,
     )
 
 
 def test_verdict_zip_plus_four_resolves_normally_when_assigned(svc):
     """ZIP+4 follow-up: a well-formed, assigned ZIP+4 search still resolves
     via its 5-digit part exactly as a bare zip would — this isn't a new
-    restriction, only the unassigned case above is."""
+    restriction, only the unassigned case above is. Relies on 77002
+    (downtown Houston) being a real entry in the offline zip dataset, same
+    as every other real-zip test in this file (e.g. test_zip_index_lookup_
+    and_distance) — not something this test sets up itself."""
     result = svc._single_location_match_verdict(
         {"location": "Houston, TX"}, _criteria(location="77002-1234", within_miles=25)
     )
     assert result[0] is True
+
+
+def test_verdict_zip_plus_four_with_an_unassigned_five_digit_part(svc):
+    """ZIP+4 counterpart to test_verdict_zip_plus_four_resolves_normally_
+    when_assigned: a well-formed ZIP+4 whose 5-digit part isn't an assigned
+    zip (99999 is outside the real range) hits the exact same
+    search_location_unresolvable path a bad bare zip does — confirmed at
+    the verdict level, not just via _location_hard_gate (which covers this
+    same input in test_hard_gate_soft_keeps_an_unresolvable_search_location)."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="99999-1234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
 
 
 def test_verdict_embedded_unresolvable_zip_still_uses_city_state_fallback(svc):
