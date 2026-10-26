@@ -64,7 +64,7 @@ import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { ApiError, extractErrorMessage } from "@/lib/api-error";
-import { isValidFutureCallbackTime } from "@/lib/callback-time";
+import { datetimeLocalMin, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
 
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -577,6 +577,11 @@ export default function CandidateRankingsPage() {
   // close, however large).
   const [actionSelectReset, setActionSelectReset] = useState<{ candidateId: number; nonce: number } | null>(null);
   const [callbackAtInput, setCallbackAtInput] = useState("");
+  // Computed once, at the moment the modal opens (same as Candidates' own
+  // callbackAtMin) rather than inline in the input's `min` prop — calling
+  // the impure datetimeLocalMin()/Date.now() directly during render is a
+  // react-hooks/purity violation.
+  const [callbackAtMin, setCallbackAtMin] = useState("");
   const callbackAtInputRef = useRef<HTMLInputElement>(null);
   // Shown inline inside the Schedule Callback modal rather than only as a
   // toast — the toast renders at a lower z-index than this modal's own
@@ -707,9 +712,11 @@ export default function CandidateRankingsPage() {
     setCallbackModalError("");
     // A browser's datetime-local `min` is only a hint, not enforcement
     // (PR #845 review, mirrored here) — typed input can still submit a past
-    // time, so check it ourselves before round-tripping to the backend.
-    if (!isValidFutureCallbackTime(callbackAtInput)) {
-      setCallbackModalError("Callback time must be in the future");
+    // time. Checks the backend's actual 5-minute lead, not just "in the
+    // future", so a time 10 seconds out is caught here instead of round-
+    // tripping to the backend for the same rejection.
+    if (!hasMinimumCallbackLeadTime(callbackAtInput)) {
+      setCallbackModalError("Callback time must be at least 5 minutes in the future");
       return;
     }
     const candidateId = String(actionCandidateId);
@@ -3221,6 +3228,7 @@ export default function CandidateRankingsPage() {
                                 } else if (val === "Callback Scheduled") {
                                   setActionCandidateId(candidate.id);
                                   setCallbackAtInput("");
+                                  setCallbackAtMin(datetimeLocalMin());
                                   setCallbackModalError("");
                                   setIntegrationModalOpen('callback');
                                 }
@@ -3501,7 +3509,7 @@ export default function CandidateRankingsPage() {
                       aria-label="Callback Time"
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
                       value={callbackAtInput}
-                      min={new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
+                      min={callbackAtMin}
                       onChange={e => { setCallbackAtInput(e.target.value); setCallbackModalError(""); }}
                     />
                     {callbackModalError && (

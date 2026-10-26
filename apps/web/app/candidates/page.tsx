@@ -41,7 +41,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { isValidFutureCallbackTime } from "@/lib/callback-time";
+import { datetimeLocalMin, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
 import { ApiError, extractErrorMessage } from "@/lib/api-error";
 
 // On-screen column count. The skeleton rows and the empty state span this many
@@ -282,12 +282,6 @@ interface Candidate {
 // share a candidate ID but belong to different JobDiva jobs.
 const candidateRowKey = (candidate: Candidate) =>
   `${candidate.jobdiva_id ?? ""}:${candidate.candidate_id}`;
-
-// "now" in the shape <input type="datetime-local"> expects, same as
-// Rankings' and Upcoming Callbacks' own callback modals.
-function datetimeLocalMin(): string {
-  return new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-}
 
 // One placeholder row, a cell per column: the four sticky identity columns,
 // then TABLE_COLUMN_COUNT - 4 plain ones.
@@ -724,8 +718,11 @@ export default function GlobalCandidatesPage() {
       const jobRef = jobRefFor(actionCandidateId);
       if (!jobRef) throw new Error("No job ID found");
       // A browser's datetime-local `min` is only a hint, not enforcement
-      // (PR #845 review) — typed input can still submit a past time.
-      if (!isValidFutureCallbackTime(callbackAtInput)) throw new Error("Callback time must be in the future");
+      // (PR #845 review) — typed input can still submit a past time. Checks
+      // the backend's actual 5-minute lead (CALLBACK_MIN_LEAD), not just
+      // "in the future" — a time 10 seconds out would otherwise pass this
+      // check and still get rejected by the backend.
+      if (!hasMinimumCallbackLeadTime(callbackAtInput)) throw new Error("Callback time must be at least 5 minutes in the future");
       // datetime-local has no timezone — treated as the browser's own local
       // time, same as the moment it describes to the recruiter typing it in.
       // Parsed inside this try (PR #845 review) so an unparseable value's
@@ -744,7 +741,7 @@ export default function GlobalCandidatesPage() {
       setCallbackAtInput("");
     } catch (error) {
       console.error('Error scheduling callback:', error);
-      const message = error instanceof Error && error.message === "Callback time must be in the future"
+      const message = error instanceof Error && error.message === "Callback time must be at least 5 minutes in the future"
         ? error.message
         : error instanceof ApiError
           ? extractErrorMessage(error.data, "Failed to schedule callback. Please try again.")

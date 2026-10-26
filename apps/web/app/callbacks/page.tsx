@@ -15,7 +15,13 @@ import {
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
 import { ApiError, extractErrorMessage } from "@/lib/api-error";
-import { callbackDayLabel, callbackRelativeLabel, isCallbackOverdue, isValidFutureCallbackTime } from "@/lib/callback-time";
+import {
+  callbackDayLabel,
+  callbackRelativeLabel,
+  datetimeLocalMin,
+  hasMinimumCallbackLeadTime,
+  isCallbackOverdue,
+} from "@/lib/callback-time";
 import { cn } from "@/lib/utils";
 
 interface UpcomingCallback {
@@ -34,15 +40,6 @@ interface UpcomingCallback {
 // either.
 function callbackKey(cb: Pick<UpcomingCallback, "candidate_id" | "job_id">): string {
   return `${cb.job_id}:${cb.candidate_id}`;
-}
-
-// Mirrors the Rankings callback modal's own `min` (PR #841) — "now" in the
-// shape <input type="datetime-local"> expects. Doesn't encode the backend's
-// 5-minute/1-year bounds; a value outside those still round-trips to the API
-// and surfaces as the same error toast Rankings shows for the same case,
-// rather than duplicating that validation client-side here too.
-function datetimeLocalMin(): string {
-  return new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
 // `iso`'s time, or +Infinity for an unparsable one (PR #844 review) — sinks
@@ -80,6 +77,10 @@ export default function UpcomingCallbacksPage() {
       const res = await api.candidates.getUpcomingCallbacks();
       setCallbacks(Array.isArray(res?.callbacks) ? res.callbacks : []);
       setLoadError(null);
+      // A fresh fetch already excludes anything done server-side, so any
+      // doneKeys from a prior load are stale by definition — drop them
+      // rather than let the set grow across repeated loads.
+      setDoneKeys(new Set());
     } catch (err) {
       console.error("Failed to load upcoming callbacks:", err);
       setLoadError("Failed to load upcoming callbacks.");
@@ -173,8 +174,8 @@ export default function UpcomingCallbacksPage() {
     // A browser's datetime-local `min` is only a hint, not enforcement
     // (PR #845 review, mirrored here) — typed input can still submit a past
     // time, so check it ourselves before round-tripping to the backend.
-    if (!isValidFutureCallbackTime(rescheduleAt)) {
-      setRescheduleError("Callback time must be in the future");
+    if (!hasMinimumCallbackLeadTime(rescheduleAt)) {
+      setRescheduleError("Callback time must be at least 5 minutes in the future");
       return;
     }
     const target = rescheduleTarget;

@@ -6185,22 +6185,24 @@ async def save_candidate_feedback(
                     _cur2,
                     CANDIDATE_CALLBACK_REMINDER,
                     str(app_job_ref or job_id_or_ref),
-                    # sc_candidate_id, not jd_candidate_id: the reminder task
-                    # re-looks-up the candidate via
-                    # notifications_service._fetch_job_and_candidate, which
-                    # matches on sourced_candidates.candidate_id — the same
-                    # column mark_candidate_callback_done/list_upcoming_callbacks
-                    # key on. jd_candidate_id is JobDiva's own candidate id
-                    # (data_blob["jobdiva_candidate_id"] for an
-                    # auto-provisioned candidate), which can differ from that
-                    # column; passing it here meant the reminder silently
-                    # found no candidate row and no-opped for exactly those
-                    # candidates, with the outbox row still marked "done".
+                    # sc_candidate_id (sourced_candidates.candidate_id), not
+                    # jd_candidate_id (JobDiva's own id): the task's own
+                    # candidate lookup keys on the former, so passing the
+                    # latter silently no-opped whenever they differ.
                     sc_candidate_id,
                     user.email,
                     callback_dt.isoformat(),
                     available_at=remind_at,
-                    dedupe_key=f"callback_reminder:{sc_candidate_id}:{job_id_or_ref}:{callback_dt.isoformat()}",
+                    # Still keyed on jd_candidate_id, unchanged from before
+                    # this fix — a dedupe key only needs to be stable, not
+                    # correct, and switching it to sc_candidate_id here too
+                    # would change the key's shape for exactly the
+                    # candidates this fix affects, so a reminder already
+                    # queued (pre-deploy) under the old key would no longer
+                    # dedupe against one queued fresh (post-deploy) for the
+                    # same re-saved callback, and the recruiter could get it
+                    # twice.
+                    dedupe_key=f"callback_reminder:{jd_candidate_id}:{job_id_or_ref}:{callback_dt.isoformat()}",
                 )
             _conn2.commit()
         _conn2.close()
