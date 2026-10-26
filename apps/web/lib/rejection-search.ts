@@ -28,12 +28,11 @@ function wordMatches(word: string, reasonWords: string[]): boolean {
 }
 
 /** True if every character of `query` appears in `text`, in order, though not
- * necessarily contiguously — e.g. "wac" is a subsequence of "wavc". Used
- * instead of "every character appears somewhere" so a query like "com" can't
- * match an acronym purely because its letters happen to occur scattered
- * across unrelated words (recruiter-reported bug: "com" matched a reason
- * with no "com" in it because its first-letters string contained a c, an o,
- * and an m in some order). */
+ * necessarily contiguously — e.g. "wac" is a subsequence of "wavc", the
+ * first-letters acronym of "Work authorization / visa constraints" (skipping
+ * "visa"'s v). Used instead of "every character appears somewhere" so a
+ * query's letters have to occur in the reason's own word order, not just be
+ * present anywhere in the acronym regardless of order. */
 function isSubsequence(query: string, text: string): boolean {
   let i = 0;
   for (const ch of text) {

@@ -64,6 +64,20 @@ describe("scoreMatch", () => {
     assert.equal(scoreMatch("Communication skills", ""), 0);
     assert.equal(scoreMatch("Communication skills", "   "), 0);
   });
+
+  it("does not match a query longer than the reason's own acronym", () => {
+    // "Open to remote only" -> acronym "otro" (4 letters); a 5-letter query
+    // can never be a subsequence of a shorter string, so this must fall
+    // through to 0 rather than throwing or matching by accident.
+    assert.equal(scoreMatch("Open to remote only", "otros"), 0);
+  });
+
+  it("does not match via the acronym branch when the reason has no acronym at all", () => {
+    // Punctuation-only text strips to zero words in wordsOf, so the acronym
+    // is "" — isSubsequence must handle an empty text without matching any
+    // non-empty query (and without throwing).
+    assert.equal(scoreMatch("---", "abc"), 0);
+  });
 });
 
 describe("smartFilter", () => {
