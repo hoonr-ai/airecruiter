@@ -46,6 +46,16 @@ export function isCallbackOverdue(iso: string, now: Date = new Date()): boolean 
   return !Number.isNaN(target.getTime()) && target.getTime() <= now.getTime();
 }
 
+/** True if `iso` parses to a real moment strictly after `now` — the guard
+ * behind the Callback Scheduled time picker (PR #845 review: a browser's
+ * datetime-local `min` is only a hint, not enforcement). Not simply
+ * `!isCallbackOverdue`: that function reads an unparsable value as "not
+ * overdue", which would wrongly pass here as a valid future time. */
+export function isValidFutureCallbackTime(iso: string, now: Date = new Date()): boolean {
+  const target = new Date(iso);
+  return !Number.isNaN(target.getTime()) && target.getTime() > now.getTime();
+}
+
 /** "in 45m" / "in 3h" / "in 2d" / "Overdue" for a single row, relative to
  * `now`. Mirrors formatRelativeTime's granularity (minutes, then hours,
  * then days) but counts forward instead of back, and collapses to a single

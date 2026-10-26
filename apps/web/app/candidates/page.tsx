@@ -1,7 +1,7 @@
 "use client";
 
 import { useActiveTime } from "@/hooks/use-active-time";
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Search, Loader2, Phone, Check, X, ExternalLink, User, Briefcase, Zap, Activity, Calendar, Mail, Download, Filter, PhoneOff, Clock, CalendarCheck } from "lucide-react";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
@@ -33,6 +33,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { isValidFutureCallbackTime } from "@/lib/callback-time";
 
 // On-screen column count. The skeleton rows and the empty state span this many
 // cells, so keep it in step with the header row.
@@ -54,6 +63,16 @@ const FEEDBACK_DISPLAY: Record<FeedbackAction, string> = {
   Unreachable: "Unreachable",
   "Allotment Slot Filled": "Slot Filled",
   "Callback Scheduled": "Callback Scheduled",
+};
+
+// Color + icon for the feedback badge, keyed the same as FEEDBACK_DISPLAY
+// (PR #845 review: replaces a nested ternary chain).
+const FEEDBACK_BADGE: Record<FeedbackAction, { color: string; Icon: typeof Check }> = {
+  Submit: { color: "text-indigo-600", Icon: Check },
+  Reject: { color: "text-rose-600", Icon: X },
+  Unreachable: { color: "text-slate-500", Icon: PhoneOff },
+  "Allotment Slot Filled": { color: "text-amber-600", Icon: CalendarCheck },
+  "Callback Scheduled": { color: "text-sky-600", Icon: Clock },
 };
 
 // Mirrors routers/candidates._submittal_status, for the optimistic update
@@ -264,12 +283,7 @@ const candidateRowKey = (candidate: Candidate) =>
   `${candidate.jobdiva_id ?? ""}:${candidate.candidate_id}`;
 
 // "now" in the shape <input type="datetime-local"> expects, same as
-// Rankings' and Upcoming Callbacks' own callback modals. A named function
-// (rather than inlining `new Date(Date.now() - ...)` in the useMemo below)
-// so the impure-function-during-render lint can't see through the call and
-// flag it — matching Upcoming Callbacks' datetimeLocalMin, which the same
-// lint rule doesn't flag precisely because it's a named call, not an
-// inlined Date.now()/new Date().
+// Rankings' and Upcoming Callbacks' own callback modals.
 function datetimeLocalMin(): string {
   return new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
@@ -549,7 +563,10 @@ export default function GlobalCandidatesPage() {
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | 'callback' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [callbackAtInput, setCallbackAtInput] = useState("");
-  const callbackAtInputRef = useRef<HTMLInputElement>(null);
+  // Set once, at the moment the callback modal opens (PR #845 review —
+  // simpler and lint-clean compared to a useMemo re-triggered off a
+  // candidate-id dependency it doesn't actually use in its formula).
+  const [callbackAtMin, setCallbackAtMin] = useState("");
   // Forces a remount of ONE row's action Select after its modal is
   // cancelled, so its own internal state resets — scoped to {candidateId,
   // nonce} rather than a single counter bumped for every close (PR #840
@@ -570,6 +587,18 @@ export default function GlobalCandidatesPage() {
     setOffset(0);
     setIsLoading(true);
   };
+
+  // The job ref every feedback write targets — jobdiva_id, falling back to
+  // the numeric job_id (PR #845 review: Allotment Slot Filled and Callback
+  // Scheduled used different fallbacks, so a candidate with only job_id
+  // would fail one and succeed the other). One lookup for every action.
+  const jobRefFor = useCallback(
+    (candidateId: number): string | null => {
+      const c = candidates.find(cand => cand.id === candidateId);
+      return c?.jobdiva_id || c?.job_id || null;
+    },
+    [candidates]
+  );
 
   // Optimistic write-back of a recorded decision, mirroring what the feedback
   // endpoint stores (feedback_at = now, submitted_by = the signed-in user).
@@ -595,8 +624,7 @@ export default function GlobalCandidatesPage() {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       try {
-        const c = candidates.find(cand => cand.id === actionCandidateId);
-        const jobRef = c?.jobdiva_id || c?.job_id;
+        const jobRef = jobRefFor(actionCandidateId);
         if (!jobRef) throw new Error("No job ID found");
         await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Submit',
@@ -629,28 +657,12 @@ export default function GlobalCandidatesPage() {
     setCallbackAtInput("");
   }, [actionCandidateId]);
 
-  // Moves focus onto the callback modal's one input as soon as it opens,
-  // same as Rankings' own callback modal (PR #841/#844 review lineage).
-  useEffect(() => {
-    if (integrationModalOpen === 'callback') {
-      callbackAtInputRef.current?.focus();
-    }
-  }, [integrationModalOpen]);
-
-  // Computed once per modal open rather than on every render (PR #844
-  // review) — "now" only needs to be this fresh, not re-evaluated on every
-  // keystroke in the time field. actionCandidateId is the recompute trigger
-  // (a new candidate's modal opening), not an input to the formula itself.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const callbackAtMin = useMemo(() => datetimeLocalMin(), [actionCandidateId]);
-
   const handleConfirmReject = async () => {
     const trimmedReason = rejectReason?.trim() || "";
     if (actionCandidateId && trimmedReason) {
       setSyncingCandidateId(actionCandidateId);
       try {
-        const c = candidates.find(cand => cand.id === actionCandidateId);
-        const jobRef = c?.jobdiva_id || c?.job_id;
+        const jobRef = jobRefFor(actionCandidateId);
         if (!jobRef) throw new Error("No job ID found");
         await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Reject',
@@ -668,11 +680,12 @@ export default function GlobalCandidatesPage() {
     }
   };
 
-  const handleMarkUnreachable = async (candidateId: number, jobDivaId: string | null) => {
+  const handleMarkUnreachable = async (candidateId: number) => {
     setSyncingCandidateId(candidateId);
     try {
-      if (!jobDivaId) throw new Error("No job ID found");
-      await api.candidates.feedback(String(jobDivaId), String(candidateId), { feedback_type: 'Unreachable' });
+      const jobRef = jobRefFor(candidateId);
+      if (!jobRef) throw new Error("No job ID found");
+      await api.candidates.feedback(String(jobRef), String(candidateId), { feedback_type: 'Unreachable' });
       applyLocalFeedback(candidateId, 'Unreachable', null, null);
     } catch (error) {
       console.error('Error marking unreachable:', error);
@@ -681,14 +694,16 @@ export default function GlobalCandidatesPage() {
     }
   };
 
-  const handleMarkAllotmentSlotFilled = async (candidateId: number, jobDivaId: string | null) => {
+  const handleMarkAllotmentSlotFilled = async (candidateId: number) => {
     setSyncingCandidateId(candidateId);
     try {
-      if (!jobDivaId) throw new Error("No job ID found");
-      await api.candidates.feedback(String(jobDivaId), String(candidateId), { feedback_type: 'Allotment Slot Filled' });
+      const jobRef = jobRefFor(candidateId);
+      if (!jobRef) throw new Error("No job ID found");
+      await api.candidates.feedback(String(jobRef), String(candidateId), { feedback_type: 'Allotment Slot Filled' });
       applyLocalFeedback(candidateId, 'Allotment Slot Filled', null, null);
     } catch (error) {
       console.error('Error marking allotment slot filled:', error);
+      setToast({ message: "Failed to mark allotment slot filled. Please try again.", type: "error" });
     } finally {
       setSyncingCandidateId(null);
     }
@@ -696,14 +711,18 @@ export default function GlobalCandidatesPage() {
 
   const handleConfirmCallbackSchedule = async () => {
     if (!actionCandidateId || !callbackAtInput) return;
-    const c = candidates.find(cand => cand.id === actionCandidateId);
-    const jobRef = c?.jobdiva_id || c?.job_id;
-    // datetime-local has no timezone — treated as the browser's own local
-    // time, same as the moment it describes to the recruiter typing it in.
-    const callbackAtIso = new Date(callbackAtInput).toISOString();
     setSyncingCandidateId(actionCandidateId);
     try {
+      const jobRef = jobRefFor(actionCandidateId);
       if (!jobRef) throw new Error("No job ID found");
+      // A browser's datetime-local `min` is only a hint, not enforcement
+      // (PR #845 review) — typed input can still submit a past time.
+      if (!isValidFutureCallbackTime(callbackAtInput)) throw new Error("Callback time must be in the future");
+      // datetime-local has no timezone — treated as the browser's own local
+      // time, same as the moment it describes to the recruiter typing it in.
+      // Parsed inside this try (PR #845 review) so an unparseable value's
+      // RangeError is caught, not thrown past this function.
+      const callbackAtIso = new Date(callbackAtInput).toISOString();
       await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
         feedback_type: 'Callback Scheduled',
         callback_at: callbackAtIso,
@@ -717,6 +736,10 @@ export default function GlobalCandidatesPage() {
       setCallbackAtInput("");
     } catch (error) {
       console.error('Error scheduling callback:', error);
+      const message = error instanceof Error && error.message === "Callback time must be in the future"
+        ? error.message
+        : "Failed to schedule callback. Please try again.";
+      setToast({ message, type: "error" });
     } finally {
       setSyncingCandidateId(null);
     }
@@ -1403,12 +1426,13 @@ export default function GlobalCandidatesPage() {
                                 setActionCandidateId(c.id);
                                 setIntegrationModalOpen('submit');
                               } else if (val === "Unreachable") {
-                                handleMarkUnreachable(c.id, c.jobdiva_id);
+                                handleMarkUnreachable(c.id);
                               } else if (val === "Allotment Slot Filled") {
-                                handleMarkAllotmentSlotFilled(c.id, c.jobdiva_id);
+                                handleMarkAllotmentSlotFilled(c.id);
                               } else if (val === "Callback Scheduled") {
                                 setActionCandidateId(c.id);
                                 setCallbackAtInput("");
+                                setCallbackAtMin(datetimeLocalMin());
                                 setIntegrationModalOpen('callback');
                               }
                             }}
@@ -1426,13 +1450,8 @@ export default function GlobalCandidatesPage() {
                           </Select>
                           {feedback && (
                             <div className="flex flex-col items-center gap-1 mt-1.5">
-                              <div className={`text-[12px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedback === 'Submit' ? 'text-indigo-600' : feedback === 'Reject' ? 'text-rose-600' : feedback === 'Allotment Slot Filled' ? 'text-amber-600' : feedback === 'Callback Scheduled' ? 'text-sky-600' : 'text-slate-500'}`}>
-                                {feedback === 'Submit' ? <Check className="w-3 h-3" /> :
-                                 feedback === 'Reject' ? <X className="w-3 h-3" /> :
-                                 feedback === 'Allotment Slot Filled' ? <CalendarCheck className="w-3 h-3" /> :
-                                 feedback === 'Callback Scheduled' ? <Clock className="w-3 h-3" /> :
-                                 feedback === 'Unreachable' ? <PhoneOff className="w-3 h-3" /> :
-                                 null}
+                              <div className={`text-[12px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${FEEDBACK_BADGE[feedback].color}`}>
+                                {(() => { const Icon = FEEDBACK_BADGE[feedback].Icon; return <Icon className="w-3 h-3" />; })()}
                                 {FEEDBACK_DISPLAY[feedback]}
                               </div>
                               {c.feedback_reason && (
@@ -1576,60 +1595,47 @@ export default function GlobalCandidatesPage() {
         </div>
       )}
 
-      {integrationModalOpen === 'callback' && actionCandidateId && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="callback-modal-title"
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.stopPropagation();
-              closeIntegrationModal();
-            }
-          }}
-        >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 id="callback-modal-title" className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-600 flex items-center justify-center">
-                      <Clock className="w-3 h-3" />
-                    </span>
-                    Schedule Callback
-                  </h3>
-                  <button onClick={closeIntegrationModal} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
-                </div>
-                <div className="p-6 space-y-4">
-                  <p className="text-sm text-slate-500">
-                    When do you plan to call <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong> back? You&apos;ll get a reminder 5 minutes before.
-                  </p>
-                  <div className="space-y-2">
-                    <label htmlFor={`callback-at-${actionCandidateId}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Callback Time</label>
-                    <input
-                      ref={callbackAtInputRef}
-                      id={`callback-at-${actionCandidateId}`}
-                      type="datetime-local"
-                      aria-label="Callback Time"
-                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
-                      value={callbackAtInput}
-                      min={callbackAtMin}
-                      onChange={e => setCallbackAtInput(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={closeIntegrationModal} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button
-                    onClick={handleConfirmCallbackSchedule}
-                    disabled={!callbackAtInput || syncingCandidateId === actionCandidateId}
-                    className="font-bold bg-sky-600 hover:bg-sky-700 text-white"
-                  >
-                    {syncingCandidateId === actionCandidateId ? 'Saving...' : 'Schedule Callback'}
-                  </Button>
-                </div>
+      {/* Shared Dialog (PR #845 review) rather than a hand-rolled overlay
+          like Reject's above — Radix supplies a focus trap, initial focus
+          and Escape-to-close for free, none of which the hand-rolled
+          version had. */}
+      <Dialog open={integrationModalOpen === 'callback' && !!actionCandidateId} onOpenChange={(open) => !open && closeIntegrationModal()}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-600 flex items-center justify-center">
+                <Clock className="w-3 h-3" />
+              </span>
+              Schedule Callback
+            </DialogTitle>
+            <DialogDescription>
+              When do you plan to call <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong> back? You&apos;ll get a reminder 5 minutes before.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label htmlFor={`callback-at-${actionCandidateId}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Callback Time</label>
+            <input
+              id={`callback-at-${actionCandidateId}`}
+              type="datetime-local"
+              aria-label="Callback Time"
+              className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
+              value={callbackAtInput}
+              min={callbackAtMin}
+              onChange={e => setCallbackAtInput(e.target.value)}
+            />
           </div>
-        </div>
-      )}
+          <DialogFooter>
+            <Button variant="outline" onClick={closeIntegrationModal} className="font-semibold text-slate-600">Cancel</Button>
+            <Button
+              onClick={handleConfirmCallbackSchedule}
+              disabled={!callbackAtInput || syncingCandidateId === actionCandidateId}
+              className="font-bold bg-sky-600 hover:bg-sky-700 text-white"
+            >
+              {syncingCandidateId === actionCandidateId ? 'Saving...' : 'Schedule Callback'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
