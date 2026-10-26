@@ -62,10 +62,14 @@ def _setup(monkeypatch):
 
 # --- POST /jobs/{job}/candidates/{id}/callback/done -------------------------
 
+def _resolved_row(submitted_by="recruiter@pyramidci.com", feedback_type="Callback Scheduled", sc_id=55148489):
+    return (sc_id, {"feedback_type": feedback_type, "submitted_by": submitted_by})
+
+
 @pytest.mark.anyio
 async def test_mark_callback_done_sets_callback_done_at_only(monkeypatch):
     cand_module = _setup(monkeypatch)
-    cur = _FakeCursor(fetchone_results=[(55148489,)])
+    cur = _FakeCursor(fetchone_results=[_resolved_row()])
     conn = _FakeConn(cur)
     monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
 
@@ -77,12 +81,17 @@ async def test_mark_callback_done_sets_callback_done_at_only(monkeypatch):
     assert res == {"status": "success"}
     update_calls = [c for c in cur.executed if "UPDATE sourced_candidates" in c[0]]
     assert len(update_calls) == 1
-    _sql, params = update_calls[0]
+    sql, params = update_calls[0]
     payload = json.loads(params[0])
     # Only callback_done_at — no feedback_type, no JobDiva action string,
     # nothing that would read as an actual outcome on Rankings.
     assert set(payload.keys()) == {"callback_done_at"}
     assert params[1] == 55148489
+    # PR #844 review: the UPDATE itself is scoped to feedback_type =
+    # 'Callback Scheduled' — an atomic guarantee, not just a Python check
+    # before it, so a race with a concurrent Reject/Submit can't stamp
+    # callback_done_at onto a row that's no longer a pending callback.
+    assert "data->>'feedback_type' = 'Callback Scheduled'" in sql
     assert conn.committed is True
 
 
@@ -99,6 +108,41 @@ async def test_mark_callback_done_404s_when_candidate_not_resolved(monkeypatch):
             job_id_or_ref="26-12137", candidate_id="999999", user=user,
         )
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_403s_for_a_different_recruiter(monkeypatch):
+    """PR #844 review (Medium): list_upcoming_callbacks scopes to
+    submitted_by == user.email, so clearing a callback must be scoped the
+    same way — another non-admin recruiter with job access shouldn't be
+    able to clear a callback off someone else's list."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row(submitted_by="owner@pyramidci.com")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="someone-else@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.mark_candidate_callback_done(
+            job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+        )
+    assert exc_info.value.status_code == 403
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_allows_an_admin_regardless_of_owner(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row(submitted_by="owner@pyramidci.com")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="admin@pyramidci.com", role="admin")
+    res = await cand_module.mark_candidate_callback_done(
+        job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+    )
+    assert res == {"status": "success"}
+    assert any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
 
 
 # --- GET /candidates/callbacks/upcoming -------------------------------------

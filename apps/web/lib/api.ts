@@ -597,7 +597,7 @@ export const api = {
     getUpcomingCallbacks: () =>
       req<any>(`/candidates/callbacks/upcoming`),
     markCallbackDone: (jobId: string, candidateId: string) =>
-      req<any>(`/jobs/${jobId}/candidates/${candidateId}/callback/done`, { method: "POST" }),
+      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/done`, { method: "POST" }),
   },
   manualCandidates: {
     add: (jobRef: string, body: unknown) =>

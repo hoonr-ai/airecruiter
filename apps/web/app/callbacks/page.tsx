@@ -44,6 +44,15 @@ function datetimeLocalMin(): string {
   return new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
+// `iso`'s time, or +Infinity for an unparsable one (PR #844 review) — sinks
+// a malformed timestamp to the very end of both sorts below instead of
+// NaN's undefined Array.sort ordering, which could otherwise scatter it
+// across more than one place in the list.
+function callbackTimeMs(iso: string): number {
+  const ms = new Date(iso).getTime();
+  return Number.isNaN(ms) ? Infinity : ms;
+}
+
 export default function UpcomingCallbacksPage() {
   const [callbacks, setCallbacks] = useState<UpcomingCallback[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -77,7 +86,7 @@ export default function UpcomingCallbacksPage() {
     // first here, or a day's overdue and still-pending items would scatter
     // into separate buckets of the same label instead of merging into one.
     const chronological = [...(callbacks || [])].sort(
-      (a, b) => new Date(a.callback_at).getTime() - new Date(b.callback_at).getTime()
+      (a, b) => callbackTimeMs(a.callback_at) - callbackTimeMs(b.callback_at)
     );
     const out: { label: string; items: UpcomingCallback[] }[] = [];
     for (const cb of chronological) {
@@ -95,7 +104,7 @@ export default function UpcomingCallbacksPage() {
         const overdueA = isCallbackOverdue(a.callback_at);
         const overdueB = isCallbackOverdue(b.callback_at);
         if (overdueA !== overdueB) return overdueA ? 1 : -1;
-        return new Date(a.callback_at).getTime() - new Date(b.callback_at).getTime();
+        return callbackTimeMs(a.callback_at) - callbackTimeMs(b.callback_at);
       });
     }
     return out;
@@ -115,6 +124,11 @@ export default function UpcomingCallbacksPage() {
       setBusyKey(null);
     }
   };
+
+  // Computed once per dialog open rather than on every render (PR #844
+  // review) — "now" only needs to be this fresh, not re-evaluated on every
+  // keystroke in the time field.
+  const rescheduleMin = useMemo(() => datetimeLocalMin(), [rescheduleTarget]);
 
   const openReschedule = (cb: UpcomingCallback) => {
     setActionError(null);
@@ -175,7 +189,12 @@ export default function UpcomingCallbacksPage() {
       )}
 
       {loadError && (
-        <Card className="p-6 text-center text-sm text-rose-600">{loadError}</Card>
+        <Card className="p-6 flex flex-col items-center gap-3 text-center text-sm text-rose-600">
+          {loadError}
+          <Button variant="outline" size="sm" onClick={() => load()}>
+            Retry
+          </Button>
+        </Card>
       )}
 
       {!loadError && callbacks === null && (
@@ -275,7 +294,7 @@ export default function UpcomingCallbacksPage() {
               aria-label="Callback Time"
               className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
               value={rescheduleAt}
-              min={datetimeLocalMin()}
+              min={rescheduleMin}
               onChange={(e) => setRescheduleAt(e.target.value)}
             />
           </div>

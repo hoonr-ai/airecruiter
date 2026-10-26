@@ -6123,6 +6123,13 @@ async def save_candidate_feedback(
                     feedback_data["internal_review_requested_by"] = None
             elif request.feedback_type == "Callback Scheduled":
                 feedback_data["callback_scheduled_at"] = callback_dt.isoformat()
+                # PR #844 review: a fresh schedule (first time, or a
+                # reschedule after a previously-done one) must clear any
+                # earlier callback_done_at — otherwise list_upcoming_callbacks
+                # (filtered on callback_done_at IS NULL) would silently never
+                # show this new callback, even though a reminder is about to
+                # fire for it.
+                feedback_data["callback_done_at"] = None
             else:
                 # PR #841 review: without this, callback_scheduled_at from a
                 # prior "Callback Scheduled" survives the JSONB `||` merge
@@ -6359,28 +6366,39 @@ async def save_candidate_feedback(
     }
 
 
-def _resolve_sourced_candidate_row_id(cur, job_id_or_ref: str, candidate_id: str) -> Optional[int]:
-    """Finds the sourced_candidates.id for (job_id_or_ref, candidate_id), the
-    same candidate_id-or-integer-PK / job-scoped match save_candidate_feedback
-    uses to resolve a row — but without that function's JobDiva-ID
-    resolution (customer_name, numeric JobDiva job ref, etc.), which
-    mark_candidate_callback_done has no use for since it never calls
-    JobDiva. Returns None if no row matches."""
+def _resolve_sourced_candidate_row_for_callback(
+    cur, job_id_or_ref: str, candidate_id: str
+) -> Optional[Tuple[int, Dict[str, Any]]]:
+    """Finds the (sourced_candidates.id, data) for (job_id_or_ref,
+    candidate_id), the same candidate_id-or-integer-PK / job-scoped match
+    save_candidate_feedback uses to resolve a row — but without that
+    function's JobDiva-ID resolution (customer_name, numeric JobDiva job
+    ref, etc.), which mark_candidate_callback_done has no use for since it
+    never calls JobDiva. Returns None if no row matches.
+
+    PR #844 review: the LEFT JOIN's `ON a OR b` can match more than one
+    monitored_jobs row for a candidate posted to multiple jobs with the same
+    jobdiva_id — ORDER BY makes the pick deterministic (most recently
+    updated row) rather than whatever order Postgres happens to return."""
     cand_id_str = str(candidate_id).strip()
     pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
     cur.execute(
         """
-        SELECT sc.id
+        SELECT sc.id, sc.data
         FROM sourced_candidates sc
         LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
         WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
           AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
+        ORDER BY sc.updated_at DESC NULLS LAST, sc.id DESC
         LIMIT 1
         """,
         (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref),
     )
     row = cur.fetchone()
-    return row[0] if row else None
+    if not row:
+        return None
+    data = row[1] if isinstance(row[1], dict) else _json_load_safe(row[1], {})
+    return row[0], data
 
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/callback/done")
@@ -6400,17 +6418,35 @@ async def mark_candidate_callback_done(
     A no-op (200, not an error) when the row is already marked done or the
     status has since moved on from "Callback Scheduled" (e.g. the recruiter
     went to Rankings and rejected the candidate before coming back to this
-    list) — either way there's nothing left for this action to clear.
+    list) — either way there's nothing left for this action to clear. The
+    UPDATE itself is scoped to feedback_type = 'Callback Scheduled' (PR #844
+    review) so that's an atomic guarantee, not just this docstring's promise
+    — a stale list entry can't stamp callback_done_at onto a row that has
+    since become a Reject/Submit/Unreachable/Allotment Slot Filled.
+
+    PR #844 review: list_upcoming_callbacks scopes to submitted_by ==
+    user.email, so clearing a callback here is scoped the same way — any
+    other non-admin recruiter with job access (but who isn't the one who
+    scheduled it) gets 403 rather than silently clearing a callback off
+    someone else's list.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            sc_row_id = _resolve_sourced_candidate_row_id(cur, job_id_or_ref, candidate_id)
-            if sc_row_id is None:
+            resolved = _resolve_sourced_candidate_row_for_callback(cur, job_id_or_ref, candidate_id)
+            if resolved is None:
                 raise HTTPException(status_code=404, detail="Candidate not found for this job")
+            sc_row_id, data = resolved
+            submitted_by = str(data.get("submitted_by") or "").strip().lower()
+            if not user.is_admin and submitted_by and submitted_by != (user.email or "").strip().lower():
+                raise HTTPException(status_code=403, detail="This callback was scheduled by another recruiter")
             cur.execute(
-                "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                """
+                UPDATE sourced_candidates
+                SET data = data || %s::jsonb
+                WHERE id = %s AND data->>'feedback_type' = 'Callback Scheduled'
+                """,
                 (json.dumps({"callback_done_at": datetime.now(timezone.utc).isoformat()}), sc_row_id),
             )
             conn.commit()
@@ -6455,7 +6491,7 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
                   AND LOWER(TRIM(sc.data->>'submitted_by')) = %s
                   AND sc.data->>'callback_scheduled_at' IS NOT NULL
                   AND sc.data->>'callback_done_at' IS NULL
-                ORDER BY sc.data->>'callback_scheduled_at' ASC
+                ORDER BY (sc.data->>'callback_scheduled_at')::timestamptz ASC
                 """,
                 (recipient,),
             )
