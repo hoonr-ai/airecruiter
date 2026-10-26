@@ -1300,7 +1300,7 @@ async def create_candidate_externally_submitted_notification(
         )
 
 
-_TITLE_CALLBACK_REMINDER = "Callback reminder: call {candidate_name} for {job_title}"
+_TITLE_CALLBACK_REMINDER = "Callback reminder: Call {candidate_name} for {job_title}"
 
 
 def _format_callback_time_utc(callback_at: str) -> str:

@@ -71,6 +71,32 @@ export function hasMinimumCallbackLeadTime(iso: string, now: Date = new Date()):
   return !Number.isNaN(target.getTime()) && target.getTime() - now.getTime() >= CALLBACK_MIN_LEAD_MINUTES * 60_000;
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/** "MM/DD/YYYY HH:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with
+ * a FIXED date order and 12-hour clock regardless of the browser's own
+ * locale — unlike toLocaleString(), which formats using whatever date order
+ * (DD/MM vs MM/DD) and notation the viewer's OS/browser happens to be
+ * configured for. Two recruiters in the same office, same timezone, could
+ * otherwise see the same callback's date written in a different order from
+ * each other purely from an OS locale setting neither of them set on
+ * purpose. Returns "" for an unparsable value rather than "Invalid Date". */
+export function formatFixedDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const month = pad2(d.getMonth() + 1);
+  const day = pad2(d.getDate());
+  const year = d.getFullYear();
+  const minutes = pad2(d.getMinutes());
+  const seconds = pad2(d.getSeconds());
+  let hours = d.getHours();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  return `${month}/${day}/${year} ${hours}:${minutes}:${seconds} ${ampm}`;
+}
+
 /** "now" in the shape <input type="datetime-local"> expects for its `min`
  * attribute — a browser hint only (see hasMinimumCallbackLeadTime's own
  * docstring for the real enforcement). Previously duplicated by hand in

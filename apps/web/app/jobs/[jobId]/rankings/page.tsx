@@ -64,7 +64,7 @@ import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import { API_BASE, authFetch, api } from "@/lib/api";
 import { ApiError, extractErrorMessage } from "@/lib/api-error";
-import { datetimeLocalMin, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
+import { datetimeLocalMin, formatFixedDateTime, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
 
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -731,7 +731,7 @@ export default function CandidateRankingsPage() {
       });
       setFeedbacks(prev => ({ ...prev, [candidateId]: 'Callback Scheduled' }));
       setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
-      setFeedbackReasons(prev => ({ ...prev, [candidateId]: `Callback at ${new Date(callbackAtIso).toLocaleString()}` }));
+      setFeedbackReasons(prev => ({ ...prev, [candidateId]: `Callback at ${formatFixedDateTime(callbackAtIso)}` }));
       setToast({ message: "Callback scheduled — you'll get a reminder 5 minutes before", type: "success" });
       // Only close/reset on success (PR #841 review) — closing unconditionally
       // in `finally` meant a failed save also wiped callbackAtInput, forcing
