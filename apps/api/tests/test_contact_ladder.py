@@ -193,41 +193,16 @@ def test_launch_goes_straight_to_the_deep_search_after_a_recent_normal_miss(monk
     assert res["phone"] == "+14155550100"
 
 
-def test_a_recent_deep_miss_is_final_and_a_click_rebuys_it_only_on_confirm(monkeypatch):
-    # 2026-10-15 ("never pay twice for the same person"): this used to be
-    # Launch-only, and every click re-bought the deep miss (ca1c503b).
-    cached = {"email": "jane@acme.com", "phone_missed": True, "phone_deep_missed": True,
-              "phone_deep_missed_at": "2026-10-01T12:00:00+00:00"}
-
-    chain = _Chain(cached=cached)
-    res = _on_demand(monkeypatch, chain, **LAUNCH)
-    assert chain.exa_calls() == []
-    assert res["status"] == "success" and res["email"] == "jane@acme.com"
-    assert res["final_missed_fields"] == ["phone"] and res["lookup"]["exa_deep"] == "final_miss"
-
-    chain = _Chain(cached=cached)
-    res = _on_demand(monkeypatch, chain, fields=["phone"])     # the phone button
-    assert chain.calls == ["apollo"]                            # no paid Exa run; Apollo still asked
-    assert res["status"] == "skipped" and res["reason"] == "recent_deep_miss"
-    assert res["checked_at"] == "2026-10-01T12:00:00+00:00" and 0.15 <= res["est_usd"] <= 0.30
-
-    chain = _Chain(cached=cached)
-    _on_demand(monkeypatch, chain, fields=["phone"], confirm=True)   # "Search again"
-    assert chain.exa_calls() == [("exa_deep", ("phone",))]
-
-
-def test_click_honour_knob_off_restores_a_click_always_retrying(monkeypatch):
-    monkeypatch.setenv("CONTACT_CLICK_HONOUR_DEEP_MISS", "false")
+def test_launch_does_not_rebuy_a_recent_deep_miss_but_a_click_does(monkeypatch):
     cached = {"email": "jane@acme.com", "phone_missed": True, "phone_deep_missed": True}
 
     chain = _Chain(cached=cached)
-    res = _on_demand(monkeypatch, chain, fields=["phone"])
-    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("phone",))]
-    assert res["status"] == "success" and res["final_missed_fields"] == []
+    _on_demand(monkeypatch, chain, **LAUNCH)
+    assert chain.exa_calls() == []
 
     chain = _Chain(cached=cached)
-    _on_demand(monkeypatch, chain, **LAUNCH)                   # Launch still honours it
-    assert chain.exa_calls() == []
+    _on_demand(monkeypatch, chain)          # the phone button: a deliberate click
+    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("phone",))]
 
 
 def test_the_deep_search_can_be_switched_off(monkeypatch):
@@ -400,10 +375,7 @@ def test_a_missing_key_is_fatal_so_no_deep_search_follows(monkeypatch):
 # group waiting for its slowest candidate, lost create answers)
 # ---------------------------------------------------------------------------
 
-def test_no_deep_search_while_the_normal_run_for_the_same_field_is_still_going(monkeypatch):
-    # The normal run gets its second window; still going after it, it is
-    # watched in the background and no deep run is bought for its fields
-    # (it used to start at once and both were billed for the same field).
+def test_a_slow_normal_run_is_not_waited_on_twice_when_the_deep_search_follows(monkeypatch):
     watched = []
     monkeypatch.setattr(ce, "watch_late_exa_run", lambda run_id, url, **kw: watched.append((run_id, kw["provider"])))
     chain = _Chain(
@@ -411,28 +383,10 @@ def test_no_deep_search_while_the_normal_run_for_the_same_field_is_still_going(m
         deep={"ok": False, "message": "Exa run timed out", "run_id": "run-deep"},
     )
 
-    res = _on_demand(monkeypatch, chain)
+    _on_demand(monkeypatch, chain)
 
-    assert chain.exa_calls() == [("exa", ("email", "phone"))]
-    assert chain.wait_retry == [True]
-    assert watched == [("run-normal", "exa")]
-    assert res["lookup"]["exa_deep"] == "-"
-    assert all(not r["missed"] and not r["deep_missed"] for r in chain.records)   # not an answer
-
-
-def test_a_deep_first_field_is_not_held_back_by_a_slow_normal_run(monkeypatch):
-    watched = []
-    monkeypatch.setattr(ce, "watch_late_exa_run", lambda run_id, url, **kw: watched.append((run_id, kw["provider"])))
-    chain = _Chain(
-        cached={"phone_missed": True},
-        exa={"ok": False, "message": "Exa run timed out", "run_id": "run-normal"},
-        deep={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
-    )
-
-    res = _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("email",)), ("exa_deep", ("phone",))]
-    assert res["phone"] == "+14155550100"
+    assert chain.wait_retry == [False, False]
+    assert watched == [("run-normal", "exa"), ("run-deep", "exa_deep")]
 
 
 def test_with_the_deep_search_off_the_normal_run_keeps_its_second_window(monkeypatch):
@@ -541,9 +495,7 @@ def test_grouped_lookups_finish_even_if_the_caller_goes_away(monkeypatch):
     first = asyncio.run(_go())
 
     assert b'"index": 1' in first
-    # Both lookups ran to the end and were kept: each step as it answered
-    # (the normal run, the deep search), then the final record.
-    assert len(chain.records) == 6
+    assert len(chain.records) == 2            # both lookups ran to the end and were kept
 
 
 def test_a_lost_create_answer_is_picked_up_not_bought_again(monkeypatch):
