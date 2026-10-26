@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge, Network, Bell, Clock } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff, FileClock, Radio, UserCheck, Gauge, Network, Bell, PhoneCall } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -17,7 +17,7 @@ export function Sidebar() {
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
         { label: "Notifications", href: "/notifications", icon: Bell, disabled: false, badge: unreadCount },
-        { label: "Callbacks", href: "/callbacks", icon: Clock, disabled: false },
+        { label: "Callbacks", href: "/callbacks", icon: PhoneCall, disabled: false },
         // Live Report navigation hidden temporarily during testing (accessible directly via /admin/live-report)
         // { label: "Live Report", href: "/admin/live-report", icon: Radio, disabled: false },
         // Admins get the full analytics + team management; team leads get the
