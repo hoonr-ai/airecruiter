@@ -53,7 +53,13 @@ interface UpcomingCallback {
 // all of them). Falls back to job_id:candidate_id only if row_id is ever
 // missing (defensive; the backend always sends it).
 function callbackKey(cb: Pick<UpcomingCallback, "row_id" | "candidate_id" | "job_id">): string {
-  return cb.row_id != null ? `row:${cb.row_id}` : `${cb.job_id}:${cb.candidate_id}`;
+  if (cb.row_id == null) {
+    // Should never happen against the current API — surface it instead of
+    // silently colliding with another duplicate row sharing this fallback key.
+    console.error("callbackKey: missing row_id, falling back to a non-unique key", cb);
+    return `${cb.job_id}:${cb.candidate_id}`;
+  }
+  return `row:${cb.row_id}`;
 }
 
 // `iso`'s time, or +Infinity for an unparsable one (PR #844 review) — sinks

@@ -21,7 +21,7 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from fastapi import BackgroundTasks  # noqa: E402
+from fastapi import BackgroundTasks, HTTPException  # noqa: E402
 
 from core.auth import UserIdentity  # noqa: E402
 from models import CandidateFeedbackRequest  # noqa: E402
@@ -219,3 +219,42 @@ async def test_sourced_row_id_targets_the_exact_row_even_when_both_duplicates_ar
     # otherwise picked.
     assert rows[row_b]["callback_scheduled_at"] == new_time.isoformat()
     assert rows[row_a]["callback_scheduled_at"] == stale.isoformat()
+
+
+@pytest.mark.anyio
+async def test_sourced_row_id_belonging_to_a_different_job_404s(pg):
+    """PR #855 review (High, IDOR): a recruiter with access to job 100 must
+    not be able to act on a sourced_candidates row that actually belongs to a
+    DIFFERENT job (100's own candidate_id/jobdiva_id scoping is exactly what
+    a cross-job row_id guess bypasses without this check) just by passing its
+    id as sourced_row_id. The explicit pin not resolving under job 100 must
+    404, not silently fall back to the ambiguous candidate_id/jobdiva_id
+    match, which could then write to an unrelated row under the right job."""
+    with pg.cursor() as cur:
+        cur.execute(
+            "INSERT INTO monitored_jobs (job_id, title, customer_name, recruiter_emails, jobdiva_id) "
+            "VALUES ('200', 'Other Job', 'Other Co', %s, '26-200')",
+            (json.dumps([_RECRUITER]),),
+        )
+        # Same candidate_id as the C1 fixture used by _save_callback below —
+        # isolates that it's the job scoping that 404s here, not merely a
+        # candidate_id mismatch (which wouldn't exercise the IDOR fix at all).
+        cur.execute(
+            "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source) "
+            "VALUES ('C1', '26-200', 'Someone Else', '{}'::jsonb, 'jobdiva') RETURNING id",
+        )
+        other_job_row_id = cur.fetchone()[0]
+    pg.commit()
+
+    user = UserIdentity(email=_RECRUITER, role="recruiter")
+    when = datetime.now(timezone.utc) + timedelta(hours=1)
+    with pytest.raises(HTTPException) as exc_info:
+        await _save_callback(user, when, sourced_row_id=other_job_row_id)
+    assert exc_info.value.status_code == 404
+
+    with pg.cursor() as cur:
+        cur.execute("SELECT data FROM sourced_candidates WHERE id = %s", (other_job_row_id,))
+        (other_job_data,) = cur.fetchone()
+    # Untouched — the 404 happened before any write, not after one that then
+    # got rolled back for an unrelated reason.
+    assert other_job_data == {}

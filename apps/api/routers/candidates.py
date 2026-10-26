@@ -5880,12 +5880,9 @@ REJECTION_REASON_TO_JOBDIVA_ACTION = {
 CALLBACK_MIN_LEAD = timedelta(minutes=5)
 CALLBACK_MAX_LEAD = timedelta(days=365)
 
-# Shared with notifications_service.py's own callback-reminder stale-check —
-# see sourced_candidate_dedup.py's module docstring for why both sides of a
-# callback action (the write, and the reminder's read right before it fires)
-# need to agree on which of a multi-sourced candidate's duplicate rows is
-# "the" one.
-_CALLBACK_ROW_TIEBREAKER = CALLBACK_ROW_TIEBREAKER
+# CALLBACK_ROW_TIEBREAKER (imported above) is shared with notifications_service.py's
+# own callback-reminder stale-check — see sourced_candidate_dedup.py's module
+# docstring for why both sides need to agree on which duplicate row is "the" one.
 
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
@@ -6000,6 +5997,14 @@ async def save_candidate_feedback(
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+    # Set True only if sourced_row_id was given AND actually matched (set
+    # inside the try/except below, which deliberately swallows its own
+    # exceptions — see that except's own comment) — checked once we're past
+    # it (PR #855 review: an explicit pin that doesn't resolve must 404, not
+    # silently fall back to the ambiguous candidate_id/jobdiva_id match,
+    # which could act on a different duplicate than the one the caller
+    # pinned to).
+    sourced_row_pin_matched = False
     jd_profile_id = ""               # JobDiva profile the manager email links to
     candidate_name = "Candidate"
     job_title = "Job"
@@ -6025,28 +6030,46 @@ async def save_candidate_feedback(
                 # straight to it — no ambiguity possible, unlike resolving by
                 # candidate_id/jobdiva_id below, which a multi-sourced
                 # candidate's duplicate rows can still tie on even with
-                # _CALLBACK_ROW_TIEBREAKER (it narrows the odds, it doesn't
-                # eliminate them). Falls through to the ambiguous resolution
-                # if the id is stale/wrong (e.g. candidate_id no longer
-                # matches it) rather than erroring, same as any other
-                # not-found case.
+                # CALLBACK_ROW_TIEBREAKER (it narrows the odds, it doesn't
+                # eliminate them). Still scoped to THIS job (PR #855 review,
+                # High: without it, a recruiter with access to job A could
+                # pass a row_id belonging to the same candidate_id's row on
+                # job B and act on a callback they have no access to) and
+                # ordered the same way the ambiguous query below is (PR #855
+                # review, Medium: the LEFT JOIN's `ON a OR b` can still match
+                # more than one monitored_jobs row even once sc.id itself is
+                # pinned, and mj.job_id/title/customer_name feed downstream
+                # notifications/emails).
                 if request.sourced_row_id is not None:
                     _cur.execute(
-                        """
+                        f"""
                         SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
                                sc.name, mj.title, mj.customer_name, sc.source
                         FROM sourced_candidates sc
                         LEFT JOIN monitored_jobs mj
                           ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
                         WHERE sc.id = %s AND sc.candidate_id = %s
+                          AND (
+                              sc.jobdiva_id = %s
+                              OR mj.job_id = %s
+                              OR mj.jobdiva_id = %s
+                              OR sc.jobdiva_id IN (
+                                  SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                              )
+                          )
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
                         LIMIT 1
                         """,
-                        (request.sourced_row_id, cand_id_str),
+                        (
+                            request.sourced_row_id, cand_id_str,
+                            job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref,
+                        ),
                     )
                     row = _cur.fetchone()
+                    sourced_row_pin_matched = row is not None
 
                 # Resolve candidate row matching either candidate_id or integer PK id, scoped to job.
-                # Tiebreaker: _CALLBACK_ROW_TIEBREAKER (see its own docstring) — keeps a
+                # Tiebreaker: CALLBACK_ROW_TIEBREAKER (see its own docstring) — keeps a
                 # duplicate-sourced candidate's writes landing on the same physical row.
                 if not row:
                     _cur.execute(
@@ -6069,7 +6092,7 @@ async def save_candidate_feedback(
                             )
                         )
                         ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
-                                 {_CALLBACK_ROW_TIEBREAKER}
+                                 {CALLBACK_ROW_TIEBREAKER}
                         LIMIT 1
                         """,
                         (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
@@ -6090,7 +6113,7 @@ async def save_candidate_feedback(
                             OR (%s::bigint IS NOT NULL AND sc.id = %s)
                         )
                         ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
-                                 {_CALLBACK_ROW_TIEBREAKER}
+                                 {CALLBACK_ROW_TIEBREAKER}
                         LIMIT 1
                         """,
                         (cand_id_str, pk_val, pk_val)
@@ -6135,6 +6158,15 @@ async def save_candidate_feedback(
     except Exception as e:
         logger.warning(f"⚠️ Could not resolve JobDiva IDs from DB for feedback "
                        f"(candidate_id={candidate_id}, job={job_id_or_ref}): {e}")
+
+    # An explicit pin that didn't resolve (wrong job, stale id, deleted row,
+    # or the lookup itself failed above) must 404 rather than silently fall
+    # back to the ambiguous candidate_id/jobdiva_id match below it — that
+    # could write to a different duplicate than the one the caller pinned to
+    # (PR #855 review). Checked here, outside the try/except above, since
+    # that except deliberately swallows its own exceptions.
+    if request.sourced_row_id is not None and not sourced_row_pin_matched:
+        raise HTTPException(status_code=404, detail="sourced_row_id not found for this candidate and job")
 
     logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, app_job_ref={app_job_ref}, sc_row_id={sc_row_id}")
 
@@ -6447,6 +6479,14 @@ async def save_candidate_feedback(
     }
 
 
+def _normalize_optional_row_id(value: Any) -> Optional[int]:
+    """A direct (non-HTTP) call to an endpoint with a Query(None, ...)
+    parameter — as both pg-backed test suites for these two endpoints make —
+    gets the raw Query sentinel object as its default, not None (same
+    pattern as get_job_candidates' own status param)."""
+    return value if isinstance(value, int) else None
+
+
 def _resolve_sourced_candidate_row_for_callback(
     cur, job_id_or_ref: str, candidate_id: str, row_id: Optional[int] = None
 ) -> Optional[Tuple[int, Dict[str, Any]]]:
@@ -6459,7 +6499,7 @@ def _resolve_sourced_candidate_row_for_callback(
 
     PR #844 review: the LEFT JOIN's `ON a OR b` can match more than one
     monitored_jobs row for a candidate posted to multiple jobs with the same
-    jobdiva_id. Tiebreaker: _CALLBACK_ROW_TIEBREAKER (see its own docstring)
+    jobdiva_id. Tiebreaker: CALLBACK_ROW_TIEBREAKER (see its own docstring)
     — makes the pick both deterministic and, unlike ordering on updated_at
     alone, stable across calls for a multi-sourced candidate.
 
@@ -6467,19 +6507,34 @@ def _resolve_sourced_candidate_row_for_callback(
     got from list_upcoming_callbacks), pins straight to that exact row — no
     ambiguity possible, unlike the candidate_id/jobdiva_id match below, which
     a multi-sourced candidate's duplicate rows can still tie on even with the
-    tiebreaker (it narrows the odds, it doesn't eliminate them). Falls
-    through to that match if the id is stale/wrong rather than erroring."""
+    tiebreaker (it narrows the odds, it doesn't eliminate them). Still scoped
+    to job_id_or_ref (PR #855 review, High: without it, a recruiter with
+    access to one job could pass a row_id belonging to the same
+    candidate_id's row on a DIFFERENT job they have no access to and act on
+    its callback) — matches the same job clause as the fallback query below.
+    Returns None (the caller 404s) rather than falling through to that
+    ambiguous match if an explicit pin doesn't resolve — a stale/wrong id
+    silently falling back could act on a different duplicate than the one
+    the caller pinned to."""
     cand_id_str = str(candidate_id).strip()
     pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
     if row_id is not None:
         cur.execute(
-            "SELECT id, data FROM sourced_candidates WHERE id = %s AND candidate_id = %s",
-            (row_id, cand_id_str),
+            """
+            SELECT sc.id, sc.data
+            FROM sourced_candidates sc
+            LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+            WHERE sc.id = %s AND sc.candidate_id = %s
+              AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
+            LIMIT 1
+            """,
+            (row_id, cand_id_str, job_id_or_ref, job_id_or_ref, job_id_or_ref),
         )
         row = cur.fetchone()
-        if row:
-            data = row[1] if isinstance(row[1], dict) else _json_load_safe(row[1], {})
-            return row[0], data
+        if not row:
+            return None
+        data = row[1] if isinstance(row[1], dict) else _json_load_safe(row[1], {})
+        return row[0], data
     cur.execute(
         f"""
         SELECT sc.id, sc.data
@@ -6487,7 +6542,7 @@ def _resolve_sourced_candidate_row_for_callback(
         LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
         WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
           AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
-        ORDER BY {_CALLBACK_ROW_TIEBREAKER}
+        ORDER BY {CALLBACK_ROW_TIEBREAKER}
         LIMIT 1
         """,
         (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref),
@@ -6529,11 +6584,7 @@ async def mark_candidate_callback_done(
     gets 403 rather than silently clearing someone else's callback.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
-    # Tests call this endpoint function directly (bypassing FastAPI's request
-    # parsing) without passing row_id, so it falls back to its raw parameter
-    # default — the Query(None, ...) sentinel object itself, not an int or
-    # None (same pattern as get_job_candidates' own status param above).
-    row_id = row_id if isinstance(row_id, int) else None
+    row_id = _normalize_optional_row_id(row_id)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -6581,11 +6632,7 @@ async def cancel_candidate_callback(
     "Callback Scheduled".
     """
     _verify_job_access_by_id(job_id_or_ref, user)
-    # Tests call this endpoint function directly (bypassing FastAPI's request
-    # parsing) without passing row_id, so it falls back to its raw parameter
-    # default — the Query(None, ...) sentinel object itself, not an int or
-    # None (same pattern as get_job_candidates' own status param above).
-    row_id = row_id if isinstance(row_id, int) else None
+    row_id = _normalize_optional_row_id(row_id)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
