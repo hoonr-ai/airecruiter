@@ -426,7 +426,7 @@ export default function UpcomingCallbacksPage() {
                         <p className="text-sm text-slate-500 truncate">
                           {cb.job_title}
                           {cb.customer_name ? ` · ${cb.customer_name}` : ""}
-                          {cb.jobdiva_id ? ` · JobDiva ${cb.jobdiva_id}` : ""}
+                          {cb.jobdiva_id ? ` · ${cb.jobdiva_id}` : ""}
                         </p>
                         {done ? (
                           <p className="text-xs font-semibold mt-1 text-emerald-600 flex items-center gap-1">
