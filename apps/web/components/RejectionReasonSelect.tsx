@@ -97,6 +97,15 @@ export function RejectionReasonSelect({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, filtered]);
 
+  // Keeps the highlighted option visible as arrow keys move past the edge of
+  // the scrollable list — without this, highlightedIndex keeps advancing
+  // correctly but the highlight silently scrolls out of view, which reads as
+  // "the down arrow stopped working" once it happens.
+  useEffect(() => {
+    if (!open || highlightedIndex < 0) return;
+    document.getElementById(optionId(highlightedIndex))?.scrollIntoView({ block: "nearest" });
+  }, [open, highlightedIndex, optionId]);
+
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       const target = e.target as Node;

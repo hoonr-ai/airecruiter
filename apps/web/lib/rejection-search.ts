@@ -27,6 +27,21 @@ function wordMatches(word: string, reasonWords: string[]): boolean {
   return reasonWords.some((rw) => rw.startsWith(word) || (word.length >= MIN_SUBSTRING_WORD_LENGTH && rw.includes(word)));
 }
 
+/** True if every character of `query` appears in `text`, in order, though not
+ * necessarily contiguously — e.g. "wac" is a subsequence of "wavc". Used
+ * instead of "every character appears somewhere" so a query like "com" can't
+ * match an acronym purely because its letters happen to occur scattered
+ * across unrelated words (recruiter-reported bug: "com" matched a reason
+ * with no "com" in it because its first-letters string contained a c, an o,
+ * and an m in some order). */
+function isSubsequence(query: string, text: string): boolean {
+  let i = 0;
+  for (const ch of text) {
+    if (i < query.length && query[i] === ch) i++;
+  }
+  return i === query.length;
+}
+
 export function scoreMatch(reason: string, query: string): number {
   const r = reason.toLowerCase();
   const q = query.toLowerCase().trim();
@@ -46,7 +61,7 @@ export function scoreMatch(reason: string, query: string): number {
   // own words, e.g. "wvc" for "Work / Visa Constraints".
   const acronym = reasonWords.map((w) => w[0] ?? "").join("");
   if (acronym.startsWith(q)) return 30;
-  if (q.length >= MIN_ACRONYM_QUERY_LENGTH && q.split("").every((ch) => acronym.includes(ch))) return 15;
+  if (q.length >= MIN_ACRONYM_QUERY_LENGTH && isSubsequence(q, acronym)) return 15;
 
   return 0;
 }
