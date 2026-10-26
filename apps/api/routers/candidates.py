@@ -6579,7 +6579,7 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
             # non-matching value reads as "not done" / sorts last, instead
             # of a 500.
             cur.execute(
-                """
+                r"""
                 SELECT sc.candidate_id, sc.name, sc.data,
                        mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name
                 FROM sourced_candidates sc

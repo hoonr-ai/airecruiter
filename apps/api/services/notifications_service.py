@@ -266,11 +266,21 @@ def _insert_notification(
 def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
     job_row = _fetch_job_sync(cur, job_id)
 
+    # sourced_candidates' own unique constraint is (jobdiva_id, candidate_id,
+    # source) — a multi-sourced candidate (JobDiva + LinkedIn + manual, …)
+    # genuinely has more than one row matching candidate_id+jobdiva_id alone.
+    # Without this ordering, an unordered LIMIT 1 could non-deterministically
+    # return a DIFFERENT (stale) row than the one a reschedule/feedback write
+    # just updated — e.g. a candidate_callback_reminder's own stale-reminder
+    # check would then read that stale row's (unchanged) callback_scheduled_
+    # at, wrongly conclude the reminder was superseded, and skip firing it.
+    # Same fix as _resolve_sourced_candidate_row_for_callback's own ORDER BY.
     cur.execute(
         """
         SELECT name, data
         FROM sourced_candidates
         WHERE candidate_id = %s AND jobdiva_id = %s
+        ORDER BY updated_at DESC NULLS LAST, id DESC
         LIMIT 1
         """,
         (candidate_id, job_row["jobdiva_id"] if job_row else job_id),
