@@ -104,3 +104,35 @@ def test_a_null_updated_at_loses_to_any_real_timestamp(pg_cursor):
 
     assert cand_row is not None
     assert cand_row["data"]["callback_scheduled_at"] == _NEW_CALLBACK_AT
+
+
+def test_prefer_callback_scheduled_reads_the_active_callback_row_not_a_busier_sibling(pg_cursor):
+    """The actual gap this closes: the callback reminder's own stale-check
+    calls this with prefer_callback_scheduled=True specifically so a sibling
+    duplicate that ISN'T the active callback — but has been touched more
+    recently by something unrelated (a resync, an enrichment update) — can't
+    outrank the row that actually IS "Callback Scheduled". Without the flag
+    (the plain recency order every other notification type still uses), the
+    busier sibling would win and the stale-check would read a mismatched
+    time, wrongly concluding the reminder was superseded and skipping it —
+    even though the real callback row was never touched."""
+    conn, cur = pg_cursor
+    cur.execute(
+        "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source, updated_at) "
+        "VALUES ('C3', '26-100', 'Sam Lee', %s::jsonb, 'jobdiva', now() - interval '1 hour')",
+        (json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": _OLD_CALLBACK_AT}),),
+    )
+    cur.execute(
+        "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source, updated_at) "
+        "VALUES ('C3', '26-100', 'Sam Lee', '{}'::jsonb, 'linkedin', now())",
+        (),
+    )
+    conn.commit()
+
+    _job_row, without_flag = _fetch_job_and_candidate(cur, "100", "C3")
+    # Demonstrates the actual bug: plain recency picks the busier sibling,
+    # which was never the callback at all (no callback_scheduled_at here).
+    assert without_flag["data"].get("callback_scheduled_at") is None
+
+    _job_row, with_flag = _fetch_job_and_candidate(cur, "100", "C3", prefer_callback_scheduled=True)
+    assert with_flag["data"]["callback_scheduled_at"] == _OLD_CALLBACK_AT

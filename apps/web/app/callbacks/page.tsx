@@ -26,6 +26,12 @@ import {
 import { cn } from "@/lib/utils";
 
 interface UpcomingCallback {
+  // sourced_candidates.id — the one truly unique identifier for this row.
+  // A multi-sourced candidate (JobDiva + LinkedIn + manual, …) can have more
+  // than one row sharing the same candidate_id + job_id; row_id is what
+  // tells those apart. Nullable only defensively (an older backend/cached
+  // response might lack it) — the current API always sends it.
+  row_id: number | null;
   candidate_id: string;
   candidate_name: string;
   job_id: string;
@@ -39,12 +45,21 @@ interface UpcomingCallback {
   callback_done_at: string | null;
 }
 
-// Identifies a callback row across state updates — candidate_id alone isn't
-// unique across jobs (the same JobDiva candidate could in principle have a
-// callback scheduled on more than one job), job_id alone obviously isn't
-// either.
-function callbackKey(cb: Pick<UpcomingCallback, "candidate_id" | "job_id">): string {
-  return `${cb.job_id}:${cb.candidate_id}`;
+// Identifies a callback row across state updates. Prefers row_id — the only
+// value guaranteed unique even for a multi-sourced candidate's duplicate
+// rows; job_id:candidate_id alone is NOT unique in that case (PR review: it
+// gave every duplicate row the exact same React key AND the exact same
+// busyKey, so acting on one visually affected — and could even act on —
+// all of them). Falls back to job_id:candidate_id only if row_id is ever
+// missing (defensive; the backend always sends it).
+function callbackKey(cb: Pick<UpcomingCallback, "row_id" | "candidate_id" | "job_id">): string {
+  if (cb.row_id == null) {
+    // Should never happen against the current API — surface it instead of
+    // silently colliding with another duplicate row sharing this fallback key.
+    console.error("callbackKey: missing row_id, falling back to a non-unique key", cb);
+    return `${cb.job_id}:${cb.candidate_id}`;
+  }
+  return `row:${cb.row_id}`;
 }
 
 // `iso`'s time, or +Infinity for an unparsable one (PR #844 review) — sinks
@@ -134,7 +149,7 @@ export default function UpcomingCallbacksPage() {
     setBusyKey(key);
     setActionError(null);
     try {
-      await api.candidates.markCallbackDone(String(cb.job_id), cb.candidate_id);
+      await api.candidates.markCallbackDone(String(cb.job_id), cb.candidate_id, cb.row_id);
       // Patch callback_done_at locally rather than removing the row — the
       // backend keeps returning it (24h window) so this same field drives
       // the "Marked as done" state across a refetch/refresh too, not just
@@ -162,7 +177,7 @@ export default function UpcomingCallbacksPage() {
     setBusyKey(key);
     setActionError(null);
     try {
-      await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id);
+      await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id, cb.row_id);
       setCallbacks((prev) => (prev || []).filter((c) => callbackKey(c) !== key));
     } catch (err) {
       console.error("Failed to cancel callback:", err);
@@ -198,7 +213,7 @@ export default function UpcomingCallbacksPage() {
     let failedCount = 0;
     for (const cb of targets) {
       try {
-        await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id);
+        await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id, cb.row_id);
       } catch (err) {
         console.error("Failed to cancel callback during Clear all:", err);
         failedCount += 1;
@@ -262,6 +277,13 @@ export default function UpcomingCallbacksPage() {
       await api.candidates.feedback(String(target.job_id), target.candidate_id, {
         feedback_type: "Callback Scheduled",
         callback_at: callbackAtIso,
+        // Pins the write to this exact row for a multi-sourced candidate's
+        // duplicate rows — without it, resolving by candidate_id/jobdiva_id
+        // alone could still land on a different duplicate than the one on
+        // screen (PR review: candidate_id/jobdiva_id ties even with the
+        // backend's own "prefer the already-scheduled row" tiebreaker, once
+        // more than one duplicate is already "Callback Scheduled").
+        sourced_row_id: target.row_id ?? undefined,
       });
       // Rescheduling also clears callback_done_at server-side
       // (candidates.py), so a row rescheduled right out of its "Marked as

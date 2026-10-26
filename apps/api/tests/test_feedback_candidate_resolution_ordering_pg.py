@@ -13,6 +13,7 @@ precedence/_Shared-connection fixture shape.
 Skipped when no Postgres is reachable (LAUNCH_PLATFORM_TEST_DSN, then
 LAUNCH_REPORT_TEST_DSN, then "dbname=postgres").
 """
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -20,7 +21,7 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from fastapi import BackgroundTasks  # noqa: E402
+from fastapi import BackgroundTasks, HTTPException  # noqa: E402
 
 from core.auth import UserIdentity  # noqa: E402
 from models import CandidateFeedbackRequest  # noqa: E402
@@ -109,10 +110,12 @@ def _scheduled_row(conn):
     return scheduled
 
 
-async def _save_callback(user, callback_at):
+async def _save_callback(user, callback_at, sourced_row_id=None):
     await cand_module.save_candidate_feedback(
         job_id_or_ref="100", candidate_id="C1",
-        request=CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=callback_at.isoformat()),
+        request=CandidateFeedbackRequest(
+            feedback_type="Callback Scheduled", callback_at=callback_at.isoformat(), sourced_row_id=sourced_row_id,
+        ),
         background_tasks=BackgroundTasks(), user=user,
     )
 
@@ -180,3 +183,78 @@ async def test_reschedule_stays_on_the_active_row_even_if_the_sibling_is_touched
     assert len(scheduled) == 1
     assert scheduled[0][0] == active_row_id
     assert scheduled[0][1]["callback_scheduled_at"] == second.isoformat()
+
+
+@pytest.mark.anyio
+async def test_sourced_row_id_targets_the_exact_row_even_when_both_duplicates_are_already_scheduled(pg):
+    """The real-world shape this guards: a candidate whose duplicates
+    already BOTH ended up 'Callback Scheduled' from past flip-flopping
+    (before this fix existed) — exactly what showed up in QA as the same
+    candidate appearing more than once in Upcoming Callbacks. Once that's
+    happened, _CALLBACK_ROW_TIEBREAKER can no longer tell the rows apart (it
+    only prefers "already scheduled" over "not"; both now qualify) — only an
+    explicit sourced_row_id (what the Upcoming Callbacks page's Reschedule
+    action sends, from list_upcoming_callbacks' own row_id) can say which
+    ONE the recruiter is actually looking at."""
+    row_a = _insert_duplicate(pg, source="jobdiva")
+    row_b = _insert_duplicate(pg, source="linkedin")
+    stale = datetime.now(timezone.utc) + timedelta(hours=1)
+    stale_data = json.dumps({"feedback_type": "Callback Scheduled", "callback_scheduled_at": stale.isoformat()})
+    with pg.cursor() as cur:
+        for rid in (row_a, row_b):
+            cur.execute("UPDATE sourced_candidates SET data = %s::jsonb WHERE id = %s", (stale_data, rid))
+    pg.commit()
+
+    user = UserIdentity(email=_RECRUITER, role="recruiter")
+    new_time = datetime.now(timezone.utc) + timedelta(hours=3)
+    await _save_callback(user, new_time, sourced_row_id=row_b)
+
+    with pg.cursor() as cur:
+        cur.execute("SELECT id, data FROM sourced_candidates WHERE id = ANY(%s) ORDER BY id", ([row_a, row_b],))
+        rows = dict(cur.fetchall())
+
+    # row_b — the one explicitly targeted — got the new time; row_a (the
+    # OTHER already-"Callback Scheduled" duplicate) is untouched, not
+    # silently overwritten by whichever the ambiguous heuristic would have
+    # otherwise picked.
+    assert rows[row_b]["callback_scheduled_at"] == new_time.isoformat()
+    assert rows[row_a]["callback_scheduled_at"] == stale.isoformat()
+
+
+@pytest.mark.anyio
+async def test_sourced_row_id_belonging_to_a_different_job_404s(pg):
+    """PR #855 review (High, IDOR): a recruiter with access to job 100 must
+    not be able to act on a sourced_candidates row that actually belongs to a
+    DIFFERENT job (100's own candidate_id/jobdiva_id scoping is exactly what
+    a cross-job row_id guess bypasses without this check) just by passing its
+    id as sourced_row_id. The explicit pin not resolving under job 100 must
+    404, not silently fall back to the ambiguous candidate_id/jobdiva_id
+    match, which could then write to an unrelated row under the right job."""
+    with pg.cursor() as cur:
+        cur.execute(
+            "INSERT INTO monitored_jobs (job_id, title, customer_name, recruiter_emails, jobdiva_id) "
+            "VALUES ('200', 'Other Job', 'Other Co', %s, '26-200')",
+            (json.dumps([_RECRUITER]),),
+        )
+        # Same candidate_id as the C1 fixture used by _save_callback below —
+        # isolates that it's the job scoping that 404s here, not merely a
+        # candidate_id mismatch (which wouldn't exercise the IDOR fix at all).
+        cur.execute(
+            "INSERT INTO sourced_candidates (candidate_id, jobdiva_id, name, data, source) "
+            "VALUES ('C1', '26-200', 'Someone Else', '{}'::jsonb, 'jobdiva') RETURNING id",
+        )
+        other_job_row_id = cur.fetchone()[0]
+    pg.commit()
+
+    user = UserIdentity(email=_RECRUITER, role="recruiter")
+    when = datetime.now(timezone.utc) + timedelta(hours=1)
+    with pytest.raises(HTTPException) as exc_info:
+        await _save_callback(user, when, sourced_row_id=other_job_row_id)
+    assert exc_info.value.status_code == 404
+
+    with pg.cursor() as cur:
+        cur.execute("SELECT data FROM sourced_candidates WHERE id = %s", (other_job_row_id,))
+        (other_job_data,) = cur.fetchone()
+    # Untouched — the 404 happened before any write, not after one that then
+    # got rolled back for an unrelated reason.
+    assert other_job_data == {}

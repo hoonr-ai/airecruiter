@@ -604,10 +604,14 @@ export const api = {
       req<any>(`/candidates/launched${query ? `?${query}` : ""}`),
     getUpcomingCallbacks: () =>
       req<any>(`/candidates/callbacks/upcoming`),
-    markCallbackDone: (jobId: string, candidateId: string) =>
-      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/done`, { method: "POST" }),
-    cancelCallback: (jobId: string, candidateId: string) =>
-      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/cancel`, { method: "POST" }),
+    // rowId (list_upcoming_callbacks' own row_id) pins the action to that
+    // exact sourced_candidates row when the candidate has more than one
+    // (multi-sourced — JobDiva + LinkedIn + manual, …); omitted, the backend
+    // falls back to resolving by candidate_id/jobdiva_id as before.
+    markCallbackDone: (jobId: string, candidateId: string, rowId?: number | null) =>
+      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/done${rowId != null ? `?row_id=${encodeURIComponent(rowId)}` : ""}`, { method: "POST" }),
+    cancelCallback: (jobId: string, candidateId: string, rowId?: number | null) =>
+      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/cancel${rowId != null ? `?row_id=${encodeURIComponent(rowId)}` : ""}`, { method: "POST" }),
   },
   manualCandidates: {
     add: (jobRef: string, body: unknown) =>

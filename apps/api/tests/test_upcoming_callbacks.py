@@ -119,6 +119,56 @@ async def test_mark_callback_done_404s_when_candidate_not_resolved(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_mark_callback_done_404s_when_row_id_belongs_to_a_different_job(monkeypatch):
+    """PR #855 review (High, IDOR): a row_id pin is still scoped to
+    job_id_or_ref — a recruiter with access to job 26-12137 can't pass a
+    row_id belonging to the same candidate_id's row on a DIFFERENT job they
+    have no access to and clear its callback. The fake cursor returns no row
+    for the pinned query (standing in for the job-scoped WHERE clause finding
+    nothing), so this must 404 rather than fall through to the ambiguous
+    candidate_id/jobdiva_id match below it."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.mark_candidate_callback_done(
+            job_id_or_ref="26-12137", candidate_id="55148489", row_id=99999001, user=user,
+        )
+    assert exc_info.value.status_code == 404
+
+    # Exactly one query ran (the row_id-pinned branch) — no fall-through to
+    # the ambiguous candidate_id/jobdiva_id query, and no UPDATE at all.
+    assert len(cur.executed) == 1
+    sql, params = cur.executed[0]
+    assert "sc.id = %s" in sql and "mj.job_id = %s" in sql
+    assert params[0] == 99999001
+    assert "26-12137" in params
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
+async def test_cancel_callback_404s_when_row_id_belongs_to_a_different_job(monkeypatch):
+    """Same IDOR scoping as mark_callback_done, for /callback/cancel's own
+    row_id-pinned resolution."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.cancel_candidate_callback(
+            job_id_or_ref="26-12137", candidate_id="55148489", row_id=99999001, user=user,
+        )
+    assert exc_info.value.status_code == 404
+    assert len(cur.executed) == 1
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
 async def test_mark_callback_done_403s_for_a_different_recruiter(monkeypatch):
     """PR #844 review (Medium): list_upcoming_callbacks scopes to
     submitted_by == user.email, so clearing a callback must be scoped the
@@ -238,6 +288,7 @@ async def test_cancel_callback_allows_an_admin_regardless_of_owner(monkeypatch):
 
 def _row(**overrides):
     row = {
+        "id": 42,
         "candidate_id": "c1", "name": "Jane Doe",
         "data": {
             "feedback_type": "Callback Scheduled",
@@ -264,6 +315,12 @@ async def test_list_upcoming_callbacks_returns_scoped_rows(monkeypatch):
     assert res["status"] == "success"
     assert len(res["callbacks"]) == 1
     cb = res["callbacks"][0]
+    # row_id (sourced_candidates.id) — PR review: candidate_id + job_id alone
+    # aren't unique for a multi-sourced candidate's duplicate rows, which
+    # previously gave every duplicate in this list the identical frontend
+    # key and no way to target one specific row for Reschedule/Mark Done/
+    # Cancel.
+    assert cb["row_id"] == 42
     assert cb["candidate_id"] == "c1"
     assert cb["candidate_name"] == "Jane Doe"
     assert cb["job_title"] == "Data Engineer"

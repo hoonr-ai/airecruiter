@@ -148,6 +148,7 @@ import psycopg2.extras
 
 from core.advisory_lock import AdvisoryLock
 from core.db import get_db_connection
+from services.sourced_candidate_dedup import CALLBACK_ROW_TIEBREAKER
 from services.engage_status import (
     format_engage_status,
     hf_display_from_payload,
@@ -263,7 +264,14 @@ def _insert_notification(
     return row is not None
 
 
-def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
+def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str, prefer_callback_scheduled: bool = False):
+    """`prefer_callback_scheduled`, used only by the callback reminder's own
+    stale-check (_create_candidate_callback_reminder_notification_sync):
+    prefers whichever duplicate already carries feedback_type = 'Callback
+    Scheduled' over plain recency (CALLBACK_ROW_TIEBREAKER — see its own
+    module docstring). Every other notification type this function serves
+    (candidate_passed, candidate_rejected, …) has no such status to prefer
+    and keeps the plain recency-only order."""
     job_row = _fetch_job_sync(cur, job_id)
 
     # sourced_candidates' own unique constraint is (jobdiva_id, candidate_id,
@@ -275,12 +283,13 @@ def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
     # check would then read that stale row's (unchanged) callback_scheduled_
     # at, wrongly conclude the reminder was superseded, and skip firing it.
     # Same fix as _resolve_sourced_candidate_row_for_callback's own ORDER BY.
+    order_by = CALLBACK_ROW_TIEBREAKER if prefer_callback_scheduled else "updated_at DESC NULLS LAST, id DESC"
     cur.execute(
-        """
+        f"""
         SELECT name, data
-        FROM sourced_candidates
-        WHERE candidate_id = %s AND jobdiva_id = %s
-        ORDER BY updated_at DESC NULLS LAST, id DESC
+        FROM sourced_candidates sc
+        WHERE sc.candidate_id = %s AND sc.jobdiva_id = %s
+        ORDER BY {order_by}
         LIMIT 1
         """,
         (candidate_id, job_row["jobdiva_id"] if job_row else job_id),
@@ -1336,7 +1345,7 @@ def _create_candidate_callback_reminder_notification_sync(
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id)
+            job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id, prefer_callback_scheduled=True)
             if not job_row or not cand_row:
                 return
 
