@@ -21,7 +21,7 @@ from routers.candidates import lookup_zip_code
 @pytest.mark.anyio
 async def test_zip_lookup_resolves_a_real_zip():
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
-    res = await lookup_zip_code(zip="77002", user=user)
+    res = await lookup_zip_code(zip_code="77002", user=user)
     assert res["status"] == "success"
     assert res["valid"] is True
     assert res["city"] == "Houston"
@@ -32,7 +32,7 @@ async def test_zip_lookup_resolves_a_real_zip():
 async def test_zip_lookup_rejects_an_out_of_range_zip():
     """99999 is outside the real US zip range — the exact QA repro."""
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
-    res = await lookup_zip_code(zip="99999", user=user)
+    res = await lookup_zip_code(zip_code="99999", user=user)
     assert res["status"] == "success"
     assert res["valid"] is False
     assert "city" not in res
@@ -40,6 +40,11 @@ async def test_zip_lookup_rejects_an_out_of_range_zip():
 
 @pytest.mark.anyio
 async def test_zip_lookup_rejects_non_zip_text():
+    """Calling the function directly bypasses FastAPI's own Query(...)
+    pattern validation (same gotcha documented elsewhere in this codebase
+    for direct, non-HTTP calls to an endpoint) — a real request with this
+    value would 422 before ever reaching this function. Both outcomes
+    agree: not a valid zip."""
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
-    res = await lookup_zip_code(zip="not-a-zip", user=user)
+    res = await lookup_zip_code(zip_code="not-a-zip", user=user)
     assert res["valid"] is False

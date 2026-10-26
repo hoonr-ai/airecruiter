@@ -5,10 +5,19 @@ from services.location import haversine_miles, inferred_region_states, is_broad_
 from .common import (
     LocationEntry,
     SearchCriteria,
+    _BROAD_REGION_CORE_BUFFER_MILES,
     _MAX_LOCATIONS,
     _UNKNOWN_DISTANCE_SENTINEL,
     _broad_core_radius_distance,
+    logger,
 )
+
+# A search zip that fails to resolve isn't just a frontend concern (Step
+# 5's own input guard) — saved/loaded criteria, API callers, and a zip
+# embedded in a longer string all reach this same resolution path. Warned
+# once per distinct unresolvable zip per process, not per-candidate, so the
+# failure is surfaced without logging once per row of every search using it.
+_WARNED_UNRESOLVABLE_SEARCH_ZIPS: set = set()
 
 
 class LocationMixin:
@@ -739,6 +748,15 @@ class LocationMixin:
                     required["city"] = self._normalize_term(zip_entry["city"])
                 if not required["state"]:
                     required["state"] = self._normalize_term(zip_entry["state"])
+            elif required["zip"] not in _WARNED_UNRESOLVABLE_SEARCH_ZIPS:
+                _WARNED_UNRESOLVABLE_SEARCH_ZIPS.add(required["zip"])
+                logger.warning(
+                    "unified_candidate_search_unresolvable_search_zip zip=%s "
+                    "location=%r — this criteria's own anchor point can't be "
+                    "placed, so no candidate's distance from it can be "
+                    "computed; every row passes the location filter unfiltered",
+                    required["zip"], criteria.location,
+                )
 
         if not required["city"] and not required["state"] and not required.get("zip"):
             return True, "empty_location_requirement", None
@@ -802,7 +820,14 @@ class LocationMixin:
             )
             if core_distance is not None:
                 miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
-                if core_distance <= miles:
+                # _BROAD_REGION_CORE_BUFFER_MILES: only hard-drop once the
+                # core is confirmed well past the radius, not merely past
+                # it — a metro's core is one representative point, not an
+                # exact pin. Still "unverified" rather than a confirmed
+                # pass even when the core alone is within the plain radius
+                # (unchanged from before this PR): this branch only ever
+                # decides hard-drop vs. not.
+                if core_distance <= miles + _BROAD_REGION_CORE_BUFFER_MILES:
                     return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
                 return (
                     False,

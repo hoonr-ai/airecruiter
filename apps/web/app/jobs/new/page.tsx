@@ -983,9 +983,14 @@ function NewJobPageContent() {
   const [sourceTitleInput, setSourceTitleInput] = useState("");
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
-  // Set only when a bare 5-digit zip fails the /candidates/zip-lookup
-  // check — see addSourceLocation's own comment for why this exists.
+  // Holds either a blocking validation error (bad zip shape/unknown zip —
+  // the location is NOT added) or a non-blocking "couldn't verify" notice
+  // (the lookup itself failed — the location IS still added). See
+  // addSourceLocation's own comment for why this exists.
   const [sourceLocationError, setSourceLocationError] = useState("");
+  // Guards against a double-click, or Enter then a click, firing a second
+  // add while the first's zip lookup is still in flight (PR #859 review).
+  const [isAddingSourceLocation, setIsAddingSourceLocation] = useState(false);
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
   const sourceLocationMilesRef = useRef(sourceLocationMiles);
   useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
@@ -5517,66 +5522,63 @@ function NewJobPageContent() {
 
   const addSourceLocation = async (value: string) => {
     const cleanValue = value.trim();
-    if (!cleanValue) return;
+    if (!cleanValue || isAddingSourceLocation) return;
+    setIsAddingSourceLocation(true);
     setSourceLocationError("");
-    // Bare numeric input only — a city/state string ("Austin, TX") or a
-    // broad region name has no zip to validate here, and is left to the
-    // backend's own offline/online resolution as before. No city name is
-    // purely digits, so any all-digit value here is always meant as a zip,
-    // whole or partial.
-    //
-    // A wrong LENGTH (2-3 digits, or 6+) is rejected immediately, no round
-    // trip needed — the backend doesn't even recognize these as a zip
-    // attempt at all: _parse_location treats "77" as a literal city named
-    // "77", which then can't match any real candidate's city and silently
-    // geocodes to nothing (same failure shape as the 5-digit case below,
-    // just via a different code path).
-    //
-    // An exact 5 digits gets a real lookup, since the shape alone doesn't
-    // confirm it's an assigned zip. QA regression: an unresolvable one like
-    // "99999" (outside the real US range) was silently accepted and,
-    // because the search's own anchor point then failed to geocode, every
-    // candidate passed the location filter completely unfiltered instead
-    // of narrowing results — this catches that at input time instead.
-    if (/^\d+$/.test(cleanValue)) {
-      if (cleanValue.length !== 5) {
-        setSourceLocationError("Zip codes must be 5 digits");
-        return;
-      }
-      try {
-        const res = await api.candidates.lookupZip(cleanValue);
-        if (!res?.valid) {
-          setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
+    try {
+      // Bare numeric input only — no city name is purely digits, so any
+      // all-digit value here is always meant as a zip. A wrong length
+      // (2-3 digits, 6+) is rejected immediately, no round trip: the
+      // backend doesn't recognize these as a zip attempt at all (see
+      // test_parse_location_short_numeric_string_is_not_recognized_as_a_zip).
+      // An exact 5 digits gets a real lookup instead, since the shape
+      // alone doesn't confirm it's assigned (QA regression: "99999").
+      let unverifiedWarning = "";
+      if (/^\d+$/.test(cleanValue)) {
+        if (cleanValue.length !== 5) {
+          setSourceLocationError("Zip codes must be 5 digits");
           return;
         }
-      } catch {
-        // Lookup itself failing (network blip) shouldn't block adding a
-        // location the backend's own matching can still attempt normally.
+        try {
+          const res = await api.candidates.lookupZip(cleanValue);
+          if (!res?.valid) {
+            setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
+            return;
+          }
+        } catch {
+          // A network/5xx failure here shouldn't block adding the
+          // location, but failing open silently is the original bug from
+          // a different trigger — surface it instead of saying nothing.
+          unverifiedWarning = `Couldn't verify "${cleanValue}" — added anyway`;
+        }
       }
+      excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
+      const nextLocations = [
+        ...sourceLocations,
+        {
+          id: Date.now(),
+          value: cleanValue,
+          radius: `within ${sourceLocationMiles} mi`
+        }
+      ];
+      setSourceLocations(nextLocations);
+      void saveJobDraft({
+        currentStep,
+        saveType: "auto",
+        skipToast: true,
+        sourceLocationsOverride: nextLocations,
+      }).catch(() => {});
+      setSourceLocationInput("");
+      setGeneratedBoolean("");
+      if (unverifiedWarning) setSourceLocationError(unverifiedWarning);
+      trackEvent("job_wizard_step5_source_location_added", {
+        step: 5,
+        value: truncateForTelemetry(cleanValue),
+        radius_miles: sourceLocationMiles,
+      });
+    } finally {
+      setIsAddingSourceLocation(false);
     }
-    excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
-    const nextLocations = [
-      ...sourceLocations,
-      {
-        id: Date.now(),
-        value: cleanValue,
-        radius: `within ${sourceLocationMiles} mi`
-      }
-    ];
-    setSourceLocations(nextLocations);
-    void saveJobDraft({
-      currentStep,
-      saveType: "auto",
-      skipToast: true,
-      sourceLocationsOverride: nextLocations,
-    }).catch(() => {});
-    setSourceLocationInput("");
-    setGeneratedBoolean("");
-    trackEvent("job_wizard_step5_source_location_added", {
-      step: 5,
-      value: truncateForTelemetry(cleanValue),
-      radius_miles: sourceLocationMiles,
-    });
   };
 
   const addSourceCompany = (value: string) => {
@@ -10278,7 +10280,7 @@ function NewJobPageContent() {
                     <Button
                       type="button"
                       onClick={() => void addSourceLocation(sourceLocationInput)}
-                      disabled={!sourceLocationInput.trim()}
+                      disabled={!sourceLocationInput.trim() || isAddingSourceLocation}
                       className="h-11 px-4 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[13px] font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Plus className="w-4 h-4 mr-1" />

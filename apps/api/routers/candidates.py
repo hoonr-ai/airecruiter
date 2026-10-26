@@ -4769,7 +4769,14 @@ async def get_candidate_filter_options(user: UserIdentity = Depends(get_current_
 
 @router.get("/candidates/zip-lookup")
 async def lookup_zip_code(
-    zip: str = Query(..., description="5-digit US zip code to validate before adding it to a Step 5 location search"),
+    zip_code: str = Query(
+        ...,
+        alias="zip",
+        min_length=5,
+        max_length=5,
+        pattern=r"^\d{5}$",
+        description="5-digit US zip code to validate before adding it to a Step 5 location search",
+    ),
     user: UserIdentity = Depends(get_current_user),
 ):
     """Resolves a zip against the offline zip index (services/zip_index.py)
@@ -4778,9 +4785,17 @@ async def lookup_zip_code(
     US range) previously made the search's own anchor point fail to
     geocode, which silently passed every candidate through the location
     filter unfiltered instead of narrowing results or erroring — this gives
-    the frontend a cheap way to catch that before the search ever runs."""
+    the frontend a cheap way to catch that before the search ever runs.
+
+    Always 200 (never 404) on a well-formed-but-unassigned zip — this is a
+    validity CHECK, not a resource fetch, so the response body carries the
+    answer: `{"valid": false}` means "well-formed 5-digit input, not a real
+    US zip," distinct from the 422 FastAPI itself returns for a malformed
+    ``zip`` query param (wrong length, non-digits) via this parameter's own
+    pattern constraint.
+    """
     from services import zip_index
-    entry = zip_index.lookup_zip(zip)
+    entry = zip_index.lookup_zip(zip_code)
     if not entry:
         return {"status": "success", "valid": False}
     return {"status": "success", "valid": True, "city": entry["city"], "state": entry["state"]}

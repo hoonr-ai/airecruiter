@@ -188,6 +188,16 @@ logger = logging.getLogger(__name__)
 # counts these rows instead of silently passing them as in-radius.
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
 
+# A broad metro label's one "core city" point stands in for the whole
+# metro, which can span 30-50mi beyond that single point (Fort Worth is
+# ~30mi from the Dallas core both labeled "Dallas-Fort Worth Metroplex").
+# Added to the search radius before a core distance counts as "confirmed
+# far enough to hard-drop," so a real in-metro suburb search isn't wrongly
+# dropped — picked generously enough to still hard-drop a genuinely
+# different same-state metro (DFW vs. Houston is ~225mi, Austin vs. Houston
+# ~146mi, both well past even a 100mi radius + this buffer).
+_BROAD_REGION_CORE_BUFFER_MILES = 50
+
 
 def _broad_core_radius_distance(
     broad_locs, required: Dict[str, str], criteria: "SearchCriteria"

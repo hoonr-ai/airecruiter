@@ -468,6 +468,22 @@ def test_hard_gate_drops_same_state_far_metro_confirmed_outside(svc):
     assert austin_vs_houston.get("distance_miles") > 50
 
 
+def test_hard_gate_soft_keeps_a_nearby_suburb_search_against_a_metro_label(svc):
+    """PR #859 review: a broad label's one core-city point stands in for a
+    whole metro, which genuinely spans well beyond that single point —
+    Fort Worth is ~32mi from the Dallas core both carry the same
+    "Dallas-Fort Worth Metroplex" label. Hard-dropping purely on
+    core-to-search distance would wrongly drop a real in-metro suburb
+    search; _BROAD_REGION_CORE_BUFFER_MILES exists so this stays a
+    soft-keep instead, the same as it was before PR #859's core-distance
+    check started running for the same-state case at all."""
+    dfw_vs_fort_worth = {"location": "Dallas-Fort Worth Metroplex"}
+    assert svc._location_hard_gate(
+        dfw_vs_fort_worth, _criteria(location="Fort Worth, TX", within_miles=25)
+    ) is None
+    assert dfw_vs_fort_worth.get("location_match_reason") == "broad_region_unverified"
+
+
 def test_hard_gate_drops_newly_recognized_regions_in_the_wrong_state(svc):
     """QA regression: "Boise Metropolitan Area" (ID) against a Dallas/
     Phoenix/San Diego/Philadelphia search, and "Greater Tampa Bay Area"
@@ -484,6 +500,22 @@ def test_hard_gate_drops_newly_recognized_regions_in_the_wrong_state(svc):
     veto = svc._location_hard_gate(tampa, _criteria(location="Houston, TX", within_miles=50))
     assert veto
     assert tampa.get("location_veto_reason") == "state_mismatch"
+
+
+def test_region_state_labels_and_core_city_tables_stay_in_sync():
+    """PR #859 review: _REGION_STATE_LABELS and _REGION_CORE_CITY
+    (services/location.py) are two hand-maintained dicts that must agree —
+    a label with a known state but no known core city can never get the
+    distance check that tells a confirmed-far same-state metro apart from
+    a nearby in-metro suburb (see _broad_core_radius_distance). Catches the
+    kind of drift that's easy to introduce when adding a new label to only
+    one of the two tables."""
+    from services.location import _REGION_CORE_CITY, _REGION_STATE_LABELS
+
+    missing_core = set(_REGION_STATE_LABELS) - set(_REGION_CORE_CITY)
+    assert not missing_core, f"labels with a state but no core city: {missing_core}"
+    missing_state = set(_REGION_CORE_CITY) - set(_REGION_STATE_LABELS)
+    assert not missing_state, f"labels with a core city but no state: {missing_state}"
 
 
 def test_broad_region_bare_literals_do_not_over_match_prefixed_strings():
@@ -651,16 +683,45 @@ def test_parse_location_zip_kept_when_state_agrees(svc):
 
 
 def test_parse_location_short_numeric_string_is_not_recognized_as_a_zip(svc):
-    """Documents the backend behavior the frontend's Step 5 location input
-    now guards against (addSourceLocation rejects a non-5-digit numeric
-    value before it ever reaches a search): a partial zip like "77" or
-    "770" isn't recognized as a zip attempt at all — it's parsed as a
-    literal city NAME, which then can't match any real candidate's city
-    and silently constrains nothing."""
+    """CHARACTERIZATION TEST, not a spec: documents today's backend
+    behavior (which the frontend's Step 5 location input now guards
+    against instead — addSourceLocation rejects a non-5-digit numeric
+    value before it ever reaches a search) rather than asserting it's
+    correct. A partial zip like "77" or "770" isn't recognized as a zip
+    attempt at all — it's parsed as a literal city NAME, which then can't
+    match any real candidate's city and silently constrains nothing. If
+    _parse_location ever learns to recognize a short numeric string as a
+    malformed zip instead, this test's expectations must change too."""
     for partial in ("7", "77", "770"):
         parsed = svc._parse_location(partial)
         assert parsed["zip"] == ""
         assert parsed["city"] == partial
+
+
+def test_verdict_warns_once_per_unresolvable_search_zip(svc, caplog):
+    """PR #859 review (Medium): the frontend's zip-lookup guard only covers
+    Step 5's own input — saved/loaded job criteria, API callers, and a zip
+    embedded in a longer string all reach this same resolution path, and an
+    unresolvable one used to fail completely silently (every candidate
+    passes the location filter unfiltered, since the search's own anchor
+    point can't be placed). Not hard-failed here — that's a bigger, riskier
+    change for a single bad search — but it must at least be logged."""
+    import logging
+    from services.unified_candidate_search import location as ucs_location
+
+    ucs_location._WARNED_UNRESOLVABLE_SEARCH_ZIPS.discard("09999")
+    candidate = {"location": "Houston, TX"}
+    with caplog.at_level(logging.WARNING):
+        svc._single_location_match_verdict(candidate, _criteria(location="09999", within_miles=25))
+    assert any("unresolvable_search_zip" in r.message and "09999" in r.message for r in caplog.records)
+
+    # Deduped: a second candidate against the SAME unresolvable zip doesn't
+    # log again (would otherwise be one warning per row of every search
+    # using it).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        svc._single_location_match_verdict({"location": "Dallas, TX"}, _criteria(location="09999", within_miles=25))
+    assert not any("unresolvable_search_zip" in r.message for r in caplog.records)
 
 
 def test_resolve_geo_address_street_number_not_sent_as_zip(svc):
