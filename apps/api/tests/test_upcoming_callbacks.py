@@ -238,6 +238,7 @@ async def test_cancel_callback_allows_an_admin_regardless_of_owner(monkeypatch):
 
 def _row(**overrides):
     row = {
+        "id": 42,
         "candidate_id": "c1", "name": "Jane Doe",
         "data": {
             "feedback_type": "Callback Scheduled",
@@ -264,6 +265,12 @@ async def test_list_upcoming_callbacks_returns_scoped_rows(monkeypatch):
     assert res["status"] == "success"
     assert len(res["callbacks"]) == 1
     cb = res["callbacks"][0]
+    # row_id (sourced_candidates.id) — PR review: candidate_id + job_id alone
+    # aren't unique for a multi-sourced candidate's duplicate rows, which
+    # previously gave every duplicate in this list the identical frontend
+    # key and no way to target one specific row for Reschedule/Mark Done/
+    # Cancel.
+    assert cb["row_id"] == 42
     assert cb["candidate_id"] == "c1"
     assert cb["candidate_name"] == "Jane Doe"
     assert cb["job_title"] == "Data Engineer"
