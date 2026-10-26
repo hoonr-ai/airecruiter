@@ -201,6 +201,91 @@ async def test_callback_scheduled_persists_callback_time_in_feedback_data(monkey
 
 
 @pytest.mark.anyio
+async def test_callback_scheduled_rejects_a_callback_under_five_minutes_away(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(monkeypatch)
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=soon)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.save_candidate_feedback(
+            job_id_or_ref="26-12137", candidate_id="55148489",
+            request=request, background_tasks=BackgroundTasks(), user=user,
+        )
+    assert exc_info.value.status_code == 400
+    assert "5 minutes" in exc_info.value.detail
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_rejects_a_callback_more_than_a_year_out(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(monkeypatch)
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    far = (datetime.now(timezone.utc) + timedelta(days=400)).isoformat()
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=far)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.save_candidate_feedback(
+            job_id_or_ref="26-12137", candidate_id="55148489",
+            request=request, background_tasks=BackgroundTasks(), user=user,
+        )
+    assert exc_info.value.status_code == 400
+    assert "year" in exc_info.value.detail
+
+
+@pytest.mark.anyio
+async def test_reject_after_callback_scheduled_clears_the_stale_callback_field(monkeypatch):
+    """PR #841 review: callback_scheduled_at must not survive a later
+    Reject/Submit/Unreachable/Allotment Slot Filled — otherwise the queued
+    reminder task (which checks this field before notifying) would still
+    see what looks like a pending callback."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    request = CandidateFeedbackRequest(feedback_type="Reject", reason="Skills do not meet requirements")
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    update_calls = [
+        (query, params) for cur in fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    assert len(update_calls) >= 1
+    _query, params = update_calls[0]
+    feedback_payload = json.loads(params[0])
+    assert feedback_payload["callback_scheduled_at"] is None
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_failure_to_queue_reminder_rolls_back_the_feedback_write(monkeypatch):
+    """PR #841 review: if task_outbox.add fails, the feedback write must not
+    silently commit without its reminder — the caller gets a 500 and the
+    transaction's own commit() is never reached."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+
+    def fake_add_raises(*a, **kw):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("services.task_outbox.add", fake_add_raises)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.save_candidate_feedback(
+            job_id_or_ref="26-12137", candidate_id="55148489",
+            request=request, background_tasks=BackgroundTasks(), user=user,
+        )
+    assert exc_info.value.status_code == 500
+    # The UPDATE was issued on the same cursor/transaction as the (never
+    # reached) task_outbox insert, so it never committed — the DB-level
+    # equivalent of a rollback for a connection that commits explicitly.
+    assert fake_conn.committed is False
+
+
+@pytest.mark.anyio
 async def test_unreachable_still_skips_jobdiva_note(monkeypatch):
     """Guard against accidentally narrowing the skip condition to only the
     two new types when extending it."""

@@ -575,6 +575,15 @@ export default function CandidateRankingsPage() {
   // close, however large).
   const [actionSelectReset, setActionSelectReset] = useState<{ candidateId: number; nonce: number } | null>(null);
   const [callbackAtInput, setCallbackAtInput] = useState("");
+  const callbackAtInputRef = useRef<HTMLInputElement>(null);
+  // PR #841 review: the callback modal had no focus handling at all — move
+  // focus onto its one input as soon as it opens, same as a native <dialog>
+  // would, instead of leaving focus wherever it was on the page behind it.
+  useEffect(() => {
+    if (integrationModalOpen === 'callback') {
+      callbackAtInputRef.current?.focus();
+    }
+  }, [integrationModalOpen]);
   // Shared by every "cancel without choosing" path for the Submit/Reject
   // modals (PR #840 review: this was copy-pasted at each call site). Reads
   // actionCandidateId before clearing it so the remount above targets
@@ -702,14 +711,17 @@ export default function CandidateRankingsPage() {
       setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
       setFeedbackReasons(prev => ({ ...prev, [candidateId]: `Callback at ${new Date(callbackAtIso).toLocaleString()}` }));
       setToast({ message: "Callback scheduled — you'll get a reminder 5 minutes before", type: "success" });
+      // Only close/reset on success (PR #841 review) — closing unconditionally
+      // in `finally` meant a failed save also wiped callbackAtInput, forcing
+      // the recruiter to re-pick the time after an error.
+      setIntegrationModalOpen(null);
+      setActionCandidateId(null);
+      setCallbackAtInput("");
     } catch (error) {
       console.error('Error scheduling callback:', error);
       setToast({ message: "Failed to schedule callback", type: "error" });
     } finally {
       setSyncingCandidateId(null);
-      setIntegrationModalOpen(null);
-      setActionCandidateId(null);
-      setCallbackAtInput("");
     }
   };
 
@@ -3209,7 +3221,11 @@ export default function CandidateRankingsPage() {
                                    feedbacks[candidate.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> :
                                    feedbacks[candidate.id] === 'Allotment Slot Filled' ? <><CalendarCheck className="w-3 h-3" /> Slot Filled</> :
                                    feedbacks[candidate.id] === 'Callback Scheduled' ? <><Clock className="w-3 h-3" /> Callback Scheduled</> :
-                                   <><PhoneOff className="w-3 h-3" /> Unreachable</>}
+                                   feedbacks[candidate.id] === 'Unreachable' ? <><PhoneOff className="w-3 h-3" /> Unreachable</> :
+                                   /* PR #841 review: an explicit fallback for any future status this
+                                      badge doesn't know about yet, instead of silently mislabeling it
+                                      "Unreachable". */
+                                   <>{feedbacks[candidate.id]}</>}
                                 </div>
                                 {feedbackReasons[candidate.id] && (
                                   <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
@@ -3421,16 +3437,32 @@ export default function CandidateRankingsPage() {
         </div>
       )}
       {integrationModalOpen === 'callback' && actionCandidateId && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="callback-modal-title"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              setIntegrationModalOpen(null);
+              setCallbackAtInput("");
+            }
+          }}
+        >
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
                 <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <h3 id="callback-modal-title" className="text-lg font-bold text-slate-900 flex items-center gap-2">
                     <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-600 flex items-center justify-center">
                       <Clock className="w-3 h-3" />
                     </span>
                     Schedule Callback
                   </h3>
-                  <button onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); }} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button
+                    onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); }}
+                    aria-label="Close"
+                    className="text-slate-400 hover:text-slate-600"
+                  >×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
@@ -3439,6 +3471,7 @@ export default function CandidateRankingsPage() {
                   <div className="space-y-2">
                     <label htmlFor={`callback-at-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Callback Time</label>
                     <input
+                      ref={callbackAtInputRef}
                       id={`callback-at-${actionCandidateId || "rankings"}`}
                       type="datetime-local"
                       aria-label="Callback Time"

@@ -5869,6 +5869,14 @@ REJECTION_REASON_TO_JOBDIVA_ACTION = {
     "Already submitted to the same client/hiring manager by another team member": "PAIR Reject - Already submitted (internal)",
 }
 
+# PR #841 review: bounds on a recruiter-chosen Callback Scheduled time.
+# Below CALLBACK_MIN_LEAD, remind_at (callback_at minus 5 minutes) would
+# already be in the past, so the "reminder" would fire immediately instead
+# of before the call; above CALLBACK_MAX_LEAD there's no real validation
+# value in accepting an arbitrarily distant date.
+CALLBACK_MIN_LEAD = timedelta(minutes=5)
+CALLBACK_MAX_LEAD = timedelta(days=365)
+
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
@@ -5925,8 +5933,16 @@ async def save_candidate_feedback(
             raise HTTPException(status_code=400, detail="callback_at must be a valid ISO 8601 datetime")
         if callback_dt.tzinfo is None:
             callback_dt = callback_dt.replace(tzinfo=timezone.utc)
-        if callback_dt <= datetime.now(timezone.utc):
+        now_utc = datetime.now(timezone.utc)
+        if callback_dt <= now_utc:
             raise HTTPException(status_code=400, detail="callback_at must be in the future")
+        # PR #841 review: under 5 minutes out, remind_at (callback_at - 5min)
+        # is already in the past and the reminder fires immediately rather
+        # than "before" the callback — reject instead of silently doing that.
+        if callback_dt - now_utc < CALLBACK_MIN_LEAD:
+            raise HTTPException(status_code=400, detail="callback_at must be at least 5 minutes in the future")
+        if callback_dt - now_utc > CALLBACK_MAX_LEAD:
+            raise HTTPException(status_code=400, detail="callback_at must be within the next year")
 
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
@@ -6107,6 +6123,16 @@ async def save_candidate_feedback(
                     feedback_data["internal_review_requested_by"] = None
             elif request.feedback_type == "Callback Scheduled":
                 feedback_data["callback_scheduled_at"] = callback_dt.isoformat()
+            else:
+                # PR #841 review: without this, callback_scheduled_at from a
+                # prior "Callback Scheduled" survives the JSONB `||` merge
+                # (it only overwrites keys present in this dict) — a later
+                # Submit/Reject/Unreachable/Allotment Slot Filled would still
+                # read as having a callback pending. Explicitly nulling it
+                # here is also what lets the reminder task (see
+                # notifications_service.create_candidate_callback_reminder_notification)
+                # detect a superseded callback and skip a stale reminder.
+                feedback_data["callback_scheduled_at"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved

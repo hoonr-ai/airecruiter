@@ -88,6 +88,8 @@ from services.notifications_service import (
     _recipient_already_digested_recently,
     create_candidate_internal_review_requested_notification,
     create_candidate_externally_submitted_notification,
+    create_candidate_callback_reminder_notification,
+    _format_callback_time_utc,
     reconcile_missed_pass_notifications,
     reconcile_missed_rejection_notifications,
 )
@@ -1666,3 +1668,123 @@ def test_create_internal_review_requested_skips_recent_duplicate(monkeypatch):
     ))
 
     assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)
+
+
+# --- create_candidate_callback_reminder_notification (PR #841 review) -------
+
+def test_format_callback_time_utc_labels_the_zone_and_strips_leading_zero():
+    # 15:05 UTC -> "3:05 PM UTC", not "03:05 PM" (and not silently read as
+    # local time, which is what the un-labeled version used to risk).
+    assert _format_callback_time_utc("2026-01-01T15:05:00+00:00") == "3:05 PM UTC"
+
+
+def test_format_callback_time_utc_keeps_two_digit_hour_without_a_stray_leading_zero():
+    assert _format_callback_time_utc("2026-01-01T10:05:00+00:00") == "10:05 AM UTC"
+
+
+def test_create_callback_reminder_noop_without_job_or_candidate_or_recruiter(monkeypatch):
+    def _fail():
+        raise AssertionError("must not touch the DB without job_id/candidate_id/recruiter_email")
+    monkeypatch.setattr("services.notifications_service.get_db_connection", _fail)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="", candidate_id="C1", recruiter_email="a@x.com", callback_at="2026-01-01T15:00:00+00:00",
+    ))
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="", recruiter_email="a@x.com", callback_at="2026-01-01T15:00:00+00:00",
+    ))
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="", callback_at="2026-01-01T15:00:00+00:00",
+    ))
+
+
+def test_create_callback_reminder_noop_when_job_or_candidate_missing(monkeypatch):
+    cur = FakeCursor(fetchone_results=[None, None])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="a@x.com", callback_at="2026-01-01T15:00:00+00:00",
+    ))
+
+    assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)
+
+
+def test_create_callback_reminder_inserts_when_still_the_current_callback(monkeypatch):
+    callback_at = "2026-01-01T15:00:00+00:00"
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {"feedback_type": "Callback Scheduled", "callback_scheduled_at": callback_at}}
+    cur = FakeCursor(fetchone_results=[job_row, cand_row, {"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="a@x.com", callback_at=callback_at,
+    ))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    sql, params = insert_calls[0]
+    assert params[0] == "a@x.com"
+    assert params[1] == "candidate_callback_reminder"
+    assert "3:00 PM UTC" in params[6]  # body
+    assert conn.committed is True
+
+
+def test_create_callback_reminder_skips_when_rescheduled_to_a_different_time(monkeypatch):
+    """Regression for PR #841 review: a reminder queued for the original
+    callback_at must not fire once the recruiter reschedules to a new time —
+    save_candidate_feedback would have overwritten callback_scheduled_at to
+    the new time, so the stale reminder's callback_at no longer matches."""
+    original_callback_at = "2026-01-01T15:00:00+00:00"
+    rescheduled_callback_at = "2026-01-01T18:00:00+00:00"
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {"feedback_type": "Callback Scheduled", "callback_scheduled_at": rescheduled_callback_at}}
+    cur = FakeCursor(fetchone_results=[job_row, cand_row])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="a@x.com", callback_at=original_callback_at,
+    ))
+
+    assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)
+
+
+def test_create_callback_reminder_skips_when_status_changed_away_from_callback(monkeypatch):
+    """Regression for PR #841 review: if the candidate was later Rejected
+    (or Submitted/Unreachable/Allotment Slot Filled), save_candidate_feedback
+    clears callback_scheduled_at to None — the queued reminder must not fire
+    for a callback that was superseded by a different outcome."""
+    callback_at = "2026-01-01T15:00:00+00:00"
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {"feedback_type": "Reject", "callback_scheduled_at": None}}
+    cur = FakeCursor(fetchone_results=[job_row, cand_row])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="a@x.com", callback_at=callback_at,
+    ))
+
+    assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)
+
+
+def test_create_callback_reminder_falls_back_to_shortly_on_bad_timestamp(monkeypatch):
+    """A malformed callback_at must still produce a notification (the
+    recruiter still gets reminded) rather than raising — just with a
+    generic body instead of a formatted time."""
+    bad_callback_at = "not-a-timestamp"
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {"feedback_type": "Callback Scheduled", "callback_scheduled_at": bad_callback_at}}
+    cur = FakeCursor(fetchone_results=[job_row, cand_row, {"id": 1}])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="a@x.com", callback_at=bad_callback_at,
+    ))
+
+    insert_calls = [c for c in cur.executed if "INSERT INTO notifications" in c[0]]
+    assert len(insert_calls) == 1
+    assert "shortly" in insert_calls[0][1][6]

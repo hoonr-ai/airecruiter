@@ -1296,6 +1296,20 @@ async def create_candidate_externally_submitted_notification(
 _TITLE_CALLBACK_REMINDER = "Callback reminder: call {candidate_name} for {job_title}"
 
 
+def _format_callback_time_utc(callback_at: str) -> str:
+    """"3:30 PM UTC", not a bare "3:30 PM" — callback_at is a UTC ISO
+    string, and formatting it without a zone label (PR #841 review) read as
+    the recruiter's own local time to anyone outside UTC. Builds the
+    leading-zero-stripped hour by hand instead of strftime's "%-I" — that
+    flag is glibc-only and raises on Windows."""
+    dt = datetime.fromisoformat(callback_at.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    time_str = dt.strftime("%I:%M %p").lstrip("0") or "0"
+    return f"{time_str} UTC"
+
+
 def _create_candidate_callback_reminder_notification_sync(
     job_id: str, candidate_id: str, recruiter_email: str, callback_at: str
 ) -> None:
@@ -1308,10 +1322,28 @@ def _create_candidate_callback_reminder_notification_sync(
             job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id)
             if not job_row or not cand_row:
                 return
+
+            # PR #841 review: a reschedule, or a switch to Submit/Reject/
+            # Unreachable/Allotment Slot Filled after this reminder was
+            # already queued, must not fire a reminder for a callback that
+            # no longer applies. save_candidate_feedback writes the CURRENT
+            # callback's time to callback_scheduled_at on every change
+            # (including clearing it to None for every other feedback type)
+            # — if it no longer matches what THIS reminder was queued for,
+            # this reminder is stale and skipped.
+            current_callback_at = (cand_row.get("data") or {}).get("callback_scheduled_at")
+            if current_callback_at != callback_at:
+                logger.info(
+                    "candidate_callback_reminder_skipped_stale candidate=%s job=%s "
+                    "queued_for=%s current=%s",
+                    candidate_id, job_id, callback_at, current_callback_at,
+                )
+                return
+
             candidate_name = cand_row.get("name") or "A candidate"
             job_title = _resolve_job_title(job_row, job_id)
             try:
-                when_label = datetime.fromisoformat(callback_at.replace("Z", "+00:00")).strftime("%-I:%M %p")
+                when_label = _format_callback_time_utc(callback_at)
             except ValueError:
                 when_label = "shortly"
             jobdiva_id = job_row.get("jobdiva_id") or job_id
