@@ -76,13 +76,6 @@ import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { useActiveTime } from "@/hooks/use-active-time";
 import { recordActivity } from "@/lib/activity";
 import { RANKINGS_TABLE_MAX_HEIGHT } from "@/lib/table-layout";
-import {
-  contactStatusHover,
-  finalMissNotice,
-  STILL_LOOKING_UP,
-  stillLookingUpMessage,
-  type ContactClickStatus,
-} from "@/lib/contact-lookup";
 
 const FINAL_ENGAGE_STATUSES = new Set([
   "completed",
@@ -334,10 +327,7 @@ interface Candidate {
   data?: any;
 }
 
-// `searchAgain`: label of the "Search again (~$X)" button, set when a recent
-// search already found nothing for what is still missing (a final miss).
-// `inProgress`: an Exa run for it is still going ("check again in a few minutes").
-type EnrichStatus = ContactClickStatus & { type: "info" | "error" | "success" };
+type EnrichStatus = { type: "info" | "error" | "success"; message: string };
 type ToastState = { type: "info" | "error" | "success" | "warning"; message: string } | null;
 
 function isPlaceholderEmail(e?: string): boolean {
@@ -925,6 +915,25 @@ export default function CandidateRankingsPage() {
     return "text-slate-600";
   };
 
+  const compactEnrichStatusMessage = (status: EnrichStatus): string => {
+    const raw = String(status.message || "").trim();
+    const lower = raw.toLowerCase();
+    if (!raw) return "";
+    if (lower.includes("no contact info found") || lower.includes("no contact match")) {
+      return "No ZoomInfo contact found";
+    }
+    if (lower.includes("linkedin url missing")) {
+      return "LinkedIn URL missing";
+    }
+    if (lower.includes("applied")) {
+      return "Contact info applied";
+    }
+    if (lower.includes("failed")) {
+      return "ZoomInfo request failed";
+    }
+    return raw;
+  };
+
   // Distinct sources present in the current candidate set, for the source dropdown.
   const availableSources = useMemo(() => {
     const set = new Set<string>();
@@ -1249,16 +1258,13 @@ export default function CandidateRankingsPage() {
     pushToast("Profile URL not available", "info");
   };
 
-  // Get Contact: Apollo → Exa → Exa deep search for what the row lacks. A
-  // field a recent deep search found nothing for is not bought again unless
-  // the recruiter confirms ("Search again", confirm=true).
-  const handleEnrichContact = async (candidate: Candidate, confirm = false) => {
+  const handleEnrichContact = async (candidate: Candidate) => {
     const candidateKey = String(candidate.candidate_id || candidate.id || "").trim();
     if (!candidateKey) return;
 
     const linkedinUrl = resolveCandidateLinkedInUrl(candidate);
     if (!linkedinUrl) {
-      const msg = "LinkedIn URL missing — cannot look up contact.";
+      const msg = "LinkedIn URL missing — cannot query ZoomInfo.";
       setEnrichStatusByCandidateId(prev => ({
         ...prev,
         [candidateKey]: {
@@ -1296,52 +1302,30 @@ export default function CandidateRankingsPage() {
           undefined,
         email: candidate.email || undefined,
         phone: candidate.phone || undefined,
-        confirm: confirm === true,
       });
-
-      // An Exa run for it is still going: say so, never "No contact found",
-      // which invites a re-click that buys a second run. Nothing new came
-      // back to apply (the server answers in_progress only then).
-      const stillGoing = stillLookingUpMessage(payload);
-      if (stillGoing && !payload?.phone && !payload?.email) {
-        setEnrichStatusByCandidateId(prev => ({
-          ...prev,
-          [candidateKey]: { type: "info", message: `${stillGoing}.`, inProgress: true },
-        }));
-        pushToast(STILL_LOOKING_UP, "info");
-        return;
-      }
 
       const nextPhone = payload?.phone || candidate.phone || "";
       const nextEmail = payload?.email || candidate.email || "";
-      // What is still missing because a recent search found none.
-      const miss = finalMissNotice(payload);
-      const missFields = miss ? miss.fields.join(" and ") : "";
-      const missText = miss
-        ? ` ${missFields.charAt(0).toUpperCase()}${missFields.slice(1)}: ${miss.message.charAt(0).toLowerCase()}${miss.message.slice(1)}.`
-        : "";
 
       if (!nextPhone && !nextEmail) {
-        const msg = `No contact info found for this LinkedIn URL.${missText}`;
+        const msg = "No contact info found from ZoomInfo for this LinkedIn URL.";
         setEnrichStatusByCandidateId(prev => ({
           ...prev,
           [candidateKey]: {
             type: "info",
             message: msg,
-            searchAgain: miss?.searchAgainLabel,
           },
         }));
-        pushToast(miss ? `No contact found — ${miss.message}` : "No contact found", "info");
+        pushToast("No ZoomInfo contact found", "info");
         return;
       }
 
-      const successMsg = `Contact info applied.${missText}`;
+      const successMsg = "ZoomInfo contact info applied.";
       setEnrichStatusByCandidateId(prev => ({
         ...prev,
         [candidateKey]: {
           type: "success",
           message: successMsg,
-          searchAgain: miss?.searchAgainLabel,
         },
       }));
       pushToast("Contact info applied", "success");
@@ -2966,44 +2950,29 @@ export default function CandidateRankingsPage() {
                               {(() => {
                                 const cid = String(candidate.candidate_id || candidate.id || "").trim();
                                 const status = enrichStatusByCandidateId[cid];
-                                // A final miss keeps its date in the hover ("Searched <date>, nothing found"),
-                                // a lookup still going its "check again in a few minutes".
                                 const hoverStatus = status
-                                  ? contactStatusHover(status)
-                                  : "Look up missing phone/email (Apollo → Exa)";
-                                const enriching = enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || ""));
+                                  ? compactEnrichStatusMessage(status)
+                                  : "Fetch missing phone/email from ZoomInfo";
                                 return (
-                                  <>
-                                    <Button
-                                      size="sm"
-                                      className="h-6 px-2 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[10px] rounded-md shadow-sm"
-                                      onClick={() => handleEnrichContact(candidate)}
-                                      disabled={enriching}
-                                      title={hoverStatus}
-                                    >
-                                      {enriching ? (
-                                        <>
-                                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                                          Checking...
-                                        </>
-                                      ) : (
-                                        <>
-                                          <RefreshCw className="w-3 h-3 mr-1" />
-                                          Get Contact
-                                        </>
-                                      )}
-                                    </Button>
-                                    {status?.searchAgain && !enriching && (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleEnrichContact(candidate, true)}
-                                        title={`${status.message} A paid lookup.`}
-                                        className="block mx-auto mt-1 text-[10px] text-indigo-600 hover:underline font-medium"
-                                      >
-                                        {status.searchAgain}
-                                      </button>
+                                  <Button
+                                    size="sm"
+                                    className="h-6 px-2 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[10px] rounded-md shadow-sm"
+                                    onClick={() => handleEnrichContact(candidate)}
+                                    disabled={enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || ""))}
+                                    title={hoverStatus}
+                                  >
+                                    {enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || "")) ? (
+                                      <>
+                                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                        Checking...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <RefreshCw className="w-3 h-3 mr-1" />
+                                        Get Contact
+                                      </>
                                     )}
-                                  </>
+                                  </Button>
                                 );
                               })()}
                             </div>

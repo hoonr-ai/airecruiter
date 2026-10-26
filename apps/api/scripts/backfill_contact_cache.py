@@ -2,9 +2,7 @@
 """Seed contact_enrichment_cache from past paid lookups (services/contact_cache_backfill.py).
 
 The API runs this once per database by itself (first cache use after deploy).
-Use the script to preview it, or to re-run it after the marker exists (e.g.
-once after CONTACT_CACHE_HIT_TTL_DAYS became 0, which brings back contact the
-first run dropped as older than 180 days; only empty cache fields are filled).
+Use the script to preview it, or to re-run it after the marker exists.
 
     cd apps/api
     venv/bin/python -m scripts.backfill_contact_cache            # dry run: counts only

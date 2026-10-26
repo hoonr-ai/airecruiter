@@ -117,11 +117,8 @@ const ADAPTERS: Record<string, (input: Input) => unknown> = {
   extractLinkedInFromText: (i) => rules.extractLinkedInFromText(i.text),
   looksLikeLinkedInProfile: (i) => rules.looksLikeLinkedInProfile(i.url),
   resolveLinkedInUrl: (i) => rules.resolveLinkedInUrl(i.candidate),
-  isServerPlaceholderEmail: (i) => rules.isServerPlaceholderEmail(i.value),
-  getCandidateSeedEmail: (i) => rules.getCandidateSeedEmail(i.candidate),
-  getCandidateLookupName: (i) => rules.getCandidateLookupName(i.candidate),
   buildEnrichRequest: (i) => rules.buildEnrichRequest(i.candidate, i.candidateId, i.linkedinUrl, i.jobdivaId),
-  interpretEnrichAnswer: (i) => rules.interpretEnrichAnswer(i.answer, i.launchableNow, i.heldEmail),
+  interpretEnrichAnswer: (i) => rules.interpretEnrichAnswer(i.answer, i.launchableNow),
   dncDroppedIds: (i) =>
     rules.dncDroppedIds(i.candidates, set(i.selectedIds), i.overrides || {}, set(i.dncPhones)),
   splitReadyNeedsContact: (i) =>
@@ -264,39 +261,6 @@ test("page.tsx runSearchStream and applyStreamEvent handle the same events", () 
   for (const name of primitives) {
     assert.match(pageBody, new RegExp(`\\b${name}\\(`), `runSearchStream no longer calls ${name}`);
   }
-});
-
-// A JobDiva row with an Auto_* (or no) email takes a LinkedIn row's extracted
-// email on a merge: Launch still looks the email up, and a found one replaces it.
-test("a merged JobDiva row never seeds another source's email", () => {
-  const li = "https://www.linkedin.com/in/jane-doe";
-  const [jd] = rules.deduplicateCandidatesUI([
-    { candidate_id: "jd", source: "JobDiva-TalentSearch", email: "Auto_77@jobdiva.com", profile_url: li },
-    { candidate_id: "li", source: "LinkedIn-Exa", email: "jane.extracted@acme.com", profile_url: li },
-  ]);
-  assert.equal(jd.email, "jane.extracted@acme.com");
-  assert.equal(rules.getCandidateSeedEmail(jd), "");
-  assert.equal(rules.buildEnrichRequest(jd, "jd", li, "26-1").email, undefined);
-  const found = { status: "success", email: "jane@found.test", phone: "+15125550100" };
-  assert.deepStrictEqual(rules.interpretEnrichAnswer(found, true, rules.getCandidateSeedEmail(jd)).override, {
-    phone: "+15125550100", email: "jane@found.test",
-  });
-});
-
-// The lookup drops a seed email utils/email_utils.py calls a placeholder and
-// buys one; holding it here would throw that answer away and launch the row
-// on the dead address. isValidLaunchEmail alone lets these through.
-test("a JobDiva email the lookup calls a placeholder is never held", () => {
-  const li = "https://www.linkedin.com/in/jane-doe";
-  for (const email of ["test@gmail.com", "jane@example.org", "jane@test.com", "jane@jobdiva.local", "candidate@acme.com"]) {
-    const jd = { candidate_id: "jd", source: "JobDiva-TalentSearch", email };
-    assert.equal(rules.isValidLaunchEmail(email), true, email);
-    assert.equal(rules.getCandidateSeedEmail(jd), "", email);
-    assert.equal(rules.buildEnrichRequest(jd, "jd", li, "26-1").email, undefined, email);
-    const found = { status: "success", email: "jane@found.io" };
-    assert.equal(rules.interpretEnrichAnswer(found, true, rules.getCandidateSeedEmail(jd)).override?.email, "jane@found.io");
-  }
-  assert.equal(rules.getCandidateSeedEmail({ source: "JobDiva", email: "tester@localbank.com" }), "tester@localbank.com");
 });
 
 // Last: the fixtures were generated from THIS launch-rules.ts.

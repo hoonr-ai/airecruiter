@@ -142,8 +142,8 @@ def _on_demand(monkeypatch, store, exa_fields_result=None, **req):
         calls.append("apollo")
         return {"ok": True, "fields": {"workEmail": "", "personalEmail": "", "mobilePhone": "", "workPhone": ""}}
 
-    async def _exa(candidate_id, url, name="", company="", fields=ce.EXA_CONTACT_FIELDS, deep=False, **kw):
-        calls.append(("exa_deep" if deep else "exa", tuple(fields)))
+    async def _exa(candidate_id, url, name="", company="", fields=ce.EXA_CONTACT_FIELDS):
+        calls.append(("exa", tuple(fields)))
         return {"ok": True, "fields": exa_fields_result or {}}
 
     async def _zi(*a, **k):
@@ -180,37 +180,17 @@ def test_launch_uses_cached_email_and_buys_only_the_phone(monkeypatch):
     assert rec["email"] == ""  # the cache's own value is not re-stamped
 
 
-def test_a_normal_miss_with_no_deep_search_to_follow_is_final_until_a_click_confirms(monkeypatch):
-    # conftest turns the deep search off, so the normal run's miss is the end
-    # of the chain: final for Launch and for a click, re-bought on confirm.
-    known = {"email": "jane@acme.com", "phone_missed": True, "phone_missed_in_deep_ttl": True,
-             "phone_missed_at": "2026-09-01T08:00:00+00:00"}
-    res, calls = _on_demand(monkeypatch, _Store(known), trigger="launch")
+def test_launch_honours_a_cached_phone_miss_but_a_click_retries(monkeypatch):
+    store = _Store({"email": "jane@acme.com", "phone_missed": True})
+    _, calls = _on_demand(monkeypatch, store, trigger="launch")
     assert not any(isinstance(c, tuple) and c[0] == "exa" for c in calls)
-    assert res["status"] == "success" and res["email"] == "jane@acme.com"
 
-    res, calls = _on_demand(monkeypatch, _Store(known))
-    assert not any(isinstance(c, tuple) and c[0] == "exa" for c in calls)
-    assert res["email"] == "jane@acme.com" and res["final_missed_fields"] == ["phone"]
-    assert res["checked_at"] == "2026-09-01T08:00:00+00:00"   # the normal run's miss
-    assert res["est_usd"] < 0.15                              # a normal run, not a deep one
-
-    _, calls = _on_demand(monkeypatch, _Store(known), confirm=True)
+    _, calls = _on_demand(monkeypatch, _Store({"email": "jane@acme.com", "phone_missed": True}))
     assert ("exa", ("phone",)) in calls
 
 
-def test_a_normal_miss_older_than_the_miss_ttl_is_bought_again_when_a_deep_search_can_follow(monkeypatch):
-    monkeypatch.setattr(ce, "EXA_CONTACT_DEEP_EFFORT", "medium")
-    known = {"email": "jane@acme.com", "phone_missed": False, "phone_missed_in_deep_ttl": True}
-    res, calls = _on_demand(monkeypatch, _Store(known), trigger="launch")
-    assert ("exa", ("phone",)) in calls and res["final_missed_fields"] == []
-
-
 # ---------------------------------------------------------------------------
-# SQL (skips without a reachable Postgres; TEMP table only). CI has no
-# Postgres, so these skip there: run them locally with LAUNCH_REPORT_TEST_DSN
-# before merging a change to the cache SQL or its lease columns (see
-# tests/test_contact_single_flight.py).
+# SQL (skips without a reachable Postgres; TEMP table only)
 # ---------------------------------------------------------------------------
 
 _DSN = os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
@@ -232,7 +212,6 @@ def pg(monkeypatch):
 
     with conn.cursor() as cur:
         cur.execute(contact_cache.CREATE_SQL.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE", 1))
-        cur.execute(contact_cache.MIGRATE_SQL)   # what _ensure_table runs after it
     monkeypatch.setattr(contact_cache, "_connect", lambda: _KeepOpen())
     monkeypatch.setattr(contact_cache, "_table_ready", True)
     yield conn
@@ -272,67 +251,7 @@ def test_sql_deep_search_misses(pg):
     assert not got["phone_missed"] and not got["phone_deep_missed"]  # a found value wins
 
 
-def _age(pg, column, days):
-    with pg.cursor() as cur:
-        cur.execute(
-            f"UPDATE contact_enrichment_cache SET {column} = NOW() - make_interval(days => %s)", (days,)
-        )
-
-
-def test_sql_found_contact_never_expires_unless_a_ttl_is_set(pg, monkeypatch):
-    monkeypatch.delenv("CONTACT_CACHE_HIT_TTL_DAYS", raising=False)
-    run = asyncio.run
-    run(contact_cache.record(LINKEDIN, email="jane@acme.com", phone="+14155550100", email_provider="exa"))
-    _age(pg, "email_found_at", 400)
-    _age(pg, "phone_found_at", 400)
-
-    got = run(contact_cache.get(LINKEDIN))
-    assert got["email"] == "jane@acme.com" and got["phone"] == "+14155550100"
-
-    monkeypatch.setenv("CONTACT_CACHE_HIT_TTL_DAYS", "180")
-    got = run(contact_cache.get(LINKEDIN))
-    assert got["email"] == "" and got["phone"] == ""
-
-
-def test_sql_a_deep_miss_stays_final_for_months_a_normal_miss_does_not(pg, monkeypatch):
-    for knob in ("CONTACT_CACHE_MISS_TTL_DAYS", "CONTACT_CACHE_DEEP_MISS_TTL_DAYS"):
-        monkeypatch.delenv(knob, raising=False)
-    run = asyncio.run
-    run(contact_cache.record(LINKEDIN, missed=["email"], deep_missed=["phone"]))
-    _age(pg, "email_missed_at", 45)
-    _age(pg, "phone_deep_missed_at", 45)
-
-    got = run(contact_cache.get(LINKEDIN))
-    assert got["phone_deep_missed"] and got["phone_missed"]          # 45 days: still final
-    assert not got["email_missed"] and not got["email_deep_missed"]  # past the 30-day miss TTL
-    assert got["email_missed_in_deep_ttl"]                           # final only without a deep search
-    for iso in (got["phone_deep_missed_at"], got["email_missed_at"]):   # when, for "Searched <date>"
-        assert 44 <= (_dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(iso)).days <= 45
-    assert got["phone_missed_at"] == "" and got["email_deep_missed_at"] == ""
-
-    _age(pg, "phone_deep_missed_at", 200)
-    got = run(contact_cache.get(LINKEDIN))
-    assert not got["phone_deep_missed"] and not got["phone_missed"]  # past 180 days
-
-    monkeypatch.setenv("CONTACT_CACHE_DEEP_MISS_TTL_DAYS", "0")      # 0 = not honoured
-    _age(pg, "phone_deep_missed_at", 1)
-    got = run(contact_cache.get(LINKEDIN))
-    assert not got["phone_deep_missed"] and not got["email_missed_in_deep_ttl"]
-
-
-def test_sql_a_miss_ttl_of_zero_makes_no_normal_miss_final(pg, monkeypatch):
-    monkeypatch.delenv("CONTACT_CACHE_DEEP_MISS_TTL_DAYS", raising=False)
-    monkeypatch.setenv("CONTACT_CACHE_MISS_TTL_DAYS", "0")             # 0 = not honoured
-    run = asyncio.run
-    run(contact_cache.record(LINKEDIN, missed=["email"], deep_missed=["phone"]))
-    _age(pg, "email_missed_at", 1)
-
-    got = run(contact_cache.get(LINKEDIN))
-    assert not got["email_missed"] and not got["email_missed_in_deep_ttl"]
-    assert got["phone_deep_missed"]                                  # the deep-miss TTL is its own
-
-
-def test_sql_migration_adds_the_deep_miss_and_lease_columns():
+def test_sql_migration_adds_the_deep_miss_columns():
     try:
         conn = psycopg2.connect(_DSN, connect_timeout=2)
     except Exception:
@@ -350,14 +269,7 @@ def test_sql_migration_adds_the_deep_miss_and_lease_columns():
                            WHERE table_name = 'contact_enrichment_cache'
                              AND table_schema LIKE 'pg_temp%%'""")
             cols = {r[0] for r in cur.fetchall()}
-            cur.execute("""SELECT indexname FROM pg_indexes
-                           WHERE tablename = 'contact_enrichment_cache'
-                             AND schemaname LIKE 'pg_temp%%'""")
-            indexes = {r[0] for r in cur.fetchall()}
         assert {"phone_personal", "email_deep_missed_at", "phone_deep_missed_at"} <= cols
-        assert {"pending_token", "pending_fields", "pending_tier", "pending_until",
-                "pending_run_id", "pending_run_at", "pending_meta"} <= cols
-        assert "contact_enrichment_cache_pending_run_idx" in indexes
     finally:
         conn.rollback()
         conn.close()
@@ -410,8 +322,7 @@ def test_backfill_takes_only_provider_verified_contact():
     assert people["bea"]["email"] == "bea@acme.com" and people["bea"]["phone"] is None
 
 
-def test_backfill_keeps_the_newest_and_drops_stale(monkeypatch):
-    monkeypatch.setenv("CONTACT_CACHE_HIT_TTL_DAYS", "180")
+def test_backfill_keeps_the_newest_and_drops_stale():
     old = {"source": "LinkedIn-Exa", "profile_url": "https://linkedin.com/in/amos",
            "email": "old@acme.com", "phone": "", "lookup": None, "sourcing_provider": "zoominfo",
            "updated_at": _NOW - _dt.timedelta(days=30)}
@@ -425,17 +336,6 @@ def test_backfill_keeps_the_newest_and_drops_stale(monkeypatch):
     assert people["amos"]["email"] == "new@acme.com"
     assert people["amos"]["email_provider"] == "apollo"
     assert "zed" not in people
-
-
-def test_backfill_keeps_everything_when_found_contact_never_expires(monkeypatch):
-    monkeypatch.delenv("CONTACT_CACHE_HIT_TTL_DAYS", raising=False)   # default 0
-    stale = {"source": "LinkedIn-Exa", "profile_url": "https://linkedin.com/in/zed", "email": "zed@acme.com",
-             "phone": "", "lookup": None, "sourcing_provider": "zoominfo",
-             "updated_at": _NOW - _dt.timedelta(days=400)}
-
-    people = bf.plan([stale], now=_NOW)
-
-    assert people["zed"]["email"] == "zed@acme.com"
 
 
 def test_backfill_runs_once_against_sql(pg):

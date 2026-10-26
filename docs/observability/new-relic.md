@@ -29,7 +29,6 @@ Browser apps: `accountID = trustKey = 7594453`, `agentID = applicationID`, brows
 | Background transactions `OtherTransaction/Task/scheduler/<job>` | `core.newrelic.background_transaction` in `main.py` | `job_status_poll`, `always_on_sync` (incl. the delayed first sync), `jobdiva_bi_sync`, `backfill_monitored_jobs_counters`. 7 of 8 workers skip each cycle on the advisory lock within ms: read `max`/`p95`; the count per `worker_pid` is a scheduler heartbeat (every background transaction carries `worker_pid`; all 8 workers share one host). |
 | Background transactions for spawned work | `core.tasks.spawn(...)` | Named after the spawn name up to `:` (`launch`, `intake_prewarm`, ...); the suffix is the `task_key` attribute. Detached from the request that spawned it (`spawn` drops the inherited trace first, `nr_txn` or not). `active_job_refresh` keepalive loops get no transaction. The launch-session runner passes `nr_txn=False` and opens one transaction per stage. A `background_transaction` reached while a transaction is live, in the same task or one it was created from (a `StreamingResponse` generator, Starlette's middleware task group, `gather`), is a span of that transaction; a raw `asyncio.create_task` from a request therefore stays in the request: use `spawn` for fire-and-forget work. |
 | Postgres spans inside `asyncio.to_thread` | `core/newrelic._install_to_thread_propagation` | The callable runs under the caller's trace (`context_wrapper`). Kill switch `NEW_RELIC_PROPAGATE_TO_THREAD=off`. |
-| Exa SDK calls in `loop.run_in_executor` | `core/newrelic.wrap_for_thread`, applied in `services/exa_service._exa_paced` | Pass A / Dice searches (and per-URL contents) run under the caller's trace, so their External segments land in the search transaction. Same kill switch. |
 | Route names + spans under uvloop | `core/newrelic._instrument_running_loop` | `uvicorn main:app` picks uvloop when installed and creates the loop **before** `main` (and so `init()`) is imported. The agent wraps a uvloop loop's `create_task` only at loop creation, so every task a request spawned (BaseHTTPMiddleware runs the route in one) lost the transaction: all web transactions were named `starlette.middleware.base:BaseHTTPMiddleware`, with no DB/HTTP spans. `init()` now wraps the running loop with the agent's own helper. Regression test: `test_route_named_when_uvloop_started_before_init`. |
 | Monitored-jobs cache warmer | metric `Custom/Scheduler/monitored_jobs_cache_warmer/ms` (+ `/errors`) | Deliberately **not** a transaction: every 25 s × 8 workers would be ~28k transactions/day/env. |
 | JobDiva calls | `services/jobdiva.py` httpx hook | Metrics `Custom/JobDiva/<path>/ms` and `Custom/JobDiva/<path>/status/<code>` per call; a `JobDivaAPI` event only when `status >= 400` or `elapsed >= 5 s`. Never the URL, query string or body. |
@@ -48,10 +47,6 @@ Browser apps: `accountID = trustKey = 7594453`, `agentID = applicationID`, brows
 | `PairJobFirstLaunch` | `services/launch_timing.stamp_first_launch` — the call that sets a job's T2 for the first time, from EVERY launch path (legacy `/engage/launch` included, so PROD is timed) | `job_id`, `jobdiva_id`, `added_to_click_s` (A), `click_to_launch_s` (B), `added_to_launch_s`, `click_recorded`, `click_to_launch_source`. One per job version: the source for job-level A / B averages (a relaunch never adds a sample). |
 | `RecruiterAction` | `services/recruiter_activity.record_action` — server-side at the endpoint (search, launch click, launch-session review / needs-contact / retry / cancel, Submit / Reject / Unreachable) and for browser-only actions sent via `POST /api/v1/activity/actions` | `recruiter` (sha256(email)[:12], the browser's NR user id), `action`, `source` (`server` / `client`), `job_id`, numeric / enum attrs only |
 | `RecruiterActiveTime` | `services/recruiter_activity.record_active_time` (each ~2-min flush of a surface's active time; the wizard's step time is mirrored as `wizard_step_N`) | `recruiter`, `surface`, `active_ms`, `job_id` |
-| `ExaCall` | `services/exa_telemetry.record_exa_call` — one per Exa call: each Pass A / Dice query, a per-URL contents call, the Pass B run (one exit event), every contact Agent attempt (`_exa_contact_attempt`) and late watch (`late = true`), plus `endpoint = 'agent_guard'` decisions of the contact path's 400 guard | `surface` (`pass_a` / `dice` / `deep_analyze` / `pass_b` / `contact`), `endpoint`, `outcome` (`ok`, `completed`, `timeout`, `out_of_credits`, `breaker_open`, `rate_limited`, `no_slot`, `create_error`, `create_rejected`, `poll_error` (a network failure too, `error_kind` = the exception class), `run_failed`, `abandoned` (cancelled mid-call, e.g. a closed Step-5 stream), `metadata_rejected`, `sources_refused`, `rejected`, ...), cost `cost_total` / `cost_search` / `cost_pages` (contents) / `cost_compute` / `cost_fee_e` / `cost_fee_p` / `cost_fiber`, `acu`, `num_results` / `n_results`, `fields_asked` / `fields_found`, `http_status`, `error_kind`, `latency_ms`, `exa_run_id`, `call_id` (the run's `metadata.call_id`), `effort`, `tier`, who asked (`trigger`: `step5_sample` / `step5_full` / `autosync` / `launch_s1` / `launch_s3` / `launch` / `click` / `click_phone`; `path`: `sourcing` / `ondemand` / `late_sweep`; `attempt`, `launch_session_id`, `arm`, `defer`), `role` (a contact run's single-flight role: `leader` / `passthrough` / `adopted`), `job_id`, `run_id`, `cache` (Pass A / Dice: `miss` = the search cache was asked first, `off` = it is unavailable). Cost is Exa's own `costDollars` estimate. A Pass A / Dice search served from the search cache is not billed and sends **no** `ExaCall`. Never query text, names, URLs or contacts. |
-| `ContactLookup` | `services/exa_telemetry.record_contact_lookup` — what the single-flight lease decided: one per paid Exa contact step (`contact_enrichment.exa_step`, on-demand and sourcing), one per orphaned run the 60 s sweep adopts, one per on-demand lookup that hits a final miss or confirms a re-buy, and one summary (`lookup`) per on-demand lookup (`routers/candidates.py`) | `outcome` (`leader` = bought the run, `follower` = answered by another lookup's run or by the cache meanwhile, `passthrough` = no lease (`reason`: `off` = kill switch / no key, `no_overlap` = the holder asks other fields, `partial_overlap` = the fields the holder is not after, bought at once while the rest waits on it), `lease_error` = the lease DB call failed (ran without one), `in_progress` = another lookup's run was still going when its time ran out (joined that lease; not a miss; the answer's `in_progress_fields` name the fields), `adopted`, `final_miss`, `confirm_rebuy`, `lookup` = one per on-demand lookup, its summary), `tier`, `fields_asked`, `fields_final` (final miss / re-buy), `exa_run_id`, `from_cache`, `lease_lost` (a leader whose lease another worker took before it created), `joined`, `waited_ms`, `remaining_s` (adopted), who asked (as `ExaCall`), `job_id`. A follower's polls of another lookup's run send no `ExaCall` (its owner reports it). `lookup` events carry `existing_rows`, `seed_from` (`request` / `row` / `-`: where a held email came from), the booleans `seeded_email` / `has_name` / `has_company`, `normal_asked` / `normal_outcome` / `deep_asked` / `deep_outcome` (fields, `miss`, `-`, `final_miss`, `in_progress`, `failed`), and the Launch deep-email holdout's `deep_skip_eligible`, `deep_skip_arm` (`skip` / `control`), `deep_skip_pct` and `first_exposure` (true on the one event that wrote the person's `contact_deep_skip_holdout` row). |
-| `ExaPeopleFanout` | `services/exa_telemetry.record_people_fanout` — one per Pass A / Dice fan-out (`ExaService._people_search_fanout`), the out-of-credits raise path included | `surface` (`pass_a` / `dice`), `queries`, `per_query` (results bought per query), `limit_total`, `raw_rows`, `dup_rows`, `merged_rows`, `kept_rows`, `deepest_rank` (rank the kept rows reach), `failed`, `ooc_failed`, `cache_hits`, `cache_misses` (queries this fan-out paid for), `inflight_joins` (joined an identical search the worker was already buying), `cache_state` (`on` / `off` = TTL 0 / `off_config` = no `REDIS_URL` or `ENCRYPTION_KEY` / `down`), `cost_usd` (this fan-out's own paid calls), `starved` (the merge could not fill the limit though a query came back full; never when a query failed), `cf15_same` (factor 1.5 would have kept the same rows), `abandoned` (the caller left before the merge, e.g. a closed Step-5 stream: only the sizing and lookup counts are sent, no rows, `failed`, `cost_usd`, `starved` or `cf15_same`; the searches it sent still finish and bill on `ExaCall`), who asked (as `ExaCall`), `job_id`, `run_id`. |
-| `ExaConfig` | `services/exa_telemetry.record_config_once` (each worker, at most hourly, from a Step-5 search with Exa or Dice) | `pass_b`, `deep_analysis`, `metadata_on`, `sdk_version` (exa_py), `breaker_ttl_s`, `normal_effort`, `deep_effort`, `per_query_factor`, `search_cache_ttl_s`, `search_cache` (state as above), `worker_pid`: shows a hand-set `.env` override per worker. |
 | `JobDivaAPI` | JobDiva hook (errors / slow only) | `endpoint` (path), `method`, `status_code`, `elapsed_ms`, `response_size_bytes`, `error_kind` (≤ 80 chars, dropped if it holds `@` or a 7+ digit run) |
 | `JobDivaBiLimiter` | `services/jobdiva_rate_limit` | `outcome` (`granted` / `slot_timeout` / `http_429` / `counters`), `label`, `priority`, `bi_wait_ms`, `bi_cooldown_ms`, `bi_429_total`. (`JobDivaBILimiter` with a capital I is retired: event types are case-sensitive.) |
 | `PairBackendStep`, `BackendError`, `BackendMessage` | `core.newrelic.log_step` / `capture_exception` / `record_message` | `PairBackendStep` was `BackendStep`, which collided with Pairbot's event of the same name. |
@@ -128,37 +123,6 @@ echo NEW_RELIC_LOG_FORWARD_LEVEL=OFF >> ~/codebase/airecruiter/apps/api/.env
 echo NEW_RELIC_PROPAGATE_TO_THREAD=off >> ~/codebase/airecruiter/apps/api/.env
 sudo systemctl restart airecruiter-api
 ```
-
-Exa (apps/api/.env, restart to apply; all default in code, CI writes no `EXA_*`):
-
-```bash
-echo EXA_TELEMETRY_ENABLED=false >> ~/codebase/airecruiter/apps/api/.env      # no ExaCall / ExaConfig events
-echo EXA_RUN_METADATA_ENABLED=false >> ~/codebase/airecruiter/apps/api/.env   # contact runs sent without `metadata`
-echo VENDOR_EXA_NO_CREDITS_TTL_S=0 >> ~/codebase/airecruiter/apps/api/.env    # out-of-credits breaker off (default 300 s)
-echo EXA_SEARCH_CACHE_TTL_S=0 >> ~/codebase/airecruiter/apps/api/.env         # Pass A / Dice search cache off (default 43200 s)
-echo EXA_PEOPLE_PER_QUERY_FACTOR=0 >> ~/codebase/airecruiter/apps/api/.env    # each Pass A query buys the full 50 again (default 2.0)
-echo CONTACT_LOOKUP_SINGLE_FLIGHT=false >> ~/codebase/airecruiter/apps/api/.env  # no per-person lease, no orphan sweep (read per call)
-echo EXA_DEEP_SKIP_REACHABLE_PCT=0 >> ~/codebase/airecruiter/apps/api/.env       # Launch deep-email holdout off: everyone keeps the run (the code default until it starts)
-echo SOURCING_DEFER_PAID_CONTACT_ENABLED=false >> ~/codebase/airecruiter/apps/api/.env  # Source & Launch searches buy Exa emails again
-sudo systemctl restart airecruiter-api
-# After a top-up: stop new workers adopting the open breaker (each worker's local copy still runs out its
-# TTL, at most 300 s; a restart clears those at once):
-redis-cli -u "$REDIS_URL" DEL vendor:exa:no_credits:prod   # :qa on QA
-# Purge the Pass A / Dice search cache (add --tls for rediss:// URLs):
-redis-cli -u "$REDIS_URL" --scan --pattern 'exa:ppl:v1:prod:*' | xargs -r redis-cli -u "$REDIS_URL" UNLINK
-```
-
-The search cache (`services/exa_search_cache.py`) keeps each Pass A / Dice query's results in Redis, Fernet-encrypted,
-under `exa:ppl:v1:<env>:<sha1>` for `EXA_SEARCH_CACHE_TTL_S` (thin answers 30 min, never empty answers or failures).
-It needs `REDIS_URL`, an eviction policy of `volatile-lru` (or `noeviction` with headroom; never `allkeys-lru`)
-and ~20-50 MB at the 12 h TTL; check `redis-cli -u "$REDIS_URL" INFO memory`. `ExaPeopleFanout.cache_state` =
-`off_config` on a worker means `REDIS_URL` or `ENCRYPTION_KEY` is missing there (logged once per worker at WARNING).
-
-Should Exa ever reject run metadata, each worker re-sends that run without it, switches metadata off for itself
-and logs `Exa rejected run metadata` (ERROR; alert "PAIR Exa Agent errors"): set `EXA_RUN_METADATA_ENABLED=false`.
-The breaker trips only on a 402 with `NO_MORE_CREDITS` / `API_KEY_BUDGET_EXCEEDED` / `TEAM_BUDGET_EXCEEDED` (never
-on `X402_*`, a 400 or a 429); while it is open no Exa request is sent, Step 5 shows LinkedIn-Exa / Dice as failed
-"Exa is out of credits", contact lookups end without Exa (no cached miss) and the sourcing caps are not used up.
 
 Everything in `core/newrelic.py` is fail-open: if the agent is missing, old, misconfigured or the collector is
 unreachable, requests are unaffected and helpers are no-ops.
@@ -257,41 +221,6 @@ FROM Span SELECT * WHERE trace.id = '<trace.id from the event>' SINCE 1 day ago
 Launch Report "Turn Around Time" (job added → first interview) can differ from A + B: B is measured per session
 from the first click that produced an interview, and historical/legacy launches have no click time.
 
-**Exa spend** (dashboard page "Exa"; weekly reconcile: `apps/api/scripts/exa_runs_ledger.py`, its `--seen` ids
-exported one day per query because `uniques()` stops at 10,000 values)
-```sql
-FROM ExaCall SELECT sum(cost_total), count(*), uniqueCount(exa_run_id) WHERE env = 'prod' FACET surface, tier, trigger SINCE 1 day ago
--- Does /search bill the contents of every result? (cost_pages vs cost_search per Pass A call)
-FROM ExaCall SELECT average(cost_total), average(cost_search), average(cost_pages), average(n_results)
-  WHERE env = 'prod' AND endpoint = 'search' AND outcome = 'ok' FACET surface SINCE 1 day ago
-FROM ExaCall SELECT count(*) WHERE env = 'prod' AND outcome NOT IN ('ok', 'completed') FACET surface, outcome SINCE 1 day ago
-FROM ExaConfig SELECT latest(pass_b), latest(deep_analysis), latest(metadata_on), latest(sdk_version) WHERE env = 'prod' FACET worker_pid SINCE 1 day ago
--- Pass A / Dice search cache: hit rate (0.40-0.65 expected) and state
-FROM ExaPeopleFanout SELECT sum(cache_hits) / (sum(cache_hits) + sum(cache_misses) + sum(inflight_joins)) AS 'hit rate',
-  sum(cost_usd) WHERE env = 'prod' FACET surface SINCE 1 day ago
-FROM ExaPeopleFanout SELECT count(*) WHERE env = 'prod' FACET cache_state SINCE 1 day ago
--- Sizing, over fan-outs that paid, lost no query and were not abandoned: $ per paid query by size settles the billing model;
--- starved over 5% -> raise EXA_PEOPLE_PER_QUERY_FACTOR, F=1.5 same at 95%+ -> lower it to 1.5
-FROM ExaPeopleFanout SELECT average(cost_usd / cache_misses), percentage(count(*), WHERE starved IS true) AS 'starved %',
-  percentage(count(*), WHERE cf15_same IS true) AS 'F=1.5 same %'
-  WHERE env = 'prod' AND cache_misses > 0 AND failed = 0 AND abandoned IS NOT true FACET per_query SINCE 1 week ago
-FROM Log SELECT timestamp, message WHERE entity.name = 'PAIR API (PROD)' AND message LIKE 'Exa is OUT OF CREDITS%' SINCE 1 day ago
--- One lookup per person: who led, who waited, what was adopted after a restart (lease_error should stay ~0)
-FROM ContactLookup SELECT count(*) WHERE env = 'prod' FACET outcome, tier SINCE 1 day ago
-FROM ContactLookup SELECT average(waited_ms), percentage(count(*), WHERE from_cache IS true) WHERE env = 'prod' AND outcome = 'follower' SINCE 1 week ago
-FROM Log SELECT timestamp, message WHERE entity.name = 'PAIR API (PROD)' AND message LIKE 'Exa contact run % adopted%' SINCE 1 day ago
--- Launch deep-email holdout (EXA_DEEP_SKIP_REACHABLE_PCT): sample ratio (~50/50 at 50), one event per person;
--- skip rows must show deep_asked '-', and ExaCall arm = 'skip' must stay 0
-FROM ContactLookup SELECT count(*) WHERE env = 'prod' AND outcome = 'lookup' AND first_exposure IS true FACET deep_skip_arm SINCE 1 week ago
-FROM ContactLookup SELECT count(*) WHERE env = 'prod' AND outcome = 'lookup' AND deep_skip_arm = 'skip' FACET deep_asked SINCE 1 week ago
-FROM ExaCall SELECT count(*), sum(cost_total) WHERE env = 'prod' AND surface = 'contact' AND tier = 'deep' FACET arm SINCE 1 week ago
--- Launch seeds and the deferred sourcing lookups: the seeded share, and the two-field normal run's phone hit rate
--- against the phone-only one (same period, named lookups only)
-FROM ContactLookup SELECT percentage(count(*), WHERE seeded_email IS true) WHERE env = 'prod' AND outcome = 'lookup' AND trigger IN ('launch', 'launch_s3') SINCE 1 week ago
-FROM ContactLookup SELECT percentage(count(*), WHERE normal_outcome LIKE '%phone%') WHERE env = 'prod' AND outcome = 'lookup' AND has_name IS true AND normal_asked IN ('email,phone', 'phone') FACET normal_asked SINCE 1 week ago
-FROM PipelineStage SELECT count(*) WHERE env = 'prod' AND stage = 'contact_enrichment' FACET paid_deferred SINCE 1 day ago
-```
-
 **Browser**
 ```sql
 FROM PageView SELECT count(*), percentile(duration, 75) WHERE appId = 1589288242 FACET pageUrl SINCE 1 day ago
@@ -309,7 +238,7 @@ be earned. Measure before and after each rollout step:
 ```sql
 FROM NrConsumption SELECT sum(GigabytesIngested) FACET usageMetric SINCE 1 day ago COMPARE WITH 1 week ago
 SELECT bytecountestimate() / 10e8 AS 'GB' FROM Transaction, Span, Log, PipelineStage, JobDivaAPI, JobDivaBiLimiter,
-  PairLaunchSession, PairLaunchTiming, PairJobFirstLaunch, BackendMessage, ExaCall, ExaConfig, ExaPeopleFanout, ContactLookup FACET eventType() SINCE 1 day ago COMPARE WITH 1 week ago
+  PairLaunchSession, PairLaunchTiming, PairJobFirstLaunch, BackendMessage FACET eventType() SINCE 1 day ago COMPARE WITH 1 week ago
 ```
 
 What this change does to it:
@@ -322,10 +251,7 @@ What this change does to it:
   ticker's non-empty ticks; empty ticks are ignored), Postgres spans made visible by the `to_thread` patch (bounded
   by `span_events.max_samples_stored = 1000` per minute per worker, and by trace sampling), JobDiva metrics
   (metric timeslices, not events), and launch events (one `PairLaunchSession` per stage transition, one
-  `PairLaunchTiming` per session), and `ExaCall` (one per Exa call: ~3-4k per weekday, under 0.2 GB a month) plus
-  an hourly `ExaConfig` per worker and an `ExaPeopleFanout` per Pass A / Dice search (~1k per weekday), and a
-  `ContactLookup` per paid contact step (about one per contact `ExaCall`, ~2k per weekday) and per on-demand lookup
-  (its `lookup` summary, about one per Launch PAIR / click lookup, ~1-2k per weekday).
+  `PairLaunchTiming` per session).
 - **Logs**: PROD forwards WARNING+ only; QA/local forward INFO (user decision) — set
   `NEW_RELIC_LOG_FORWARD_LEVEL=WARNING` on QA if its log volume shows up in the query above.
 - Session polling endpoints call `ignore_transaction()` on success, so a polling tab costs nothing.
@@ -343,32 +269,16 @@ Both live in New Relic **and** in this repo; the repo copy is the source of trut
 
 | Asset | In New Relic | Definition |
 |---|---|---|
-| Dashboard **PAIR Ops** (pages: API, Launch pipeline, Browser, Exa, Logs & ingest; variables `api_app` / `web_app` switch QA / PROD / local) | guid `NzU5NDQ1M3xWSVp8REFTSEJPQVJEfGRhOjEzMjkyMjg3` | `docs/observability/newrelic/pair-ops-dashboard.json` (a NerdGraph `DashboardInput`) |
-| Alert policy **PAIR (QA + PROD)** (id 8176568), 13 NRQL conditions (12 enabled) | Alerts → Alert policies | `docs/observability/newrelic/pair-alerts.json` |
+| Dashboard **PAIR Ops** (pages: API, Launch pipeline, Browser, Logs & ingest; variables `api_app` / `web_app` switch QA / PROD / local) | guid `NzU5NDQ1M3xWSVp8REFTSEJPQVJEfGRhOjEzMjkyMjg3` | `docs/observability/newrelic/pair-ops-dashboard.json` (a NerdGraph `DashboardInput`) |
+| Alert policy **PAIR (QA + PROD)** (id 8176568), 9 NRQL conditions | Alerts → Alert policies | `docs/observability/newrelic/pair-alerts.json` |
 
 Conditions: API error rate (warn 2 % / critical 5 %, 15 min), non-streaming p95 latency (5 s / 10 s), API stopped
 reporting (loss of signal 20 min), scheduler stopped (AutoSync silent 45 min), launch session failed, launch pipeline
-stage failures, JobDiva 5xx, JobDiva profile invariant, web JavaScript errors, and four for Exa:
+stage failures, JobDiva 5xx, JobDiva profile invariant, web JavaScript errors. All facet by `appName`, so QA and PROD
+alert separately; an app that has never reported (PROD before its key is set) cannot fire.
 
-- **Exa credits exhausted** (CRITICAL, Log `message LIKE 'Exa%'` + `OUT OF CREDITS` / `NO_MORE_CREDITS` /
-  `BUDGET_EXCEEDED`, any in 5 min). The `Exa%` prefix keeps Apollo's own "Apollo is OUT OF CREDITS" line out.
-- **Exa Agent errors** (WARNING, `ExaCall` outcome `create_error` / `poll_error` / `metadata_rejected` / `rejected`, any
-  in 30 min; rate limits (`rate_limited`, a 429 on create or poll) and a refused Fiber source excluded). Network
-  failures count: a ConnectError, a create timeout with no started run found, or a poll ReadTimeout (late watches
-  included) is a `create_error` / `poll_error` whose `error_kind` is the exception class.
-- **Exa contact poll timeouts** (WARNING, timeout % per `tier`, late watches excluded). Shipped **disabled**: set the
-  per-tier threshold after a week of `ExaCall` data, then enable it.
-- **Exa Pass A query failures** (WARNING, Log `Exa people search:%queries failed%`, ERROR and never sampled). A
-  partial list that lost queries only to credits logs `queries skipped while Exa is out of credits` (WARNING) instead:
-  that outage is the credits alert's.
-
-Event conditions facet by `appName`, Log conditions by `entity.name`, so QA and PROD alert separately; an app that
-has never reported (PROD before its key is set) cannot fire. QA and PROD share one Exa key today, so a credits outage
-opens two incidents.
-
-**Notifications are not wired yet** (manual step, required for the Exa credits alert to page anyone). Attach policy
-8176568 to a destination in New Relic: Alerts → Workflows → Add workflow → filter "Policy = PAIR (QA + PROD)" → email
-or Slack channel.
+**Notifications are not wired yet.** Attach the policy to a destination in New Relic: Alerts → Workflows → Add workflow
+→ filter "Policy = PAIR (QA + PROD)" → email or Slack channel.
 
 To recreate or edit from the files: NerdGraph `dashboardCreate` / `dashboardUpdate(guid, dashboard)` with the JSON as
 `dashboard`, and `alertsPolicyCreate` + `alertsNrqlConditionStaticCreate` per condition (account 7594453).

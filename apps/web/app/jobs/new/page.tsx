@@ -155,7 +155,6 @@ import {
   getCandidateExclusionReason,
   getCandidateLaunchEmail,
   getCandidateLaunchPhone,
-  getCandidateSeedEmail,
   interpretEnrichAnswer,
   isDetailFailedPatch,
   isLaunchableNow,
@@ -6253,10 +6252,6 @@ function NewJobPageContent() {
       // `samplePerSource` fully-scored preview rows per source.
       searchMode?: "sample" | "full";
       samplePerSource?: number;
-      // Source & Launch's full run (and its relaxed runs): Launch PAIR is
-      // about to look contact up, so the search's paid Exa email lookups wait
-      // for it (one run for the email and the phone; Apollo still runs).
-      deferPaidContact?: boolean;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -6267,7 +6262,6 @@ function NewJobPageContent() {
       ...(typeof overrides?.jobdivaBatchSize === "number" ? { jobdiva_batch_size: overrides.jobdivaBatchSize } : {}),
       ...(overrides?.searchMode ? { search_mode: overrides.searchMode } : {}),
       ...(typeof overrides?.samplePerSource === "number" ? { sample_per_source: overrides.samplePerSource } : {}),
-      ...(overrides?.deferPaidContact ? { defer_paid_contact: true } : {}),
     };
 
     const controller = new AbortController();
@@ -6642,10 +6636,7 @@ function NewJobPageContent() {
     return sampleResults;
   };
 
-  // `deferPaidContact`: the run is about to be launched (handleSourceAndLaunch),
-  // see runSearchStream.
-  const handleRunSearch = async (opts?: { deferPaidContact?: boolean }): Promise<any[]> => {
-    const deferPaidContact = opts?.deferPaidContact === true;
+  const handleRunSearch = async (): Promise<any[]> => {
     if (hasInvalidExperienceRange) {
       setSearchStatus("Set Max YOE to the same value as or above Min YOE before searching.");
       return [];
@@ -6678,7 +6669,7 @@ function NewJobPageContent() {
       setSearchStatus("Connecting to source portals...");
 
       const firstRunStartMs = Date.now();
-      const firstRun = await runSearchStream(initial, "replace", deferPaidContact ? { deferPaidContact } : undefined);
+      const firstRun = await runSearchStream(initial, "replace");
       accumulated = [...firstRun];
       const firstQuality = collectCandidateQualityStats(firstRun);
       runBreakdown = [
@@ -6713,7 +6704,7 @@ function NewJobPageContent() {
         setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
 
         const relaxedRunStartMs = Date.now();
-        const nextRun = await runSearchStream(relaxed.query, "append", { ...structuralOverrides, deferPaidContact });
+        const nextRun = await runSearchStream(relaxed.query, "append", structuralOverrides);
         const relaxedQuality = collectCandidateQualityStats(nextRun);
         runBreakdown.push({
           attempt: currentAttempts.length,
@@ -7690,7 +7681,7 @@ function NewJobPageContent() {
       });
       let results: any[] = [];
       if (!launchRemainingOnly) {
-        results = await handleRunSearch({ deferPaidContact: true });
+        results = await handleRunSearch();
         if (searchAbortRef.current?.signal.aborted) return;
         // Let the final stream updates flush into candidates state/ref before
         // computing the auto-launch selection.
@@ -9174,11 +9165,10 @@ function NewJobPageContent() {
       }
 
       // How an answer is read (found contact → override that REPLACES the
-      // row's own, except the JobDiva email the lookup was seeded with;
-      // already reachable, not eligible, no contact, failed) is
+      // row's own, already reachable, not eligible, no contact, failed) is
       // interpretEnrichAnswer in lib/launch-rules.ts; this tallies it.
       const applyEnrichResult = (item: EnrichItem, enriched: EnrichAnswer) => {
-        const answer = interpretEnrichAnswer(enriched, item.launchableNow, getCandidateSeedEmail(item.c));
+        const answer = interpretEnrichAnswer(enriched, item.launchableNow);
         if (answer.outcome === "failed") {
           enrichFailedCount += 1;
           bumpEnrich("enrichFailed");

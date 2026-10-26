@@ -382,30 +382,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001 - never block boot
         logger.error(f"launch_session_scheduler_failed: {e}; continuing")
 
-    # 4a'. Paid Exa contact runs whose late watch died with its worker (a
-    # deploy, a recycle under --limit-max-requests) are adopted while they can
-    # still answer, so what they find is kept (services/contact_enrichment.
-    # resume_orphaned_late_watches). Every worker sweeps; each orphan goes to
-    # one of them (FOR UPDATE SKIP LOCKED on its contact_enrichment_cache
-    # lease). Not a New Relic transaction (every 60 s in 8 workers); each
-    # adoption logs a WARNING and sends a ContactLookup event.
-    try:
-        from services.contact_enrichment import resume_orphaned_late_watches
-
-        scheduler.add_job(
-            resume_orphaned_late_watches,
-            "interval",
-            seconds=60,
-            id="exa_late_watch_sweep",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
-            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
-        )
-    except Exception as e:  # noqa: BLE001 - never block boot
-        logger.error(f"exa_late_watch_sweep_schedule_failed: {e}; continuing")
-
     # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
     # has a 30s TTL, but the live query can spike to 20-30s during
     # poll-loop lock contention — long enough that the frontend's 8s

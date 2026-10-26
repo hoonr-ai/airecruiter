@@ -441,72 +441,33 @@ JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED = _env_bool_geo(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Exa Pass A people search — results bought per query
-# ─────────────────────────────────────────────────────────────────────────
-# Pass A (and Dice) runs one Exa search per title (up to 3) and keeps the
-# round-robin merge's top `limit` (50). Each query used to ask for all 50, so
-# a 3-title search bought 150 results to keep 50; Exa bills every result past
-# 10. Each query now asks for ceil(limit * F / queries), at least 10 and at
-# most `limit` (34 for 3 titles; 1-2 titles are unchanged), which leaves 2x
-# the merge's need for duplicates across sibling titles. Sample and full runs
-# ask for the same size on purpose: they share the Pass A search cache
-# (services/exa_search_cache.py). 0 = every query asks for `limit` again.
-# Read at import; ExaPeopleFanout's `starved` / `cf15_same` say whether to
-# move it.
-def _env_factor(name: str, default: float) -> float:
-    import math
-
-    try:
-        value = float((_os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-    return value if math.isfinite(value) and value >= 0 else default
-
-
-EXA_PEOPLE_PER_QUERY_FACTOR = _env_factor("EXA_PEOPLE_PER_QUERY_FACTOR", 2.0)
-
-
-# ─────────────────────────────────────────────────────────────────────────
 # Exa Agent API (Websets 2.0) — agentic deep-search pass for LinkedIn-Exa
 # ─────────────────────────────────────────────────────────────────────────
-# When True, every full Step-5 search that includes the "Exa" source also
-# fires an Exa Agent run (`exa.beta.agent.runs.create`, "Pass B") that
-# discovers more LinkedIn profiles and enriches Pass A's hits with
-# last_activity, follower_count, last 2 companies and fit_rationale, emitted
-# as "LinkedIn-DeepSearch" rows/patches.
+# When True, every Step-5 search that includes the "Exa" source also fires
+# an Exa Agent run (`exa.beta.agent.runs.create`) in parallel. The Agent
+# discovers additional LinkedIn profiles missed by Pass A's keyword search
+# AND enriches Pass A's hits (passed via `input.data`) with structured
+# fields: last_activity, follower_count, last 2 companies, fit_rationale.
+# Results land as a second wave of `candidate` / `candidate_detail` events
+# tagged with source "LinkedIn-DeepSearch". Disable to skip the cost.
 #
-# OFF by default (2026-10-14, user decision). A medium run is a flat $0.10,
-# and on PROD nearly every one was paid for and thrown away: exa_py 2.13's
-# AgentUsage.agent_compute_units is an int, Exa now returns 0.4, so create /
-# poll raise a parse error, deep_research_candidates() returns [] and the
-# run id is lost. Relaxation attempts also re-sent byte-identical prompts
-# (47% repeats). Before turning it back on: pin an exa_py whose AgentUsage
-# takes a float (2.14+) or move Pass B to raw httpx like contact_enrichment,
-# and dedupe runs per job + prompt.
-#
-# Turning Pass B off re-enables the per-URL get_contents() fallback unless
-# EXA_DEEP_ANALYSIS_ENABLED is off too (exa_deep_analysis_enabled below);
-# both default off so neither spends on its own.
+# Requires `exa_py>=2.13.0` and an Exa account with the agent beta enabled.
 import os as _os
-
 # Accept the common truthy variants. Strict "true" was tripping operators
 # who set `EXA_AGENT_ENABLED=1` or `=yes` and then wondered why Pass B
 # was silently skipped on every search.
-_TRUTHY = {"1", "true", "yes", "on", "y", "t"}
-
-
-def _truthy(raw) -> bool:
-    return str(raw or "").strip().lower() in _TRUTHY
-
-
-EXA_AGENT_ENABLED = _truthy(_os.getenv("EXA_AGENT_ENABLED", "false"))
+EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on", "y", "t"
+}
 
 
 def exa_deep_analysis_enabled() -> bool:
     """Per-URL Exa get_contents() (full profile text + match summary) for
-    LinkedIn-Exa rows that pass the filters, when Pass B is off. About $12 a
-    business day at PROD volume, so OFF by default. Read at call time."""
-    return _truthy(_os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "false"))
+    LinkedIn-Exa rows that pass the filters, when Pass B is off. Read at
+    call time."""
+    return _os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on", "y", "t"
+    }
 
 # Agent effort level → cost cap per 1k searches:
 #   low    → $25/1k    — fails our 4-field schema (budget too tight to scrape)
@@ -564,8 +525,7 @@ EXA_AGENT_CONTACT_FIELDS = _os.getenv(
 # `enrich_contact_for_sourcing` falls through to the Exa Agent contact run
 # (still gated by EXA_CONTACT_ENRICH_ENABLED + EXA_API_KEY) for LinkedIn-*
 # sources. Capped per job by EXA_SOURCING_CONTACT_CAP to bound spend
-# (~$0.115/run). Source & Launch's own searches put it off to Launch PAIR
-# (SOURCING_DEFER_PAID_CONTACT_ENABLED below).
+# (~$0.115/run).
 EXA_SOURCING_CONTACT_FALLBACK = _os.getenv(
     "EXA_SOURCING_CONTACT_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
@@ -599,52 +559,9 @@ EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
 # an email Exa is the only source of a phone, and PAIR screens by phone first.
 # The spend is bounded by the eligibility policy (CONTACT_ENRICH_*, launch pass
 # only), and the contact cache means a person's phone is bought at most once.
-# ON between 2026-09-25 and 09-28 to cut Exa spend. Do NOT set it true again:
-# since Launch PAIR sends the JobDiva email it holds (2026-10-15), it would stop
-# the phone lookup for every candidate who has an email.
+# ON between 2026-09-25 and 09-28 to cut Exa spend; set true to go back.
 EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
     "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
-).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
-
-
-# Launch PAIR's deep-search EMAIL run for a candidate who already holds a
-# personal phone (2026-10-14, user decision: a 50/50 holdout for 2 weeks, then
-# decide). The launch gate is phone OR email, so that run (~$0.30 per email
-# found, ~$1.6k a month) never changes who can be launched; it buys a second
-# channel. This share of such people, 0-100 by a hash of their LinkedIn slug
-# (one arm per person across workers and restarts:
-# contact_enrichment.deep_skip_arm), skips it; the rest keep it, and both arms
-# are logged when it is decided (services/contact_holdout.py). 0 = off
-# (everyone keeps the run), 100 = everyone skips it. Only Launch PAIR's lookups
-# (trigger "launch"); a recruiter's click always gets the deep search. Parsed
-# at import (a bad value is 0), read through this attribute at call time.
-# 0 in code until the experiment starts (50, by a one-line change here, so the
-# deploy sets it on every VM: CI writes no EXA_* values): PAIR does not keep
-# the field that says a screen was started by email yet, without which the
-# holdout cannot be read, and a person's first exposure takes their row in
-# contact_deep_skip_holdout for good, so exposures before the window would
-# drop out of the analysis. Start it once that field is persisted (or agreed
-# with PairBot) and Exa is topped up; docs/exa-cost-optimization.md.
-def _env_pct(name: str, default: int) -> int:
-    try:
-        value = int((_os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-    return min(100, max(0, value))
-
-
-EXA_DEEP_SKIP_REACHABLE_PCT = _env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0)
-
-# Source & Launch PAIR's full search (the browser's footer run and every
-# relaxed run behind it) and a launch session's S1 put the sourcing-time paid
-# Exa email lookup off to Launch PAIR (SearchCriteria.defer_paid_contact,
-# 2026-10-14): Launch asks Exa for the email and the phone in ONE run instead
-# of an email run now and a phone run minutes later (a second $0.025 base fee,
-# ~8.4k pairs per 15 days), and people never launched cost nothing. Apollo
-# still runs at sourcing, and no miss is recorded, so Launch does a normal run
-# first. Browse-only Step-5 searches keep buying. false = every search buys.
-SOURCING_DEFER_PAID_CONTACT_ENABLED = _os.getenv(
-    "SOURCING_DEFER_PAID_CONTACT_ENABLED", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate

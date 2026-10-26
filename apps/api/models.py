@@ -175,11 +175,6 @@ class CandidateSearchRequest(BaseModel):
     # rank comparably across sources (auto-launch takes every launchable
     # candidate; its safety cap keeps the highest scores first).
     assess_all_sources: bool = False
-    # Put the sourcing-time paid (Exa) email lookup off to Launch PAIR, which
-    # asks for the email and the phone in one run: Source & Launch's full run
-    # (and its relaxed runs) and a launch session's S1 send True. Apollo still
-    # runs (SOURCING_DEFER_PAID_CONTACT_ENABLED; SearchCriteria).
-    defer_paid_contact: bool = False
 
 class JobFetchRequest(BaseModel):
     job_id: str

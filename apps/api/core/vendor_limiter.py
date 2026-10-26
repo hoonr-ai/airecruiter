@@ -12,17 +12,11 @@ Per vendor, in Redis:
   default). Every caller on every worker waits it out instead of retrying
   into the same exhausted quota.
 
-- ``vendor:<name>:no_credits:<env>`` — the out-of-credits breaker (Exa only,
-  ``no_credits_ttl_s`` > 0): set by the first worker that sees the vendor's
-  "no credits" answer, so every worker skips the vendor until it expires.
-  Separate from ``acquire()``, which it never changes: callers check
-  ``no_credits_left()`` and turn it into their own fatal answer.
-
 Fails closed: when Redis is configured but unreachable each worker paces at
 ``min_interval_s × local_workers``, its share of the budget, rather than the
 whole budget per worker. Every interval and cooldown can be overridden with
 ``VENDOR_<NAME>_MIN_INTERVAL_S`` / ``_COOLDOWN_MIN_S`` / ``_COOLDOWN_MAX_S`` /
-``_COOLDOWN_CAP_S`` / ``_NO_CREDITS_TTL_S`` and ``VENDOR_LOCAL_WORKERS``.
+``_COOLDOWN_CAP_S`` and ``VENDOR_LOCAL_WORKERS``.
 """
 from __future__ import annotations
 
@@ -131,26 +125,20 @@ class VendorLimiter:
         cooldown_min_s: float = 5.0,
         cooldown_max_s: float = 15.0,
         cooldown_cap_s: float = 60.0,
-        no_credits_ttl_s: float = 0.0,
-        label: str = "",
     ):
         env = f"VENDOR_{name.upper()}_"
         self.name = name
-        self.label = label or name
         self.min_interval_s = _env_float(env + "MIN_INTERVAL_S", min_interval_s)
         self.cooldown_min_s = _env_float(env + "COOLDOWN_MIN_S", cooldown_min_s)
         self.cooldown_max_s = _env_float(env + "COOLDOWN_MAX_S", cooldown_max_s)
         self.cooldown_cap_s = _env_float(env + "COOLDOWN_CAP_S", cooldown_cap_s)
-        # 0 = no out-of-credits breaker.
-        self.no_credits_ttl_s = max(0.0, _env_float(env + "NO_CREDITS_TTL_S", no_credits_ttl_s))
         self.local_workers = max(1, int(_env_float("VENDOR_LOCAL_WORKERS", 8)))
         self._next_key = f"vendor:{name}:next"
         self._cooldown_key = f"vendor:{name}:cooldown"
         self._local_lock: Optional[Tuple[Any, asyncio.Lock]] = None
         self._local_next = 0.0
         self._local_cooldown_until = 0.0
-        self._local_no_credits_until = 0.0
-        self.stats: Dict[str, int] = {"granted": 0, "timeouts": 0, "http_429": 0, "no_credits": 0}
+        self.stats: Dict[str, int] = {"granted": 0, "timeouts": 0, "http_429": 0}
 
     # ---- slot ------------------------------------------------------------
 
@@ -249,74 +237,13 @@ class VendorLimiter:
         log.warning("%s 429: shared cooldown %.1fs (Retry-After=%r)", self.name, secs, retry_after)
         return secs
 
-    # ---- out of credits --------------------------------------------------
-
-    def _no_credits_key(self) -> str:
-        # Per environment: QA and PROD may share a Redis, and a QA key's
-        # budget running out must not switch PROD's Exa off.
-        from core import newrelic as _nr
-
-        return f"vendor:{self.name}:no_credits:{_nr.environment()}"
-
-    async def no_credits_left(self) -> float:
-        """Seconds the out-of-credits breaker stays open (0 = closed). Adopts a
-        breaker another worker opened (the Redis PTTL), mirrored locally."""
-        if self.no_credits_ttl_s <= 0:
-            return 0.0
-        left = self._local_no_credits_until - time.monotonic()
-        if left > 0:
-            return left
-        client = _get_redis()
-        if client is not None:
-            try:
-                ms = int(await client.pttl(self._no_credits_key()))
-            except Exception as exc:
-                _mark_redis_down(exc)
-                return 0.0
-            if ms > 0:
-                self._local_no_credits_until = time.monotonic() + ms / 1000.0
-                return ms / 1000.0
-        return 0.0
-
-    async def trip_no_credits(self, tag: str = "") -> bool:
-        """Open the breaker for ``no_credits_ttl_s`` on every worker. True when
-        this call opened it: that caller logs the ERROR, so it appears once
-        per window (once per worker per window while Redis is down). The first
-        real call after the TTL is the probe; a 402 is not billed."""
-        if self.no_credits_ttl_s <= 0:
-            return False
-        now = time.monotonic()
-        opened = now >= self._local_no_credits_until
-        self._local_no_credits_until = max(self._local_no_credits_until, now + self.no_credits_ttl_s)
-        client = _get_redis()
-        if client is not None:
-            try:
-                opened = bool(await client.set(
-                    self._no_credits_key(), tag or "1", nx=True, px=int(self.no_credits_ttl_s * 1000),
-                ))
-            except Exception as exc:
-                _mark_redis_down(exc)
-        if opened:
-            self.stats["no_credits"] += 1
-            log.error(
-                "%s is OUT OF CREDITS (%s): skipping %s for %ds on all workers; "
-                "top up the account or raise the key's budget",
-                self.label, tag or "402", self.label, int(self.no_credits_ttl_s),
-            )
-        return opened
-
 
 # Initial budgets. All overridable per env (see module docstring).
 # OpenAI: no fixed spacing (TPM-bound, many models); a shared cooldown on 429
 # stops every worker's SDK retries from piling into the same exhausted limit.
 OPENAI = VendorLimiter("openai", min_interval_s=0.0, cooldown_min_s=2.0, cooldown_max_s=8.0, cooldown_cap_s=30.0)
-# Exa: ~5 requests/s across the account. Out-of-credits breaker 300 s
-# (VENDOR_EXA_NO_CREDITS_TTL_S, 0 = off): short, because a top-up is only
-# noticed by the first call after it expires (services/exa_errors.py).
-EXA = VendorLimiter(
-    "exa", min_interval_s=0.2, cooldown_min_s=10.0, cooldown_max_s=15.0, cooldown_cap_s=60.0,
-    no_credits_ttl_s=300.0, label="Exa",
-)
+# Exa: ~5 requests/s across the account.
+EXA = VendorLimiter("exa", min_interval_s=0.2, cooldown_min_s=10.0, cooldown_max_s=15.0, cooldown_cap_s=60.0)
 # Unipile: global cap of ~4 requests/s across every LinkedIn account and worker.
 # LinkedIn 429s are per account and handled by the 15-min account bench in
 # services/unipile.py, so this limiter only paces; it never starts a cooldown.

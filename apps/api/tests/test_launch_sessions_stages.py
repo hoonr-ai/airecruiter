@@ -259,65 +259,6 @@ def test_s3_lookups_counters_and_per_row_checkpoint():
     assert store.sessions[fields["id"]]["enrich_done_at"] is not None
 
 
-def test_s3_seeds_the_lookup_and_keeps_the_held_jobdiva_email():
-    """O9 (2026-10-15): S3 sends the browser's request body
-    (rules.build_enrich_request: the JobDiva email, the name, the company,
-    never the phone), and a found email never replaces the seeded one."""
-    store = MemoryStore()
-    job = add_job(store)
-    world = FakeWorld(store)
-    li = "https://www.linkedin.com/in/someone"
-    rows = [
-        cand("j", 80, source="JobDiva-TalentSearch", email="Jane@Gmail.com", phone="", profile_url=li + "-j",
-             current_company="Acme Bank"),
-        cand("l", 80, email="", phone="", profile_url=li + "-l"),
-        # An address the lookup drops as a placeholder (utils.email_utils):
-        # never held, so the email it buys is the one launched.
-        cand("t", 80, source="JobDiva-Applicants", email="test@gmail.com", phone="", profile_url=li + "-t"),
-    ]
-    found = {"status": "success", "phone": "+15125550100", "phone_provider": "exa",
-             "email": "work@found.test", "email_provider": "apollo"}
-    world.enrich_answers = {"j": dict(found), "l": dict(found), "t": dict(found)}
-    sent: List[Dict[str, Any]] = []
-    enrich = world.enrich
-
-    async def spy(items, *, job_id, concurrency):
-        sent.extend(items)
-        async for answer in enrich(items, job_id=job_id, concurrency=concurrency):
-            yield answer
-
-    world.enrich = spy
-    fields = new_session_fields(job)
-    ctx = claimed_ctx(store, world, fields, stage=S.STAGE_ENRICHING, rows=[row_rec(r, S.ROW_SELECTED) for r in rows])
-    run(enriching.run(ctx))
-
-    by_id = {it["candidate_id"]: it for it in sent}
-    assert by_id["j"]["email"] == "jane@gmail.com" and by_id["j"]["full_name"] == "Person j"
-    assert by_id["j"]["company_name"] == "Acme Bank" and by_id["j"]["trigger"] == "launch"
-    assert "email" not in by_id["l"] and "email" not in by_id["t"] and all("phone" not in it for it in sent)
-    contact = {cid: c["contact"] for cid, c in store.cands[fields["id"]].items()}
-    assert contact["j"]["override"] == {"phone": "+15125550100"} and "email_provider" not in contact["j"]
-    assert contact["l"]["override"] == {"phone": "+15125550100", "email": "work@found.test"}
-    assert contact["t"]["override"] == {"phone": "+15125550100", "email": "work@found.test"}
-
-
-def test_s1_defers_paid_contact_on_every_attempt():
-    """O6: the session launches what S1 finds, so every attempt's search puts
-    its paid Exa email lookups off to S3 (one run for email + phone)."""
-    store, world, job, fields = full_search_world()
-    seen = []
-    orig = world.search_events
-
-    def spy(request, *, schedule_cross_submissions):
-        seen.append(request.get("defer_paid_contact"))
-        return orig(request, schedule_cross_submissions=schedule_cross_submissions)
-
-    world.search_events = spy
-    store.create_session(fields)
-    run(drive(store, world, fields["id"]))
-    assert seen == [True, True]
-
-
 def test_s3_goes_to_review_when_required():
     store = MemoryStore()
     job = add_job(store)
@@ -586,37 +527,6 @@ def test_s1_binds_every_search_to_the_sessions_job():
     store.create_session(fields)
     run(drive(store, world, fields["id"]))
     assert seen == ["1001", "26-001"]
-
-
-def test_s1_and_s3_tag_their_exa_spend_with_the_session():
-    """ExaCall attribution: search_candidates() starts its own pipeline run, so
-    the session id (and S1's attempt) ride in the Exa telemetry context."""
-    from services import exa_telemetry
-
-    store, world, job, fields = full_search_world()
-    seen: Dict[str, List[Dict[str, Any]]] = {"search": [], "enrich": []}
-    search, enrich = world.search_events, world.enrich
-
-    async def spy_search(request, *, schedule_cross_submissions):
-        seen["search"].append(exa_telemetry.current())
-        async for event in search(request, schedule_cross_submissions=schedule_cross_submissions):
-            yield event
-
-    async def spy_enrich(items, *, job_id, concurrency):
-        seen["enrich"].append(exa_telemetry.current())
-        async for answer in enrich(items, job_id=job_id, concurrency=concurrency):
-            yield answer
-
-    world.search_events, world.enrich = spy_search, spy_enrich
-    store.create_session(fields)
-    run(drive(store, world, fields["id"]))
-
-    sid = fields["id"]
-    assert seen["search"] == [
-        {"trigger": "launch_s1", "attempt": 0, "launch_session_id": sid},
-        {"trigger": "launch_s1", "attempt": 1, "launch_session_id": sid},
-    ]
-    assert seen["enrich"] and all(c == {"trigger": "launch_s3", "launch_session_id": sid} for c in seen["enrich"])
 
 
 def test_s6_a_payload_the_request_model_refuses_fails_only_its_batch(monkeypatch):

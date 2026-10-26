@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Phone, Loader2, Check, Search, X as XIcon } from "lucide-react";
 import { API_BASE, authFetch } from "@/lib/api";
-import { finalMissNotice, inProgress, type FinalMissNotice } from "@/lib/contact-lookup";
 import { logger } from "@/lib/logger";
 
 interface PhoneIndicatorProps {
@@ -15,7 +14,7 @@ interface PhoneIndicatorProps {
   persist?: boolean;
   title?: string;
   /** LinkedIn profile URL. Required for the "Find phone" provider lookup —
-   *  every provider (Apollo, Exa) keys off it. Without one, only manual entry works. */
+   *  ZoomInfo/Apollo/Exa all key off it. Without one, only manual entry works. */
   linkedinUrl?: string;
   /** Candidate source, forwarded to the enrichment endpoint for attribution. */
   source?: string;
@@ -47,8 +46,6 @@ export function PhoneIndicator({
   const [saving, setSaving] = useState(false);
   const [finding, setFinding] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A recent search already found no phone: shown with "Search again".
-  const [notice, setNotice] = useState<FinalMissNotice | null>(null);
   // Coords for the portal-rendered popup. The candidate table is wrapped in
   // an `overflow-hidden` container, so an `absolute` popup gets clipped when
   // the phone icon lives in rows near the right edge / bottom of the table.
@@ -90,7 +87,6 @@ export function PhoneIndicator({
       if (popupRef.current?.contains(t)) return;
       setOpen(false);
       setError(null);
-      setNotice(null);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
@@ -100,7 +96,6 @@ export function PhoneIndicator({
     if (open) {
       setValue(phone || "");
       setError(null);
-      setNotice(null);
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [open, phone]);
@@ -145,21 +140,18 @@ export function PhoneIndicator({
   }
 
   // Look the candidate's personal phone up through the provider chain
-  // (Apollo → Exa → Exa deep search; Kipplo / ZoomInfo only when the server
-  // lists them). Sourcing deliberately does not buy phone numbers — they are
-  // the expensive half of every provider, so spending on a candidate nobody
-  // has shortlisted is speculative. This button (and Launch PAIR) are the
-  // moments with real intent, so the lookup happens here, on demand, one
-  // candidate at a time. A phone a recent deep search found none for is not
-  // bought again unless the recruiter confirms ("Search again", confirm=true).
-  async function findPhone(confirm = false) {
+  // (Kipplo → ZoomInfo → Apollo → Exa).
+  // Sourcing deliberately does not buy phone numbers — they are the expensive
+  // half of every provider, so spending on a candidate nobody has shortlisted is
+  // speculative. This button (and Launch PAIR) are the moments with real intent,
+  // so the lookup happens here, on demand, one candidate at a time.
+  async function findPhone() {
     if (!linkedinUrl) {
       setError("No LinkedIn URL on this candidate to look up");
       return;
     }
     setFinding(true);
     setError(null);
-    setNotice(null);
     try {
       const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
         method: "POST",
@@ -171,7 +163,6 @@ export function PhoneIndicator({
           source,
           // Only the phone: this button never buys an email.
           fields: ["phone"],
-          confirm: confirm === true,
         }),
       });
       const data = await res.json().catch(() => ({} as any));
@@ -181,15 +172,6 @@ export function PhoneIndicator({
       // number. A work line (workPhone) is never offered.
       const found = String(data?.phone || data?.mobilePhone || "").trim();
       if (!found || countDigits(found) < 7) {
-        const miss = finalMissNotice(data, ["phone"]);
-        if (miss) {
-          setNotice(miss);
-          return;
-        }
-        if (inProgress(data)) {
-          setError("Already being looked up — check again in a few minutes");
-          return;
-        }
         // Not an error — the providers genuinely may not hold a number. Leave
         // the field ready so the recruiter can enter one they sourced elsewhere.
         setError(
@@ -235,7 +217,6 @@ export function PhoneIndicator({
               onClick={() => {
                 setOpen(false);
                 setError(null);
-                setNotice(null);
               }}
               className="text-slate-400 hover:text-slate-600"
               aria-label="Close"
@@ -263,28 +244,14 @@ export function PhoneIndicator({
             className="w-full h-9 px-3 rounded-lg border border-slate-300 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
           {error && <p className="text-[11px] text-rose-600 mt-1.5">{error}</p>}
-          {notice && (
-            <div className="mt-1.5 flex items-center justify-between gap-2">
-              <p className="text-[11px] text-slate-500">{notice.message}</p>
-              <button
-                type="button"
-                onClick={() => findPhone(true)}
-                disabled={finding || saving}
-                title="A paid lookup: the last search found no phone for this person"
-                className="text-[11px] text-indigo-600 hover:underline font-medium disabled:opacity-50 shrink-0"
-              >
-                {notice.searchAgainLabel}
-              </button>
-            </div>
-          )}
           <div className="flex items-center justify-between gap-2 mt-2.5">
             <button
               type="button"
-              onClick={() => findPhone(false)}
+              onClick={findPhone}
               disabled={finding || saving || !linkedinUrl}
               title={
                 linkedinUrl
-                  ? "Look this number up via Apollo → Exa"
+                  ? "Look this number up via ZoomInfo → Apollo → Exa"
                   : "No LinkedIn URL on this candidate to look up"
               }
               className="text-[12px] px-2.5 py-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium disabled:opacity-50 flex items-center gap-1.5 shrink-0"

@@ -119,15 +119,10 @@ ADAPTERS = {
     "extractLinkedInFromText": lambda i: rules.extract_linkedin_from_text(i.get("text")),
     "looksLikeLinkedInProfile": lambda i: rules.looks_like_linkedin_profile(i.get("url")),
     "resolveLinkedInUrl": lambda i: rules.resolve_linkedin_url(i["candidate"]),
-    "isServerPlaceholderEmail": lambda i: rules.is_server_placeholder_email(i.get("value")),
-    "getCandidateSeedEmail": lambda i: rules.get_candidate_seed_email(i["candidate"]),
-    "getCandidateLookupName": lambda i: rules.get_candidate_lookup_name(i["candidate"]),
     "buildEnrichRequest": lambda i: rules.build_enrich_request(
         i["candidate"], i["candidateId"], i["linkedinUrl"], i.get("jobdivaId"),
     ),
-    "interpretEnrichAnswer": lambda i: rules.interpret_enrich_answer(
-        i.get("answer"), i["launchableNow"], i.get("heldEmail") or "",
-    ),
+    "interpretEnrichAnswer": lambda i: rules.interpret_enrich_answer(i.get("answer"), i["launchableNow"]),
     "dncDroppedIds": lambda i: rules.dnc_dropped_ids(
         i["candidates"], _s(i, "selectedIds"), i.get("overrides") or {}, _s(i, "dncPhones"),
     ),
@@ -309,32 +304,6 @@ def test_floor_matches_web_outreach_floor():
     assert rules.QUALIFIED_SCORE_THRESHOLD == rules.LAUNCH_MIN_SCORE
 
 
-def test_seed_placeholders_match_the_lookups_own():
-    """getCandidateSeedEmail holds no email the contact lookup drops as a
-    placeholder (utils.email_utils.is_placeholder_email): a dropped seed gets
-    the email bought, and a held one throws that answer away, so the row
-    would launch on the dead address."""
-    from utils.email_utils import is_placeholder_email
-
-    values = [
-        case["input"]["value"]
-        for case in json.loads((FIXTURE_DIR / "is_server_placeholder_email.json").read_text())["cases"]
-        if isinstance(case["input"]["value"], str)
-    ]
-    values += [
-        case["input"]["candidate"]["email"]
-        for case in json.loads((FIXTURE_DIR / "get_candidate_seed_email.json").read_text())["cases"]
-        if isinstance(case["input"]["candidate"], dict) and isinstance(case["input"]["candidate"].get("email"), str)
-    ]
-    values += ["", "a@b", "x@sub.example.org", "email@example.com", "noreply@example.com"]
-    assert len(values) > 30
-    for value in values:
-        assert rules.is_server_placeholder_email(value) == is_placeholder_email(value), value
-    for value in values:
-        seed = rules.get_candidate_seed_email({"source": "JobDiva", "email": value})
-        assert not seed or not is_placeholder_email(seed), value
-
-
 def test_dnc_normalisation_matches_backend_dnc_matching():
     from utils.phone import normalize_phone
 
@@ -465,27 +434,3 @@ def test_selection_reasons_and_no_floor_on_python_values():
         pool, launched_keys=set(), launched_ids=set(), limit=10, min_score=None,
     )
     assert quick["ids"] == ["a", "c", "b", "d"]
-
-
-def test_a_merged_jobdiva_row_never_seeds_another_sources_email():
-    """Review of PR 4: a JobDiva row with an Auto_* (or no) email takes a
-    LinkedIn row's extracted email on a merge; Launch must still look the
-    email up (no seed), and a found one replaces it, as before seeds."""
-    li = "https://www.linkedin.com/in/jane-doe"
-    [jd] = rules.deduplicate_candidates_ui([
-        {"candidate_id": "jd", "source": "JobDiva-TalentSearch", "email": "Auto_77@jobdiva.com", "profile_url": li},
-        {"candidate_id": "li", "source": "LinkedIn-Exa", "email": "jane.extracted@acme.com", "profile_url": li},
-    ])
-    assert jd["candidate_id"] == "jd" and jd["email"] == "jane.extracted@acme.com"
-    assert rules.get_candidate_seed_email(jd) == ""
-    assert "email" not in rules.build_enrich_request(jd, "jd", li, "26-1")
-    found = {"status": "success", "email": "jane@found.test", "phone": "+15125550100"}
-    assert rules.interpret_enrich_answer(found, True, rules.get_candidate_seed_email(jd))["override"] == {
-        "phone": "+15125550100", "email": "jane@found.test",
-    }
-    # The JobDiva row's own email is still the seed.
-    [own] = rules.deduplicate_candidates_ui([
-        {"candidate_id": "jd", "source": "JobDiva-TalentSearch", "email": "jane@acme.com", "profile_url": li},
-        {"candidate_id": "li", "source": "LinkedIn-Exa", "email": "other@acme.com", "profile_url": li},
-    ])
-    assert rules.get_candidate_seed_email(own) == "jane@acme.com"

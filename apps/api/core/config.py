@@ -24,14 +24,6 @@ def get_env_bool(var_name: str, default: bool = False) -> bool:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
 
-def get_env_int(var_name: str, default: int) -> int:
-    """An int env var; unset, empty or malformed falls back to ``default``
-    (a hand-set typo must not stop the workers at import)."""
-    try:
-        return int((os.getenv(var_name) or "").strip() or default)
-    except ValueError:
-        return default
-
 # ---- API/Environment Settings ----
 ALLOWED_ORIGINS = get_env_with_default("ALLOWED_ORIGINS", "*").split(",")
 
@@ -178,22 +170,6 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
-# One New Relic `ExaCall` event per Exa call (cost, outcome, latency; ids and
-# enums only) and an `ExaConfig` event per worker per hour
-# (services/exa_telemetry.py). Read-only: nothing branches on it.
-EXA_TELEMETRY_ENABLED = get_env_bool("EXA_TELEMETRY_ENABLED", True)
-# Tag every contact Agent run with `metadata` (env, surface, tier, trigger,
-# job_id, call_id...) so the free run list can be split by environment and
-# surface (scripts/exa_runs_ledger.py). Should Exa ever reject it (a 400), the
-# run is re-sent once without it and metadata is switched off for the process
-# (logged at ERROR). false = never send it.
-EXA_RUN_METADATA_ENABLED = get_env_bool("EXA_RUN_METADATA_ENABLED", True)
-# Pass A / Dice people-search cache (services/exa_search_cache.py): each
-# query's results are kept in Redis, encrypted, for this many seconds, so the
-# sample run, the full run, relaxation attempts and a resumed launch session
-# reuse them instead of buying the same search again. 0 = off. Needs
-# REDIS_URL; read at call time.
-EXA_SEARCH_CACHE_TTL_S = get_env_int("EXA_SEARCH_CACHE_TTL_S", 12 * 3600)
 
 # ---- Exa Agent contact enrichment (paid fallback after Apollo) ----
 # The Exa Agent API (POST https://api.exa.ai/agent/runs) looks a person up by

@@ -19,8 +19,7 @@ browser's live table; résumé text / LinkedIn profile left out until the end)
 and checkpoint.s1 (attempt, pool, qualified, source statuses, stage text,
 JobDiva-criteria flag, errors, detail-failed count). An attempt that is
 interrupted is re-run from its start (its partial events are deleted first;
-the search caches make that cheap: Exa Pass A is served from the Redis search
-cache within its TTL, and Pass B is off by default); finished
+the search caches make that cheap, Exa Pass A/B is paid again); finished
 attempts are rebuilt by replaying their events through a fresh StreamRun —
 the same reducer, so the same state. Cross-submissions are scheduled once per
 session (flag written BEFORE the first stream starts).
@@ -35,7 +34,6 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from services import exa_telemetry
 from services.launch_sessions import config as cfg
 from services.launch_sessions import rules
 from services.launch_sessions import schema as S
@@ -57,17 +55,13 @@ def _target(ctx: StageContext) -> int:
 def bound_payload(ctx: StageContext, payload: Dict[str, Any]) -> Dict[str, Any]:
     """The attempt's search payload with ``job_id`` bound to this session's
     job (control.create_session already refused any other job; this keeps a
-    stored snapshot from ever searching — and emailing — for another job),
-    and its paid contact lookups put off to S3 (``defer_paid_contact``: the
-    session launches what it finds, and S3 asks Exa for the email and the
-    phone in one run; Apollo still runs at sourcing)."""
+    stored snapshot from ever searching — and emailing — for another job)."""
     out = dict(payload or {})
     job_id = str(out.get("job_id") or "").strip()
     if job_id not in ctx.job_keys:
         if job_id:
             logger.warning("launch_session search payload job_id rebound session=%s", ctx.sid)
         out["job_id"] = ctx.job_id
-    out["defer_paid_contact"] = True
     return out
 
 
@@ -224,23 +218,20 @@ async def run(ctx: StageContext) -> StageResult:
                 chunk += 1
             await ctx.boundary()
 
-        # ExaCall attribution: search_candidates() starts a new pipeline run,
-        # so the session id is what joins this attempt's Exa spend.
-        with exa_telemetry.scope(trigger="launch_s1", attempt=i, launch_session_id=ctx.sid):
-            async with contextlib.aclosing(
-                ctx.fx.search_events(request, schedule_cross_submissions=cross)
-            ) as stream:
-                async for raw in stream:
-                    if isinstance(raw, dict) and raw.get("type") in _SKIP_EVENTS:
-                        if time.monotonic() - last_flush >= cfg.stream_flush_s():
-                            await flush()
-                        continue
-                    if not stat["began"]:
-                        run_.begin_attempt()
-                        stat["began"] = True
-                    buffer.append(_normalise(raw) if isinstance(raw, dict) else raw)
-                    if len(buffer) >= cfg.stream_flush_events() or time.monotonic() - last_flush >= cfg.stream_flush_s():
+        async with contextlib.aclosing(
+            ctx.fx.search_events(request, schedule_cross_submissions=cross)
+        ) as stream:
+            async for raw in stream:
+                if isinstance(raw, dict) and raw.get("type") in _SKIP_EVENTS:
+                    if time.monotonic() - last_flush >= cfg.stream_flush_s():
                         await flush()
+                    continue
+                if not stat["began"]:
+                    run_.begin_attempt()
+                    stat["began"] = True
+                buffer.append(_normalise(raw) if isinstance(raw, dict) else raw)
+                if len(buffer) >= cfg.stream_flush_events() or time.monotonic() - last_flush >= cfg.stream_flush_s():
+                    await flush()
         if not stat["began"]:
             # The stream answered and ended without a row: it still began
             # (the browser clears / appends the table on an OK response).

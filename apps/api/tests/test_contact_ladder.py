@@ -11,10 +11,7 @@ Kipplo and ZoomInfo stay off unless listed in CONTACT_LOOKUP_PROVIDERS. These
 tests run with the production defaults; conftest lists every provider and
 turns the deep search off for the older chain tests.
 """
-import ast
 import asyncio
-import inspect
-import json
 
 import pytest
 
@@ -24,8 +21,7 @@ from routers import candidates as candidates_router
 from services import apollo_phone, contact_cache
 from services import contact_enrichment as ce
 
-LINKEDIN = "https://www.linkedin.com/in/jane-doe"     # holdout bucket 40
-ALEX = "https://www.linkedin.com/in/alex-smith"       # holdout bucket 93
+LINKEDIN = "https://www.linkedin.com/in/jane-doe"
 
 
 def _fields(**kw):
@@ -85,11 +81,11 @@ class _Chain:
         return [c for c in self.calls if isinstance(c, tuple)]
 
 
-def _on_demand(monkeypatch, chain, linkedin=LINKEDIN, db=None, **req):
+def _on_demand(monkeypatch, chain, **req):
     def _no_db():
         raise RuntimeError("no db in tests")
 
-    monkeypatch.setattr(candidates_router, "get_db_connection", db.connect if db else _no_db)
+    monkeypatch.setattr(candidates_router, "get_db_connection", _no_db)
     monkeypatch.setattr(contact_cache, "get", chain.cache_get)
     monkeypatch.setattr(contact_cache, "record", chain.cache_record)
     monkeypatch.setattr(candidates_router, "_kipplo_enrich_by_linkedin", chain.kipplo)
@@ -97,8 +93,9 @@ def _on_demand(monkeypatch, chain, linkedin=LINKEDIN, db=None, **req):
     monkeypatch.setattr(candidates_router, "_exa_enrich_by_linkedin", chain.exa)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_email", chain.zoominfo)
     monkeypatch.setattr(ce, "zoominfo_enrich_by_name", chain.zoominfo)
-    req.setdefault("full_name", "Jane Doe")
-    body = candidates_router.EnrichCandidateContactRequest(candidate_id="cand-1", linkedin_url=linkedin, **req)
+    body = candidates_router.EnrichCandidateContactRequest(
+        candidate_id="cand-1", linkedin_url=LINKEDIN, full_name="Jane Doe", **req
+    )
     return asyncio.run(candidates_router._enrich_candidate_contact_impl("cand-1", body))
 
 
@@ -196,41 +193,16 @@ def test_launch_goes_straight_to_the_deep_search_after_a_recent_normal_miss(monk
     assert res["phone"] == "+14155550100"
 
 
-def test_a_recent_deep_miss_is_final_and_a_click_rebuys_it_only_on_confirm(monkeypatch):
-    # 2026-10-15 ("never pay twice for the same person"): this used to be
-    # Launch-only, and every click re-bought the deep miss (ca1c503b).
-    cached = {"email": "jane@acme.com", "phone_missed": True, "phone_deep_missed": True,
-              "phone_deep_missed_at": "2026-10-01T12:00:00+00:00"}
-
-    chain = _Chain(cached=cached)
-    res = _on_demand(monkeypatch, chain, **LAUNCH)
-    assert chain.exa_calls() == []
-    assert res["status"] == "success" and res["email"] == "jane@acme.com"
-    assert res["final_missed_fields"] == ["phone"] and res["lookup"]["exa_deep"] == "final_miss"
-
-    chain = _Chain(cached=cached)
-    res = _on_demand(monkeypatch, chain, fields=["phone"])     # the phone button
-    assert chain.calls == ["apollo"]                            # no paid Exa run; Apollo still asked
-    assert res["status"] == "skipped" and res["reason"] == "recent_deep_miss"
-    assert res["checked_at"] == "2026-10-01T12:00:00+00:00" and 0.15 <= res["est_usd"] <= 0.30
-
-    chain = _Chain(cached=cached)
-    _on_demand(monkeypatch, chain, fields=["phone"], confirm=True)   # "Search again"
-    assert chain.exa_calls() == [("exa_deep", ("phone",))]
-
-
-def test_click_honour_knob_off_restores_a_click_always_retrying(monkeypatch):
-    monkeypatch.setenv("CONTACT_CLICK_HONOUR_DEEP_MISS", "false")
+def test_launch_does_not_rebuy_a_recent_deep_miss_but_a_click_does(monkeypatch):
     cached = {"email": "jane@acme.com", "phone_missed": True, "phone_deep_missed": True}
 
     chain = _Chain(cached=cached)
-    res = _on_demand(monkeypatch, chain, fields=["phone"])
-    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("phone",))]
-    assert res["status"] == "success" and res["final_missed_fields"] == []
+    _on_demand(monkeypatch, chain, **LAUNCH)
+    assert chain.exa_calls() == []
 
     chain = _Chain(cached=cached)
-    _on_demand(monkeypatch, chain, **LAUNCH)                   # Launch still honours it
-    assert chain.exa_calls() == []
+    _on_demand(monkeypatch, chain)          # the phone button: a deliberate click
+    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("phone",))]
 
 
 def test_the_deep_search_can_be_switched_off(monkeypatch):
@@ -355,28 +327,15 @@ def test_the_deep_search_request(monkeypatch):
 
 
 def test_deep_search_goes_web_only_when_exa_refuses_fiber(monkeypatch):
-    from services import exa_telemetry
-
     bodies = []
-    sent = []
-    monkeypatch.setattr(exa_telemetry, "_send", lambda event_type, attrs: sent.append(attrs))
-    refused = _Resp(400, {"error": "dataSources not available"})
-    _exa_env(monkeypatch, bodies, [refused, refused, FOUND])
+    _exa_env(monkeypatch, bodies, [_Resp(400, {"error": "dataSources not available"}), FOUND])
 
     res = asyncio.run(ce.exa_enrich_by_linkedin("c1", LINKEDIN, "Jane Doe", fields=("phone",), deep=True))
 
     assert res["ok"] and res["fields"]["mobilePhone"] == "+14155550100"
-    # The metadata guard goes first: the same Fiber body without metadata,
-    # refused too, so it was not the metadata (no latch) ...
-    assert bodies[0]["dataSources"] == [{"provider": "fiber"}] and "metadata" in bodies[0]
-    assert bodies[1]["dataSources"] == [{"provider": "fiber"}] and "metadata" not in bodies[1]
-    assert exa_telemetry.run_metadata_enabled()
-    # ... then the existing fallback: web search alone, still without metadata.
-    assert "dataSources" not in bodies[2] and "Fiber" not in bodies[2]["query"]
-    assert "search thoroughly" in bodies[2]["query"] and bodies[2]["effort"] == "medium"
-    assert "metadata" not in bodies[2]
-    guard = [(a["outcome"], a.get("http_status")) for a in sent if a.get("endpoint") == "agent_guard"]
-    assert guard == [("sources_refused", 400)]  # not metadata_rejected, not rejected
+    assert bodies[0]["dataSources"] == [{"provider": "fiber"}]
+    assert "dataSources" not in bodies[1] and "Fiber" not in bodies[1]["query"]
+    assert "search thoroughly" in bodies[1]["query"] and bodies[1]["effort"] == "medium"
 
 
 def test_deep_search_without_data_sources_when_switched_off(monkeypatch):
@@ -403,10 +362,7 @@ def test_a_missing_key_is_fatal_so_no_deep_search_follows(monkeypatch):
 # group waiting for its slowest candidate, lost create answers)
 # ---------------------------------------------------------------------------
 
-def test_no_deep_search_while_the_normal_run_for_the_same_field_is_still_going(monkeypatch):
-    # The normal run gets its second window; still going after it, it is
-    # watched in the background and no deep run is bought for its fields
-    # (it used to start at once and both were billed for the same field).
+def test_a_slow_normal_run_is_not_waited_on_twice_when_the_deep_search_follows(monkeypatch):
     watched = []
     monkeypatch.setattr(ce, "watch_late_exa_run", lambda run_id, url, **kw: watched.append((run_id, kw["provider"])))
     chain = _Chain(
@@ -414,28 +370,10 @@ def test_no_deep_search_while_the_normal_run_for_the_same_field_is_still_going(m
         deep={"ok": False, "message": "Exa run timed out", "run_id": "run-deep"},
     )
 
-    res = _on_demand(monkeypatch, chain)
+    _on_demand(monkeypatch, chain)
 
-    assert chain.exa_calls() == [("exa", ("email", "phone"))]
-    assert chain.wait_retry == [True]
-    assert watched == [("run-normal", "exa")]
-    assert res["lookup"]["exa_deep"] == "-"
-    assert all(not r["missed"] and not r["deep_missed"] for r in chain.records)   # not an answer
-
-
-def test_a_deep_first_field_is_not_held_back_by_a_slow_normal_run(monkeypatch):
-    watched = []
-    monkeypatch.setattr(ce, "watch_late_exa_run", lambda run_id, url, **kw: watched.append((run_id, kw["provider"])))
-    chain = _Chain(
-        cached={"phone_missed": True},
-        exa={"ok": False, "message": "Exa run timed out", "run_id": "run-normal"},
-        deep={"ok": True, "fields": _fields(mobilePhone="+14155550100")},
-    )
-
-    res = _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("email",)), ("exa_deep", ("phone",))]
-    assert res["phone"] == "+14155550100"
+    assert chain.wait_retry == [False, False]
+    assert watched == [("run-normal", "exa"), ("run-deep", "exa_deep")]
 
 
 def test_with_the_deep_search_off_the_normal_run_keeps_its_second_window(monkeypatch):
@@ -544,9 +482,7 @@ def test_grouped_lookups_finish_even_if_the_caller_goes_away(monkeypatch):
     first = asyncio.run(_go())
 
     assert b'"index": 1' in first
-    # Both lookups ran to the end and were kept: each step as it answered
-    # (the normal run, the deep search), then the final record.
-    assert len(chain.records) == 6
+    assert len(chain.records) == 2            # both lookups ran to the end and were kept
 
 
 def test_a_lost_create_answer_is_picked_up_not_bought_again(monkeypatch):
@@ -641,360 +577,3 @@ def test_a_late_deep_result_is_kept_for_the_next_lookup(monkeypatch):
                         "phone_provider": "exa_deep", "deep_missed": []}]
     assert fills == [{"email": None, "phone": "+14155550100", "candidate_id": "cand-1", "jobdiva_id": "26-1"}]
 
-
-
-# ---------------------------------------------------------------------------
-# Launch PAIR's deep email run for someone already holding a personal phone:
-# a holdout (EXA_DEEP_SKIP_REACHABLE_PCT, user 2026-10-14). conftest turns it
-# off; these tests run it at 50%: jane-doe (bucket 40) skips, alex-smith (93)
-# is the control arm.
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def holdout(monkeypatch):
-    """The holdout at 50% with its decision log kept in memory; a decision is
-    also appended to ``log["calls"]`` when a test points it at a chain's."""
-    from services import contact_holdout
-
-    log = {"decisions": [], "outcomes": [], "calls": None}
-
-    async def _decision(url, **kw):
-        log["decisions"].append({"slug": contact_cache.linkedin_slug(url), **kw})
-        if log["calls"] is not None:
-            log["calls"].append(f"decision:{kw['arm']}")
-        return True
-
-    async def _outcome(url, outcome):
-        log["outcomes"].append((contact_cache.linkedin_slug(url), outcome))
-
-    monkeypatch.setattr(sourcing_config, "EXA_DEEP_SKIP_REACHABLE_PCT", 50)
-    monkeypatch.setattr(contact_holdout, "record_decision", _decision)
-    monkeypatch.setattr(contact_holdout, "record_deep_outcome", _outcome)
-    return log
-
-
-@pytest.fixture
-def events(monkeypatch):
-    from services import exa_telemetry
-
-    sent = []
-    monkeypatch.setattr(exa_telemetry, "_send", lambda event_type, attrs: sent.append((event_type, attrs)))
-    return sent
-
-
-def _summaries(events):
-    return [a for t, a in events if t == "ContactLookup" and a["outcome"] == "lookup"]
-
-
-MOBILE = "+14155550100"
-# The commonest deep email run: the email was missed lately (a sourcing-time
-# normal run), so Launch sends it straight to the deep search while the
-# normal run looks for the phone, and finds it.
-REACHABLE = dict(cached={"email_missed": True}, exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
-
-
-def test_holdout_buckets_are_pinned_per_person():
-    assert ce.deep_skip_bucket(LINKEDIN) == 40
-    assert ce.deep_skip_bucket("https://uk.linkedin.com/in/Alex-Smith/?trk=x") == 93
-    assert (ce.deep_skip_arm(LINKEDIN, 50), ce.deep_skip_arm(ALEX, 50)) == ("skip", "control")
-    assert (ce.deep_skip_arm(LINKEDIN, 40), ce.deep_skip_arm(ALEX, 100)) == ("control", "skip")
-    assert ce.deep_skip_arm(LINKEDIN, 0) == "off"
-    assert ce.deep_skip_arm("https://example.com/jane", 50) == "off"
-
-
-def test_holdout_pct_is_parsed_guarded_and_clamped(monkeypatch):
-    for raw, want in (("", 0), ("abc", 0), ("12.5", 0), ("30", 30), (" 70 ", 70), ("150", 100), ("-5", 0)):
-        monkeypatch.setenv("EXA_DEEP_SKIP_REACHABLE_PCT", raw)
-        assert sourcing_config._env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0) == want, raw
-    monkeypatch.delenv("EXA_DEEP_SKIP_REACHABLE_PCT")
-    assert sourcing_config._env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0) == 0
-    for value, want in (("garbage", 0), (None, 0), (250, 100), (-1, 0), (25, 25)):
-        monkeypatch.setattr(sourcing_config, "EXA_DEEP_SKIP_REACHABLE_PCT", value)
-        assert ce.deep_skip_reachable_pct() == want, value
-
-
-def test_the_holdout_is_off_in_code_until_it_starts():
-    """0 in code (review of PR 4): the deploy must not start the holdout
-    before the email-start field exists, and CI writes no EXA_* values, so
-    the code default is what QA and PROD run. Read from the source: the
-    module's value reflects whatever .env this machine has."""
-    tree = ast.parse(inspect.getsource(sourcing_config))
-    defaults = [
-        node.value.args[1].value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and any(getattr(t, "id", "") == "EXA_DEEP_SKIP_REACHABLE_PCT" for t in node.targets)
-    ]
-    assert defaults == [0]
-
-
-def test_skip_arm_drops_the_deep_email_run_once_a_phone_is_held(monkeypatch, holdout, events):
-    chain = _Chain(**REACHABLE)
-
-    res = _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("phone",))]
-    assert res["status"] == "success" and res["phone"] == MOBILE and res["email"] is None
-    assert res["lookup"]["exa_deep"] == "-" and res["lookup"]["exa_deep_skip"] == "skip"
-    # Not a deep miss: the next Launch decides again, and a click still buys it.
-    assert all(not r["deep_missed"] for r in chain.records)
-    assert holdout["decisions"] == [{
-        "slug": "jane-doe", "arm": "skip", "pct": 50, "jobdiva_id": None, "candidate_id": "cand-1",
-        "phone_from": "found", "normal_outcome": "phone",
-    }]
-    assert holdout["outcomes"] == []
-    [summary] = _summaries(events)
-    assert (summary["deep_skip_eligible"], summary["deep_skip_arm"], summary["deep_skip_pct"]) == (True, "skip", 50)
-    assert summary["first_exposure"] is True and summary["deep_asked"] == "-"
-
-
-def test_control_arm_logs_the_decision_before_buying_the_deep_email(monkeypatch, holdout):
-    from services import exa_telemetry
-
-    chain = _Chain(**REACHABLE, deep={"ok": True, "fields": _fields(workEmail="alex@acme.com")})
-    holdout["calls"] = chain.calls
-    arms = []
-    exa = chain.exa
-
-    async def _exa(*args, deep=False, **kw):
-        if deep:
-            arms.append(exa_telemetry.current().get("arm"))
-        return await exa(*args, deep=deep, **kw)
-
-    chain.exa = _exa
-
-    res = _on_demand(monkeypatch, chain, linkedin=ALEX, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("email",))]
-    assert chain.calls.index("decision:control") < chain.calls.index(("exa_deep", ("email",)))
-    assert arms == ["control"]                       # ExaCall / run metadata say which arm
-    assert res["email"] == "alex@acme.com" and res["lookup"]["exa_deep_skip"] == "control"
-    assert [d["arm"] for d in holdout["decisions"]] == ["control"]
-    assert holdout["outcomes"] == [("alex-smith", "email")]
-
-
-def test_control_arm_logs_a_deep_miss_and_a_run_still_going(monkeypatch, holdout):
-    _on_demand(monkeypatch, _Chain(**REACHABLE), linkedin=ALEX, **LAUNCH)
-    monkeypatch.setattr(ce, "watch_late_exa_run", lambda run_id, url, **kw: True)
-    _on_demand(monkeypatch, _Chain(**REACHABLE, deep={"ok": False, "message": "Exa run timed out", "run_id": "r"}),
-               linkedin=ALEX, **LAUNCH)
-    _on_demand(monkeypatch, _Chain(**REACHABLE, deep={"ok": False, "message": "Exa create error (500)"}),
-               linkedin=ALEX, **LAUNCH)
-
-    assert [o for _, o in holdout["outcomes"]] == ["miss", "in_progress", "failed"]
-
-
-@pytest.mark.parametrize("pct", [0, 100])
-def test_the_holdout_share_is_the_knob(monkeypatch, holdout, pct):
-    monkeypatch.setattr(sourcing_config, "EXA_DEEP_SKIP_REACHABLE_PCT", pct)
-    chain = _Chain(**REACHABLE)
-
-    res = _on_demand(monkeypatch, chain, linkedin=ALEX, **LAUNCH)
-
-    if pct == 0:   # off: everyone keeps the deep email run, nothing is logged
-        assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("email",))]
-        assert holdout["decisions"] == [] and "exa_deep_skip" not in res["lookup"]
-    else:          # everyone eligible skips it
-        assert chain.exa_calls() == [("exa", ("phone",))]
-        assert [d["arm"] for d in holdout["decisions"]] == ["skip"]
-
-
-def test_a_held_seed_phone_is_reachable_without_any_exa_run(monkeypatch, holdout):
-    chain = _Chain(cached={"email_missed": True})
-
-    _on_demand(monkeypatch, chain, phone="+1 (415) 555-0100", **LAUNCH)
-
-    assert chain.exa_calls() == []
-    assert holdout["decisions"][0]["phone_from"] == "seed"
-    assert holdout["decisions"][0]["normal_outcome"] == "-"
-
-
-def test_without_a_held_phone_there_is_no_holdout(monkeypatch, holdout):
-    chain = _Chain()
-
-    res = _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("email", "phone")), ("exa_deep", ("email", "phone"))]
-    assert holdout["decisions"] == [] and "exa_deep_skip" not in res["lookup"]
-
-
-def test_a_final_phone_miss_keeps_the_deep_email_run(monkeypatch, holdout):
-    # No phone to fall back on: the email is their only channel.
-    chain = _Chain(cached={"phone_missed": True, "phone_deep_missed": True,
-                           "phone_deep_missed_at": "2026-10-01T12:00:00+00:00"})
-
-    _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("email",)), ("exa_deep", ("email",))]
-    assert holdout["decisions"] == []
-
-
-def test_a_work_phone_is_not_a_held_phone(monkeypatch, holdout):
-    chain = _Chain(cached={"email_missed": True}, exa={"ok": True, "fields": _fields(workPhone="+14155550199")})
-
-    _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("email", "phone"))]
-    assert holdout["decisions"] == []
-
-
-def test_a_junk_seed_phone_does_not_hide_a_found_mobile(monkeypatch, holdout):
-    # "N/A" is not a phone; the mobile the normal run finds is.
-    chain = _Chain(**REACHABLE)
-
-    res = _on_demand(monkeypatch, chain, phone="N/A", **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("phone",))]
-    assert res["phone"] == MOBILE and holdout["decisions"][0]["phone_from"] == "found"
-
-
-def test_a_recruiters_click_is_never_in_the_holdout(monkeypatch, holdout):
-    chain = _Chain(**REACHABLE, deep={"ok": True, "fields": _fields(workEmail="jane@acme.com")})
-
-    res = _on_demand(monkeypatch, chain)            # Rankings Get Contact: no trigger
-
-    assert chain.exa_calls() == [("exa", ("phone",)), ("exa_deep", ("email",))]
-    assert res["email"] == "jane@acme.com" and holdout["decisions"] == []
-
-
-def test_each_lookup_sends_one_summary_with_its_seeds_and_no_contact(monkeypatch, events):
-    chain = _Chain(exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
-
-    _on_demand(monkeypatch, chain, email="jane@gmail.com", company_name="Acme", **LAUNCH)
-
-    [summary] = _summaries(events)
-    assert summary["trigger"] == "launch" and summary["path"] == "ondemand"
-    assert summary["existing_rows"] == 0 and summary["seed_from"] == "request"
-    assert (summary["seeded_email"], summary["has_name"], summary["has_company"]) == (True, True, True)
-    assert (summary["normal_asked"], summary["normal_outcome"]) == ("phone", "phone")
-    assert (summary["deep_asked"], summary["deep_outcome"]) == ("-", "-")
-    assert summary["deep_skip_eligible"] is False and "deep_skip_arm" not in summary
-    assert summary["deep_skip_pct"] == 0             # conftest: the holdout is off
-    assert not any("@" in str(v) or "linkedin" in str(v).lower() for v in summary.values())
-
-
-def test_lookup_outcomes_are_enums_never_free_text():
-    enum = candidates_router._lookup_outcome_enum
-    assert [enum(v) for v in ("email", "phone", "email,phone", "miss", "-", "final_miss", "", None)] == [
-        "email", "phone", "email,phone", "miss", "-", "final_miss", "-", "-",
-    ]
-    assert enum("Exa create error (402): https://x @y") == "failed"
-    assert enum("Exa run timed out", still_going=True) == "in_progress"
-
-
-# ---------------------------------------------------------------------------
-# Launch PAIR's seeds (2026-10-15): the JobDiva email the row holds, its name
-# and company; never the phone.
-# ---------------------------------------------------------------------------
-
-class _Db:
-    """sourced_candidates for the chain: the prefetch reads ``rows``; each
-    UPDATE's parameters are kept."""
-
-    def __init__(self, rows):
-        self.rows = rows
-        self.updates = []
-
-    def connect(self):
-        db = self
-
-        class _Cur:
-            rowcount = 1
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def execute(self, sql, params=None):
-                if not sql.strip().upper().startswith("SELECT"):
-                    db.updates.append(params)
-
-            def fetchall(self):
-                return [dict(r) for r in db.rows]
-
-        class _Conn:
-            def cursor(self, **kw):
-                return _Cur()
-
-            def commit(self):
-                pass
-
-            def close(self):
-                pass
-
-        return _Conn()
-
-
-def test_a_seeded_email_buys_only_the_phone_and_is_never_overwritten(monkeypatch):
-    db = _Db([{
-        "id": 7, "candidate_id": "cand-1", "jobdiva_id": "26-1", "source": "JobDiva-TalentSearch", "name": "Jane Doe",
-        "headline": "", "profile_url": LINKEDIN, "email": "jane@gmail.com", "phone": "", "data": "{}",
-        "resume_match_percentage": 80,
-    }])
-    chain = _Chain(
-        apollo={"ok": True, "fields": _fields(workEmail="jane.doe@acme.com")},
-        exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)},
-    )
-    launch = {**LAUNCH, "source": "JobDiva-TalentSearch"}
-
-    res = _on_demand(monkeypatch, chain, db=db, email="jane@gmail.com", **launch)
-
-    assert chain.exa_calls() == [("exa", ("phone",))]
-    # EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT stays off: a seeded email never
-    # stops the phone lookup.
-    assert sourcing_config.EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT is False
-    [(phone, email, blob, row_id)] = db.updates
-    assert (phone, email, row_id) == (MOBILE, None, 7)     # the row keeps its email
-    assert json.loads(blob)["zoominfo_contact_enrichment"]["workEmail"] == "jane.doe@acme.com"
-    assert res["phone"] == MOBILE and res["updated_rows"] == 1
-
-
-def test_a_clicks_request_email_keeps_the_old_save(monkeypatch):
-    # Rankings Get Contact sends the row's email too and shows the answer's.
-    db = _Db([{
-        "id": 7, "candidate_id": "cand-1", "jobdiva_id": "26-1", "source": "JobDiva-TalentSearch", "name": "Jane Doe",
-        "headline": "", "profile_url": LINKEDIN, "email": "jane@gmail.com", "phone": "", "data": "{}",
-        "resume_match_percentage": 80,
-    }])
-    chain = _Chain(apollo={"ok": True, "fields": _fields(workEmail="jane.doe@acme.com")},
-                   exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
-
-    _on_demand(monkeypatch, chain, db=db, email="jane@gmail.com")
-
-    [(_phone, email, _blob, _id)] = db.updates
-    assert email == "jane.doe@acme.com"
-
-
-def test_a_found_email_still_fills_a_row_whose_email_came_from_the_row(monkeypatch):
-    db = _Db([{
-        "id": 7, "candidate_id": "cand-1", "jobdiva_id": "26-1", "source": "LinkedIn-Exa", "name": "Jane Doe",
-        "headline": "", "profile_url": LINKEDIN, "email": "", "phone": "", "data": "{}",
-        "resume_match_percentage": 80,
-    }])
-    chain = _Chain(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone=MOBILE)})
-
-    _on_demand(monkeypatch, chain, db=db, **LAUNCH)
-
-    [(phone, email, _blob, _id)] = db.updates
-    assert (phone, email) == (MOBILE, "jane@acme.com")
-
-
-def test_a_placeholder_seed_email_is_ignored(monkeypatch):
-    chain = _Chain(exa={"ok": True, "fields": _fields(workEmail="jane@acme.com", mobilePhone=MOBILE)})
-
-    res = _on_demand(monkeypatch, chain, email="Auto_123@jobdiva.com", **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("email", "phone"))]
-    assert res["email"] == "jane@acme.com"
-
-
-def test_after_a_deferred_search_launch_asks_one_normal_run_for_both(monkeypatch):
-    # A deferred sourcing lookup asked no Exa, so it cached no miss: Launch's
-    # normal run asks for the email and the phone together, deep only after.
-    chain = _Chain(exa={"ok": True, "fields": _fields(mobilePhone=MOBILE)})
-
-    _on_demand(monkeypatch, chain, **LAUNCH)
-
-    assert chain.exa_calls() == [("exa", ("email", "phone")), ("exa_deep", ("email",))]
