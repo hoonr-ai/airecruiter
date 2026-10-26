@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { callbackDayLabel, callbackRelativeLabel, isCallbackOverdue } from "./callback-time.ts";
+import { callbackDayLabel, callbackRelativeLabel, isCallbackOverdue, isValidFutureCallbackTime } from "./callback-time.ts";
 
 // Built from LOCAL date/time components (not a UTC "Z" string) so this is
 // deterministic regardless of the machine running the suite — a fixed UTC
@@ -70,5 +70,26 @@ describe("callbackRelativeLabel", () => {
 
   it("renders Overdue once the moment has passed, not a negative duration", () => {
     assert.equal(callbackRelativeLabel(new Date(NOW.getTime() - 3_600_000).toISOString(), NOW), "Overdue");
+  });
+});
+
+describe("isValidFutureCallbackTime", () => {
+  it("is true for a time strictly after now", () => {
+    assert.equal(isValidFutureCallbackTime(new Date(NOW.getTime() + 60_000).toISOString(), NOW), true);
+  });
+
+  it("is false for the exact current moment (not strictly future)", () => {
+    assert.equal(isValidFutureCallbackTime(NOW.toISOString(), NOW), false);
+  });
+
+  it("is false for a past time", () => {
+    assert.equal(isValidFutureCallbackTime(new Date(NOW.getTime() - 60_000).toISOString(), NOW), false);
+  });
+
+  it("is false for an unparsable value, unlike a naive !isCallbackOverdue check", () => {
+    assert.equal(isValidFutureCallbackTime("not-a-date", NOW), false);
+    // The regression this guards: isCallbackOverdue reads "not-a-date" as
+    // NOT overdue, which would wrongly look like a valid future time.
+    assert.equal(isCallbackOverdue("not-a-date", NOW), false);
   });
 });

@@ -196,6 +196,8 @@ def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]
         "reject": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
         "rejected": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
         "unreachable": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')",
+        "allotment slot filled": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'allotment slot filled')",
+        "callback scheduled": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled')",
     }
     predicate = predicates.get(f_lower, "")
     return (f"AND {predicate}", predicate) if predicate else ("", "")
