@@ -22,29 +22,16 @@ Only provider-found values are written, never the contact a row arrived with
 last paid step (Exa) actually answered for that field; a timeout, an error or a
 budget skip is not a miss.
 
-The same row is the person's single-flight LEASE (``pending_*``, 2026-10-15):
-one paid Exa contact lookup per person at a time across the 8 workers
-(contact_enrichment.exa_step). ``claim`` takes it for LEASE_S, the holder's
-``heartbeat`` keeps it (and stamps the run it started), ``release`` ends it and
-hands back the late-fill contexts other lookups ``join``-ed while waiting. A
-lease that lapsed is free again, except while the run started under it can
-still answer (its run horizon): ``adopt_orphans`` gives such a run, whose
-watcher died with its worker, to the next sweep (one worker each, FOR UPDATE
-SKIP LOCKED).
-
-Everything fails open: a DB problem means "no cache" (and no lease: the lookup
-runs as it did before), never a failed lookup.
+Everything fails open: a DB problem means "no cache", never a failed lookup.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
-import uuid
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import quote, unquote
+from typing import Any, Dict, Iterable, Optional
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +51,7 @@ CREATE_SQL = """
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         phone_personal BOOLEAN,
         email_deep_missed_at TIMESTAMPTZ,
-        phone_deep_missed_at TIMESTAMPTZ,
-        pending_token TEXT,
-        pending_fields TEXT,
-        pending_tier TEXT,
-        pending_until TIMESTAMPTZ,
-        pending_run_id TEXT,
-        pending_run_at TIMESTAMPTZ,
-        pending_meta JSONB
+        phone_deep_missed_at TIMESTAMPTZ
     )
 """
 
@@ -81,23 +61,10 @@ CREATE_SQL = """
 # and the person is looked up again.
 # Deep-search misses (2026-09-29): a miss recorded before the deep search
 # existed is a normal-run miss, so the next Launch still tries the deep search.
-# Single-flight lease (2026-10-15): one ALTER (one lock) for its columns, and a
-# partial index so the 60 s orphan sweep of every worker reads only rows with a
-# run going.
 MIGRATE_SQL = """
     ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_personal BOOLEAN;
     ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS email_deep_missed_at TIMESTAMPTZ;
-    ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_deep_missed_at TIMESTAMPTZ;
-    ALTER TABLE contact_enrichment_cache
-        ADD COLUMN IF NOT EXISTS pending_token TEXT,
-        ADD COLUMN IF NOT EXISTS pending_fields TEXT,
-        ADD COLUMN IF NOT EXISTS pending_tier TEXT,
-        ADD COLUMN IF NOT EXISTS pending_until TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS pending_run_id TEXT,
-        ADD COLUMN IF NOT EXISTS pending_run_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS pending_meta JSONB;
-    CREATE INDEX IF NOT EXISTS contact_enrichment_cache_pending_run_idx
-        ON contact_enrichment_cache (pending_run_at) WHERE pending_run_id IS NOT NULL
+    ALTER TABLE contact_enrichment_cache ADD COLUMN IF NOT EXISTS phone_deep_missed_at TIMESTAMPTZ
 """
 
 # Hit TTL 0 = a found value never expires. Miss TTL 0 = misses not honoured
@@ -159,127 +126,9 @@ UPSERT_SQL = """
         updated_at = NOW()
 """
 
-# ---------------------------------------------------------------------------
-# Single-flight lease (see the module docstring)
-# ---------------------------------------------------------------------------
-
-# A lease lives this long without a heartbeat (the holder beats every 20 s).
-LEASE_S = 60
-# Late-fill contexts one lease collects at most (join).
-MAX_JOINED = 50
-# Upper bound of any run horizon: a deep run's 240 s window + the 600 s late
-# watch + 30 s (contact_enrichment.run_horizon_s).
-MAX_RUN_HORIZON_S = 870
-
-# How long after its start the run of a lease ({t}) can still answer.
-_HORIZON = (
-    "make_interval(secs => CASE WHEN {t}.pending_tier = 'deep'"
-    " THEN %(deep_horizon_s)s ELSE %(normal_horizon_s)s END)"
-)
-# A lease is free once it lapsed (no heartbeat for LEASE_S) and no run was
-# started under it or that run is past its horizon. A lapsed lease whose run
-# can still answer is an orphan: not claimable, adopted by the sweep.
-_LEASE_FREE = (
-    "(COALESCE({t}.pending_until, '-infinity'::timestamptz) < NOW()"
-    " AND ({t}.pending_run_id IS NULL OR {t}.pending_run_at IS NULL"
-    " OR {t}.pending_run_at < NOW() - " + _HORIZON + "))"
-)
-
-# The winner gets its token back; a claim while someone holds the person
-# returns nothing. Contexts joined to a lease that lapsed before its run began
-# are kept for the new holder.
-CLAIM_SQL = """
-    INSERT INTO contact_enrichment_cache AS c (
-        linkedin_slug, pending_token, pending_fields, pending_tier, pending_until, pending_meta
-    ) VALUES (
-        %(slug)s, %(token)s, %(fields)s, %(tier)s,
-        NOW() + make_interval(secs => %(lease_s)s), %(meta)s::jsonb
-    )
-    ON CONFLICT (linkedin_slug) DO UPDATE SET
-        pending_token = EXCLUDED.pending_token,
-        pending_fields = EXCLUDED.pending_fields,
-        pending_tier = EXCLUDED.pending_tier,
-        pending_until = EXCLUDED.pending_until,
-        pending_run_id = NULL,
-        pending_run_at = NULL,
-        pending_meta = COALESCE(c.pending_meta, '[]'::jsonb) || EXCLUDED.pending_meta
-    WHERE """ + _LEASE_FREE.format(t="c") + """
-    RETURNING pending_token
-"""
-
-# Holder only. A new run id restarts the run's horizon.
-HEARTBEAT_SQL = """
-    UPDATE contact_enrichment_cache
-    SET pending_until = NOW() + make_interval(secs => %(lease_s)s),
-        pending_run_at = CASE WHEN %(run_id)s::text IS NOT NULL
-                                   AND pending_run_id IS DISTINCT FROM %(run_id)s::text
-                              THEN NOW() ELSE pending_run_at END,
-        pending_run_id = COALESCE(%(run_id)s::text, pending_run_id)
-    WHERE linkedin_slug = %(slug)s AND pending_token = %(token)s
-"""
-
-# Holder only; hands back the contexts joined while it held the person.
-RELEASE_SQL = """
-    WITH held AS (
-        SELECT linkedin_slug, pending_meta FROM contact_enrichment_cache
-        WHERE linkedin_slug = %(slug)s AND pending_token = %(token)s
-        FOR UPDATE
-    )
-    UPDATE contact_enrichment_cache AS c
-    SET pending_token = NULL, pending_fields = NULL, pending_tier = NULL, pending_until = NULL,
-        pending_run_id = NULL, pending_run_at = NULL, pending_meta = NULL
-    FROM held
-    WHERE c.linkedin_slug = held.linkedin_slug
-    RETURNING held.pending_meta
-"""
-
-JOIN_SQL = """
-    UPDATE contact_enrichment_cache
-    SET pending_meta = COALESCE(pending_meta, '[]'::jsonb) || jsonb_build_array(%(ctx)s::jsonb)
-    WHERE linkedin_slug = %(slug)s
-      AND pending_token IS NOT NULL
-      AND NOT COALESCE(pending_meta, '[]'::jsonb) @> jsonb_build_array(%(ctx)s::jsonb)
-      AND jsonb_array_length(COALESCE(pending_meta, '[]'::jsonb)) < %(max_joined)s
-"""
-
-HOLDER_SQL = """
-    SELECT c.pending_fields, c.pending_tier, c.pending_run_id
-    FROM contact_enrichment_cache AS c
-    WHERE c.linkedin_slug = %(slug)s
-      AND c.pending_token IS NOT NULL
-      AND NOT """ + _LEASE_FREE.format(t="c") + """
-"""
-
-# Orphans: a lapsed lease whose run can still answer. Each row goes to one
-# sweeping worker (SKIP LOCKED), under a new token and a fresh lease; the watch
-# it gets lasts until the run's horizon.
-ADOPT_SQL = """
-    UPDATE contact_enrichment_cache AS c
-    SET pending_token = md5(random()::text || clock_timestamp()::text || c.linkedin_slug),
-        pending_until = NOW() + make_interval(secs => %(lease_s)s)
-    FROM (
-        SELECT o.linkedin_slug FROM contact_enrichment_cache AS o
-        WHERE o.pending_run_id IS NOT NULL
-          AND o.pending_token IS NOT NULL
-          AND COALESCE(o.pending_until, '-infinity'::timestamptz) < NOW()
-          AND o.pending_run_at > NOW() - """ + _HORIZON.format(t="o") + """
-        ORDER BY o.pending_run_at
-        LIMIT %(limit)s
-        FOR UPDATE SKIP LOCKED
-    ) AS orphan
-    WHERE c.linkedin_slug = orphan.linkedin_slug
-    RETURNING c.linkedin_slug, c.pending_token, c.pending_run_id, c.pending_fields, c.pending_tier,
-              EXTRACT(EPOCH FROM (c.pending_run_at + """ + _HORIZON.format(t="c") + """ - NOW())) AS remaining_s
-"""
-
 
 def _enabled() -> bool:
     return os.getenv("CONTACT_CACHE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def enabled() -> bool:
-    """CONTACT_CACHE_ENABLED (default on): the cache and its lease."""
-    return _enabled()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -324,12 +173,6 @@ def linkedin_slug(url: Any) -> str:
     if not m:
         return ""
     return unquote(m.group(1)).strip().strip("/").lower()
-
-
-def profile_url(slug: str) -> str:
-    """A LinkedIn profile URL whose ``linkedin_slug`` is ``slug`` (for work
-    that only has the cache key, such as an adopted late watch)."""
-    return f"https://www.linkedin.com/in/{quote(slug, safe='')}" if slug else ""
 
 
 _table_ready = False
@@ -487,194 +330,3 @@ async def record(
         await asyncio.to_thread(_record_sync, params)
     except Exception as e:
         logger.warning("contact_cache write failed for %s: %s", slug, e)
-
-
-# ---------------------------------------------------------------------------
-# Single-flight lease. Each call fails open: a DB error is logged and reported
-# as "error" (claim / holder) or None, and the caller looks the person up
-# without a lease, as before the lease existed.
-# ---------------------------------------------------------------------------
-
-def _lease_sync(sql: str, params: Dict[str, Any], fetch: str = "") -> Any:
-    """Run one lease statement; ``fetch`` "one" / "all" returns rows, else
-    the row count."""
-    conn = _connect()
-    try:
-        _ensure_table(conn)
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            if fetch == "one":
-                out: Any = cur.fetchone()
-            elif fetch == "all":
-                out = cur.fetchall() or []
-            else:
-                out = cur.rowcount
-            cols = [d[0] for d in cur.description] if fetch and cur.description else []
-        conn.commit()
-    finally:
-        conn.close()
-    if fetch == "one":
-        return _as_dict(out, cols) if out else None
-    if fetch == "all":
-        return [_as_dict(r, cols) for r in out]
-    return out
-
-
-def _as_dict(row: Any, cols: List[str]) -> Dict[str, Any]:
-    return dict(row) if isinstance(row, dict) else dict(zip(cols, row))
-
-
-def _horizons(normal_horizon_s: int, deep_horizon_s: int) -> Dict[str, int]:
-    return {
-        "normal_horizon_s": max(0, min(int(normal_horizon_s), MAX_RUN_HORIZON_S)),
-        "deep_horizon_s": max(0, min(int(deep_horizon_s), MAX_RUN_HORIZON_S)),
-    }
-
-
-def _fields_text(fields: Iterable[str]) -> str:
-    wanted = set(fields or ())
-    return ",".join(f for f in ("email", "phone") if f in wanted)
-
-
-def _fields_of(text: Any) -> Tuple[str, ...]:
-    return tuple(f for f in str(text or "").split(",") if f)
-
-
-def _contexts(meta: Any) -> List[Dict[str, Any]]:
-    if isinstance(meta, str):
-        try:
-            meta = json.loads(meta)
-        except ValueError:
-            return []
-    return [m for m in (meta or []) if isinstance(m, dict)] if isinstance(meta, list) else []
-
-
-async def claim(
-    slug: str,
-    fields: Iterable[str],
-    tier: str,
-    *,
-    ctx: Optional[Dict[str, Any]] = None,
-    normal_horizon_s: int = MAX_RUN_HORIZON_S,
-    deep_horizon_s: int = MAX_RUN_HORIZON_S,
-) -> Tuple[str, str]:
-    """Take the person's lease for a paid lookup of ``fields`` at ``tier``
-    ("normal" / "deep"): ("won", token), ("held", "") while another lookup
-    holds it, or ("error", "") (fail open). ``ctx`` (candidate_id /
-    jobdiva_id) is the holder's own late-fill context, kept in pending_meta so
-    an adopted watch can fill its rows too."""
-    if not slug or not _enabled():
-        return "error", ""
-    token = uuid.uuid4().hex
-    params = {
-        "slug": slug, "token": token, "fields": _fields_text(fields), "tier": tier,
-        "lease_s": LEASE_S, "meta": json.dumps([ctx] if ctx else []),
-        **_horizons(normal_horizon_s, deep_horizon_s),
-    }
-    try:
-        row = await asyncio.to_thread(_lease_sync, CLAIM_SQL, params, "one")
-    except Exception as e:
-        logger.warning("contact_cache lease claim failed: %s", e)
-        return "error", ""
-    return ("won", token) if row and row.get("pending_token") == token else ("held", "")
-
-
-async def heartbeat(slug: str, token: str, run_id: str = "") -> Optional[int]:
-    """Keep the lease another LEASE_S (holder only), stamping ``run_id`` (the
-    run just started) when given. Rows updated: 0 = someone else holds the
-    person now; None = a DB error (the holder carries on)."""
-    if not (slug and token):
-        return None
-    params = {"slug": slug, "token": token, "run_id": run_id or None, "lease_s": LEASE_S}
-    try:
-        return int(await asyncio.to_thread(_lease_sync, HEARTBEAT_SQL, params))
-    except Exception as e:
-        logger.warning("contact_cache lease heartbeat failed: %s", e)
-        return None
-
-
-async def release(slug: str, token: str) -> Optional[List[Dict[str, Any]]]:
-    """End the lease (holder only). Returns the late-fill contexts joined to
-    it ([] for none), or None when this token no longer holds it or the DB
-    failed (the lease then lapses on its own)."""
-    if not (slug and token):
-        return None
-    try:
-        row = await asyncio.to_thread(_lease_sync, RELEASE_SQL, {"slug": slug, "token": token}, "one")
-    except Exception as e:
-        logger.warning("contact_cache lease release failed: %s", e)
-        return None
-    if row is None:
-        return None
-    return _contexts(row.get("pending_meta"))
-
-
-async def join(slug: str, ctx: Dict[str, Any]) -> bool:
-    """Add a late-fill context (candidate_id / jobdiva_id) to the lease held
-    on the person, so whoever finishes its run fills that candidate's rows
-    too. False when nobody holds it (or it is already there, or full)."""
-    if not (slug and ctx and ctx.get("candidate_id")):
-        return False
-    params = {"slug": slug, "ctx": json.dumps(ctx), "max_joined": MAX_JOINED}
-    try:
-        return bool(await asyncio.to_thread(_lease_sync, JOIN_SQL, params))
-    except Exception as e:
-        logger.warning("contact_cache lease join failed: %s", e)
-        return False
-
-
-async def holder(
-    slug: str,
-    *,
-    normal_horizon_s: int = MAX_RUN_HORIZON_S,
-    deep_horizon_s: int = MAX_RUN_HORIZON_S,
-) -> Dict[str, Any]:
-    """Who holds the person: {"state": "held", "fields", "tier", "run_id"},
-    {"state": "free"} (a claim would win) or {"state": "error"}."""
-    if not slug or not _enabled():
-        return {"state": "error"}
-    params = {"slug": slug, **_horizons(normal_horizon_s, deep_horizon_s)}
-    try:
-        row = await asyncio.to_thread(_lease_sync, HOLDER_SQL, params, "one")
-    except Exception as e:
-        logger.warning("contact_cache lease read failed: %s", e)
-        return {"state": "error"}
-    if not row:
-        return {"state": "free"}
-    return {
-        "state": "held",
-        "fields": _fields_of(row.get("pending_fields")),
-        "tier": "deep" if row.get("pending_tier") == "deep" else "normal",
-        "run_id": str(row.get("pending_run_id") or ""),
-    }
-
-
-async def adopt_orphans(
-    *,
-    limit: int = 50,
-    normal_horizon_s: int = MAX_RUN_HORIZON_S,
-    deep_horizon_s: int = MAX_RUN_HORIZON_S,
-) -> List[Dict[str, Any]]:
-    """Take over up to ``limit`` runs whose lease lapsed while they can still
-    answer (their watcher died with its worker). Each comes back once, to one
-    caller, as {"slug", "token", "run_id", "fields", "tier", "remaining_s"}
-    under a fresh lease the caller's watch must keep alive. [] on a DB error."""
-    if not _enabled():
-        return []
-    params = {"limit": max(1, int(limit)), "lease_s": LEASE_S, **_horizons(normal_horizon_s, deep_horizon_s)}
-    try:
-        rows = await asyncio.to_thread(_lease_sync, ADOPT_SQL, params, "all")
-    except Exception as e:
-        logger.warning("contact_cache orphan sweep failed: %s", e)
-        return []
-    return [
-        {
-            "slug": str(r.get("linkedin_slug") or ""),
-            "token": str(r.get("pending_token") or ""),
-            "run_id": str(r.get("pending_run_id") or ""),
-            "fields": _fields_of(r.get("pending_fields")),
-            "tier": "deep" if r.get("pending_tier") == "deep" else "normal",
-            "remaining_s": max(0.0, float(r.get("remaining_s") or 0.0)),
-        }
-        for r in rows
-    ]

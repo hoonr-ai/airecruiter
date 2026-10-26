@@ -33,9 +33,7 @@ name / url / text / contact / content / resume ..., hence ``cost_pages`` not
   ``off`` = it is unavailable; a cache hit is not billed and sends no ExaCall)
 - who asked, from the request-scoped context below: ``trigger``, ``path``,
   ``attempt``, ``job_id``, ``launch_session_id``, ``tier``, ``arm``, ``defer``,
-  ``role`` (a contact run's single-flight role: leader / passthrough /
-  adopted; contact_enrichment.exa_step), plus pipeline_trace's ``run_id`` /
-  ``job_id``.
+  plus pipeline_trace's ``run_id`` / ``job_id``.
 
 Context. A ContextVar carries who asked, so no signature changes (tests fake
 ``_exa_contact_attempt`` with a fixed signature):
@@ -44,13 +42,6 @@ Context. A ContextVar carries who asked, so no signature changes (tests fake
 - ``bind_if_unbound(**kw)``: async generators (a reset there can run in
   another context when the generator is closed elsewhere); a bare set of the
   keys not already bound.
-
-``ContactLookup`` (one per contact_enrichment.exa_step, per adopted orphan
-run, and per on-demand final miss / confirmed re-buy) says what the person's
-single-flight lease decided: ``outcome`` leader | follower | passthrough |
-in_progress | lease_error | adopted | final_miss | confirm_rebuy
-(``record_contact_lookup``). A follower's free polls of another lookup's run
-send no ExaCall: the run's owner reports it.
 
 ``ExaPeopleFanout`` (one per Pass A / Dice fan-out) counts cache hits,
 misses and in-flight joins, the per-query size and what the merge kept
@@ -84,12 +75,11 @@ logger = logging.getLogger(__name__)
 EVENT = "ExaCall"
 CONFIG_EVENT = "ExaConfig"
 FANOUT_EVENT = "ExaPeopleFanout"
-LOOKUP_EVENT = "ContactLookup"
 CONFIG_EVERY_S = 3600.0
 
 CONTEXT_KEYS = (
     "trigger", "path", "attempt", "job_id", "launch_session_id",
-    "tier", "fields_asked", "arm", "defer", "role",
+    "tier", "fields_asked", "arm", "defer",
 )
 _METADATA_KEYS = ("tier", "path", "trigger", "job_id", "attempt", "arm")
 _MAX_STR = 64
@@ -336,20 +326,6 @@ def record_people_fanout(surface: str, **attrs: Any) -> None:
         _send(FANOUT_EVENT, _nr.safe_attributes({k: _flat(v) for k, v in payload.items()}))
     except Exception as exc:  # noqa: BLE001
         logger.debug("ExaPeopleFanout not recorded: %s", exc)
-
-
-def record_contact_lookup(outcome: str, **attrs: Any) -> None:
-    """One ``ContactLookup`` event: what a contact step's single-flight lease
-    (or the final-miss rule) decided (see the module docstring), with the
-    who-asked context. Ids, enums and numbers only. Never raises."""
-    if not enabled():
-        return
-    try:
-        payload = _with_context(attrs)
-        payload["outcome"] = outcome
-        _send(LOOKUP_EVENT, _nr.safe_attributes({k: _flat(v) for k, v in payload.items()}))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("ContactLookup not recorded: %s", exc)
 
 
 def _sdk_version() -> str:

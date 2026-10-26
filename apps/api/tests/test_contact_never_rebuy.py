@@ -389,7 +389,7 @@ def test_a_cancelled_sourcing_lookup_still_keeps_the_paid_exa_answer(monkeypatch
 
     assert freed == 1                                  # released once the run ended
     assert records == [{"email": "jane@acme.com", "phone": "", "email_provider": "exa",
-                        "phone_provider": "exa", "missed": [], "deep_missed": []}]
+                        "phone_provider": "exa", "missed": ("email",)}]
     assert not ce._SOURCING_EXA_TASKS
 
 
@@ -493,14 +493,13 @@ def test_a_sourcing_lookup_cancelled_while_queued_for_a_slot_buys_nothing(monkey
     assert bought == [OTHER]                                    # Jane was never bought
 
 
-def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch):
+@pytest.mark.parametrize("slots", [1, 3])
+def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch, slots):
     # Search 1's lookup of Jane runs (billed) and the stream closes; the
-    # re-search's lookup of Jane misses the cache, queues for the slot, and
-    # finds Jane's answer there once the first run gives the slot back. With
-    # a slot free (production has 3) the person's lease does it instead
-    # (test_contact_single_flight: a re-search after Stop follows the run).
+    # re-search's lookup of Jane misses the cache and, whether or not an Exa
+    # slot is free (production has 3), waits for that run instead of buying.
     bought = []
-    _store, gate = _queued_env(monkeypatch, bought)
+    _store, gate = _queued_env(monkeypatch, bought, slots)
 
     async def _go():
         first = asyncio.ensure_future(_lookup(LINKEDIN))
@@ -521,6 +520,75 @@ def test_a_re_search_after_stop_does_not_buy_the_same_person_twice(monkeypatch):
     assert res["provider_used"] == "cache" and res["workEmail"] == "jane-doe@acme.com"
     assert ce._JOB_EXA_COUNTERS.get("job-s", 0) == 0            # the reuse cost no cap slot
     assert ce._JOB_EXA_LIFETIME.get("job-s", 0) == 1            # the one run bought
+    assert not ce._SOURCING_EXA_INFLIGHT
+
+
+def test_two_rows_of_one_person_with_free_slots_buy_one_run(monkeypatch):
+    bought = []
+    _store, gate = _queued_env(monkeypatch, bought, slots=3)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        second = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gate.set()
+        answers = await asyncio.gather(first, second)
+        return answers, ce._exa_semaphore()._value
+
+    (first, second), free = asyncio.run(_go())
+
+    assert bought == [LINKEDIN]
+    assert {first["provider_used"], second["provider_used"]} == {"exa", "cache"}
+    assert first["workEmail"] == second["workEmail"] == "jane-doe@acme.com"
+    assert ce._JOB_EXA_LIFETIME.get("job-s", 0) == 1            # the follower gave its slot back
+    assert free == 3                                            # no Exa slot leaked
+
+
+def test_a_follower_cancelled_by_its_stream_leaves_the_run_alone(monkeypatch):
+    bought = []
+    store, gate = _queued_env(monkeypatch, bought, slots=3)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        second = asyncio.ensure_future(_lookup(LINKEDIN, "job-o"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        assert ce._JOB_EXA_LIFETIME.get("job-o", 0) == 0        # its cap slot is back
+        gate.set()
+        return await first
+
+    res = asyncio.run(_go())
+
+    assert bought == [LINKEDIN]
+    assert res["provider_used"] == "exa"
+    assert store[LINKEDIN]["email"] == "jane-doe@acme.com"
+
+
+def test_a_lookup_asking_more_than_the_run_going_buys_its_own(monkeypatch):
+    # The run going asks the email only; a lookup that also wants the phone
+    # is not covered by it and buys its own.
+    bought = []
+    _store, gate = _queued_env(monkeypatch, bought, slots=3)
+
+    async def _go():
+        first = asyncio.ensure_future(_lookup(LINKEDIN))
+        await _until(lambda: bought == [LINKEDIN])
+        second = asyncio.ensure_future(ce.enrich_contact_for_sourcing(
+            LINKEDIN, "job-o", full_name="Jane Doe", include_exa=True, want_phone=True,
+        ))
+        await _until(lambda: len(bought) == 2)
+        gate.set()
+        return await asyncio.gather(first, second)
+
+    asyncio.run(_go())
+
+    assert bought == [LINKEDIN, LINKEDIN]
 
 
 def test_a_queued_lookup_does_not_rebuy_a_miss_recorded_while_it_waited(monkeypatch):
