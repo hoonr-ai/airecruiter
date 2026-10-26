@@ -165,7 +165,28 @@ logger = logging.getLogger(__name__)
 # routers/notifications.py (both the narrowed unique index and its own
 # review-loop lookup index) imports this, so the two can't drift apart.
 REVIEW_LOOP_TYPES = ("candidate_internal_review_requested", "candidate_externally_submitted")
-_REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+
+# candidate_callback_reminder is excluded from the "once ever" index below
+# for an unrelated reason: unlike candidate_passed/rejected, the same
+# (recipient, candidate, job) legitimately gets MANY of these over time —
+# every reschedule is a new real-world event, each deserving its own
+# reminder. Before this fix, the very first callback reminder a
+# (recipient, candidate, job) combo ever received permanently blocked every
+# later one (including for a reschedule) with a UniqueViolation that killed
+# the task_outbox row for good — confirmed in QA (PR #855 follow-up): once
+# one reminder had fired, no later reschedule for that candidate ever
+# notified again. Its own, narrower "don't double-fire THIS exact callback"
+# dedup is the separate uniq_notifications_callback_reminder_occurrence
+# index below (_CONFLICT_CALLBACK_REMINDER), scoped by callback_at instead
+# of being permanent.
+CALLBACK_REMINDER_TYPE = "candidate_callback_reminder"
+# Single source of truth for the predicate excluding both of the above from
+# the "once ever" index — imported by routers/notifications.py so the
+# index DDL there can't drift from the ON CONFLICT clause here (exactly
+# that kind of drift broke candidate_passed/rejected entirely once already,
+# see this module's own docstring).
+ONCE_EVER_EXCLUDED_TYPES = REVIEW_LOOP_TYPES + (CALLBACK_REMINDER_TYPE,)
+_ONCE_EVER_EXCLUDED_TYPES_SQL = ", ".join(f"'{t}'" for t in ONCE_EVER_EXCLUDED_TYPES)
 
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
 # Shared by every candidate-level "once ever" type (candidate_passed,
@@ -179,7 +200,18 @@ _REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
 # below for the same rule applied to a different partial index).
 _CONFLICT_CANDIDATE_LEVEL = (
     "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) "
-    f"WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL}) "
+    f"WHERE type NOT IN ({_ONCE_EVER_EXCLUDED_TYPES_SQL}) "
+    "DO NOTHING"
+)
+# candidate_callback_reminder's own per-occurrence dedup — matches
+# uniq_notifications_callback_reminder_occurrence in routers/notifications.py
+# exactly (same predicate-matching requirement as _CONFLICT_CANDIDATE_LEVEL
+# above). Scoped by callback_at (stored in metadata, not a column) so a
+# genuinely new callback (a reschedule) still gets its own reminder, while a
+# retried run of the exact same task_outbox row can't double-insert one.
+_CONFLICT_CALLBACK_REMINDER = (
+    "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, (metadata->>'callback_at')) "
+    f"WHERE type = '{CALLBACK_REMINDER_TYPE}' "
     "DO NOTHING"
 )
 # Job-level dedup, matching the partial unique index of the same name in
@@ -1376,8 +1408,16 @@ def _create_candidate_callback_reminder_notification_sync(
             app_job_id = job_row.get("job_id") or job_id
             inserted = _insert_notification(
                 cur,
-                notification_type="candidate_callback_reminder",
-                conflict_clause=None,
+                notification_type=CALLBACK_REMINDER_TYPE,
+                # Was conflict_clause=None (bare INSERT): that collided with
+                # uniq_notifications_recipient_candidate_job_type's "once
+                # ever" index, which this type used to fall under — the
+                # FIRST callback reminder a (recipient, candidate, job) combo
+                # ever got would permanently UniqueViolation every later one,
+                # including for a reschedule (confirmed in QA: see
+                # ONCE_EVER_EXCLUDED_TYPES's own comment above). Now scoped
+                # per callback occurrence instead of forever.
+                conflict_clause=_CONFLICT_CALLBACK_REMINDER,
                 recipient_email=recipient,
                 job_id=app_job_id,
                 jobdiva_id=jobdiva_id,

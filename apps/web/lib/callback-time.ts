@@ -104,6 +104,21 @@ export function formatFixedDateTime(iso: string): string {
   return `${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
 }
 
+/** "12:14 AM" — just the time of day, viewer-local, fixed 12-hour order with
+ * no leading zero on the hour and no seconds. Pairs with callbackDayLabel
+ * (the list already groups rows under "Today"/"Tomorrow"/a dated header), so
+ * repeating the full calendar date next to every row — formatFixedDateTime's
+ * job elsewhere — was redundant here and made each row noisier to scan.
+ * Returns "" for an unparsable value, same as formatFixedDateTime. */
+export function formatCallbackTimeOfDay(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const minutes = String(d.getMinutes()).padStart(2, "0");
+  const ampm = d.getHours() >= 12 ? "PM" : "AM";
+  const hours = d.getHours() % 12 || 12;
+  return `${hours}:${minutes} ${ampm}`;
+}
+
 /** "now" in the shape <input type="datetime-local"> expects for its `min`
  * attribute — a browser hint only (see hasMinimumCallbackLeadTime's own
  * docstring for the real enforcement). Previously duplicated by hand in

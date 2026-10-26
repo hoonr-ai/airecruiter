@@ -41,7 +41,7 @@ from fastapi.responses import StreamingResponse
 from core.auth import UserIdentity, get_current_user
 from core.db import get_db_connection
 from models import NotificationItem, NotificationListResponse, UnreadCountResponse
-from services.notifications_service import REVIEW_LOOP_TYPES
+from services.notifications_service import REVIEW_LOOP_TYPES, ONCE_EVER_EXCLUDED_TYPES, CALLBACK_REMINDER_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -170,37 +170,45 @@ def init_notifications_schema_sync() -> None:
                     """
                 )
                 # Narrow the index above to exclude the internal-review-loop
-                # types (REVIEW_LOOP_TYPES): unlike candidate_passed/rejected,
-                # a second review cycle for the same (recipient, candidate,
-                # job) — reject, then internally resubmit — must still
-                # notify. "Once ever" would silently swallow that. Checked
-                # against pg_indexes first so the DROP+CREATE (and its lock)
-                # runs at most once, on the first boot after this shipped,
-                # same as the nullable-column ALTERs above.
+                # types (REVIEW_LOOP_TYPES) and candidate_callback_reminder
+                # (ONCE_EVER_EXCLUDED_TYPES = REVIEW_LOOP_TYPES plus that one):
+                # unlike candidate_passed/rejected, a second review cycle for
+                # the same (recipient, candidate, job) — reject, then
+                # internally resubmit — must still notify, and so must a
+                # reschedule's own reminder. "Once ever" would silently
+                # swallow both. Checked against pg_indexes first so the
+                # DROP+CREATE (and its lock) runs at most once per predicate
+                # change, same as the nullable-column ALTERs above.
                 #
-                # Built from REVIEW_LOOP_TYPES (not a hardcoded literal list)
-                # so this can't drift from _CONFLICT_CANDIDATE_LEVEL's own
-                # predicate in services/notifications_service.py — exactly
-                # that kind of drift broke candidate_passed/rejected entirely
-                # once already (see that module's docstring).
+                # Built from ONCE_EVER_EXCLUDED_TYPES (not a hardcoded literal
+                # list) so this can't drift from _CONFLICT_CANDIDATE_LEVEL's
+                # own predicate in services/notifications_service.py —
+                # exactly that kind of drift broke candidate_passed/rejected
+                # entirely once already (see that module's docstring).
                 #
                 # f-string interpolation (not a bind param) is safe ONLY
-                # because REVIEW_LOOP_TYPES is a fixed, hardcoded module-level
-                # constant — never user input, request data, or anything
-                # else that could carry a quote/injection payload. This must
-                # never be built from anything but another such constant.
+                # because these are fixed, hardcoded module-level constants —
+                # never user input, request data, or anything else that could
+                # carry a quote/injection payload. This must never be built
+                # from anything but another such constant.
                 review_loop_types_sql = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+                once_ever_excluded_types_sql = ", ".join(f"'{t}'" for t in ONCE_EVER_EXCLUDED_TYPES)
                 cur.execute(
                     "SELECT indexdef FROM pg_indexes WHERE indexname = 'uniq_notifications_recipient_candidate_job_type'"
                 )
                 idx = cur.fetchone()
-                if idx and "WHERE" not in idx[0]:
+                # Not just "has a WHERE at all": this predicate itself has
+                # already widened once (review-loop types only -> + callback
+                # reminder), so a deploy that only ran the first version would
+                # still have a WHERE clause, just missing the newer exclusion
+                # — check for that literal specifically.
+                if idx and f"'{CALLBACK_REMINDER_TYPE}'" not in idx[0]:
                     cur.execute("DROP INDEX IF EXISTS uniq_notifications_recipient_candidate_job_type;")
                     cur.execute(
                         f"""
                         CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_recipient_candidate_job_type
                             ON notifications (recipient_email, candidate_id, jobdiva_id, type)
-                            WHERE type NOT IN ({review_loop_types_sql});
+                            WHERE type NOT IN ({once_ever_excluded_types_sql});
                         """
                     )
                 # Pre-insert existence check for the two review-loop types
@@ -213,6 +221,22 @@ def init_notifications_schema_sync() -> None:
                     CREATE INDEX IF NOT EXISTS idx_notifications_candidate_review_loop_recent
                         ON notifications (recipient_email, candidate_id, jobdiva_id, created_at)
                         WHERE type IN ({review_loop_types_sql});
+                    """
+                )
+                # candidate_callback_reminder's own per-occurrence dedup, now
+                # that it's excluded from the "once ever" index above — ON
+                # CONFLICT target for _CONFLICT_CALLBACK_REMINDER in
+                # notifications_service.py (predicate must match this
+                # exactly, same rule as every partial-index arbiter in this
+                # function). metadata->>'callback_at' is an immutable text
+                # extraction (unlike the date_trunc(..., timestamptz)
+                # expression that broke pair_launched's old index below — see
+                # that index's own removal comment), so Postgres accepts it.
+                cur.execute(
+                    f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_callback_reminder_occurrence
+                        ON notifications (recipient_email, candidate_id, jobdiva_id, (metadata->>'callback_at'))
+                        WHERE type = '{CALLBACK_REMINDER_TYPE}';
                     """
                 )
                 # Job-level dedup (candidate_id is NULL for these two types, so

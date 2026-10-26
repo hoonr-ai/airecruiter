@@ -68,6 +68,26 @@ _FAKE_CAND_ROW_AUTO_PROVISIONED = (
     "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
 )
 
+# Already has an ACTIVE (not done) callback pending — this write is a real
+# Reschedule.
+_FAKE_CAND_ROW_WITH_ACTIVE_CALLBACK = (
+    55148489, "21562841721070", "26-12137",
+    {"feedback_type": "Callback Scheduled", "callback_scheduled_at": "2026-01-01T10:00:00+00:00"},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
+
+# Had a callback, but it was already marked done — a fresh Schedule, not a
+# Reschedule of something still pending.
+_FAKE_CAND_ROW_WITH_DONE_CALLBACK = (
+    55148489, "21562841721070", "26-12137",
+    {
+        "feedback_type": "Callback Scheduled",
+        "callback_scheduled_at": "2026-01-01T10:00:00+00:00",
+        "callback_done_at": "2026-01-01T10:05:00+00:00",
+    },
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
+
 
 def _base_setup(monkeypatch, select_row=_FAKE_CAND_ROW):
     from routers import candidates as cand_module
@@ -286,6 +306,85 @@ async def test_callback_scheduled_clears_a_previous_callback_done_at(monkeypatch
     ]
     feedback_payload = json.loads(update_calls[0][1][0])
     assert feedback_payload["callback_done_at"] is None
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_marks_is_reschedule_false_for_a_fresh_schedule(monkeypatch):
+    """No callback pending beforehand (the default _FAKE_CAND_ROW has no
+    feedback_type/callback_scheduled_at at all) — this is a first-time
+    Schedule, not a Reschedule."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+    monkeypatch.setattr("services.task_outbox.add", lambda *a, **kw: 1)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    update_calls = [
+        (query, params) for cur in fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    feedback_payload = json.loads(update_calls[0][1][0])
+    assert feedback_payload["callback_is_reschedule"] is False
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_marks_is_reschedule_true_when_one_was_already_active(monkeypatch):
+    """An ACTIVE (not yet done) callback already pending — this write is
+    changing its time, the actual Reschedule case the Upcoming Callbacks
+    page's own Reschedule button produces."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_WITH_ACTIVE_CALLBACK,
+    )
+    monkeypatch.setattr("services.task_outbox.add", lambda *a, **kw: 1)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    update_calls = [
+        (query, params) for cur in fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    feedback_payload = json.loads(update_calls[0][1][0])
+    assert feedback_payload["callback_is_reschedule"] is True
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_marks_is_reschedule_false_after_a_done_callback(monkeypatch):
+    """The previous callback already got marked done (POST .../callback/
+    done) — a brand new Schedule for this candidate afterward is a fresh
+    booking, not a Reschedule of something that already concluded."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_WITH_DONE_CALLBACK,
+    )
+    monkeypatch.setattr("services.task_outbox.add", lambda *a, **kw: 1)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    update_calls = [
+        (query, params) for cur in fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    feedback_payload = json.loads(update_calls[0][1][0])
+    assert feedback_payload["callback_is_reschedule"] is False
 
 
 @pytest.mark.anyio

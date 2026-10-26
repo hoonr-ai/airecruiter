@@ -6214,6 +6214,19 @@ async def save_candidate_feedback(
                 # show this new callback, even though a reminder is about to
                 # fire for it.
                 feedback_data["callback_done_at"] = None
+                # True only when this write is changing the time of a
+                # callback that was already active (scheduled, not yet done)
+                # — i.e. an actual Reschedule, not a fresh Schedule for a
+                # candidate with no callback pending (none yet, or the
+                # previous one already got marked done). data_blob is this
+                # row's data from BEFORE this write's merge (see its own
+                # comment above), so it still reflects the prior state.
+                # list_upcoming_callbacks surfaces this so the UI can tell
+                # the two apart (PR follow-up: recruiters asked for a visual
+                # difference between a first schedule and a reschedule).
+                feedback_data["callback_is_reschedule"] = bool(
+                    data_blob.get("callback_scheduled_at") and not data_blob.get("callback_done_at")
+                )
             else:
                 # PR #841 review: without this, callback_scheduled_at from a
                 # prior "Callback Scheduled" survives the JSONB `||` merge
@@ -6754,5 +6767,10 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
             "customer_name": row.get("customer_name"),
             "callback_at": callback_at,
             "callback_done_at": data.get("callback_done_at"),
+            # Set by save_candidate_feedback (see its own comment) — lets the
+            # UI show a Reschedule differently from a fresh Schedule. Absent
+            # on a row written before this field shipped, so default False
+            # (reads as "a fresh schedule") rather than crashing the list.
+            "is_reschedule": bool(data.get("callback_is_reschedule", False)),
         })
     return {"status": "success", "callbacks": callbacks}

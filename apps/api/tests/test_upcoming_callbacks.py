@@ -326,6 +326,10 @@ async def test_list_upcoming_callbacks_returns_scoped_rows(monkeypatch):
     assert cb["job_title"] == "Data Engineer"
     assert cb["customer_name"] == "Acme"
     assert cb["callback_at"] == "2026-01-01T15:00:00+00:00"
+    assert cb["jobdiva_id"] == "26-1"
+    # Absent from _row()'s default data — a row written before this field
+    # shipped must read as "a fresh schedule", not crash the list.
+    assert cb["is_reschedule"] is False
 
     sql, params = cur.executed[0]
     assert "callback_done_at' IS NULL" in sql
@@ -381,6 +385,27 @@ async def test_list_upcoming_callbacks_includes_callback_done_at(monkeypatch):
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
     res = await cand_module.list_upcoming_callbacks(user=user)
     assert res["callbacks"][0]["callback_done_at"] == "2026-01-01T15:05:00+00:00"
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_surfaces_is_reschedule(monkeypatch):
+    """save_candidate_feedback's own callback_is_reschedule (see its
+    comment) passes straight through so the UI can show a Reschedule
+    differently from a fresh Schedule."""
+    cand_module = _setup(monkeypatch)
+    rescheduled_row = _row(data={
+        "feedback_type": "Callback Scheduled",
+        "callback_scheduled_at": "2026-01-01T15:00:00+00:00",
+        "submitted_by": "recruiter@pyramidci.com",
+        "callback_is_reschedule": True,
+    })
+    cur = _FakeCursor(fetchall_results=[[rescheduled_row]])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+    assert res["callbacks"][0]["is_reschedule"] is True
 
 
 @pytest.mark.anyio
