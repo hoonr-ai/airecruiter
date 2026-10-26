@@ -11,6 +11,7 @@ const REASONS = [
   "Not aligned with employment type (W2 / C2C / 1099)",
   "Work authorization / visa constraints",
   "Already submitted to same client / hiring manager by another vendor",
+  "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience",
 ];
 
 describe("scoreMatch", () => {
@@ -32,6 +33,24 @@ describe("scoreMatch", () => {
     assert.ok(scoreMatch("Not aligned with employment type (W2 / C2C / 1099)", "w2") > 0);
   });
 
+  it("still matches an acronym whose letters appear in order across the reason's words", () => {
+    // "wac" -> Work / Authorization / Constraints (skipping "visa"), in order.
+    assert.ok(scoreMatch("Work authorization / visa constraints", "wac") > 0);
+  });
+
+  it("does not score a query whose letters appear scattered out of order in the acronym", () => {
+    // Regression: "com" used to score 15 against this reason because its
+    // first-letters string ("fcmprmope") happens to contain a c, an o, and
+    // an m — just not in that order, and "com" doesn't appear in the text.
+    assert.equal(
+      scoreMatch(
+        "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience",
+        "com"
+      ),
+      0
+    );
+  });
+
   it("ranks an exact match above a prefix match above a partial-word match", () => {
     const exact = scoreMatch("Communication skills", "Communication skills");
     const prefix = scoreMatch("Communication skills", "comm");
@@ -44,6 +63,20 @@ describe("scoreMatch", () => {
   it("returns 0 for an empty or whitespace-only query", () => {
     assert.equal(scoreMatch("Communication skills", ""), 0);
     assert.equal(scoreMatch("Communication skills", "   "), 0);
+  });
+
+  it("does not match a query longer than the reason's own acronym", () => {
+    // "Open to remote only" -> acronym "otro" (4 letters); a 5-letter query
+    // can never be a subsequence of a shorter string, so this must fall
+    // through to 0 rather than throwing or matching by accident.
+    assert.equal(scoreMatch("Open to remote only", "otros"), 0);
+  });
+
+  it("does not match via the acronym branch when the reason has no acronym at all", () => {
+    // Punctuation-only text strips to zero words in wordsOf, so the acronym
+    // is "" — isSubsequence must handle an empty text without matching any
+    // non-empty query (and without throwing).
+    assert.equal(scoreMatch("---", "abc"), 0);
   });
 });
 
@@ -65,5 +98,11 @@ describe("smartFilter", () => {
   it("orders multiple matches with the best match first", () => {
     const results = smartFilter(REASONS, "submitted");
     assert.equal(results[0], "Already submitted to same client / hiring manager by another vendor");
+  });
+
+  it("does not include an unrelated reason for 'com' just because its acronym has scattered c/o/m letters", () => {
+    const results = smartFilter(REASONS, "com");
+    assert.ok(!results.includes("Fake candidate — Multiple profiles/resumes; misrepresentation of past experience"));
+    assert.ok(results.includes("Communication skills"));
   });
 });

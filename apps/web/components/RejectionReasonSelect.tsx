@@ -36,8 +36,43 @@ export function RejectionReasonSelect({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const listboxRef = useRef<HTMLUListElement>(null);
+  const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
   const listboxId = id ? `${id}-listbox` : "rejection-reason-listbox";
   const optionId = useCallback((index: number) => `${listboxId}-option-${index}`, [listboxId]);
+
+  // Mirrors highlightedIndex, updated synchronously (not via an effect) by
+  // every setter below. ArrowDown/ArrowUp need the FRESHLY-computed index
+  // synchronously, in the same tick, to pass to scrollOptionIntoView — but
+  // several native keydown events dispatched in quick succession (holding
+  // the key down) can all run before React re-renders and commits the
+  // previous one's state update, so reading `highlightedIndex` itself inside
+  // the handler would read the same stale value for each and only ever
+  // advance by one. The ref can't go stale that way since this sets it
+  // directly, same tick, every time.
+  const highlightedIndexRef = useRef(-1);
+  const setHighlighted = useCallback((next: number) => {
+    highlightedIndexRef.current = next;
+    setHighlightedIndex(next);
+  }, []);
+
+  // Scrolls the listbox's own scrollTop just enough to bring option `index`
+  // into view — never the page or an enclosing modal (PR #843 review: the
+  // previous scrollIntoView() could scroll ancestor containers too, not just
+  // this list). Reads refs directly instead of document.getElementById
+  // (same review) so this can't accidentally pick up stale/duplicate ids.
+  const scrollOptionIntoView = useCallback((index: number) => {
+    const listboxEl = listboxRef.current;
+    const optionEl = optionRefs.current[index];
+    if (!listboxEl || !optionEl) return;
+    const top = optionEl.offsetTop;
+    const bottom = top + optionEl.offsetHeight;
+    if (top < listboxEl.scrollTop) {
+      listboxEl.scrollTop = top;
+    } else if (bottom > listboxEl.scrollTop + listboxEl.clientHeight) {
+      listboxEl.scrollTop = bottom - listboxEl.clientHeight;
+    }
+  }, []);
 
   const filtered = useMemo(
     () => (search.trim() ? smartFilter(REJECTION_REASONS, search) : REJECTION_REASONS),
@@ -68,7 +103,7 @@ export function RejectionReasonSelect({
   useEffect(() => {
     if (!open) {
       setSearch("");
-      setHighlightedIndex(-1);
+      setHighlighted(-1);
       return;
     }
     updateDropdownPosition();
@@ -83,7 +118,7 @@ export function RejectionReasonSelect({
       window.removeEventListener("resize", updateDropdownPosition);
       clearTimeout(focusTimeout);
     };
-  }, [open, updateDropdownPosition]);
+  }, [open, updateDropdownPosition, setHighlighted]);
 
   // Whenever the result set changes (a new search, or the dropdown just
   // opened), the previous highlighted index can easily point past the end
@@ -93,7 +128,14 @@ export function RejectionReasonSelect({
   useEffect(() => {
     if (!open) return;
     const currentIndex = filtered.indexOf(value);
-    setHighlightedIndex(currentIndex >= 0 ? currentIndex : filtered.length > 0 ? 0 : -1);
+    const next = currentIndex >= 0 ? currentIndex : filtered.length > 0 ? 0 : -1;
+    setHighlighted(next);
+    if (next >= 0) {
+      // Runs after the list for this filter has painted, so option refs are
+      // attached — a plain call here (not inside a rAF) would target last
+      // render's (possibly longer) list.
+      requestAnimationFrame(() => scrollOptionIntoView(next));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, filtered]);
 
@@ -126,16 +168,31 @@ export function RejectionReasonSelect({
   // DOM node lives in document.body), so this stays scoped to this control.
   const handleDropdownKeyDown = (e: React.KeyboardEvent) => {
     switch (e.key) {
-      case "ArrowDown":
+      case "ArrowDown": {
         e.preventDefault();
         e.stopPropagation();
-        setHighlightedIndex((i) => (filtered.length === 0 ? -1 : Math.min(i + 1, filtered.length - 1)));
+        // Reads/writes highlightedIndexRef, not the `highlightedIndex` state
+        // closed over by this render — see the ref's own comment: several
+        // ArrowDown keydowns from the OS's key-repeat can fire before React
+        // re-renders, and each would otherwise compute "next" from the same
+        // stale value.
+        const next = filtered.length === 0 ? -1 : Math.min(highlightedIndexRef.current + 1, filtered.length - 1);
+        setHighlighted(next);
+        // Scrolled here, not in an effect keyed on highlightedIndex (PR #843
+        // review) — an effect would also fire for onMouseEnter's hover-driven
+        // highlight changes below, yanking the list out from under the
+        // cursor when hovering a partially-visible edge option.
+        if (next >= 0) scrollOptionIntoView(next);
         break;
-      case "ArrowUp":
+      }
+      case "ArrowUp": {
         e.preventDefault();
         e.stopPropagation();
-        setHighlightedIndex((i) => (filtered.length === 0 ? -1 : Math.max(i - 1, 0)));
+        const next = filtered.length === 0 ? -1 : Math.max(highlightedIndexRef.current - 1, 0);
+        setHighlighted(next);
+        if (next >= 0) scrollOptionIntoView(next);
         break;
+      }
       case "Enter":
         e.preventDefault();
         e.stopPropagation();
@@ -175,17 +232,21 @@ export function RejectionReasonSelect({
         />
       </div>
 
-      <ul id={listboxId} role="listbox" aria-label={ariaLabel} className="max-h-60 overflow-y-auto py-1 select-none">
+      <ul ref={listboxRef} id={listboxId} role="listbox" aria-label={ariaLabel} className="max-h-60 overflow-y-auto py-1 select-none">
         {filtered.length === 0 ? (
           <li className="px-3 py-2 text-sm text-slate-400">No results found.</li>
         ) : (
           filtered.map((reason, index) => (
             <li
               key={reason}
+              ref={(el) => { optionRefs.current[index] = el; }}
               id={optionId(index)}
               role="option"
               aria-selected={value === reason}
-              onMouseEnter={() => setHighlightedIndex(index)}
+              // Hover only highlights — it deliberately never scrolls (PR
+              // #843 review): scrollOptionIntoView is called solely from the
+              // ArrowUp/ArrowDown handlers above.
+              onMouseEnter={() => setHighlighted(index)}
               onClick={() => {
                 onChange(reason);
                 closeAndFocusTrigger();
