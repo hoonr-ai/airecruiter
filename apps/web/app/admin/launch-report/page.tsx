@@ -172,7 +172,9 @@ const LIVE_REFRESH_MS = 120_000;
 // a second refresh landing seconds later off an unrelated timer.
 const LIVE_CHECK_MS = 15_000;
 
-type DateRange = { start: string; end: string };
+// includeRelaunches rides with the range so flipping it re-runs the report
+// through the same requestedRange effect as Generate.
+type DateRange = { start: string; end: string; includeRelaunches?: boolean };
 
 function rangeIncludes(range: DateRange | null, day: string): boolean {
   return !!range && range.start <= day && day <= range.end;
@@ -548,6 +550,9 @@ export default function LaunchReportPage() {
   const [selectedDate, setSelectedDate] = useState<string>(() => addIsoDays(todayEastern(), -1));
   const [selectedEndDate, setSelectedEndDate] = useState<string>(() => addIsoDays(todayEastern(), -1));
   const [requestedRange, setRequestedRange] = useState<DateRange | null>(null);
+  // Off by default: a relaunched job brings its whole lifetime of launched
+  // people (and a live pair-bot lookup for each), so listing them is opt-in.
+  const [includeRelaunches, setIncludeRelaunches] = useState(false);
   const [data, setData] = useState<LaunchReportData | null>(null);
   // A full load: the table body shows "Loading…".
   const [isLoading, setIsLoading] = useState(false);
@@ -589,7 +594,11 @@ export default function LaunchReportPage() {
       setRefreshError(null);
     }
     try {
-      const res = await api.launchReport.get({ startDate: range.start, endDate: range.end });
+      const res = await api.launchReport.get({
+        startDate: range.start,
+        endDate: range.end,
+        includeRelaunches: !!range.includeRelaunches,
+      });
       if (seq !== requestSeqRef.current) return;
       setData(res?.data ?? null);
       setError(null);
@@ -642,8 +651,8 @@ export default function LaunchReportPage() {
     // already shows "Loading…" rather than a flash of "No jobs were launched".
     setIsLoading(true);
     setError(null);
-    setRequestedRange({ start: selectedDate, end });
-  }, [selectedDate, selectedEndDate, isRange]);
+    setRequestedRange({ start: selectedDate, end, includeRelaunches });
+  }, [selectedDate, selectedEndDate, isRange, includeRelaunches]);
 
   const showToday = useCallback(() => {
     const now = todayEastern();
@@ -653,8 +662,8 @@ export default function LaunchReportPage() {
     setSelectedEndDate(now);
     setIsLoading(true);
     setError(null);
-    setRequestedRange({ start: now, end: now });
-  }, []);
+    setRequestedRange({ start: now, end: now, includeRelaunches });
+  }, [includeRelaunches]);
 
   // Re-runs the report currently on screen. Keeps the rows up while it loads;
   // with nothing on screen yet (e.g. the last load failed) it is a full load.
@@ -860,6 +869,27 @@ export default function LaunchReportPage() {
               />
             </label>
           )}
+          <label
+            className="flex items-center gap-2 h-10 px-3 rounded-lg border border-slate-200 bg-white shadow-sm select-none cursor-pointer"
+            title="Also list jobs first launched before these dates that launched new people in them. Slower: each brings every person it has ever launched."
+          >
+            <input
+              type="checkbox"
+              checked={includeRelaunches}
+              disabled={isLoading}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setIncludeRelaunches(next);
+                if (requestedRange) {
+                  setIsLoading(true);
+                  setError(null);
+                  setRequestedRange({ ...requestedRange, includeRelaunches: next });
+                }
+              }}
+              className="h-4 w-4 accent-[#6366f1]"
+            />
+            <span className="text-[12px] font-semibold text-slate-600">Include relaunches</span>
+          </label>
           <Button
             variant="outline"
             onClick={showToday}
