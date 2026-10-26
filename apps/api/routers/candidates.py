@@ -5879,6 +5879,30 @@ REJECTION_REASON_TO_JOBDIVA_ACTION = {
 CALLBACK_MIN_LEAD = timedelta(minutes=5)
 CALLBACK_MAX_LEAD = timedelta(days=365)
 
+# Shared duplicate-row tiebreaker (PR #854 review): sourced_candidates' real
+# unique constraint is (jobdiva_id, candidate_id, source), so a multi-sourced
+# candidate can have more than one row for the same candidate_id + jobdiva_id.
+# Ordering by updated_at alone (PR #851) makes a single query deterministic
+# but not STABLE over time — any other writer touching the sibling row (a
+# resync, an enrichment update) between a schedule and a later reschedule
+# flips which one sorts first, and the reschedule lands on the wrong row.
+# Preferring whichever row already carries "Callback Scheduled" fixes that:
+# once a row is the active callback, it stays the target for every later
+# callback action on this candidate regardless of what touches its sibling.
+# Falls through to recency only when neither (or both, in already-corrupted
+# data) row currently carries it. Shared by save_candidate_feedback's own
+# resolution queries and _resolve_sourced_candidate_row_for_callback.
+_CALLBACK_ROW_TIEBREAKER = (
+    # COALESCE(..., FALSE), not a bare boolean expression: Postgres defaults
+    # to NULLS FIRST for DESC order, and data->>'feedback_type' IS NULL for
+    # a duplicate with no feedback at all — without the COALESCE, that NULL
+    # (neither true nor false) would sort AHEAD of a sibling that actually
+    # IS 'Callback Scheduled' (TRUE), defeating this tiebreaker's entire
+    # purpose. Caught by this PR's own interleaving test.
+    "COALESCE(LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled', FALSE) DESC, "
+    "sc.updated_at DESC NULLS LAST, sc.id DESC"
+)
+
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
@@ -6010,9 +6034,11 @@ async def save_candidate_feedback(
         _conn = get_db_connection()
         try:
             with _conn.cursor() as _cur:
-                # Resolve candidate row matching either candidate_id or integer PK id, scoped to job
+                # Resolve candidate row matching either candidate_id or integer PK id, scoped to job.
+                # Tiebreaker: _CALLBACK_ROW_TIEBREAKER (see its own docstring) — keeps a
+                # duplicate-sourced candidate's writes landing on the same physical row.
                 _cur.execute(
-                    """
+                    f"""
                     SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
                            sc.name, mj.title, mj.customer_name, sc.source
                     FROM sourced_candidates sc
@@ -6030,7 +6056,8 @@ async def save_candidate_feedback(
                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                         )
                     )
-                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
+                             {_CALLBACK_ROW_TIEBREAKER}
                     LIMIT 1
                     """,
                     (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
@@ -6040,7 +6067,7 @@ async def save_candidate_feedback(
                 # Fallback: if not matched with job scope, try candidate ID alone
                 if not row:
                     _cur.execute(
-                        """
+                        f"""
                         SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
                                sc.name, mj.title, mj.customer_name, sc.source
                         FROM sourced_candidates sc
@@ -6050,7 +6077,8 @@ async def save_candidate_feedback(
                             sc.candidate_id = %s
                             OR (%s::bigint IS NOT NULL AND sc.id = %s)
                         )
-                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
+                                 {_CALLBACK_ROW_TIEBREAKER}
                         LIMIT 1
                         """,
                         (cand_id_str, pk_val, pk_val)
@@ -6419,18 +6447,19 @@ def _resolve_sourced_candidate_row_for_callback(
 
     PR #844 review: the LEFT JOIN's `ON a OR b` can match more than one
     monitored_jobs row for a candidate posted to multiple jobs with the same
-    jobdiva_id — ORDER BY makes the pick deterministic (most recently
-    updated row) rather than whatever order Postgres happens to return."""
+    jobdiva_id. Tiebreaker: _CALLBACK_ROW_TIEBREAKER (see its own docstring)
+    — makes the pick both deterministic and, unlike ordering on updated_at
+    alone, stable across calls for a multi-sourced candidate."""
     cand_id_str = str(candidate_id).strip()
     pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
     cur.execute(
-        """
+        f"""
         SELECT sc.id, sc.data
         FROM sourced_candidates sc
         LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
         WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
           AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
-        ORDER BY sc.updated_at DESC NULLS LAST, sc.id DESC
+        ORDER BY {_CALLBACK_ROW_TIEBREAKER}
         LIMIT 1
         """,
         (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref),
