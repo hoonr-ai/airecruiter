@@ -206,7 +206,17 @@ export default function UpcomingCallbacksPage() {
       {!loadError && isEmpty && (
         <Card className="p-10 text-center">
           <CalendarClock className="h-8 w-8 text-slate-300 mx-auto mb-3" />
-          <p className="text-sm text-slate-500">No callbacks scheduled. Schedule one from a candidate on Rankings.</p>
+          <p className="text-sm text-slate-500">
+            No callbacks scheduled. Schedule one from a candidate on a job&apos;s{" "}
+            <Link href="/" className="font-medium text-sky-600 hover:text-sky-700 underline underline-offset-2">
+              Rankings
+            </Link>{" "}
+            or the{" "}
+            <Link href="/candidates" className="font-medium text-sky-600 hover:text-sky-700 underline underline-offset-2">
+              Master Candidate Pool
+            </Link>
+            .
+          </p>
         </Card>
       )}
 
