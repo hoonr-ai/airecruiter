@@ -6357,3 +6357,125 @@ async def save_candidate_feedback(
         "feedback_completed": (feedback_metrics or {}).get("feedback_completed"),
         "pair_submits": (feedback_metrics or {}).get("pair_submits"),
     }
+
+
+def _resolve_sourced_candidate_row_id(cur, job_id_or_ref: str, candidate_id: str) -> Optional[int]:
+    """Finds the sourced_candidates.id for (job_id_or_ref, candidate_id), the
+    same candidate_id-or-integer-PK / job-scoped match save_candidate_feedback
+    uses to resolve a row — but without that function's JobDiva-ID
+    resolution (customer_name, numeric JobDiva job ref, etc.), which
+    mark_candidate_callback_done has no use for since it never calls
+    JobDiva. Returns None if no row matches."""
+    cand_id_str = str(candidate_id).strip()
+    pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+    cur.execute(
+        """
+        SELECT sc.id
+        FROM sourced_candidates sc
+        LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+        WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
+          AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
+        LIMIT 1
+        """,
+        (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/callback/done")
+async def mark_candidate_callback_done(
+    job_id_or_ref: str,
+    candidate_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Clears a scheduled callback from the Upcoming Callbacks list.
+
+    Deliberately NOT a feedback_type change: the callback itself isn't an
+    outcome, the conversation it leads to still ends in Submit/Reject/
+    Unreachable, recorded separately from Rankings exactly as today. This
+    only sets callback_done_at — no JobDiva note, no change to the
+    candidate's Submit/Reject/Unreachable status, no notification.
+
+    A no-op (200, not an error) when the row is already marked done or the
+    status has since moved on from "Callback Scheduled" (e.g. the recruiter
+    went to Rankings and rejected the candidate before coming back to this
+    list) — either way there's nothing left for this action to clear.
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            sc_row_id = _resolve_sourced_candidate_row_id(cur, job_id_or_ref, candidate_id)
+            if sc_row_id is None:
+                raise HTTPException(status_code=404, detail="Candidate not found for this job")
+            cur.execute(
+                "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                (json.dumps({"callback_done_at": datetime.now(timezone.utc).isoformat()}), sc_row_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success"}
+
+
+@router.get("/candidates/callbacks/upcoming")
+async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)):
+    """Every not-yet-done "Callback Scheduled" candidate, scoped to the
+    recruiter who scheduled it — the same scoping as the reminder
+    notification itself (recruiter_email, not the job's whole
+    recruiter_emails list), so this list only ever shows callbacks THIS
+    recruiter is personally on the hook for.
+
+    Includes overdue callbacks (callback_scheduled_at already in the past,
+    still not marked done) rather than cutting them off at "now" — the
+    point of this list is "what do I still need to call," and a missed
+    callback is exactly that, not something to quietly drop.
+
+    Sorted soonest-first; grouping into Today/Tomorrow/dated sections and
+    the "in 45 min" / "overdue" relative labels are display concerns, left
+    to the frontend rather than duplicated here.
+    """
+    from psycopg2.extras import RealDictCursor
+
+    recipient = (user.email or "").strip().lower()
+    if not recipient:
+        return {"status": "success", "callbacks": []}
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT sc.candidate_id, sc.name, sc.data,
+                       mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name
+                FROM sourced_candidates sc
+                JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id
+                WHERE LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled'
+                  AND LOWER(TRIM(sc.data->>'submitted_by')) = %s
+                  AND sc.data->>'callback_scheduled_at' IS NOT NULL
+                  AND sc.data->>'callback_done_at' IS NULL
+                ORDER BY sc.data->>'callback_scheduled_at' ASC
+                """,
+                (recipient,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    callbacks = []
+    for row in rows:
+        data = row.get("data") if isinstance(row.get("data"), dict) else _json_load_safe(row.get("data"), {})
+        callback_at = data.get("callback_scheduled_at")
+        if not callback_at:
+            continue
+        callbacks.append({
+            "candidate_id": row.get("candidate_id"),
+            "candidate_name": row.get("name") or "A candidate",
+            "job_id": row.get("job_id") or row.get("jobdiva_id"),
+            "jobdiva_id": row.get("jobdiva_id"),
+            "job_title": row.get("enhanced_title") or row.get("title") or "this job",
+            "customer_name": row.get("customer_name"),
+            "callback_at": callback_at,
+        })
+    return {"status": "success", "callbacks": callbacks}
