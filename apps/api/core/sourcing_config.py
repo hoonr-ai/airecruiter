@@ -460,6 +460,15 @@ EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on", "y", "t"
 }
 
+
+def exa_deep_analysis_enabled() -> bool:
+    """Per-URL Exa get_contents() (full profile text + match summary) for
+    LinkedIn-Exa rows that pass the filters, when Pass B is off. Read at
+    call time."""
+    return _os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on", "y", "t"
+    }
+
 # Agent effort level → cost cap per 1k searches:
 #   low    → $25/1k    — fails our 4-field schema (budget too tight to scrape)
 #   medium → $100/1k   — DEFAULT since 2026-09-28 (user call, cost: 1/5 of high).
