@@ -674,6 +674,7 @@ class LocationMixin:
             "candidate_location_missing",
             "broad_region_unverified",
             "candidate_state_unknown",
+            "search_location_unresolvable",
         })
         _HARD_DROP_REASONS = frozenset({"outside_radius_confirmed", "state_mismatch"})
 
@@ -748,15 +749,30 @@ class LocationMixin:
                     required["city"] = self._normalize_term(zip_entry["city"])
                 if not required["state"]:
                     required["state"] = self._normalize_term(zip_entry["state"])
-            elif required["zip"] not in _WARNED_UNRESOLVABLE_SEARCH_ZIPS:
-                _WARNED_UNRESOLVABLE_SEARCH_ZIPS.add(required["zip"])
-                logger.warning(
-                    "unified_candidate_search_unresolvable_search_zip zip=%s "
-                    "location=%r — this criteria's own anchor point can't be "
-                    "placed, so no candidate's distance from it can be "
-                    "computed; every row passes the location filter unfiltered",
-                    required["zip"], criteria.location,
-                )
+            else:
+                if required["zip"] not in _WARNED_UNRESOLVABLE_SEARCH_ZIPS:
+                    _WARNED_UNRESOLVABLE_SEARCH_ZIPS.add(required["zip"])
+                    logger.warning(
+                        "unified_candidate_search_unresolvable_search_zip zip=%s "
+                        "location=%r — this criteria's own anchor point can't "
+                        "be placed, so no candidate's distance from it can be "
+                        "computed; every row is soft-kept as unverified",
+                        required["zip"], criteria.location,
+                    )
+                if not required["city"] and not required["state"]:
+                    # The zip is the ONLY location signal and it doesn't
+                    # resolve — every candidate is equally unverifiable
+                    # against this search regardless of their OWN location
+                    # shape. Without this, a candidate with a broad-region
+                    # label (below) would already fall through to this same
+                    # soft-keep, but a candidate with a precise city/zip
+                    # would instead reach the Nominatim fallback further
+                    # down and geocode THIS unresolvable text — which can
+                    # return a confidently wrong verdict (a real place that
+                    # isn't what the recruiter meant) instead of an honestly
+                    # unverified one. Short-circuit here so every candidate
+                    # gets the same, correct answer: "can't tell."
+                    return False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL
 
         if not required["city"] and not required["state"] and not required.get("zip"):
             return True, "empty_location_requirement", None

@@ -5526,30 +5526,33 @@ function NewJobPageContent() {
     setIsAddingSourceLocation(true);
     setSourceLocationError("");
     try {
-      // Bare numeric input only — no city name is purely digits, so any
-      // all-digit value here is always meant as a zip. A wrong length
-      // (2-3 digits, 6+) is rejected immediately, no round trip: the
-      // backend doesn't recognize these as a zip attempt at all (see
+      // A bare zip ("77002") or ZIP+4 ("77002-1234") — digits and dashes
+      // only, no city name looks like this — is always meant as a zip. A
+      // wrong shape (2-3/6+ digits, a malformed dash) is rejected
+      // immediately, no round trip: the backend doesn't recognize these as
+      // a zip attempt at all (see
       // test_parse_location_short_numeric_string_is_not_recognized_as_a_zip).
-      // An exact 5 digits gets a real lookup instead, since the shape
-      // alone doesn't confirm it's assigned (QA regression: "99999").
+      // A recognized shape extracts its 5-digit part for a real lookup,
+      // since the shape alone doesn't confirm it's assigned (QA
+      // regression: "99999"; ZIP+4 follow-up: "99999-1234" the same way).
       let unverifiedWarning = "";
-      if (/^\d+$/.test(cleanValue)) {
-        if (cleanValue.length !== 5) {
+      if (/^[\d-]+$/.test(cleanValue)) {
+        const zip5 = cleanValue.match(/^(\d{5})(?:-\d{4})?$/)?.[1];
+        if (!zip5) {
           setSourceLocationError("Zip codes must be 5 digits");
           return;
         }
         try {
-          const res = await api.candidates.lookupZip(cleanValue);
+          const res = await api.candidates.lookupZip(zip5);
           if (!res?.valid) {
-            setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
+            setSourceLocationError(`"${zip5}" isn't a recognized US zip code`);
             return;
           }
         } catch {
           // A network/5xx failure here shouldn't block adding the
           // location, but failing open silently is the original bug from
           // a different trigger — surface it instead of saying nothing.
-          unverifiedWarning = `Couldn't verify "${cleanValue}" — added anyway`;
+          unverifiedWarning = `Couldn't verify "${zip5}" — added anyway`;
         }
       }
       excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));

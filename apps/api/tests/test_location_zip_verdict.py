@@ -724,6 +724,58 @@ def test_verdict_warns_once_per_unresolvable_search_zip(svc, caplog):
     assert not any("unresolvable_search_zip" in r.message for r in caplog.records)
 
 
+def test_verdict_unresolvable_search_zip_is_consistent_regardless_of_candidate_shape(svc):
+    """Follow-up to the warning-log fix above: before this, an unresolvable
+    search zip only cleanly soft-kept a candidate with a BROAD-region label
+    (it fell through to broad_region_unverified). A candidate with a
+    PRECISE location instead reached the Nominatim fallback and geocoded
+    the same unresolvable text live — which can return a confidently wrong
+    verdict (a real but unintended place) instead of an honest "can't
+    tell." Both candidate shapes must now get the identical, correct
+    answer with no live geocode involved."""
+    criteria = _criteria(location="99999-1234", within_miles=25)
+
+    precise = {"location": "Houston, TX"}
+    assert svc._single_location_match_verdict(precise, criteria) == (
+        False, "search_location_unresolvable", 9999.0,
+    )
+
+    broad = {"location": "Dallas-Fort Worth Metroplex"}
+    assert svc._single_location_match_verdict(broad, criteria) == (
+        False, "search_location_unresolvable", 9999.0,
+    )
+
+
+def test_verdict_zip_plus_four_resolves_normally_when_assigned(svc):
+    """ZIP+4 follow-up: a well-formed, assigned ZIP+4 search still resolves
+    via its 5-digit part exactly as a bare zip would — this isn't a new
+    restriction, only the unassigned case above is."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="77002-1234", within_miles=25)
+    )
+    assert result[0] is True
+
+
+def test_verdict_embedded_unresolvable_zip_still_uses_city_state_fallback(svc):
+    """A search like "Houston, TX 99999" has a real city/state alongside
+    the bad zip — it must keep using that city/state fallback (unchanged
+    behavior), not get swept into the new zip-is-the-only-signal
+    short-circuit above."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="Houston, TX 99999", within_miles=25)
+    )
+    assert result[0] is True
+    assert result[1] != "search_location_unresolvable"
+
+
+def test_hard_gate_soft_keeps_an_unresolvable_search_location(svc):
+    candidate = {"location": "Houston, TX"}
+    veto = svc._location_hard_gate(candidate, _criteria(location="99999-1234", within_miles=25))
+    assert veto is None
+    assert candidate.get("location_match_reason") == "search_location_unresolvable"
+    assert candidate.get("distance_miles") is None
+
+
 def test_resolve_geo_address_street_number_not_sent_as_zip(svc):
     _, states, zip_code = svc._resolve_jobdiva_geo(
         _criteria(location="10001 W Main St, Mesa, AZ")
