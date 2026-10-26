@@ -71,16 +71,15 @@ export function hasMinimumCallbackLeadTime(iso: string, now: Date = new Date()):
   return !Number.isNaN(target.getTime()) && target.getTime() - now.getTime() >= CALLBACK_MIN_LEAD_MINUTES * 60_000;
 }
 
-/** "MM/DD/YYYY h:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with a
- * FIXED date order and 12-hour clock regardless of the browser's own locale
- * — unlike toLocaleString(), which formats using whatever date order
- * (DD/MM vs MM/DD) and notation the viewer's OS/browser happens to be
- * configured for. Two recruiters in the same office, same timezone, could
- * otherwise see the same callback's date written in a different order from
- * each other purely from an OS locale setting neither of them set on
- * purpose. The hour is NOT zero-padded (8:43:00 PM, not 08:43:00 PM) —
- * matches how a 12-hour clock is written everywhere else in this app.
- * Returns "" for an unparsable value rather than "Invalid Date".
+/** "MM/DD/YYYY HH:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with
+ * a FIXED date order and zero-padded 12-hour clock regardless of the
+ * browser's own locale — unlike toLocaleString(), which formats using
+ * whatever date order (DD/MM vs MM/DD) and notation the viewer's OS/browser
+ * happens to be configured for. Two recruiters in the same office, same
+ * timezone, could otherwise see the same callback's date written in a
+ * different order from each other purely from an OS locale setting neither
+ * of them set on purpose. Returns "" for an unparsable value rather than
+ * "Invalid Date".
  *
  * Deliberately NOT lib/date.ts's formatEasternDateTime, despite the similar
  * "MM/DD/YYYY ..." shape: that one fixes every report cell to one shared
@@ -101,7 +100,8 @@ export function formatFixedDateTime(iso: string): string {
   let hours = d.getHours();
   const ampm = hours >= 12 ? "PM" : "AM";
   hours = hours % 12 || 12;
-  return `${month}/${day}/${year} ${hours}:${minutes}:${seconds} ${ampm}`;
+  const hoursStr = String(hours).padStart(2, "0");
+  return `${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
 }
 
 /** "now" in the shape <input type="datetime-local"> expects for its `min`

@@ -124,12 +124,12 @@ describe("hasMinimumCallbackLeadTime", () => {
 });
 
 describe("formatFixedDateTime", () => {
-  it("formats as MM/DD/YYYY h:MM:SS AM/PM regardless of locale", () => {
-    assert.equal(formatFixedDateTime(localIso(2026, 9, 26, 20, 43)), "10/26/2026 8:43:00 PM");
+  it("formats as MM/DD/YYYY HH:MM:SS AM/PM regardless of locale", () => {
+    assert.equal(formatFixedDateTime(localIso(2026, 9, 26, 20, 43)), "10/26/2026 08:43:00 PM");
   });
 
-  it("pads single-digit month, day, minute and second", () => {
-    assert.equal(formatFixedDateTime(localIso(2026, 0, 5, 9, 5)), "01/05/2026 9:05:00 AM");
+  it("pads single-digit month, day, hour, minute and second", () => {
+    assert.equal(formatFixedDateTime(localIso(2026, 0, 5, 9, 5)), "01/05/2026 09:05:00 AM");
   });
 
   it("renders midnight as 12 AM, not 0 AM", () => {
