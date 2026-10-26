@@ -6030,7 +6030,20 @@ async def save_candidate_feedback(
                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                         )
                     )
-                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                    -- sc.updated_at/sc.id tiebreaker (PR review): sourced_candidates'
+                    -- real unique constraint is (jobdiva_id, candidate_id, source), so
+                    -- a multi-sourced candidate can have more than one sc row that
+                    -- joins to the SAME mj row — the job-level ordering above alone
+                    -- doesn't break that tie, so which duplicate won was whatever
+                    -- Postgres's scan happened to return. A reschedule that landed on
+                    -- a DIFFERENT duplicate than the original schedule left the old
+                    -- row's "Callback Scheduled" + stale time behind as a phantom
+                    -- second entry in Upcoming Callbacks, and broke the reminder's own
+                    -- stale-check besides. Ordering by the most recently touched row
+                    -- keeps every feedback action for this candidate+job landing on
+                    -- the same physical row once one has been written to.
+                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
+                             sc.updated_at DESC NULLS LAST, sc.id DESC
                     LIMIT 1
                     """,
                     (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
@@ -6050,7 +6063,8 @@ async def save_candidate_feedback(
                             sc.candidate_id = %s
                             OR (%s::bigint IS NOT NULL AND sc.id = %s)
                         )
-                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
+                                 sc.updated_at DESC NULLS LAST, sc.id DESC
                         LIMIT 1
                         """,
                         (cand_id_str, pk_val, pk_val)
