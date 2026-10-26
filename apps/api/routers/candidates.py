@@ -5821,6 +5821,55 @@ async def get_candidate_evaluation_report(
     except Exception as e:
         logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Every UI reason (apps/web/lib/rejection.ts's REJECTION_REASONS) must have an
+# entry here, or selecting it in the Reject-candidate dropdown fails with a
+# 422 on confirm — exactly what happened to the two newest reasons in PR #840,
+# which shipped on the frontend with no matching entry here. Module-level (not
+# rebuilt inside save_candidate_feedback on every request) specifically so
+# tests/test_rejection_reasons_sync.py can import it directly and assert the
+# two lists stay in sync, instead of only finding the next drift in
+# production the way this one was found.
+REJECTION_REASON_TO_JOBDIVA_ACTION = {
+    "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
+    "Communication skills": "PAIR Reject - Communication skills",
+    "Domain experience mismatch": "PAIR Reject - Domain experience mismatch",
+    "More qualified candidates identified": "PAIR Reject - More qualified candidates identified",
+    "Overqualified for the role": "PAIR Reject - Overqualified for the role",
+    "Compensation expectations exceed budget": "PAIR Reject - Compensation expectations exceed budget",
+    "Not aligned with employment type (W2 / C2C / 1099)": "PAIR Reject - Not aligned with employment type (W2 / C2C / 1099)",
+    "Work authorization / visa constraints": "PAIR Reject - Work authorization / visa constraints",
+    "Not comfortable with background check / drug test": "PAIR Reject - Not comfortable with background check / drug test",
+    "Not local and not open to relocation": "PAIR Reject - Not local and not open to relocation",
+    "Open to remote only": "PAIR Reject - Open to remote only",
+    "Not available within required timeline": "PAIR Reject - Not available within required timeline",
+    "Accepted another offer": "PAIR Reject - Accepted another offer",
+    "Candidate withdrew interest": "PAIR Reject - Candidate withdrew interest",
+    "Career gap concern": "PAIR Reject - Career gap concern",
+    "Job Hopping (short-term engagements throughout or in the last 5-7 years)": "PAIR Reject - Job Hopping",
+    "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience": "PAIR Reject - Fake candidate",
+    "Already submitted to same client / hiring manager by another vendor": "PAIR Reject - Already submitted",
+    "Previously rejected by client": "PAIR Reject - Previously rejected by client",
+    "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
+    "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
+    "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
+    # PR #840 review: these two shipped on the frontend without a matching
+    # entry here, so selecting either one failed with a 422 on confirm.
+    # Distinct from "Already submitted to same client / hiring manager by
+    # another vendor" above — that one is an external vendor conflict; this
+    # is an internal team member conflict — kept as separate action strings
+    # rather than reusing "PAIR Reject - Already submitted" so JobDiva
+    # reporting can tell the two apart.
+    #
+    # NEEDS CONFIRMATION: these two action strings are new and have not been
+    # verified against JobDiva's own configured action list the way every
+    # other entry above presumably was when it first shipped.
+    "Candidate is not interested in the role/job responsibilities": "PAIR Reject - Not interested in role",
+    "Already submitted to the same client/hiring manager by another team member": "PAIR Reject - Already submitted (internal)",
+}
+
+
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
     job_id_or_ref: str,
@@ -5882,33 +5931,9 @@ async def save_candidate_feedback(
     if request.feedback_type == "Submit":
         action_string = "PAIR Internal Submission" if submission_type == "internal" else "PAIR External Submission"
     elif request.feedback_type == "Reject":
-        rejection_mapping = {
-            "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
-            "Communication skills": "PAIR Reject - Communication skills",
-            "Domain experience mismatch": "PAIR Reject - Domain experience mismatch",
-            "More qualified candidates identified": "PAIR Reject - More qualified candidates identified",
-            "Overqualified for the role": "PAIR Reject - Overqualified for the role",
-            "Compensation expectations exceed budget": "PAIR Reject - Compensation expectations exceed budget",
-            "Not aligned with employment type (W2 / C2C / 1099)": "PAIR Reject - Not aligned with employment type (W2 / C2C / 1099)",
-            "Work authorization / visa constraints": "PAIR Reject - Work authorization / visa constraints",
-            "Not comfortable with background check / drug test": "PAIR Reject - Not comfortable with background check / drug test",
-            "Not local and not open to relocation": "PAIR Reject - Not local and not open to relocation",
-            "Open to remote only": "PAIR Reject - Open to remote only",
-            "Not available within required timeline": "PAIR Reject - Not available within required timeline",
-            "Accepted another offer": "PAIR Reject - Accepted another offer",
-            "Candidate withdrew interest": "PAIR Reject - Candidate withdrew interest",
-            "Career gap concern": "PAIR Reject - Career gap concern",
-            "Job Hopping (short-term engagements throughout or in the last 5-7 years)": "PAIR Reject - Job Hopping",
-            "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience": "PAIR Reject - Fake candidate",
-            "Already submitted to same client / hiring manager by another vendor": "PAIR Reject - Already submitted",
-            "Previously rejected by client": "PAIR Reject - Previously rejected by client",
-            "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
-            "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
-            "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
-        }
-        if request.reason and request.reason not in rejection_mapping:
+        if request.reason and request.reason not in REJECTION_REASON_TO_JOBDIVA_ACTION:
             raise HTTPException(status_code=422, detail="Invalid rejection reason provided")
-        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
+        action_string = REJECTION_REASON_TO_JOBDIVA_ACTION.get(request.reason, "PAIR Reject")
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID

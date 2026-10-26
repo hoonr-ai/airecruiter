@@ -23,7 +23,7 @@ import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
-import { REJECTION_REASONS } from "@/lib/rejection";
+import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
@@ -533,6 +533,12 @@ export default function GlobalCandidatesPage() {
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  // Forces a remount of ONE row's action Select after its modal is
+  // cancelled, so its own internal state resets — scoped to {candidateId,
+  // nonce} rather than a single counter bumped for every close (PR #840
+  // review: a shared counter remounted every row in the table on every
+  // close, however large).
+  const [actionSelectReset, setActionSelectReset] = useState<{ candidateId: number; nonce: number } | null>(null);
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
 
   // Activity states
@@ -591,6 +597,19 @@ export default function GlobalCandidatesPage() {
       }
     }
   };
+
+  // Shared by every "cancel without choosing" path for the Submit/Reject
+  // modals (PR #840 review: this was copy-pasted at each call site). Reads
+  // actionCandidateId before clearing it so the remount above targets
+  // exactly the row whose modal just closed.
+  const closeIntegrationModal = useCallback(() => {
+    if (actionCandidateId != null) {
+      setActionSelectReset({ candidateId: actionCandidateId, nonce: Date.now() });
+    }
+    setIntegrationModalOpen(null);
+    setActionCandidateId(null);
+    setRejectReason("");
+  }, [actionCandidateId]);
 
   const handleConfirmReject = async () => {
     const trimmedReason = rejectReason?.trim() || "";
@@ -1296,6 +1315,7 @@ export default function GlobalCandidatesPage() {
                       <TableCell className="border-b border-slate-200 text-center border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
                         <div className="flex flex-col items-center justify-center gap-1.5 min-h-[64px]">
                           <Select
+                            key={actionSelectReset?.candidateId === c.id ? `${c.id}-${actionSelectReset.nonce}` : c.id}
                             disabled={syncingCandidateId === c.id}
                             value={feedback}
                             onValueChange={(val) => {
@@ -1420,10 +1440,7 @@ export default function GlobalCandidatesPage() {
       {/* Integration Modals */}
       <SubmissionModal
         isOpen={integrationModalOpen === 'submit' && !!actionCandidateId}
-        onClose={() => {
-          setIntegrationModalOpen(null);
-          setActionCandidateId(null);
-        }}
+        onClose={closeIntegrationModal}
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={candidates.find(c => c.id === actionCandidateId)?.job_title || "Job"}
         jobRef={candidates.find(c => c.id === actionCandidateId)?.jobdiva_id || ""}
@@ -1440,7 +1457,7 @@ export default function GlobalCandidatesPage() {
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
+                  <button onClick={closeIntegrationModal} className="text-slate-400 hover:text-slate-600" aria-label="Close">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
@@ -1448,22 +1465,15 @@ export default function GlobalCandidatesPage() {
                   </p>
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
-                    <select
+                    <RejectionReasonSelect
                       id={`reject-reason-${actionCandidateId}`}
-                      aria-label="Rejection Reason"
-                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
-                    >
-                      <option value="" disabled>Select a reason...</option>
-                      {REJECTION_REASONS.map((r) => (
-                        <option key={r} value={r}>{r}</option>
-                      ))}
-                    </select>
+                      onChange={setRejectReason}
+                    />
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button variant="outline" onClick={closeIntegrationModal} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}
