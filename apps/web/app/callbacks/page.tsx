@@ -206,7 +206,7 @@ export default function UpcomingCallbacksPage() {
       {!loadError && isEmpty && (
         <Card className="p-10 text-center">
           <CalendarClock className="h-8 w-8 text-slate-300 mx-auto mb-3" />
-          <p className="text-sm text-slate-500">No callbacks scheduled. Schedule one from a candidate on Rankings.</p>
+          <p className="text-sm text-slate-500">No callbacks scheduled. Schedule one from a candidate on Rankings or the Master Candidate Pool.</p>
         </Card>
       )}
 
