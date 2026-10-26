@@ -384,7 +384,7 @@ export default function UpcomingCallbacksPage() {
                         {done ? (
                           <p className="text-xs font-semibold mt-1 text-emerald-600 flex items-center gap-1">
                             <CheckCircle2 className="h-3.5 w-3.5" />
-                            Marked as done — was {formatFixedDateTime(cb.callback_at)}
+                            Marked as done — was {formatFixedDateTime(cb.callback_at) || "an unknown time"}
                           </p>
                         ) : (
                           <p
@@ -394,7 +394,7 @@ export default function UpcomingCallbacksPage() {
                             )}
                           >
                             {overdue && <AlertTriangle className="inline h-3 w-3 mr-1 -mt-0.5" />}
-                            {callbackRelativeLabel(cb.callback_at)} · {formatFixedDateTime(cb.callback_at)}
+                            {callbackRelativeLabel(cb.callback_at)} · {formatFixedDateTime(cb.callback_at) || "an unknown time"}
                           </p>
                         )}
                       </div>

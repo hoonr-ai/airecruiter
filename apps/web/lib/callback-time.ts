@@ -71,26 +71,33 @@ export function hasMinimumCallbackLeadTime(iso: string, now: Date = new Date()):
   return !Number.isNaN(target.getTime()) && target.getTime() - now.getTime() >= CALLBACK_MIN_LEAD_MINUTES * 60_000;
 }
 
-function pad2(n: number): string {
-  return n < 10 ? `0${n}` : `${n}`;
-}
-
-/** "MM/DD/YYYY HH:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with
- * a FIXED date order and 12-hour clock regardless of the browser's own
- * locale — unlike toLocaleString(), which formats using whatever date order
+/** "MM/DD/YYYY h:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with a
+ * FIXED date order and 12-hour clock regardless of the browser's own locale
+ * — unlike toLocaleString(), which formats using whatever date order
  * (DD/MM vs MM/DD) and notation the viewer's OS/browser happens to be
  * configured for. Two recruiters in the same office, same timezone, could
  * otherwise see the same callback's date written in a different order from
  * each other purely from an OS locale setting neither of them set on
- * purpose. Returns "" for an unparsable value rather than "Invalid Date". */
+ * purpose. The hour is NOT zero-padded (8:43:00 PM, not 08:43:00 PM) —
+ * matches how a 12-hour clock is written everywhere else in this app.
+ * Returns "" for an unparsable value rather than "Invalid Date".
+ *
+ * Deliberately NOT lib/date.ts's formatEasternDateTime, despite the similar
+ * "MM/DD/YYYY ..." shape: that one fixes every report cell to one shared
+ * business timezone (Eastern, 24-hour) so a dashboard reads the same for
+ * every viewer. A callback is the opposite — it's a specific recruiter's own
+ * commitment at a specific moment in THEIR day, so it's shown in each
+ * viewer's own local clock time instead (confirmed product behavior: an IST
+ * tester and an EDT recruiter should each see their own correct local time
+ * for the same underlying instant, not one shared zone). */
 export function formatFixedDateTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  const month = pad2(d.getMonth() + 1);
-  const day = pad2(d.getDate());
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
   const year = d.getFullYear();
-  const minutes = pad2(d.getMinutes());
-  const seconds = pad2(d.getSeconds());
+  const minutes = String(d.getMinutes()).padStart(2, "0");
+  const seconds = String(d.getSeconds()).padStart(2, "0");
   let hours = d.getHours();
   const ampm = hours >= 12 ? "PM" : "AM";
   hours = hours % 12 || 12;

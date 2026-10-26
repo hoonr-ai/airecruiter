@@ -124,7 +124,7 @@ describe("hasMinimumCallbackLeadTime", () => {
 });
 
 describe("formatFixedDateTime", () => {
-  it("formats as MM/DD/YYYY HH:MM:SS AM/PM regardless of locale", () => {
+  it("formats as MM/DD/YYYY h:MM:SS AM/PM regardless of locale", () => {
     assert.equal(formatFixedDateTime(localIso(2026, 9, 26, 20, 43)), "10/26/2026 8:43:00 PM");
   });
 
