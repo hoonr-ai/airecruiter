@@ -649,8 +649,14 @@ export const api = {
     // the backend for yesterday. Pass startDate+endDate instead for a range
     // (both required together); date is ignored when a range is given. Team
     // leads are auto-scoped server-side, so teamId is only meaningful for admins.
-    get: (opts?: { date?: string | null; startDate?: string | null; endDate?: string | null; teamId?: string | null }) => {
-      const { date, startDate, endDate, teamId } = opts ?? {};
+    get: (opts?: {
+      date?: string | null;
+      startDate?: string | null;
+      endDate?: string | null;
+      teamId?: string | null;
+      includeRelaunches?: boolean;
+    }) => {
+      const { date, startDate, endDate, teamId, includeRelaunches } = opts ?? {};
       const qs = new URLSearchParams();
       if (startDate && endDate) {
         qs.set("start_date", startDate);
@@ -659,6 +665,7 @@ export const api = {
         qs.set("date", date);
       }
       if (teamId) qs.set("team_id", teamId);
+      if (includeRelaunches) qs.set("include_relaunches", "true");
       const suffix = qs.toString();
       return req<any>(`/api/v1/launch-report${suffix ? `?${suffix}` : ""}`);
     },

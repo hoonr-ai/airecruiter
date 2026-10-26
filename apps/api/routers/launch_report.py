@@ -446,6 +446,7 @@ def _fetch_jobs_launched_on(
     start_date: datetime.date,
     scope: Optional[Dict[str, Any]] = None,
     end_date: Optional[datetime.date] = None,
+    include_relaunches: bool = False,
 ) -> List[Dict[str, Any]]:
     """Jobs launched between `start_date` and `end_date` (inclusive, Eastern
     time): their FIRST SUCCESSFUL launch (MIN of engage_interview_audit.created_at
@@ -459,6 +460,10 @@ def _fetch_jobs_launched_on(
     on day N+k shows on day N+k, while the row's lifetime numbers stay the
     rank list's. A person launched twice counts on the day of their FIRST
     interview only.
+
+    Relaunch-only rows are opt-in (`include_relaunches`): each one brings the
+    job's whole lifetime of launched people, and a live outreach lookup per
+    person, so by default only jobs first launched in the range are listed.
     """
     single_day_query = end_date is None
     if single_day_query:
@@ -474,6 +479,7 @@ def _fetch_jobs_launched_on(
 
     launch_date_filter, launch_date_params = in_range("l.first_launch_at")
     period_filter, period_params = in_range("pp.first_at")
+    relaunch_filter = " OR COALESCE(p.launched_in_period, 0) > 0" if include_relaunches else ""
     with conn.cursor() as cur:
         # NULL for an attribution column the startup ALTER has not added yet.
         optional = optional_monitored_jobs_columns(cur, "mj.")
@@ -544,7 +550,7 @@ def _fetch_jobs_launched_on(
         FROM launches l
         JOIN monitored_jobs mj ON mj.job_id = l.job_id
         LEFT JOIN period p ON p.job_id = l.job_id
-        WHERE ({launch_date_filter}) OR COALESCE(p.launched_in_period, 0) > 0
+        WHERE ({launch_date_filter}){relaunch_filter}
         ORDER BY l.first_launch_at ASC
     """
     params = mj_params + period_params + launch_date_params + launch_date_params
@@ -1391,7 +1397,10 @@ def _load_launch_timings(conn, jobs: List[Dict[str, Any]]) -> Dict[str, Dict[str
 
 
 def _load_report_inputs(
-    start_date: datetime.date, end_date: datetime.date, scope_team_id: Optional[str]
+    start_date: datetime.date,
+    end_date: datetime.date,
+    scope_team_id: Optional[str],
+    include_relaunches: bool = False,
 ) -> Tuple[
     List[Dict[str, Any]],
     Dict[str, List[Dict[str, Any]]],
@@ -1407,7 +1416,7 @@ def _load_report_inputs(
     conn = get_db_connection()
     try:
         scope = _load_team_scope(conn, scope_team_id) if scope_team_id else None
-        jobs = _fetch_jobs_launched_on(conn, start_date, scope, end_date)
+        jobs = _fetch_jobs_launched_on(conn, start_date, scope, end_date, include_relaunches)
         launched_by_job: Dict[str, List[Dict[str, Any]]] = {}
         sourced_by_job: Dict[str, List[Dict[str, Any]]] = {}
         for job in jobs:
@@ -1441,6 +1450,10 @@ async def get_launch_report(
     start_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with end_date"),
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Eastern time; range mode, use with start_date"),
     team_id: Optional[str] = Query(default=None),
+    include_relaunches: bool = Query(
+        default=False,
+        description="Also list jobs first launched before the range that launched new people in it",
+    ),
     user: UserIdentity = Depends(get_current_user),
     response: Response = Response(),
 ):
@@ -1499,7 +1512,7 @@ async def get_launch_report(
 
     try:
         jobs, launched_by_job, sourced_by_job, step_metrics_by_job = await asyncio.to_thread(
-            _load_report_inputs, report_start_date, report_end_date, scope_team_id
+            _load_report_inputs, report_start_date, report_end_date, scope_team_id, include_relaunches
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1541,6 +1554,7 @@ async def get_launch_report(
             "timezone": str(REPORT_TIMEZONE),
             "generated_at": _edt(datetime.datetime.now(datetime.timezone.utc)),
             "team_id": scope_team_id,
+            "include_relaunches": include_relaunches,
             "jobs": rows,
             "totals": {
                 "jobs": len(rows),
