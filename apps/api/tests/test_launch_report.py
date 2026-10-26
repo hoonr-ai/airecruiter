@@ -362,7 +362,7 @@ def test_report_asks_pair_bot_once_per_launched_person_over_the_whole_lifetime(m
     }
     sourced_by_job = {"55": [{"candidate_id": cid, "created_at": datetime.datetime(2026, 8, 26, 12, 0)} for cid in ("c1", "c2", "c3", "never-launched")]}
 
-    def _load_inputs(_start, _end, _scope):
+    def _load_inputs(_start, _end, _scope, _include_relaunches=False):
         return [job], launched_by_job, sourced_by_job, {}
 
     async def _fake_outreach(interview_ids):
@@ -1204,7 +1204,7 @@ def test_launch_report_rejects_ranges_over_the_server_cap_before_db(monkeypatch)
 def test_launch_report_accepts_range_at_the_server_cap(monkeypatch):
     captured = {}
 
-    def _load_inputs(start_date, end_date, scope_team_id):
+    def _load_inputs(start_date, end_date, scope_team_id, include_relaunches=False):
         captured["dates"] = (start_date, end_date)
         captured["scope_team_id"] = scope_team_id
         return [], {}, {}, {}
@@ -1235,7 +1235,7 @@ def test_launch_report_accepts_range_at_the_server_cap(monkeypatch):
 def _capture_dates(monkeypatch):
     captured = {}
 
-    def _load_inputs(start_date, end_date, scope_team_id):
+    def _load_inputs(start_date, end_date, scope_team_id, include_relaunches=False):
         captured["dates"] = (start_date, end_date)
         return [], {}, {}, {}
 
@@ -2030,6 +2030,13 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     fake_conn = FakeConn()
     start = datetime.date(2026, 9, 8)
     end = datetime.date(2026, 9, 9)
+    lr._fetch_jobs_launched_on(fake_conn, start, None, end, include_relaunches=True)
+    relaunch_sql = " ".join(fake_conn.cursor_obj.last_sql.split())
+    # Opted in: first launch in range, OR people first launched in range
+    # (a relaunch) — each person on the day of their FIRST interview.
+    assert ("WHERE (((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s) "
+            "OR COALESCE(p.launched_in_period, 0) > 0") in relaunch_sql
+
     lr._fetch_jobs_launched_on(fake_conn, start, None, end)
 
     sql = fake_conn.cursor_obj.last_sql
@@ -2047,10 +2054,11 @@ def test_fetch_jobs_launched_on_sql_filters_true_first_launch():
     assert "AND COALESCE(NULLIF(a.candidate_id, ''), '') <> ''" in cte
     # Unused total_launched removed from CTE and outer query
     assert "total_launched" not in sql
-    # Outer query: first launch in range, OR people first launched in range
-    # (a relaunch) — each person on the day of their FIRST interview.
+    # Outer query, by default: first launch in range only — relaunch-only
+    # rows are opt-in.
     assert ("WHERE (((l.first_launch_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s) "
-            "OR COALESCE(p.launched_in_period, 0) > 0") in squashed
+            "ORDER BY") in squashed
+    assert "OR COALESCE(p.launched_in_period, 0) > 0" not in squashed
     assert "SELECT s.job_id, a.candidate_id, MIN(a.created_at) AS first_at" in squashed
     assert "((pp.first_at AT TIME ZONE %s) AT TIME ZONE %s)::date BETWEEN %s AND %s" in squashed
     # Posted By / Launched By come straight off the job row.
@@ -2191,7 +2199,10 @@ def test_a_relaunch_that_reaches_new_people_lists_the_job_on_that_day(pg_conn):
     assert first_day["26-06182"]["first_launch_in_period"] is True
     assert first_day["26-06182"]["launched_in_period"] == 2          # c1, c2
 
-    relaunch_day = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 9, 2), None)}
+    # Relaunch-only rows are opt-in.
+    assert lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 9, 2), None) == []
+    relaunch_day = {j["job_id"]: j for j in lr._fetch_jobs_launched_on(
+        pg_conn, datetime.date(2026, 9, 2), None, include_relaunches=True)}
     assert set(relaunch_day) == {"26-06182"}
     job = relaunch_day["26-06182"]
     assert job["first_launch_in_period"] is False and job["launched_in_period"] == 1   # c9 only
@@ -2207,4 +2218,4 @@ def test_a_relaunch_that_reaches_new_people_lists_the_job_on_that_day(pg_conn):
     with pg_conn.cursor() as cur:
         cur.execute("INSERT INTO engage_interview_audit (candidate_id, jobdiva_id, interview_id, status, created_at) "
                     "VALUES ('c2', '26-06182', '912', 'Initiated', '2026-09-05 15:00:00')")
-    assert lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 9, 5), None) == []
+    assert lr._fetch_jobs_launched_on(pg_conn, datetime.date(2026, 9, 5), None, include_relaunches=True) == []
