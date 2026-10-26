@@ -443,44 +443,22 @@ JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED = _env_bool_geo(
 # ─────────────────────────────────────────────────────────────────────────
 # Exa Agent API (Websets 2.0) — agentic deep-search pass for LinkedIn-Exa
 # ─────────────────────────────────────────────────────────────────────────
-# When True, every full Step-5 search that includes the "Exa" source also
-# fires an Exa Agent run (`exa.beta.agent.runs.create`, "Pass B") that
-# discovers more LinkedIn profiles and enriches Pass A's hits with
-# last_activity, follower_count, last 2 companies and fit_rationale, emitted
-# as "LinkedIn-DeepSearch" rows/patches.
+# When True, every Step-5 search that includes the "Exa" source also fires
+# an Exa Agent run (`exa.beta.agent.runs.create`) in parallel. The Agent
+# discovers additional LinkedIn profiles missed by Pass A's keyword search
+# AND enriches Pass A's hits (passed via `input.data`) with structured
+# fields: last_activity, follower_count, last 2 companies, fit_rationale.
+# Results land as a second wave of `candidate` / `candidate_detail` events
+# tagged with source "LinkedIn-DeepSearch". Disable to skip the cost.
 #
-# OFF by default (2026-10-14, user decision). A medium run is a flat $0.10,
-# and on PROD nearly every one was paid for and thrown away: exa_py 2.13's
-# AgentUsage.agent_compute_units is an int, Exa now returns 0.4, so create /
-# poll raise a parse error, deep_research_candidates() returns [] and the
-# run id is lost. Relaxation attempts also re-sent byte-identical prompts
-# (47% repeats). Before turning it back on: pin an exa_py whose AgentUsage
-# takes a float (2.14+) or move Pass B to raw httpx like contact_enrichment,
-# and dedupe runs per job + prompt.
-#
-# Turning Pass B off re-enables the per-URL get_contents() fallback unless
-# EXA_DEEP_ANALYSIS_ENABLED is off too (exa_deep_analysis_enabled below);
-# both default off so neither spends on its own.
+# Requires `exa_py>=2.13.0` and an Exa account with the agent beta enabled.
 import os as _os
-
 # Accept the common truthy variants. Strict "true" was tripping operators
 # who set `EXA_AGENT_ENABLED=1` or `=yes` and then wondered why Pass B
 # was silently skipped on every search.
-_TRUTHY = {"1", "true", "yes", "on", "y", "t"}
-
-
-def _truthy(raw) -> bool:
-    return str(raw or "").strip().lower() in _TRUTHY
-
-
-EXA_AGENT_ENABLED = _truthy(_os.getenv("EXA_AGENT_ENABLED", "false"))
-
-
-def exa_deep_analysis_enabled() -> bool:
-    """Per-URL Exa get_contents() (full profile text + match summary) for
-    LinkedIn-Exa rows that pass the filters, when Pass B is off. About $12 a
-    business day at PROD volume, so OFF by default. Read at call time."""
-    return _truthy(_os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "false"))
+EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on", "y", "t"
+}
 
 # Agent effort level → cost cap per 1k searches:
 #   low    → $25/1k    — fails our 4-field schema (budget too tight to scrape)
