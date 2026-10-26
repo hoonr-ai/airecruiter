@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 import pytest
 from fastapi import APIRouter
@@ -43,6 +44,20 @@ def test_nginx_jobs_regex_is_comprehensive():
                 f"from the NGINX allowlist in nginx-app-locations.conf. "
                 f"Please add it to prevent 404 routing errors on QA/Production."
             )
+
+
+def test_voice_webhook_has_its_own_rate_limit_zone():
+    """Pairbot sends ~20-30 webhooks/min; under /api/ they'd share the 30r/m
+    write zone with pairbot's DNC and creation POSTs."""
+    repo = Path(__file__).resolve().parents[3]
+    upstreams = (repo / "nginx-upstreams.conf").read_text(encoding="utf-8")
+    assert re.search(r"zone=voice_webhook_limit:\S+ rate=60r/m;", upstreams)
+    conf = (repo / "nginx-app-locations.conf").read_text(encoding="utf-8")
+    m = re.search(r"location = /api/v1/voice/interviews/webhook \{(.*?)\n    \}", conf, re.S)
+    assert m, "exact nginx location for the voice webhook is missing"
+    assert "zone=voice_webhook_limit" in m.group(1)
+    assert "api_write_limit" not in m.group(1) and "api_limit" not in m.group(1)
+    assert "proxy_pass http://airecruiter_api$uri$is_args$args;" in m.group(1)
 
 
 def test_launch_session_upload_has_its_own_batch_location():
