@@ -22,6 +22,15 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # PR #851: tried adding a `postgres` service here so the *_pg.py suite
+    # (and other DB-fixture tests that self-skip without one) would finally
+    # run in CI instead of silently skipping. Reverted — turning it on
+    # surfaced several pre-existing failures in code unrelated to that PR
+    # (collation-order assumptions in test_job_step_time_router.py/
+    # test_report_foundations.py, a lease-state assertion in
+    # test_contact_single_flight.py) that need their own dedicated
+    # investigation, not a blind fix bundled into an unrelated PR. Tracked
+    # as separate follow-up work rather than reintroduced here.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

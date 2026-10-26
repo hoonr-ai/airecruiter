@@ -172,6 +172,16 @@ async def test_callback_scheduled_skips_jobdiva_note_and_schedules_reminder(monk
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 0
 
+    # PR #851 review: notifications_service._fetch_job_and_candidate's
+    # duplicate-row-ordering fix relies on this write actually bumping
+    # updated_at — there is no trigger doing it automatically.
+    update_calls = [
+        (query, params) for cur in _fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    assert len(update_calls) == 1
+    assert "updated_at = now()" in update_calls[0][0].lower()
+
     assert len(outbox_calls) == 1
     call = outbox_calls[0]
     from core.queue_tasks import CANDIDATE_CALLBACK_REMINDER

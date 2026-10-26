@@ -95,6 +95,11 @@ async def test_mark_callback_done_sets_callback_done_at_only(monkeypatch):
     # here could silently no-op on a row the list still shows, for any
     # differently-cased or whitespace-padded value).
     assert "lower(trim(data->>'feedback_type')) = 'callback scheduled'" in sql.lower()
+    # PR #851 review: the duplicate-row ordering fix in
+    # notifications_service._fetch_job_and_candidate relies on updated_at
+    # actually reflecting this write — there's no trigger bumping it
+    # automatically, so it must be set here explicitly.
+    assert "updated_at = now()" in sql.lower()
     assert conn.committed is True
 
 
@@ -175,6 +180,11 @@ async def test_cancel_callback_clears_feedback_type_and_both_timestamps(monkeypa
     # Scoped at the SQL level to a still-pending "Callback Scheduled" row,
     # same guarantee (and same LOWER(TRIM(...)) match) /callback/done relies on.
     assert "lower(trim(data->>'feedback_type')) = 'callback scheduled'" in sql.lower()
+    # PR #851 review: the duplicate-row ordering fix in
+    # notifications_service._fetch_job_and_candidate relies on updated_at
+    # actually reflecting this write — there's no trigger bumping it
+    # automatically, so it must be set here explicitly.
+    assert "updated_at = now()" in sql.lower()
     assert conn.committed is True
 
 

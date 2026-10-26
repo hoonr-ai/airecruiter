@@ -57,6 +57,7 @@ CREATE TEMP TABLE notifications (
     title TEXT NOT NULL,
     body TEXT,
     score NUMERIC,
+    metadata JSONB DEFAULT '{{}}'::jsonb,
     read_at TIMESTAMPTZ,
     cleared_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
