@@ -8,6 +8,7 @@ LAUNCH_REPORT_TEST_DSN, then "dbname=postgres") — same precedence as
 test_task_outbox_pg.py.
 """
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -115,6 +116,33 @@ async def test_list_upcoming_callbacks_filters_and_sorts_against_real_sql(pg):
     names = [cb["candidate_name"] for cb in res["callbacks"]]
     assert names == ["Sooner Sam", "Later Larry"]  # sorted soonest-first, real timestamptz ORDER BY
     assert res["callbacks"][0]["customer_name"] == "Acme"
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_includes_a_recently_done_row_but_not_an_old_one(pg):
+    """PR review follow-up: Mark Done 'erasing' a row on refresh. The
+    24h-done window has to hold against a real `now()`, not a value this
+    test controls — so unlike the other fixtures here, these timestamps are
+    computed relative to actual wall-clock time."""
+    now = datetime.now(timezone.utc)
+    _insert_candidate(pg, candidate_id="c-done-recent", name="Just Done Jo", data={
+        "feedback_type": "Callback Scheduled", "submitted_by": _RECRUITER,
+        "callback_scheduled_at": (now - timedelta(hours=1)).isoformat(),
+        "callback_done_at": (now - timedelta(minutes=5)).isoformat(),
+    })
+    _insert_candidate(pg, candidate_id="c-done-old", name="Long Done Lee", data={
+        "feedback_type": "Callback Scheduled", "submitted_by": _RECRUITER,
+        "callback_scheduled_at": (now - timedelta(days=2)).isoformat(),
+        "callback_done_at": (now - timedelta(days=2)).isoformat(),
+    })
+
+    user = UserIdentity(email=_RECRUITER, role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+
+    names = {cb["candidate_name"]: cb for cb in res["callbacks"]}
+    assert "Just Done Jo" in names
+    assert names["Just Done Jo"]["callback_done_at"] is not None
+    assert "Long Done Lee" not in names
 
 
 @pytest.mark.anyio

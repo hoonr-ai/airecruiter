@@ -232,6 +232,7 @@ def _insert_notification(
     title: str,
     body: Optional[str],
     score: Optional[float],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """candidate_id is None for job-level event types (pair_launched,
     pair_inactive). pair_inactive passes its own type-specific
@@ -241,16 +242,22 @@ def _insert_notification(
     so it would silently stop deduping at all for this type. pair_launched
     and recruiter_assigned omit conflict_clause entirely (bare INSERT, no ON
     CONFLICT) since their dedup is an application-level pre-insert check
-    done by their caller instead (see _job_level_duplicate_in_last_minute)."""
+    done by their caller instead (see _job_level_duplicate_in_last_minute).
+
+    `metadata` carries structured data the frontend needs to render itself
+    (e.g. a raw ISO timestamp it can format in the viewer's own local
+    timezone) — distinct from `title`/`body`, which are pre-rendered,
+    server-chosen text."""
     cur.execute(
         f"""
         INSERT INTO notifications
-            (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score, metadata)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
         {conflict_clause or ""}
         RETURNING id
         """,
-        (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score),
+        (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score,
+         json.dumps(metadata or {})),
     )
     row = cur.fetchone()
     return row is not None
@@ -1357,8 +1364,15 @@ def _create_candidate_callback_reminder_notification_sync(
                 jobdiva_id=jobdiva_id,
                 candidate_id=candidate_id,
                 title=_TITLE_CALLBACK_REMINDER.format(candidate_name=candidate_name, job_title=job_title),
+                # body stays UTC-labeled, as a plain-text fallback for a
+                # client that doesn't understand metadata.callback_at — the
+                # frontend renders the local-time version of that instead
+                # when it's present (PR review: showing a bare "UTC" time
+                # read as the recruiter's own local time to anyone outside
+                # UTC, e.g. IST).
                 body=f"Scheduled callback at {when_label}.",
                 score=None,
+                metadata={"callback_at": callback_at},
             )
             conn.commit()
             if inserted:

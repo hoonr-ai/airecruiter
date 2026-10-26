@@ -6489,18 +6489,80 @@ async def mark_candidate_callback_done(
     return {"status": "success"}
 
 
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/callback/cancel")
+async def cancel_candidate_callback(
+    job_id_or_ref: str,
+    candidate_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Cancels a scheduled callback outright — "I'm not calling this person
+    back after all" — as opposed to /callback/done ("I called them; the
+    callback itself is over"). Unlike /callback/done, this clears
+    feedback_type back to unset (not just callback_scheduled_at), returning
+    the candidate to the same no-feedback-yet state as before "Callback
+    Scheduled" was ever chosen, rather than leaving a "Callback Scheduled"
+    status with nothing actually scheduled.
+
+    Also clears the queued reminder's effect at read time: once
+    callback_scheduled_at is gone, notifications_service's own stale-
+    reminder check (comparing it against what the already-queued
+    candidate_callback_reminder task was queued for) skips firing — no
+    separate cancellation of the outbox row is needed.
+
+    Same ownership scoping as /callback/done: non-admin, not the recruiter
+    who scheduled it → 403. A no-op (200) if the row has already moved off
+    "Callback Scheduled" (reused, matched, done) — nothing left to cancel.
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            resolved = _resolve_sourced_candidate_row_for_callback(cur, job_id_or_ref, candidate_id)
+            if resolved is None:
+                raise HTTPException(status_code=404, detail="Candidate not found for this job")
+            sc_row_id, data = resolved
+            submitted_by = str(data.get("submitted_by") or "").strip().lower()
+            if not user.is_admin and submitted_by and submitted_by != (user.email or "").strip().lower():
+                raise HTTPException(status_code=403, detail="This callback was scheduled by another recruiter")
+            cur.execute(
+                """
+                UPDATE sourced_candidates
+                SET data = data || %s::jsonb
+                WHERE id = %s AND data->>'feedback_type' = 'Callback Scheduled'
+                """,
+                (json.dumps({
+                    "feedback_type": None,
+                    "callback_scheduled_at": None,
+                    "callback_done_at": None,
+                }), sc_row_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success"}
+
+
 @router.get("/candidates/callbacks/upcoming")
 async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)):
-    """Every not-yet-done "Callback Scheduled" candidate, scoped to the
-    recruiter who scheduled it — the same scoping as the reminder
-    notification itself (recruiter_email, not the job's whole
-    recruiter_emails list), so this list only ever shows callbacks THIS
-    recruiter is personally on the hook for.
+    """Every "Callback Scheduled" candidate still pending, PLUS one marked
+    done in the last 24h, scoped to the recruiter who scheduled it — the
+    same scoping as the reminder notification itself (recruiter_email, not
+    the job's whole recruiter_emails list), so this list only ever shows
+    callbacks THIS recruiter is personally on the hook for.
 
     Includes overdue callbacks (callback_scheduled_at already in the past,
     still not marked done) rather than cutting them off at "now" — the
     point of this list is "what do I still need to call," and a missed
     callback is exactly that, not something to quietly drop.
+
+    The 24h-done window (PR review: Mark Done "erasing" the row) exists so a
+    row the recruiter just marked done keeps showing its "Marked as done"
+    state across a page refresh, not just for the current in-memory session
+    — the frontend tells a server-known done row apart from a pending one
+    via this response's own callback_done_at, rather than only its local
+    doneKeys set. A done row older than 24h drops off entirely; marking
+    done doesn't delete anything (callback_done_at just gets set, same as
+    before), it's just no longer returned here.
 
     Sorted soonest-first; grouping into Today/Tomorrow/dated sections and
     the "in 45 min" / "overdue" relative labels are display concerns, left
@@ -6524,7 +6586,10 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
                 WHERE LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled'
                   AND LOWER(TRIM(sc.data->>'submitted_by')) = %s
                   AND sc.data->>'callback_scheduled_at' IS NOT NULL
-                  AND sc.data->>'callback_done_at' IS NULL
+                  AND (
+                      sc.data->>'callback_done_at' IS NULL
+                      OR (sc.data->>'callback_done_at')::timestamptz > now() - interval '24 hours'
+                  )
                 ORDER BY (sc.data->>'callback_scheduled_at')::timestamptz ASC
                 """,
                 (recipient,),
@@ -6547,5 +6612,6 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
             "job_title": row.get("enhanced_title") or row.get("title") or "this job",
             "customer_name": row.get("customer_name"),
             "callback_at": callback_at,
+            "callback_done_at": data.get("callback_done_at"),
         })
     return {"status": "success", "callbacks": callbacks}

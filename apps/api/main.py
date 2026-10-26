@@ -201,21 +201,24 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
 
     # Transactional outbox relay (services/task_outbox.py). The arq worker
-    # runs it when ARQ_ENABLED; otherwise every API worker does, and
-    # FOR UPDATE SKIP LOCKED keeps them from claiming the same row.
-    from core.queue import queue_enabled as _queue_enabled
-    if not _queue_enabled():
-        from services import task_outbox as _task_outbox_relay
-        scheduler.add_job(
-            background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
-            "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
-        )
-        scheduler.add_job(
-            background_transaction("scheduler/task_outbox_purge")(_task_outbox_relay.purge_old),
-            "cron", hour=3, minute=17, id="task_outbox_purge", max_instances=1, coalesce=True,
-        )
-    # Runs in the API either way: with ARQ_ENABLED a dead worker would
-    # otherwise stop outbox delivery silently.
+    # ALSO runs it when ARQ_ENABLED, but every API worker runs it too,
+    # unconditionally — FOR UPDATE SKIP LOCKED keeps any number of relays
+    # from claiming the same row (task_outbox.py's own docstring), so this
+    # is safe, redundant delivery rather than a race. Previously gated
+    # behind `if not queue_enabled()`, so a dead or never-deployed arq
+    # worker in an ARQ_ENABLED environment meant NOTHING relayed the
+    # outbox — including every candidate_callback_reminder — with only
+    # check_lag's log line to notice. Running it here too makes that a
+    # non-issue instead of an alert someone has to act on.
+    from services import task_outbox as _task_outbox_relay
+    scheduler.add_job(
+        background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
+        "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        background_transaction("scheduler/task_outbox_purge")(_task_outbox_relay.purge_old),
+        "cron", hour=3, minute=17, id="task_outbox_purge", max_instances=1, coalesce=True,
+    )
     from services import task_outbox as _task_outbox_lag
     scheduler.add_job(
         _task_outbox_lag.check_lag, "interval", minutes=5, id="task_outbox_lag_check",

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Clock, ExternalLink, CheckCircle2, CalendarClock, AlertTriangle, Loader2 } from "lucide-react";
+import { Clock, ExternalLink, CheckCircle2, CalendarClock, AlertTriangle, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -32,6 +32,10 @@ interface UpcomingCallback {
   job_title: string;
   customer_name: string | null;
   callback_at: string;
+  // Set once Mark Done succeeds; the backend keeps returning the row for
+  // 24h afterward so this (and the "Marked as done" state it drives) also
+  // survives a page refresh, not just the current in-memory session.
+  callback_done_at: string | null;
 }
 
 // Identifies a callback row across state updates — candidate_id alone isn't
@@ -64,23 +68,17 @@ export default function UpcomingCallbacksPage() {
   // hides it while the dialog is open (the same failure mode as Rankings'
   // Schedule Callback modal).
   const [rescheduleError, setRescheduleError] = useState("");
-  // Keys of callbacks marked done in this session. The backend already
-  // excludes them from a fresh fetch (callback_done_at is no longer null),
-  // but we keep the row visible locally with a clear "Marked as Done" state
-  // instead of yanking it out of the list the instant the request succeeds
-  // — a bare instant disappearance reads as the action having silently
-  // failed or wiped the record, when the underlying data is untouched.
-  const [doneKeys, setDoneKeys] = useState<Set<string>>(new Set());
+  // Clearing (Cancel/Clear all) is a separate busy flag from busyKey — the
+  // latter already means "this one row's Reschedule/Mark done is in
+  // flight," and "Clear all" can be busy across several rows at once,
+  // which a single shared key can't represent.
+  const [clearingAll, setClearingAll] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const res = await api.candidates.getUpcomingCallbacks();
       setCallbacks(Array.isArray(res?.callbacks) ? res.callbacks : []);
       setLoadError(null);
-      // A fresh fetch already excludes anything done server-side, so any
-      // doneKeys from a prior load are stale by definition — drop them
-      // rather than let the set grow across repeated loads.
-      setDoneKeys(new Set());
     } catch (err) {
       console.error("Failed to load upcoming callbacks:", err);
       setLoadError("Failed to load upcoming callbacks.");
@@ -118,8 +116,8 @@ export default function UpcomingCallbacksPage() {
     // something still requiring attention.
     for (const group of out) {
       group.items.sort((a, b) => {
-        const doneA = doneKeys.has(callbackKey(a));
-        const doneB = doneKeys.has(callbackKey(b));
+        const doneA = !!a.callback_done_at;
+        const doneB = !!b.callback_done_at;
         if (doneA !== doneB) return doneA ? 1 : -1;
         const overdueA = isCallbackOverdue(a.callback_at);
         const overdueB = isCallbackOverdue(b.callback_at);
@@ -128,7 +126,7 @@ export default function UpcomingCallbacksPage() {
       });
     }
     return out;
-  }, [callbacks, doneKeys]);
+  }, [callbacks]);
 
   const handleMarkDone = async (cb: UpcomingCallback) => {
     const key = callbackKey(cb);
@@ -136,18 +134,79 @@ export default function UpcomingCallbacksPage() {
     setActionError(null);
     try {
       await api.candidates.markCallbackDone(String(cb.job_id), cb.candidate_id);
-      // Keep the row (data persists either way — this only sets
-      // callback_done_at server-side) but flag it as done so the row below
-      // shows a clear "Marked as Done" state instead of vanishing outright.
-      // It naturally drops off the next time this list is fetched fresh,
-      // once the backend itself excludes it.
-      setDoneKeys((prev) => new Set(prev).add(key));
+      // Patch callback_done_at locally rather than removing the row — the
+      // backend keeps returning it (24h window) so this same field drives
+      // the "Marked as done" state across a refetch/refresh too, not just
+      // this optimistic update.
+      const doneAt = new Date().toISOString();
+      setCallbacks((prev) =>
+        (prev || []).map((c) => (callbackKey(c) === key ? { ...c, callback_done_at: doneAt } : c))
+      );
     } catch (err) {
       console.error("Failed to mark callback done:", err);
       setActionError("Failed to mark this callback done. Please try again.");
     } finally {
       setBusyKey(null);
     }
+  };
+
+  const handleCancelCallback = async (cb: UpcomingCallback) => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`Cancel the callback with ${cb.candidate_name}? No reminder will be sent, and this can't be undone.`)
+    ) {
+      return;
+    }
+    const key = callbackKey(cb);
+    setBusyKey(key);
+    setActionError(null);
+    try {
+      await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id);
+      setCallbacks((prev) => (prev || []).filter((c) => callbackKey(c) !== key));
+    } catch (err) {
+      console.error("Failed to cancel callback:", err);
+      setActionError("Failed to cancel this callback. Please try again.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleClearAll = async () => {
+    const all = callbacks || [];
+    if (all.length === 0) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Clear all ${all.length} callback${all.length === 1 ? "" : "s"}? Any still pending won't get a reminder, and this can't be undone.`
+      )
+    ) {
+      return;
+    }
+    setClearingAll(true);
+    setActionError(null);
+    // Sequential, not Promise.all — these all hit the same recruiter's rows,
+    // and a clear failure partway through should still leave state (loading
+    // indicator, remaining list) consistent rather than racing N requests
+    // against one shared setCallbacks.
+    const failed: UpcomingCallback[] = [];
+    for (const cb of all) {
+      try {
+        await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id);
+        const key = callbackKey(cb);
+        setCallbacks((prev) => (prev || []).filter((c) => callbackKey(c) !== key));
+      } catch (err) {
+        console.error("Failed to cancel callback during Clear all:", err);
+        failed.push(cb);
+      }
+    }
+    if (failed.length > 0) {
+      setActionError(
+        failed.length === all.length
+          ? "Failed to clear the callbacks. Please try again."
+          : `Cleared ${all.length - failed.length} of ${all.length} — the rest failed. Please try again.`
+      );
+    }
+    setClearingAll(false);
   };
 
   // Computed once per dialog open rather than on every render (PR #844
@@ -194,19 +253,15 @@ export default function UpcomingCallbacksPage() {
         feedback_type: "Callback Scheduled",
         callback_at: callbackAtIso,
       });
-      setCallbacks((prev) =>
-        (prev || []).map((c) => (callbackKey(c) === key ? { ...c, callback_at: callbackAtIso } : c))
-      );
-      // Rescheduling clears callback_done_at server-side (candidates.py), so
-      // a row rescheduled right out of its "Marked as Done" state should
-      // immediately drop that state here too rather than waiting on a
+      // Rescheduling also clears callback_done_at server-side
+      // (candidates.py), so a row rescheduled right out of its "Marked as
+      // Done" state drops that state here too rather than waiting on a
       // refetch.
-      setDoneKeys((prev) => {
-        if (!prev.has(key)) return prev;
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
+      setCallbacks((prev) =>
+        (prev || []).map((c) =>
+          callbackKey(c) === key ? { ...c, callback_at: callbackAtIso, callback_done_at: null } : c
+        )
+      );
       closeReschedule();
     } catch (err) {
       console.error("Failed to reschedule callback:", err);
@@ -229,6 +284,18 @@ export default function UpcomingCallbacksPage() {
       <div className="flex items-center gap-2 mb-6">
         <Clock className="h-5 w-5 text-slate-500" />
         <h1 className="text-xl font-semibold text-slate-900">Upcoming Callbacks</h1>
+        {callbacks !== null && callbacks.length > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleClearAll}
+            disabled={clearingAll || busyKey !== null}
+            className="ml-auto text-slate-500 hover:text-rose-600 hover:border-rose-200"
+          >
+            {clearingAll ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
+            Clear all
+          </Button>
+        )}
       </div>
 
       {actionError && (
@@ -280,7 +347,7 @@ export default function UpcomingCallbacksPage() {
                   const key = callbackKey(cb);
                   const overdue = isCallbackOverdue(cb.callback_at);
                   const busy = busyKey === key;
-                  const done = doneKeys.has(key);
+                  const done = !!cb.callback_done_at;
                   return (
                     <Card
                       key={key}
@@ -340,6 +407,16 @@ export default function UpcomingCallbacksPage() {
                             {busy ? "" : "Mark done"}
                           </Button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => handleCancelCallback(cb)}
+                          disabled={busy || clearingAll}
+                          aria-label={`Cancel callback with ${cb.candidate_name}`}
+                          title="Cancel this callback"
+                          className="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-50 disabled:pointer-events-none"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
                       </div>
                     </Card>
                   );
