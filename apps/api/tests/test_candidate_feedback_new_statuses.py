@@ -201,6 +201,66 @@ async def test_callback_scheduled_persists_callback_time_in_feedback_data(monkey
 
 
 @pytest.mark.anyio
+async def test_callback_scheduled_clears_a_previous_callback_done_at(monkeypatch):
+    """PR #844 review (High): a fresh Callback Scheduled write — the first
+    time, or a reschedule after a previous one was marked done via
+    POST .../callback/done — must clear callback_done_at. Otherwise
+    list_upcoming_callbacks (filtered on callback_done_at IS NULL) would
+    silently never show the new callback even though a reminder is about
+    to fire for it."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+    monkeypatch.setattr("services.task_outbox.add", lambda *a, **kw: 1)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    update_calls = [
+        (query, params) for cur in fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    feedback_payload = json.loads(update_calls[0][1][0])
+    assert feedback_payload["callback_done_at"] is None
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_payload_omits_submit_only_fields(monkeypatch):
+    """PR #844 review (Medium): a reschedule from the Upcoming Callbacks page
+    sends only feedback_type + callback_at — confirms that write never
+    includes submission_type/manager_email/recruiter_notes (Submit-only
+    fields). sourced_candidates.data is merged with Postgres's `||` (only
+    overwrites keys present in this dict), so their absence here is exactly
+    what guarantees a reschedule can't wipe out an unrelated prior Submit's
+    fields."""
+    cand_module, jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+    monkeypatch.setattr("services.task_outbox.add", lambda *a, **kw: 1)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=3)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    assert len(jobdiva_calls) == 0  # no JobDiva note fired for the reschedule either
+    update_calls = [
+        (query, params) for cur in fake_conn.cursors for query, params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    feedback_payload = json.loads(update_calls[0][1][0])
+    assert "submission_type" not in feedback_payload
+    assert "manager_email" not in feedback_payload
+    assert "recruiter_notes" not in feedback_payload
+
+
+@pytest.mark.anyio
 async def test_callback_scheduled_rejects_a_callback_under_five_minutes_away(monkeypatch):
     cand_module, _jobdiva_calls, _fake_conn = _base_setup(monkeypatch)
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")

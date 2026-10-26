@@ -594,6 +594,10 @@ export const api = {
       req<any>(`/candidates/filter-options`),
     getAllLaunched: (query?: string) =>
       req<any>(`/candidates/launched${query ? `?${query}` : ""}`),
+    getUpcomingCallbacks: () =>
+      req<any>(`/candidates/callbacks/upcoming`),
+    markCallbackDone: (jobId: string, candidateId: string) =>
+      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/done`, { method: "POST" }),
   },
   manualCandidates: {
     add: (jobRef: string, body: unknown) =>
