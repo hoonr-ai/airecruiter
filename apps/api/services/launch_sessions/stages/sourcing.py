@@ -19,8 +19,7 @@ browser's live table; résumé text / LinkedIn profile left out until the end)
 and checkpoint.s1 (attempt, pool, qualified, source statuses, stage text,
 JobDiva-criteria flag, errors, detail-failed count). An attempt that is
 interrupted is re-run from its start (its partial events are deleted first;
-the search caches make that cheap: Exa Pass A is served from the Redis search
-cache within its TTL, and Pass B is off by default); finished
+the search caches make that cheap, Exa Pass A/B is paid again); finished
 attempts are rebuilt by replaying their events through a fresh StreamRun —
 the same reducer, so the same state. Cross-submissions are scheduled once per
 session (flag written BEFORE the first stream starts).

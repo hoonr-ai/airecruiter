@@ -742,7 +742,6 @@ def test_config_is_sent_once_per_hour_and_only_once_new_relic_took_it(monkeypatc
     monkeypatch.setattr(sourcing_config, "EXA_AGENT_ENABLED", False)
     monkeypatch.delenv("EXA_DEEP_ANALYSIS_ENABLED", raising=False)
     monkeypatch.setattr(core_config, "EXA_RUN_METADATA_ENABLED", True)
-    monkeypatch.setattr(core_config, "EXA_SEARCH_CACHE_TTL_S", 43200)
     monkeypatch.setattr(nr, "is_enabled", lambda: False)
     tele.record_config_once()
     assert events == []  # agent not connected: not counted as sent
@@ -755,10 +754,6 @@ def test_config_is_sent_once_per_hour_and_only_once_new_relic_took_it(monkeypatc
     cfg = configs[0]
     assert cfg["pass_b"] is False and cfg["deep_analysis"] is False and cfg["metadata_on"] is True
     assert cfg["breaker_ttl_s"] == 300.0 and isinstance(cfg["worker_pid"], int) and cfg["sdk_version"]
-    # Pass A sizing and the search cache (no REDIS_URL in the suite: off_config).
-    assert cfg["per_query_factor"] == sourcing_config.EXA_PEOPLE_PER_QUERY_FACTOR
-    assert cfg["search_cache_ttl_s"] == 43200
-    assert cfg["search_cache"] == "off_config"
 
     monkeypatch.setattr(tele, "_config_sent_at", time.monotonic() - tele.CONFIG_EVERY_S - 1)
     tele.record_config_once()

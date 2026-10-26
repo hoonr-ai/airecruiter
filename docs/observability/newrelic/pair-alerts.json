@@ -329,7 +329,7 @@
     {
       "name": "PAIR Exa Pass A query failures",
       "enabled": true,
-      "description": "Some LinkedIn-Exa / Dice people-search queries failed and Step 5 showed a PARTIAL list (exa_service._people_search_fanout logs this at ERROR, never sampled). A run whose failed queries all ran out of credits is the credits alert instead: it raises when no rows came back, and a partial list (the other queries cached) logs 'queries skipped while Exa is out of credits' at WARNING, which this condition does not match.",
+      "description": "Some LinkedIn-Exa / Dice people-search queries failed and Step 5 showed a PARTIAL list (exa_service._people_search_fanout logs this at ERROR, never sampled). A run where every query ran out of credits is the credits alert instead.",
       "nrql": {
         "query": "SELECT count(*) FROM Log WHERE entity.name IN ('PAIR API (QA)', 'PAIR API (PROD)') AND message LIKE 'Exa people search:%queries failed%' FACET entity.name"
       },

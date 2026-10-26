@@ -441,32 +441,6 @@ JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED = _env_bool_geo(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Exa Pass A people search — results bought per query
-# ─────────────────────────────────────────────────────────────────────────
-# Pass A (and Dice) runs one Exa search per title (up to 3) and keeps the
-# round-robin merge's top `limit` (50). Each query used to ask for all 50, so
-# a 3-title search bought 150 results to keep 50; Exa bills every result past
-# 10. Each query now asks for ceil(limit * F / queries), at least 10 and at
-# most `limit` (34 for 3 titles; 1-2 titles are unchanged), which leaves 2x
-# the merge's need for duplicates across sibling titles. Sample and full runs
-# ask for the same size on purpose: they share the Pass A search cache
-# (services/exa_search_cache.py). 0 = every query asks for `limit` again.
-# Read at import; ExaPeopleFanout's `starved` / `cf15_same` say whether to
-# move it.
-def _env_factor(name: str, default: float) -> float:
-    import math
-
-    try:
-        value = float((_os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-    return value if math.isfinite(value) and value >= 0 else default
-
-
-EXA_PEOPLE_PER_QUERY_FACTOR = _env_factor("EXA_PEOPLE_PER_QUERY_FACTOR", 2.0)
-
-
-# ─────────────────────────────────────────────────────────────────────────
 # Exa Agent API (Websets 2.0) — agentic deep-search pass for LinkedIn-Exa
 # ─────────────────────────────────────────────────────────────────────────
 # When True, every full Step-5 search that includes the "Exa" source also

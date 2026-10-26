@@ -28,9 +28,7 @@ name / url / text / contact / content / resume ..., hence ``cost_pages`` not
   ``cost_fiber`` (Exa Connect data sources), ``acu``
 - ``num_results`` (asked) / ``n_results`` (got), ``fields_asked`` /
   ``fields_found``, ``http_status``, ``error_kind``, ``latency_ms``,
-  ``exa_run_id``, ``call_id`` (the run's metadata id), ``effort``, ``late``,
-  ``cache`` (Pass A / Dice: ``miss`` = the search cache was asked first,
-  ``off`` = it is unavailable; a cache hit is not billed and sends no ExaCall)
+  ``exa_run_id``, ``call_id`` (the run's metadata id), ``effort``, ``late``
 - who asked, from the request-scoped context below: ``trigger``, ``path``,
   ``attempt``, ``job_id``, ``launch_session_id``, ``tier``, ``arm``, ``defer``,
   plus pipeline_trace's ``run_id`` / ``job_id``.
@@ -42,12 +40,6 @@ Context. A ContextVar carries who asked, so no signature changes (tests fake
 - ``bind_if_unbound(**kw)``: async generators (a reset there can run in
   another context when the generator is closed elsewhere); a bare set of the
   keys not already bound.
-
-``ExaPeopleFanout`` (one per Pass A / Dice fan-out) counts cache hits,
-misses and in-flight joins, the per-query size and what the merge kept
-(``record_people_fanout``; see exa_service._people_search_fanout). One whose
-caller left before the merge carries ``abandoned`` = true and the lookup
-counts only (no rows, cost, ``starved`` or ``cf15_same``).
 
 ``ExaConfig`` (once per worker per hour, from the Step-5 search) shows the
 Exa flags each worker actually runs with, so a hand-set ``.env`` override is
@@ -74,7 +66,6 @@ logger = logging.getLogger(__name__)
 
 EVENT = "ExaCall"
 CONFIG_EVENT = "ExaConfig"
-FANOUT_EVENT = "ExaPeopleFanout"
 CONFIG_EVERY_S = 3600.0
 
 CONTEXT_KEYS = (
@@ -281,51 +272,29 @@ def _flat(value: Any) -> Any:
     return value
 
 
-def _with_context(attrs: Dict[str, Any]) -> Dict[str, Any]:
-    """The bound context plus pipeline_trace's run / job, then ``attrs``
-    (which win; None values dropped)."""
-    payload: Dict[str, Any] = {}
-    ctx = _ctx.get()
-    for key in CONTEXT_KEYS:
-        if ctx.get(key) is not None:
-            payload[key] = ctx[key]
-    if payload.get("job_id") is None:
-        job = _pt.job_id.get()
-        if job:
-            payload["job_id"] = job
-    run = _pt.run_id.get()
-    if run:
-        payload["run_id"] = run
-    payload.update({k: v for k, v in attrs.items() if v is not None})
-    return payload
-
-
 def record_exa_call(surface: str, endpoint: str, outcome: str, **attrs: Any) -> None:
     """One ``ExaCall`` event (see the module docstring for the attributes).
     ``attrs`` beat the bound context; None values are dropped. Never raises."""
     if not enabled():
         return
     try:
-        payload = _with_context(attrs)
+        payload: Dict[str, Any] = {}
+        ctx = _ctx.get()
+        for key in CONTEXT_KEYS:
+            if ctx.get(key) is not None:
+                payload[key] = ctx[key]
+        if payload.get("job_id") is None:
+            job = _pt.job_id.get()
+            if job:
+                payload["job_id"] = job
+        run = _pt.run_id.get()
+        if run:
+            payload["run_id"] = run
+        payload.update({k: v for k, v in attrs.items() if v is not None})
         payload.update(surface=surface, endpoint=endpoint, outcome=outcome)
         _send(EVENT, _nr.safe_attributes({k: _flat(v) for k, v in payload.items()}))
     except Exception as exc:  # noqa: BLE001
         logger.debug("ExaCall not recorded: %s", exc)
-
-
-def record_people_fanout(surface: str, **attrs: Any) -> None:
-    """One ``ExaPeopleFanout`` event per Pass A / Dice fan-out (counts and
-    flags only, see exa_service._people_search_fanout), with the same who-
-    asked context as ExaCall. Cache hits are counted here, never as ExaCall
-    (they are not billed). Never raises."""
-    if not enabled():
-        return
-    try:
-        payload = _with_context(attrs)
-        payload["surface"] = surface
-        _send(FANOUT_EVENT, _nr.safe_attributes({k: _flat(v) for k, v in payload.items()}))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("ExaPeopleFanout not recorded: %s", exc)
 
 
 def _sdk_version() -> str:
@@ -355,12 +324,8 @@ def record_config_once() -> None:
     try:
         from core import sourcing_config as _sc
         from core.vendor_limiter import EXA
-        from services import exa_search_cache
 
         _send(CONFIG_EVENT, _nr.safe_attributes({
-            "per_query_factor": float(getattr(_sc, "EXA_PEOPLE_PER_QUERY_FACTOR", 0.0) or 0.0),
-            "search_cache_ttl_s": exa_search_cache.ttl_s(),
-            "search_cache": exa_search_cache.state(),
             "pass_b": bool(getattr(_sc, "EXA_AGENT_ENABLED", False)),
             "deep_analysis": bool(_sc.exa_deep_analysis_enabled()),
             "metadata_on": run_metadata_enabled(),

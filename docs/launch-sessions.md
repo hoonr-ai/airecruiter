@@ -125,7 +125,7 @@ Skip reasons:
   - the raw events, to `launch_session_stream`;
   - the table rows that changed (light: no résumé text, no LinkedIn profile, until the end of S1);
   - `checkpoint.s1`: attempt, pool, qualified, source statuses, stage text, JobDiva-criteria flag, errors and detail-failed count.
-- An interrupted attempt is re-run from its start (cheap because of caches: Exa Pass A is served from the Redis search cache within its TTL, and Pass B is off by default). Finished attempts are rebuilt by replaying their events through a fresh `StreamRun`: the same reducer gives the same state.
+- An interrupted attempt is re-run from its start (cheap because of caches, but Exa Pass A/B is paid again). Finished attempts are rebuilt by replaying their events through a fresh `StreamRun`: the same reducer gives the same state.
 - Cross submissions are scheduled once per session. The flag is written before the first stream starts, so delivery is at most once.
 
 ### S7: never post a person twice
