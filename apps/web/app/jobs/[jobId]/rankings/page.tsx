@@ -3,7 +3,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { REJECTION_REASONS } from "@/lib/rejection";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import {
   ArrowLeft,
@@ -559,7 +558,24 @@ export default function CandidateRankingsPage() {
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
-  const [actionSelectKey, setActionSelectKey] = useState(0);
+  // Forces a remount of ONE row's action Select after its modal is
+  // cancelled, so its own internal state resets — scoped to {candidateId,
+  // nonce} rather than a single counter bumped for every close (PR #840
+  // review: a shared counter remounted every row in the table on every
+  // close, however large).
+  const [actionSelectReset, setActionSelectReset] = useState<{ candidateId: number; nonce: number } | null>(null);
+  // Shared by every "cancel without choosing" path for the Submit/Reject
+  // modals (PR #840 review: this was copy-pasted at each call site). Reads
+  // actionCandidateId before clearing it so the remount above targets
+  // exactly the row whose modal just closed.
+  const closeIntegrationModal = useCallback(() => {
+    if (actionCandidateId != null) {
+      setActionSelectReset({ candidateId: actionCandidateId, nonce: Date.now() });
+    }
+    setIntegrationModalOpen(null);
+    setActionCandidateId(null);
+    setRejectReason("");
+  }, [actionCandidateId]);
 
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
@@ -3074,7 +3090,7 @@ export default function CandidateRankingsPage() {
                         <TableCell className="border-b border-slate-200 text-center pr-4 pl-4 border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-col items-center gap-1.5">
                             <Select
-                              key={`${candidate.id}-${actionSelectKey}`}
+                              key={actionSelectReset?.candidateId === candidate.id ? `${candidate.id}-${actionSelectReset.nonce}` : candidate.id}
                               disabled={syncingCandidateId === candidate.id}
                               value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || undefined}
                               onValueChange={(val) => {
@@ -3269,11 +3285,7 @@ export default function CandidateRankingsPage() {
       {/* Integration Modals */}
       <SubmissionModal
         isOpen={integrationModalOpen === 'submit' && !!actionCandidateId}
-        onClose={() => {
-          setIntegrationModalOpen(null);
-          setActionCandidateId(null);
-          setActionSelectKey(k => k + 1);
-        }}
+        onClose={closeIntegrationModal}
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={job?.title || "Job"}
         jobRef={job?.jobdiva_id || job?.job_id || String(jobId || "")}
@@ -3283,14 +3295,14 @@ export default function CandidateRankingsPage() {
       />
 
       {integrationModalOpen === 'reject' && actionCandidateId && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 select-none">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
                 <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => { setIntegrationModalOpen(null); setActionCandidateId(null); setRejectReason(""); setActionSelectKey(k => k + 1); }} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={closeIntegrationModal} className="text-slate-400 hover:text-slate-600">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
@@ -3306,7 +3318,7 @@ export default function CandidateRankingsPage() {
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => { setIntegrationModalOpen(null); setActionCandidateId(null); setRejectReason(""); setActionSelectKey(k => k + 1); }} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button variant="outline" onClick={closeIntegrationModal} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}

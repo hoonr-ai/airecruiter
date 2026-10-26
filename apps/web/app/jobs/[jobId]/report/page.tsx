@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { REJECTION_REASONS } from "@/lib/rejection";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -938,7 +937,7 @@ export default function CandidateEvaluationReportPage() {
       />
 
       {integrationModalOpen === 'reject' && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 no-print select-none">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 no-print">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
                 <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
