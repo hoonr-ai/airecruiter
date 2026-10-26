@@ -59,13 +59,22 @@ _FAKE_CAND_ROW = (
     "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
 )
 
+# Same candidate, but auto-provisioned: data carries its own JobDiva
+# candidate id, distinct from sourced_candidates.candidate_id (row[1]) —
+# the shape that exposes the jd_candidate_id/sc_candidate_id bug (PR #848
+# review).
+_FAKE_CAND_ROW_AUTO_PROVISIONED = (
+    55148489, "21562841721070", "26-12137", {"jobdiva_candidate_id": "99999999"}, "33087136",
+    "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
 
-def _base_setup(monkeypatch):
+
+def _base_setup(monkeypatch, select_row=_FAKE_CAND_ROW):
     from routers import candidates as cand_module
     from services.jobdiva import jobdiva_service
 
     monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
-    fake_conn = _FakeConnection(select_row=_FAKE_CAND_ROW)
+    fake_conn = _FakeConnection(select_row=select_row)
     monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 0})
 
@@ -173,6 +182,47 @@ async def test_callback_scheduled_skips_jobdiva_note_and_schedules_reminder(monk
     expected_remind_at = future - timedelta(minutes=5)
     assert abs((call["available_at"] - expected_remind_at).total_seconds()) < 1
     assert call["dedupe_key"] is not None
+
+
+@pytest.mark.anyio
+async def test_callback_scheduled_reminder_uses_sourced_candidate_id_for_auto_provisioned(monkeypatch):
+    """PR #848 review: for an auto-provisioned candidate (one with its own
+    JobDiva id in data["jobdiva_candidate_id"], distinct from
+    sourced_candidates.candidate_id), the reminder must be queued with the
+    latter. notifications_service's own candidate lookup
+    (_fetch_job_and_candidate) matches on that column — queuing the JobDiva
+    id instead (the original bug) meant the lookup silently found nothing
+    and the reminder never fired, with the outbox row still marked done.
+    """
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(monkeypatch, select_row=_FAKE_CAND_ROW_AUTO_PROVISIONED)
+
+    outbox_calls = []
+
+    def fake_add(cur, task_name, *args, dedupe_key=None, available_at=None):
+        outbox_calls.append({"task_name": task_name, "args": args, "dedupe_key": dedupe_key})
+        return 1
+
+    monkeypatch.setattr("services.task_outbox.add", fake_add)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    request = CandidateFeedbackRequest(feedback_type="Callback Scheduled", callback_at=future.isoformat())
+
+    res = await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    assert res["status"] == "success"
+    assert len(outbox_calls) == 1
+    # args: (job_id, candidate_id, recruiter_email, callback_at)
+    queued_candidate_id = outbox_calls[0]["args"][1]
+    assert queued_candidate_id == "21562841721070"  # sourced_candidates.candidate_id
+    assert queued_candidate_id != "99999999"  # not data["jobdiva_candidate_id"]
+    # The dedupe key stays on the old (JobDiva-id) shape regardless — see
+    # candidates.py's own comment at the call site for why a key already
+    # queued before this fix must keep deduping the same way after it.
+    assert outbox_calls[0]["dedupe_key"] == f"callback_reminder:99999999:26-12137:{future.isoformat()}"
 
 
 @pytest.mark.anyio

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { callbackDayLabel, callbackRelativeLabel, isCallbackOverdue, isValidFutureCallbackTime } from "./callback-time.ts";
+import {
+  callbackDayLabel,
+  callbackRelativeLabel,
+  hasMinimumCallbackLeadTime,
+  isCallbackOverdue,
+  isValidFutureCallbackTime,
+} from "./callback-time.ts";
 
 // Built from LOCAL date/time components (not a UTC "Z" string) so this is
 // deterministic regardless of the machine running the suite — a fixed UTC
@@ -91,5 +97,27 @@ describe("isValidFutureCallbackTime", () => {
     // The regression this guards: isCallbackOverdue reads "not-a-date" as
     // NOT overdue, which would wrongly look like a valid future time.
     assert.equal(isCallbackOverdue("not-a-date", NOW), false);
+  });
+});
+
+describe("hasMinimumCallbackLeadTime", () => {
+  it("is false for a time that is future but under the 5-minute lead", () => {
+    assert.equal(hasMinimumCallbackLeadTime(new Date(NOW.getTime() + 60_000).toISOString(), NOW), false);
+  });
+
+  it("is true at exactly the 5-minute lead", () => {
+    assert.equal(hasMinimumCallbackLeadTime(new Date(NOW.getTime() + 5 * 60_000).toISOString(), NOW), true);
+  });
+
+  it("is true comfortably past the 5-minute lead", () => {
+    assert.equal(hasMinimumCallbackLeadTime(new Date(NOW.getTime() + 3_600_000).toISOString(), NOW), true);
+  });
+
+  it("is false for a past time", () => {
+    assert.equal(hasMinimumCallbackLeadTime(new Date(NOW.getTime() - 60_000).toISOString(), NOW), false);
+  });
+
+  it("is false for an unparsable value", () => {
+    assert.equal(hasMinimumCallbackLeadTime("not-a-date", NOW), false);
   });
 });

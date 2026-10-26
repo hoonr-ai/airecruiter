@@ -63,6 +63,8 @@ import { StopOutreachModal, type StopOutreachCandidate } from "@/components/Stop
 import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import { API_BASE, authFetch, api } from "@/lib/api";
+import { ApiError, extractErrorMessage } from "@/lib/api-error";
+import { datetimeLocalMin, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
 
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -575,7 +577,17 @@ export default function CandidateRankingsPage() {
   // close, however large).
   const [actionSelectReset, setActionSelectReset] = useState<{ candidateId: number; nonce: number } | null>(null);
   const [callbackAtInput, setCallbackAtInput] = useState("");
+  // Computed once, at the moment the modal opens (same as Candidates' own
+  // callbackAtMin) rather than inline in the input's `min` prop — calling
+  // the impure datetimeLocalMin()/Date.now() directly during render is a
+  // react-hooks/purity violation.
+  const [callbackAtMin, setCallbackAtMin] = useState("");
   const callbackAtInputRef = useRef<HTMLInputElement>(null);
+  // Shown inline inside the Schedule Callback modal rather than only as a
+  // toast — the toast renders at a lower z-index than this modal's own
+  // backdrop, so while the modal stays open after a failed save the toast
+  // is effectively invisible behind it.
+  const [callbackModalError, setCallbackModalError] = useState("");
   // PR #841 review: the callback modal had no focus handling at all — move
   // focus onto its one input as soon as it opens, same as a native <dialog>
   // would, instead of leaving focus wherever it was on the page behind it.
@@ -697,6 +709,16 @@ export default function CandidateRankingsPage() {
 
   const handleConfirmCallbackSchedule = async () => {
     if (!actionCandidateId || !callbackAtInput) return;
+    setCallbackModalError("");
+    // A browser's datetime-local `min` is only a hint, not enforcement
+    // (PR #845 review, mirrored here) — typed input can still submit a past
+    // time. Checks the backend's actual 5-minute lead, not just "in the
+    // future", so a time 10 seconds out is caught here instead of round-
+    // tripping to the backend for the same rejection.
+    if (!hasMinimumCallbackLeadTime(callbackAtInput)) {
+      setCallbackModalError("Callback time must be at least 5 minutes in the future");
+      return;
+    }
     const candidateId = String(actionCandidateId);
     // datetime-local has no timezone — treated as the browser's own local
     // time, same as the moment it describes to the recruiter typing it in.
@@ -719,7 +741,14 @@ export default function CandidateRankingsPage() {
       setCallbackAtInput("");
     } catch (error) {
       console.error('Error scheduling callback:', error);
-      setToast({ message: "Failed to schedule callback", type: "error" });
+      // Shown inline in the still-open modal (not just a toast, which
+      // renders behind this modal's own overlay) so the recruiter actually
+      // sees why the save failed — e.g. the backend's 5-minute-lead rule —
+      // and can correct the time right there.
+      const message = error instanceof ApiError
+        ? extractErrorMessage(error.data, "Failed to schedule callback. Please try again.")
+        : "Failed to schedule callback. Please try again.";
+      setCallbackModalError(message);
     } finally {
       setSyncingCandidateId(null);
     }
@@ -3199,6 +3228,8 @@ export default function CandidateRankingsPage() {
                                 } else if (val === "Callback Scheduled") {
                                   setActionCandidateId(candidate.id);
                                   setCallbackAtInput("");
+                                  setCallbackAtMin(datetimeLocalMin());
+                                  setCallbackModalError("");
                                   setIntegrationModalOpen('callback');
                                 }
                               }}
@@ -3447,6 +3478,7 @@ export default function CandidateRankingsPage() {
               e.stopPropagation();
               setIntegrationModalOpen(null);
               setCallbackAtInput("");
+              setCallbackModalError("");
             }
           }}
         >
@@ -3459,7 +3491,7 @@ export default function CandidateRankingsPage() {
                     Schedule Callback
                   </h3>
                   <button
-                    onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); }}
+                    onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); setCallbackModalError(""); }}
                     aria-label="Close"
                     className="text-slate-400 hover:text-slate-600"
                   >×</button>
@@ -3477,13 +3509,16 @@ export default function CandidateRankingsPage() {
                       aria-label="Callback Time"
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
                       value={callbackAtInput}
-                      min={new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
-                      onChange={e => setCallbackAtInput(e.target.value)}
+                      min={callbackAtMin}
+                      onChange={e => { setCallbackAtInput(e.target.value); setCallbackModalError(""); }}
                     />
+                    {callbackModalError && (
+                      <p role="alert" className="text-sm font-medium text-rose-600">{callbackModalError}</p>
+                    )}
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); }} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button variant="outline" onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); setCallbackModalError(""); }} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     onClick={handleConfirmCallbackSchedule}
                     disabled={!callbackAtInput || syncingCandidateId === actionCandidateId}
@@ -3496,7 +3531,11 @@ export default function CandidateRankingsPage() {
         </div>
       )}
       {toast && (
-        <div className="fixed right-4 top-4 z-[90]">
+        // z-[110]: above every modal overlay on this page (the highest of
+        // which is z-[100]) — previously z-[90], so a toast fired while a
+        // modal stayed open (e.g. a failed save) rendered behind the
+        // modal's backdrop and was effectively invisible.
+        <div className="fixed right-4 top-4 z-[110]">
           <div
             className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${toast.type === "success"
               ? "border-emerald-200 bg-emerald-50 text-emerald-700"

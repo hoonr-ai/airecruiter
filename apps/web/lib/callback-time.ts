@@ -56,6 +56,30 @@ export function isValidFutureCallbackTime(iso: string, now: Date = new Date()): 
   return !Number.isNaN(target.getTime()) && target.getTime() > now.getTime();
 }
 
+/** Minutes of lead time the backend requires between "now" and a callback
+ * time — mirrors routers/candidates.py's CALLBACK_MIN_LEAD. */
+export const CALLBACK_MIN_LEAD_MINUTES = 5;
+
+/** True if `iso` clears the backend's minimum lead time, not merely
+ * `isValidFutureCallbackTime`'s "somewhere after now" — a time 10 seconds
+ * out passes that check but still gets a 400 here, since the backend's own
+ * remind_at (callback_at minus 5 minutes) would already be in the past.
+ * Checked client-side so that specific, common rejection doesn't need a
+ * round trip to show up. */
+export function hasMinimumCallbackLeadTime(iso: string, now: Date = new Date()): boolean {
+  const target = new Date(iso);
+  return !Number.isNaN(target.getTime()) && target.getTime() - now.getTime() >= CALLBACK_MIN_LEAD_MINUTES * 60_000;
+}
+
+/** "now" in the shape <input type="datetime-local"> expects for its `min`
+ * attribute — a browser hint only (see hasMinimumCallbackLeadTime's own
+ * docstring for the real enforcement). Previously duplicated by hand in
+ * each of the three callback-scheduling modals (Rankings, Candidates,
+ * Upcoming Callbacks' Reschedule dialog). */
+export function datetimeLocalMin(now: Date = new Date()): string {
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
 /** "in 45m" / "in 3h" / "in 2d" / "Overdue" for a single row, relative to
  * `now`. Mirrors formatRelativeTime's granularity (minutes, then hours,
  * then days) but counts forward instead of back, and collapses to a single

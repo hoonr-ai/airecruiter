@@ -211,7 +211,15 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
       redirectToSignIn();
     }
     const text = await res.text().catch(() => "");
-    throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`);
+    let data: unknown;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // Not JSON — leave `data` undefined, callers fall back to the raw message.
+      }
+    }
+    throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`, data);
   }
 
   return res.json() as Promise<T>;

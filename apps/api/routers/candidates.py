@@ -5979,6 +5979,16 @@ async def save_candidate_feedback(
     pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
 
     jd_candidate_id = cand_id_str   # fallback: use whatever was passed
+    # sourced_candidates.candidate_id — the id every OTHER callback lookup
+    # keys on (_fetch_job_and_candidate, _resolve_sourced_candidate_row_for_
+    # callback, list_upcoming_callbacks). Kept distinct from jd_candidate_id
+    # (below, resolved to data_blob["jobdiva_candidate_id"] for an
+    # auto-provisioned candidate) — that id is for JobDiva API calls only;
+    # using it for the callback reminder instead of this one meant the
+    # reminder task could never find the candidate row for any
+    # auto-provisioned candidate, and silently no-op without ever creating
+    # a notification.
+    sc_candidate_id = cand_id_str
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
@@ -6175,10 +6185,23 @@ async def save_candidate_feedback(
                     _cur2,
                     CANDIDATE_CALLBACK_REMINDER,
                     str(app_job_ref or job_id_or_ref),
-                    jd_candidate_id,
+                    # sc_candidate_id (sourced_candidates.candidate_id), not
+                    # jd_candidate_id (JobDiva's own id): the task's own
+                    # candidate lookup keys on the former, so passing the
+                    # latter silently no-opped whenever they differ.
+                    sc_candidate_id,
                     user.email,
                     callback_dt.isoformat(),
                     available_at=remind_at,
+                    # Still keyed on jd_candidate_id, unchanged from before
+                    # this fix — a dedupe key only needs to be stable, not
+                    # correct, and switching it to sc_candidate_id here too
+                    # would change the key's shape for exactly the
+                    # candidates this fix affects, so a reminder already
+                    # queued (pre-deploy) under the old key would no longer
+                    # dedupe against one queued fresh (post-deploy) for the
+                    # same re-saved callback, and the recruiter could get it
+                    # twice.
                     dedupe_key=f"callback_reminder:{jd_candidate_id}:{job_id_or_ref}:{callback_dt.isoformat()}",
                 )
             _conn2.commit()
@@ -6218,7 +6241,12 @@ async def save_candidate_feedback(
             background_tasks.add_task(
                 create_candidate_internal_review_requested_notification,
                 job_id=str(app_job_ref or job_id_or_ref),
-                candidate_id=jd_candidate_id,
+                # sc_candidate_id, not jd_candidate_id — this notification's
+                # own candidate lookup (_fetch_job_and_candidate) matches on
+                # sourced_candidates.candidate_id, not JobDiva's candidate
+                # id, which the two can differ on for an auto-provisioned
+                # candidate (same bug as the callback reminder above).
+                candidate_id=sc_candidate_id,
                 manager_email=manager_email,
             )
         elif submission_type == "external":
@@ -6243,14 +6271,18 @@ async def save_candidate_feedback(
                 background_tasks.add_task(
                     create_candidate_externally_submitted_notification,
                     job_id=str(app_job_ref or job_id_or_ref),
-                    candidate_id=jd_candidate_id,
+                    # sc_candidate_id — see the internal-review notification
+                    # above for why jd_candidate_id is wrong here.
+                    candidate_id=sc_candidate_id,
                     recipient_email=prior_requested_by,
                 )
     elif request.feedback_type == "Reject":
         background_tasks.add_task(
             create_candidate_rejected_notifications,
             job_id=str(app_job_ref or job_id_or_ref),
-            candidate_id=jd_candidate_id,
+            # sc_candidate_id — see the internal-review notification above
+            # for why jd_candidate_id is wrong here.
+            candidate_id=sc_candidate_id,
             rejecter_email=user.email,
         )
 
