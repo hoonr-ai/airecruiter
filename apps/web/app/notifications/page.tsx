@@ -41,6 +41,23 @@ function emptyFilterMessage(filter: NotificationFilter): string {
   }
 }
 
+// "Scheduled callback at 10/26/2026, 7:51:00 PM" in the VIEWER's own local
+// timezone (toLocaleString's default date+time format), from
+// metadata.callback_at (a raw UTC ISO instant — PR review, so the time
+// doesn't read as the recruiter's own local time to anyone outside UTC).
+// Falls back to item.body (the server's pre-formatted "... UTC" string) for
+// a notification created before metadata.callback_at existed.
+function callbackReminderTimeLabel(item: NotificationItem): string {
+  const raw = item.metadata?.callback_at;
+  if (typeof raw === "string") {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      return `Scheduled callback at ${parsed.toLocaleString()}`;
+    }
+  }
+  return item.body || "";
+}
+
 function NotificationRow({
   item,
   onRead,
@@ -120,7 +137,10 @@ function NotificationRow({
             both was redundant and cost a 3rd line); pair_launched and
             pair_inactive never set body at all (see
             services/notifications_service.py — their title alone carries
-            the full message), so there's nothing of theirs being hidden. */}
+            the full message), so there's nothing of theirs being hidden.
+            candidate_callback_reminder is the one exception: its callback
+            time is real information, not redundant with the title, so it
+            gets its own line below. */}
         <p
           className={cn(
             "text-sm line-clamp-2",
@@ -131,6 +151,9 @@ function NotificationRow({
           {item.title}
           {item.jobdiva_id && <span className="text-slate-400 font-normal"> · {item.jobdiva_id}</span>}
         </p>
+        {item.type === "candidate_callback_reminder" && (
+          <p className="text-xs text-slate-500 mt-0.5">{callbackReminderTimeLabel(item)}</p>
+        )}
         <p className="text-xs text-slate-400 mt-1">{formatRelativeTime(item.created_at)}</p>
       </div>
       {item.score !== null && <ScoreBadge score={item.score} className="shrink-0" />}

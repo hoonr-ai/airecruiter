@@ -6453,16 +6453,15 @@ async def mark_candidate_callback_done(
     status has since moved on from "Callback Scheduled" (e.g. the recruiter
     went to Rankings and rejected the candidate before coming back to this
     list) — either way there's nothing left for this action to clear. The
-    UPDATE itself is scoped to feedback_type = 'Callback Scheduled' (PR #844
-    review) so that's an atomic guarantee, not just this docstring's promise
-    — a stale list entry can't stamp callback_done_at onto a row that has
-    since become a Reject/Submit/Unreachable/Allotment Slot Filled.
+    UPDATE itself is scoped to feedback_type (same LOWER(TRIM(...)) match as
+    list_upcoming_callbacks' own filter, PR review — an exact-string match
+    here could silently no-op on a row the list still shows, for any
+    differently-cased or whitespace-padded value) so that's an atomic
+    guarantee, not just this docstring's promise.
 
-    PR #844 review: list_upcoming_callbacks scopes to submitted_by ==
-    user.email, so clearing a callback here is scoped the same way — any
-    other non-admin recruiter with job access (but who isn't the one who
-    scheduled it) gets 403 rather than silently clearing a callback off
-    someone else's list.
+    Ownership scoping matches list_upcoming_callbacks (submitted_by ==
+    user.email): a non-admin recruiter who isn't the one who scheduled it
+    gets 403 rather than silently clearing someone else's callback.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
     conn = get_db_connection()
@@ -6479,7 +6478,7 @@ async def mark_candidate_callback_done(
                 """
                 UPDATE sourced_candidates
                 SET data = data || %s::jsonb
-                WHERE id = %s AND data->>'feedback_type' = 'Callback Scheduled'
+                WHERE id = %s AND LOWER(TRIM(data->>'feedback_type')) = 'callback scheduled'
                 """,
                 (json.dumps({"callback_done_at": datetime.now(timezone.utc).isoformat()}), sc_row_id),
             )
@@ -6489,18 +6488,77 @@ async def mark_candidate_callback_done(
     return {"status": "success"}
 
 
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/callback/cancel")
+async def cancel_candidate_callback(
+    job_id_or_ref: str,
+    candidate_id: str,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Cancels a scheduled callback outright — "I'm not calling this person
+    back after all" — as opposed to /callback/done ("I called them; the
+    callback itself is over"). Unlike /callback/done, this clears
+    feedback_type back to unset, returning the candidate to the same
+    no-feedback-yet state as before "Callback Scheduled" was ever chosen,
+    rather than leaving that status with nothing actually scheduled.
+
+    No separate outbox cancellation needed: once callback_scheduled_at is
+    gone, notifications_service's own stale-reminder check skips firing the
+    already-queued reminder.
+
+    Same ownership scoping and feedback_type match as /callback/done (see
+    its docstring) — a no-op (200) if the row has already moved off
+    "Callback Scheduled".
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            resolved = _resolve_sourced_candidate_row_for_callback(cur, job_id_or_ref, candidate_id)
+            if resolved is None:
+                raise HTTPException(status_code=404, detail="Candidate not found for this job")
+            sc_row_id, data = resolved
+            submitted_by = str(data.get("submitted_by") or "").strip().lower()
+            if not user.is_admin and submitted_by and submitted_by != (user.email or "").strip().lower():
+                raise HTTPException(status_code=403, detail="This callback was scheduled by another recruiter")
+            cur.execute(
+                """
+                UPDATE sourced_candidates
+                SET data = data || %s::jsonb
+                WHERE id = %s AND LOWER(TRIM(data->>'feedback_type')) = 'callback scheduled'
+                """,
+                (json.dumps({
+                    "feedback_type": None,
+                    "callback_scheduled_at": None,
+                    "callback_done_at": None,
+                }), sc_row_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success"}
+
+
 @router.get("/candidates/callbacks/upcoming")
 async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)):
-    """Every not-yet-done "Callback Scheduled" candidate, scoped to the
-    recruiter who scheduled it — the same scoping as the reminder
-    notification itself (recruiter_email, not the job's whole
-    recruiter_emails list), so this list only ever shows callbacks THIS
-    recruiter is personally on the hook for.
+    """Every "Callback Scheduled" candidate still pending, PLUS one marked
+    done in the last 24h, scoped to the recruiter who scheduled it — the
+    same scoping as the reminder notification itself (recruiter_email, not
+    the job's whole recruiter_emails list), so this list only ever shows
+    callbacks THIS recruiter is personally on the hook for.
 
     Includes overdue callbacks (callback_scheduled_at already in the past,
     still not marked done) rather than cutting them off at "now" — the
     point of this list is "what do I still need to call," and a missed
     callback is exactly that, not something to quietly drop.
+
+    The 24h-done window (PR review: Mark Done "erasing" the row) exists so a
+    row the recruiter just marked done keeps showing its "Marked as done"
+    state across a page refresh, not just for the current in-memory session
+    — the frontend tells a server-known done row apart from a pending one
+    via this response's own callback_done_at, rather than only its local
+    doneKeys set. A done row older than 24h drops off entirely; marking
+    done doesn't delete anything (callback_done_at just gets set, same as
+    before), it's just no longer returned here.
 
     Sorted soonest-first; grouping into Today/Tomorrow/dated sections and
     the "in 45 min" / "overdue" relative labels are display concerns, left
@@ -6515,6 +6573,11 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # The regex-guarded CASE around each ::timestamptz cast (PR
+            # review) keeps one row with a malformed timestamp from
+            # throwing and failing this whole query for the recruiter — a
+            # non-matching value reads as "not done" / sorts last, instead
+            # of a 500.
             cur.execute(
                 """
                 SELECT sc.candidate_id, sc.name, sc.data,
@@ -6524,8 +6587,19 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
                 WHERE LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled'
                   AND LOWER(TRIM(sc.data->>'submitted_by')) = %s
                   AND sc.data->>'callback_scheduled_at' IS NOT NULL
-                  AND sc.data->>'callback_done_at' IS NULL
-                ORDER BY (sc.data->>'callback_scheduled_at')::timestamptz ASC
+                  AND (
+                      sc.data->>'callback_done_at' IS NULL
+                      OR CASE
+                           WHEN sc.data->>'callback_done_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+                           THEN (sc.data->>'callback_done_at')::timestamptz > now() - interval '24 hours'
+                           ELSE FALSE
+                         END
+                  )
+                ORDER BY CASE
+                           WHEN sc.data->>'callback_scheduled_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+                           THEN (sc.data->>'callback_scheduled_at')::timestamptz
+                           ELSE 'infinity'::timestamptz
+                         END ASC
                 """,
                 (recipient,),
             )
@@ -6547,5 +6621,6 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
             "job_title": row.get("enhanced_title") or row.get("title") or "this job",
             "customer_name": row.get("customer_name"),
             "callback_at": callback_at,
+            "callback_done_at": data.get("callback_done_at"),
         })
     return {"status": "success", "callbacks": callbacks}
