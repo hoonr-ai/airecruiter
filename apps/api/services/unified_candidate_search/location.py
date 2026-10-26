@@ -7,7 +7,7 @@ from .common import (
     SearchCriteria,
     _MAX_LOCATIONS,
     _UNKNOWN_DISTANCE_SENTINEL,
-    _broad_core_inside_radius,
+    _broad_core_radius_distance,
 )
 
 
@@ -786,12 +786,30 @@ class LocationMixin:
                     known_states.add(state.lower())
                 for code in inferred_region_states(loc):
                     known_states.add(code.lower())
-            if required.get("state") and known_states and required["state"] not in known_states:
-                # The state list can still miss a border. Keep the row when
-                # the metro's core city sits inside this circle. Chicago
-                # against Richardson stays a mismatch: Chicago is outside.
-                if _broad_core_inside_radius(broad_locs, required, criteria):
+            state_mismatch = bool(
+                required.get("state") and known_states and required["state"] not in known_states
+            )
+            # Checked regardless of whether the state matches: a state is
+            # huge (same-state ≠ same metro — "Dallas-Fort Worth Metroplex"
+            # is ~225mi from a Houston ZIP, both TX), so a known core city
+            # that's confirmed outside the radius must hard-drop even when
+            # the broad label's state happens to match the search's. None
+            # (no core known at all, e.g. an unrecognized label) falls
+            # through to the softer state-based verdicts below instead.
+            core_distance = (
+                _broad_core_radius_distance(broad_locs, required, criteria)
+                if (required.get("city") or required.get("zip")) else None
+            )
+            if core_distance is not None:
+                miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+                if core_distance <= miles:
                     return False, "broad_region_unverified", _UNKNOWN_DISTANCE_SENTINEL
+                return (
+                    False,
+                    "state_mismatch" if state_mismatch else "outside_radius_confirmed",
+                    core_distance,
+                )
+            if state_mismatch:
                 return False, "state_mismatch", None
             if required.get("state") and known_states and not required.get("city"):
                 return True, "state_match", None

@@ -600,6 +600,13 @@ export const api = {
       req<any>(`/candidates/${encodeURIComponent(candidateId)}/phone`, { method: "PATCH", body }),
     getFilterOptions: () =>
       req<any>(`/candidates/filter-options`),
+    // Confirms a bare 5-digit zip is a real, resolvable US zip before the
+    // Step 5 location input accepts it — see addSourceLocation's own
+    // comment in app/jobs/new/page.tsx for the bug this guards against.
+    lookupZip: (zip: string) =>
+      req<{ status: string; valid: boolean; city?: string; state?: string }>(
+        `/candidates/zip-lookup?zip=${encodeURIComponent(zip)}`
+      ),
     getAllLaunched: (query?: string) =>
       req<any>(`/candidates/launched${query ? `?${query}` : ""}`),
     getUpcomingCallbacks: () =>

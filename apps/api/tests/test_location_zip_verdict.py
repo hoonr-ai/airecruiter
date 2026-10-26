@@ -445,6 +445,47 @@ def test_hard_gate_soft_keeps_county_and_metroplex_as_unverified(svc):
     assert dfw_near.get("location") == "Dallas-Fort Worth Metroplex"
 
 
+def test_hard_gate_drops_same_state_far_metro_confirmed_outside(svc):
+    """QA regression: a multi-ZIP search for 10001 New York / 90001 Los
+    Angeles / 77002 Houston kept "Dallas-Fort Worth Metroplex" and "Austin,
+    Texas Metropolitan Area" candidates — both Texas, same state as the
+    Houston ZIP, but ~146-225mi from it, a different metro entirely. Before
+    this fix, a same-state broad region never checked its core city's
+    distance at all and fell straight to broad_region_unverified (soft-
+    keep) regardless of how far away it actually was — only a state
+    MISMATCH triggered the core-distance check. Now it's checked either
+    way, so a confirmed-far same-state metro hard-drops too."""
+    dfw_vs_houston = {"location": "Dallas-Fort Worth Metroplex"}
+    veto = svc._location_hard_gate(dfw_vs_houston, _criteria(location="Houston, TX", within_miles=50))
+    assert veto and "outside" in veto
+    assert dfw_vs_houston.get("location_veto_reason") == "outside_radius_confirmed"
+    assert dfw_vs_houston.get("distance_miles") > 50
+
+    austin_vs_houston = {"location": "Austin, Texas Metropolitan Area"}
+    veto = svc._location_hard_gate(austin_vs_houston, _criteria(location="Houston, TX", within_miles=50))
+    assert veto and "outside" in veto
+    assert austin_vs_houston.get("location_veto_reason") == "outside_radius_confirmed"
+    assert austin_vs_houston.get("distance_miles") > 50
+
+
+def test_hard_gate_drops_newly_recognized_regions_in_the_wrong_state(svc):
+    """QA regression: "Boise Metropolitan Area" (ID) against a Dallas/
+    Phoenix/San Diego/Philadelphia search, and "Greater Tampa Bay Area"
+    (FL) against a New York/Los Angeles/Houston search, were both soft-kept
+    instead of hard-dropped — neither label was in _REGION_STATE_LABELS/
+    _REGION_CORE_CITY, so the gate had no state or distance signal for them
+    at all and fell through to broad_region_unverified unconditionally."""
+    boise = {"location": "Boise Metropolitan Area"}
+    veto = svc._location_hard_gate(boise, _criteria(location="Dallas, TX", within_miles=50))
+    assert veto
+    assert boise.get("location_veto_reason") == "state_mismatch"
+
+    tampa = {"location": "Greater Tampa Bay Area"}
+    veto = svc._location_hard_gate(tampa, _criteria(location="Houston, TX", within_miles=50))
+    assert veto
+    assert tampa.get("location_veto_reason") == "state_mismatch"
+
+
 def test_broad_region_bare_literals_do_not_over_match_prefixed_strings():
     """"chicagoland" and "silicon valley" are bare literals (no leading `.+`
     wildcard) in _BROAD_REGION_RE, matched via .fullmatch(). A prefixed
@@ -607,6 +648,19 @@ def test_parse_location_takes_trailing_zip_in_address(svc):
 
 def test_parse_location_zip_kept_when_state_agrees(svc):
     assert svc._parse_location("Tempe, AZ 85281")["zip"] == "85281"
+
+
+def test_parse_location_short_numeric_string_is_not_recognized_as_a_zip(svc):
+    """Documents the backend behavior the frontend's Step 5 location input
+    now guards against (addSourceLocation rejects a non-5-digit numeric
+    value before it ever reaches a search): a partial zip like "77" or
+    "770" isn't recognized as a zip attempt at all — it's parsed as a
+    literal city NAME, which then can't match any real candidate's city
+    and silently constrains nothing."""
+    for partial in ("7", "77", "770"):
+        parsed = svc._parse_location(partial)
+        assert parsed["zip"] == ""
+        assert parsed["city"] == partial
 
 
 def test_resolve_geo_address_street_number_not_sent_as_zip(svc):

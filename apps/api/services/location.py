@@ -135,6 +135,12 @@ _REGION_STATE_LABELS = {
     "new york city metropolitan area": frozenset({"NY", "NJ", "CT", "PA"}),
     "greater new york area": frozenset({"NY", "NJ", "CT", "PA"}),
     "dallas area": frozenset({"TX"}),
+    "boise metropolitan area": frozenset({"ID"}),
+    "greater tampa bay area": frozenset({"FL"}),
+    "tampa bay area": frozenset({"FL"}),
+    "austin, texas metropolitan area": frozenset({"TX"}),
+    "austin metropolitan area": frozenset({"TX"}),
+    "austin area": frozenset({"TX"}),
 }
 
 # One city used only to decide whether a broad label can reach a circle.
@@ -163,6 +169,12 @@ _REGION_CORE_CITY = {
     "new york city metropolitan area": ("New York", "NY"),
     "greater new york area": ("New York", "NY"),
     "dallas area": ("Dallas", "TX"),
+    "boise metropolitan area": ("Boise", "ID"),
+    "greater tampa bay area": ("Tampa", "FL"),
+    "tampa bay area": ("Tampa", "FL"),
+    "austin, texas metropolitan area": ("Austin", "TX"),
+    "austin metropolitan area": ("Austin", "TX"),
+    "austin area": ("Austin", "TX"),
 }
 
 

@@ -4767,6 +4767,25 @@ async def get_candidate_filter_options(user: UserIdentity = Depends(get_current_
         logger.error(f"Error fetching candidate filter options: {e}")
         return {"status": "error", "jobs": [], "sources": [], "locations": [], "message": str(e)}
 
+@router.get("/candidates/zip-lookup")
+async def lookup_zip_code(
+    zip: str = Query(..., description="5-digit US zip code to validate before adding it to a Step 5 location search"),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Resolves a zip against the offline zip index (services/zip_index.py)
+    so the Step 5 location input can confirm or reject it before it's added
+    to search criteria. An unresolvable zip (e.g. "99999", outside the real
+    US range) previously made the search's own anchor point fail to
+    geocode, which silently passed every candidate through the location
+    filter unfiltered instead of narrowing results or erroring — this gives
+    the frontend a cheap way to catch that before the search ever runs."""
+    from services import zip_index
+    entry = zip_index.lookup_zip(zip)
+    if not entry:
+        return {"status": "success", "valid": False}
+    return {"status": "success", "valid": True, "city": entry["city"], "state": entry["state"]}
+
+
 @router.post("/candidates/enhanced-fetch")
 async def fetch_enhanced_candidates(request: Dict[str, str], user: UserIdentity = Depends(get_current_user)):
     """

@@ -983,6 +983,9 @@ function NewJobPageContent() {
   const [sourceTitleInput, setSourceTitleInput] = useState("");
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
+  // Set only when a bare 5-digit zip fails the /candidates/zip-lookup
+  // check — see addSourceLocation's own comment for why this exists.
+  const [sourceLocationError, setSourceLocationError] = useState("");
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
   const sourceLocationMilesRef = useRef(sourceLocationMiles);
   useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
@@ -5512,9 +5515,45 @@ function NewJobPageContent() {
     });
   };
 
-  const addSourceLocation = (value: string) => {
+  const addSourceLocation = async (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    setSourceLocationError("");
+    // Bare numeric input only — a city/state string ("Austin, TX") or a
+    // broad region name has no zip to validate here, and is left to the
+    // backend's own offline/online resolution as before. No city name is
+    // purely digits, so any all-digit value here is always meant as a zip,
+    // whole or partial.
+    //
+    // A wrong LENGTH (2-3 digits, or 6+) is rejected immediately, no round
+    // trip needed — the backend doesn't even recognize these as a zip
+    // attempt at all: _parse_location treats "77" as a literal city named
+    // "77", which then can't match any real candidate's city and silently
+    // geocodes to nothing (same failure shape as the 5-digit case below,
+    // just via a different code path).
+    //
+    // An exact 5 digits gets a real lookup, since the shape alone doesn't
+    // confirm it's an assigned zip. QA regression: an unresolvable one like
+    // "99999" (outside the real US range) was silently accepted and,
+    // because the search's own anchor point then failed to geocode, every
+    // candidate passed the location filter completely unfiltered instead
+    // of narrowing results — this catches that at input time instead.
+    if (/^\d+$/.test(cleanValue)) {
+      if (cleanValue.length !== 5) {
+        setSourceLocationError("Zip codes must be 5 digits");
+        return;
+      }
+      try {
+        const res = await api.candidates.lookupZip(cleanValue);
+        if (!res?.valid) {
+          setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
+          return;
+        }
+      } catch {
+        // Lookup itself failing (network blip) shouldn't block adding a
+        // location the backend's own matching can still attempt normally.
+      }
+    }
     excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
     const nextLocations = [
       ...sourceLocations,
@@ -10184,11 +10223,14 @@ function NewJobPageContent() {
                       <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
                       <Input
                         value={sourceLocationInput}
-                        onChange={(e) => setSourceLocationInput(e.target.value)}
+                        onChange={(e) => {
+                          setSourceLocationInput(e.target.value);
+                          if (sourceLocationError) setSourceLocationError("");
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
                             e.preventDefault();
-                            addSourceLocation(sourceLocationInput);
+                            void addSourceLocation(sourceLocationInput);
                           }
                         }}
                         placeholder="City, state, or zip code..."
@@ -10235,7 +10277,7 @@ function NewJobPageContent() {
                     </div>
                     <Button
                       type="button"
-                      onClick={() => addSourceLocation(sourceLocationInput)}
+                      onClick={() => void addSourceLocation(sourceLocationInput)}
                       disabled={!sourceLocationInput.trim()}
                       className="h-11 px-4 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[13px] font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
@@ -10243,6 +10285,11 @@ function NewJobPageContent() {
                       Add
                     </Button>
                   </div>
+                  {sourceLocationError && (
+                    <p role="alert" className="text-[12px] font-medium text-rose-600 mt-1.5">
+                      {sourceLocationError}
+                    </p>
+                  )}
                 </div>
               </section>
 
