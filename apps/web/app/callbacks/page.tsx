@@ -426,7 +426,16 @@ export default function UpcomingCallbacksPage() {
                         <p className="text-sm text-slate-500 truncate">
                           {cb.job_title}
                           {cb.customer_name ? ` · ${cb.customer_name}` : ""}
-                          {cb.jobdiva_id ? ` · JobDiva ${cb.jobdiva_id}` : ""}
+                          {/* Muted + a tooltip (PR #857 review) instead of a
+                              "JobDiva" word prefix — same bare-id-with-tooltip
+                              treatment notifications/page.tsx already gives
+                              this exact field, so this now matches that page
+                              rather than diverging from it. */}
+                          {cb.jobdiva_id && (
+                            <span className="text-slate-400" title={`JobDiva job ID ${cb.jobdiva_id}`}>
+                              {" "}· {cb.jobdiva_id}
+                            </span>
+                          )}
                         </p>
                         {done ? (
                           <p className="text-xs font-semibold mt-1 text-emerald-600 flex items-center gap-1">
