@@ -6214,6 +6214,23 @@ async def save_candidate_feedback(
                 # show this new callback, even though a reminder is about to
                 # fire for it.
                 feedback_data["callback_done_at"] = None
+                # True only for an actual Reschedule — changing the time of a
+                # callback that was already active — not a fresh Schedule
+                # (none pending yet, or the previous one was already done).
+                # data_blob is this row's PRE-write data (see its own comment
+                # above). Surfaced by list_upcoming_callbacks for the UI's
+                # Scheduled/Rescheduled badge.
+                #
+                # Read without FOR UPDATE (PR #856 review), so two concurrent
+                # saves for the same row could both read the same prior state
+                # and both compute this the same way. Left as is: the badge
+                # is cosmetic, and adding FOR UPDATE to this SELECT would
+                # also serialize every OTHER feedback_type through the same
+                # lock, for a race that doesn't otherwise corrupt anything
+                # (the UPDATE itself is still a single atomic JSONB merge).
+                feedback_data["callback_is_reschedule"] = bool(
+                    data_blob.get("callback_scheduled_at") and not data_blob.get("callback_done_at")
+                )
             else:
                 # PR #841 review: without this, callback_scheduled_at from a
                 # prior "Callback Scheduled" survives the JSONB `||` merge
@@ -6224,6 +6241,11 @@ async def save_candidate_feedback(
                 # notifications_service.create_candidate_callback_reminder_notification)
                 # detect a superseded callback and skip a stale reminder.
                 feedback_data["callback_scheduled_at"] = None
+                # Same reasoning as callback_scheduled_at just above: once
+                # this status moves on, callback_is_reschedule is stale data,
+                # not just unused — a later fresh Schedule shouldn't inherit
+                # whatever this field happened to say before.
+                feedback_data["callback_is_reschedule"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved. updated_at
@@ -6754,5 +6776,10 @@ async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)
             "customer_name": row.get("customer_name"),
             "callback_at": callback_at,
             "callback_done_at": data.get("callback_done_at"),
+            # Set by save_candidate_feedback (see its own comment) — lets the
+            # UI show a Reschedule differently from a fresh Schedule. Absent
+            # on a row written before this field shipped, so default False
+            # (reads as "a fresh schedule") rather than crashing the list.
+            "is_reschedule": bool(data.get("callback_is_reschedule", False)),
         })
     return {"status": "success", "callbacks": callbacks}

@@ -122,9 +122,17 @@ documented there:
   only the outbox relay actually calls it when that time comes. Candidate-
   level, single recipient (the recruiter who scheduled it) — its own sync
   helper rather than reusing _create_candidate_notification_for_recipient_sync
-  because the body needs the formatted callback time, not just a title — with
-  no duplicate check of its own, since task_outbox's dedupe_key already
-  guarantees the underlying task runs at most once.
+  because the body needs the formatted callback time, not just a title.
+  Excluded from the candidate-level "once ever" index (ONCE_EVER_EXCLUDED_
+  TYPES) — a recipient legitimately gets many of these over time, one per
+  reschedule, not just the first ever. Confirmed live in QA (PR #856): with
+  this type still under that index and a bare insert, the first reminder a
+  (recipient, candidate, job) combo ever got permanently UniqueViolation'd
+  every later one, so no reschedule's reminder ever fired again. Dedupes
+  instead on its own per-occurrence index, scoped by callback_at
+  (_CONFLICT_CALLBACK_REMINDER) — task_outbox's dedupe_key already keeps a
+  given callback's own task from running twice, so this index only matters
+  for an outright retry of that same run.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -165,7 +173,18 @@ logger = logging.getLogger(__name__)
 # routers/notifications.py (both the narrowed unique index and its own
 # review-loop lookup index) imports this, so the two can't drift apart.
 REVIEW_LOOP_TYPES = ("candidate_internal_review_requested", "candidate_externally_submitted")
-_REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+
+# Excluded from the "once ever" index below for an unrelated reason than
+# REVIEW_LOOP_TYPES — see this module's own docstring, candidate_callback_
+# reminder entry.
+CALLBACK_REMINDER_TYPE = "candidate_callback_reminder"
+# Single source of truth for the predicate excluding both of the above from
+# the "once ever" index — imported by routers/notifications.py so the
+# index DDL there can't drift from the ON CONFLICT clause here (exactly
+# that kind of drift broke candidate_passed/rejected entirely once already,
+# see this module's own docstring).
+ONCE_EVER_EXCLUDED_TYPES = REVIEW_LOOP_TYPES + (CALLBACK_REMINDER_TYPE,)
+_ONCE_EVER_EXCLUDED_TYPES_SQL = ", ".join(f"'{t}'" for t in ONCE_EVER_EXCLUDED_TYPES)
 
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
 # Shared by every candidate-level "once ever" type (candidate_passed,
@@ -179,7 +198,18 @@ _REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
 # below for the same rule applied to a different partial index).
 _CONFLICT_CANDIDATE_LEVEL = (
     "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) "
-    f"WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL}) "
+    f"WHERE type NOT IN ({_ONCE_EVER_EXCLUDED_TYPES_SQL}) "
+    "DO NOTHING"
+)
+# candidate_callback_reminder's own per-occurrence dedup — matches
+# uniq_notifications_callback_reminder_occurrence in routers/notifications.py
+# exactly (same predicate-matching requirement as _CONFLICT_CANDIDATE_LEVEL
+# above). Scoped by callback_at (stored in metadata, not a column) so a
+# genuinely new callback (a reschedule) still gets its own reminder, while a
+# retried run of the exact same task_outbox row can't double-insert one.
+_CONFLICT_CALLBACK_REMINDER = (
+    "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, (metadata->>'callback_at')) "
+    f"WHERE type = '{CALLBACK_REMINDER_TYPE}' "
     "DO NOTHING"
 )
 # Job-level dedup, matching the partial unique index of the same name in
@@ -1376,8 +1406,16 @@ def _create_candidate_callback_reminder_notification_sync(
             app_job_id = job_row.get("job_id") or job_id
             inserted = _insert_notification(
                 cur,
-                notification_type="candidate_callback_reminder",
-                conflict_clause=None,
+                notification_type=CALLBACK_REMINDER_TYPE,
+                # Was conflict_clause=None (bare INSERT): that collided with
+                # uniq_notifications_recipient_candidate_job_type's "once
+                # ever" index, which this type used to fall under — the
+                # FIRST callback reminder a (recipient, candidate, job) combo
+                # ever got would permanently UniqueViolation every later one,
+                # including for a reschedule (confirmed in QA: see
+                # ONCE_EVER_EXCLUDED_TYPES's own comment above). Now scoped
+                # per callback occurrence instead of forever.
+                conflict_clause=_CONFLICT_CALLBACK_REMINDER,
                 recipient_email=recipient,
                 job_id=app_job_id,
                 jobdiva_id=jobdiva_id,

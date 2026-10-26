@@ -19,6 +19,7 @@ import {
   callbackDayLabel,
   callbackRelativeLabel,
   datetimeLocalMin,
+  formatCallbackTimeOfDay,
   formatFixedDateTime,
   hasMinimumCallbackLeadTime,
   isCallbackOverdue,
@@ -43,6 +44,11 @@ interface UpcomingCallback {
   // 24h afterward so this (and the "Marked as done" state it drives) also
   // survives a page refresh, not just the current in-memory session.
   callback_done_at: string | null;
+  // True when this callback_at is a Reschedule of one that was already
+  // active (not a fresh Schedule) — set by save_candidate_feedback at write
+  // time, not derived client-side, so it's correct even right after a page
+  // load (not just for a reschedule made in this same browser session).
+  is_reschedule: boolean;
 }
 
 // Identifies a callback row across state updates. Prefers row_id — the only
@@ -288,10 +294,15 @@ export default function UpcomingCallbacksPage() {
       // Rescheduling also clears callback_done_at server-side
       // (candidates.py), so a row rescheduled right out of its "Marked as
       // Done" state drops that state here too rather than waiting on a
-      // refetch.
+      // refetch. is_reschedule mirrors the backend's own rule (PR #856
+      // review) — only true if THIS row wasn't already done before the
+      // action: rescheduling a done callback is a fresh Schedule, not a
+      // Reschedule, same as save_candidate_feedback computes it.
       setCallbacks((prev) =>
         (prev || []).map((c) =>
-          callbackKey(c) === key ? { ...c, callback_at: callbackAtIso, callback_done_at: null } : c
+          callbackKey(c) === key
+            ? { ...c, callback_at: callbackAtIso, callback_done_at: null, is_reschedule: !target.callback_done_at }
+            : c
         )
       );
       closeReschedule();
@@ -398,15 +409,32 @@ export default function UpcomingCallbacksPage() {
                             {cb.candidate_name}
                           </Link>
                           <ExternalLink className="h-3.5 w-3.5 text-slate-300 shrink-0" />
+                          {/* Distinct colors so a Reschedule reads differently
+                              from a fresh Schedule at a glance (product ask) —
+                              violet for "this time changed," sky for "booked
+                              fresh," independent of the overdue/done states
+                              below, which are about urgency, not origin. */}
+                          <span
+                            className={cn(
+                              "shrink-0 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded",
+                              cb.is_reschedule ? "bg-violet-100 text-violet-700" : "bg-sky-100 text-sky-700"
+                            )}
+                          >
+                            {cb.is_reschedule ? "Rescheduled" : "Scheduled"}
+                          </span>
                         </div>
                         <p className="text-sm text-slate-500 truncate">
                           {cb.job_title}
                           {cb.customer_name ? ` · ${cb.customer_name}` : ""}
+                          {cb.jobdiva_id ? ` · JobDiva ${cb.jobdiva_id}` : ""}
                         </p>
                         {done ? (
                           <p className="text-xs font-semibold mt-1 text-emerald-600 flex items-center gap-1">
                             <CheckCircle2 className="h-3.5 w-3.5" />
-                            Marked as done — was {formatFixedDateTime(cb.callback_at) || "an unknown time"}
+                            Marked as done — was{" "}
+                            <span title={formatFixedDateTime(cb.callback_at)}>
+                              {formatCallbackTimeOfDay(cb.callback_at) || "an unknown time"}
+                            </span>
                           </p>
                         ) : (
                           <p
@@ -414,9 +442,15 @@ export default function UpcomingCallbacksPage() {
                               "text-xs font-semibold mt-1",
                               overdue ? "text-rose-600" : "text-sky-600"
                             )}
+                            // Full fixed date+time on hover — the visible text
+                            // drops the (redundant, with this row already
+                            // grouped under Today/Tomorrow/a dated header) date
+                            // and seconds for a quicker scan, but the exact
+                            // moment is still one hover away.
+                            title={formatFixedDateTime(cb.callback_at) || undefined}
                           >
                             {overdue && <AlertTriangle className="inline h-3 w-3 mr-1 -mt-0.5" />}
-                            {callbackRelativeLabel(cb.callback_at)} · {formatFixedDateTime(cb.callback_at) || "an unknown time"}
+                            {formatCallbackTimeOfDay(cb.callback_at) || "an unknown time"} · {callbackRelativeLabel(cb.callback_at)}
                           </p>
                         )}
                       </div>

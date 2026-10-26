@@ -71,6 +71,14 @@ export function hasMinimumCallbackLeadTime(iso: string, now: Date = new Date()):
   return !Number.isNaN(target.getTime()) && target.getTime() - now.getTime() >= CALLBACK_MIN_LEAD_MINUTES * 60_000;
 }
 
+/** 24-hour `hours` (from Date#getHours) as a 12-hour clock hour (1-12) plus
+ * AM/PM — shared by formatFixedDateTime and formatCallbackTimeOfDay so
+ * "midnight is 12, not 0" and "noon is 12 PM, not 0 PM" are only encoded
+ * once. */
+function to12Hour(hours24: number): { hours: number; ampm: "AM" | "PM" } {
+  return { hours: hours24 % 12 || 12, ampm: hours24 >= 12 ? "PM" : "AM" };
+}
+
 /** "MM/DD/YYYY HH:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with
  * a FIXED date order and zero-padded 12-hour clock regardless of the
  * browser's own locale — unlike toLocaleString(), which formats using
@@ -97,11 +105,23 @@ export function formatFixedDateTime(iso: string): string {
   const year = d.getFullYear();
   const minutes = String(d.getMinutes()).padStart(2, "0");
   const seconds = String(d.getSeconds()).padStart(2, "0");
-  let hours = d.getHours();
-  const ampm = hours >= 12 ? "PM" : "AM";
-  hours = hours % 12 || 12;
+  const { hours, ampm } = to12Hour(d.getHours());
   const hoursStr = String(hours).padStart(2, "0");
   return `${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
+}
+
+/** "12:14 AM" — just the time of day, viewer-local, fixed 12-hour order with
+ * no leading zero on the hour and no seconds. Pairs with callbackDayLabel
+ * (the list already groups rows under "Today"/"Tomorrow"/a dated header), so
+ * repeating the full calendar date next to every row — formatFixedDateTime's
+ * job elsewhere — was redundant here and made each row noisier to scan.
+ * Returns "" for an unparsable value, same as formatFixedDateTime. */
+export function formatCallbackTimeOfDay(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const minutes = String(d.getMinutes()).padStart(2, "0");
+  const { hours, ampm } = to12Hour(d.getHours());
+  return `${hours}:${minutes} ${ampm}`;
 }
 
 /** "now" in the shape <input type="datetime-local"> expects for its `min`

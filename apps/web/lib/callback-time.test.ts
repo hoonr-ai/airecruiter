@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   callbackDayLabel,
   callbackRelativeLabel,
+  formatCallbackTimeOfDay,
   formatFixedDateTime,
   hasMinimumCallbackLeadTime,
   isCallbackOverdue,
@@ -142,5 +143,31 @@ describe("formatFixedDateTime", () => {
 
   it("returns an empty string for an unparsable value", () => {
     assert.equal(formatFixedDateTime("not-a-date"), "");
+  });
+});
+
+describe("formatCallbackTimeOfDay", () => {
+  it("formats as h:mm AM/PM with no leading zero on the hour", () => {
+    assert.equal(formatCallbackTimeOfDay(localIso(2026, 9, 26, 20, 43)), "8:43 PM");
+  });
+
+  it("pads single-digit minutes but not the hour", () => {
+    assert.equal(formatCallbackTimeOfDay(localIso(2026, 0, 5, 9, 5)), "9:05 AM");
+  });
+
+  it("renders midnight as 12 AM, not 0 AM", () => {
+    assert.equal(formatCallbackTimeOfDay(new Date(2026, 0, 1, 0, 0, 0).toISOString()), "12:00 AM");
+  });
+
+  it("renders noon as 12 PM, not 0 PM", () => {
+    assert.equal(formatCallbackTimeOfDay(new Date(2026, 0, 1, 12, 0, 0).toISOString()), "12:00 PM");
+  });
+
+  it("drops seconds, unlike formatFixedDateTime", () => {
+    assert.equal(formatCallbackTimeOfDay(new Date(2026, 0, 1, 14, 5, 59).toISOString()), "2:05 PM");
+  });
+
+  it("returns an empty string for an unparsable value", () => {
+    assert.equal(formatCallbackTimeOfDay("not-a-date"), "");
   });
 });
