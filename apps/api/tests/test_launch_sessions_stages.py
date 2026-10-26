@@ -529,37 +529,6 @@ def test_s1_binds_every_search_to_the_sessions_job():
     assert seen == ["1001", "26-001"]
 
 
-def test_s1_and_s3_tag_their_exa_spend_with_the_session():
-    """ExaCall attribution: search_candidates() starts its own pipeline run, so
-    the session id (and S1's attempt) ride in the Exa telemetry context."""
-    from services import exa_telemetry
-
-    store, world, job, fields = full_search_world()
-    seen: Dict[str, List[Dict[str, Any]]] = {"search": [], "enrich": []}
-    search, enrich = world.search_events, world.enrich
-
-    async def spy_search(request, *, schedule_cross_submissions):
-        seen["search"].append(exa_telemetry.current())
-        async for event in search(request, schedule_cross_submissions=schedule_cross_submissions):
-            yield event
-
-    async def spy_enrich(items, *, job_id, concurrency):
-        seen["enrich"].append(exa_telemetry.current())
-        async for answer in enrich(items, job_id=job_id, concurrency=concurrency):
-            yield answer
-
-    world.search_events, world.enrich = spy_search, spy_enrich
-    store.create_session(fields)
-    run(drive(store, world, fields["id"]))
-
-    sid = fields["id"]
-    assert seen["search"] == [
-        {"trigger": "launch_s1", "attempt": 0, "launch_session_id": sid},
-        {"trigger": "launch_s1", "attempt": 1, "launch_session_id": sid},
-    ]
-    assert seen["enrich"] and all(c == {"trigger": "launch_s3", "launch_session_id": sid} for c in seen["enrich"])
-
-
 def test_s6_a_payload_the_request_model_refuses_fails_only_its_batch(monkeypatch):
     """review-parity #9: a pydantic ValidationError is the browser's 422 —
     that batch fails (no retry, no values in the error), the next one saves."""

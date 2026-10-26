@@ -23,7 +23,6 @@ import logging
 import math
 from typing import Any, Dict, List
 
-from services import exa_telemetry
 from services.launch_sessions import config as cfg
 from services.launch_sessions import rules
 from services.launch_sessions import schema as S
@@ -129,18 +128,16 @@ async def run(ctx: StageContext) -> StageResult:
             for g in group
         ]
         answered: set = set()
-        # ExaCall attribution; the lookups' tasks copy this context.
-        with exa_telemetry.scope(trigger="launch_s3", launch_session_id=ctx.sid):
-            async with contextlib.aclosing(
-                ctx.fx.enrich(items, job_id=ctx.job_ref, concurrency=len(items))
-            ) as stream:
-                async for answer in stream:
-                    idx = answer.get("index") if isinstance(answer, dict) else None
-                    if not isinstance(idx, int) or idx < 0 or idx >= len(group) or idx in answered:
-                        continue
-                    answered.add(idx)
-                    g = group[idx]
-                    await ctx.set_states([{"candidate_id": g["cid"], "contact": answer_contact(answer, g["launchable"])}])
+        async with contextlib.aclosing(
+            ctx.fx.enrich(items, job_id=ctx.job_ref, concurrency=len(items))
+        ) as stream:
+            async for answer in stream:
+                idx = answer.get("index") if isinstance(answer, dict) else None
+                if not isinstance(idx, int) or idx < 0 or idx >= len(group) or idx in answered:
+                    continue
+                answered.add(idx)
+                g = group[idx]
+                await ctx.set_states([{"candidate_id": g["cid"], "contact": answer_contact(answer, g["launchable"])}])
         # A lookup that never answered reads as failed (the browser's null).
         missing_answers = [
             {"candidate_id": g["cid"], "contact": answer_contact({"result": None}, g["launchable"])}

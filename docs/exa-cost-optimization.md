@@ -67,8 +67,4 @@ Monthly total: about $6.3–7.6k.
 - `x-api-key` header, `limit=100`, cursor pagination.
 - Each run carries `costDollars` (agentCompute, enrichments, dataSources) and `usage`.
 
-Contact runs now carry `metadata` (`env/surface/tier/path/trigger/job_id/attempt/arm/call_id`). `apps/api/scripts/exa_runs_ledger.py` does the weekly reconcile: it groups spend by `metadata.env/surface/tier/trigger/arm` and, given the `exa_run_id`/`call_id`s New Relic saw finish (completed, failed or cancelled), flags billed runs no `ExaCall` event saw end. Never store or print `request.query` or `output`: they contain candidate names.
-
-Export those ids one day per query. NRQL `uniques()` returns at most 10,000 values, so a single `SINCE 8 days ago` export is cut off and every dropped run would show as a false orphan. Run the script's query (module docstring) 8 times, `SINCE n days ago UNTIL n-1 days ago` for n = 8 … 2, then `SINCE 1 day ago`, and append every result to the one `--seen` file (New Relic JSON exports can be appended as-is; a plain id list needs a blank line between exports). If any column holds 10,000 ids the script refuses with exit code 2; split that day into smaller windows (`SINCE 12 hours ago`).
-
-Live spend: New Relic `ExaCall` events (cost per call, by surface / tier / trigger) on the PAIR Ops dashboard's "Exa" page; runbook and kill switches in `docs/observability/new-relic.md`.
+Once run `metadata` ships, group spend by `metadata.env/surface/tier/trigger/arm`. Never store or print `request.query` or `output`: they contain candidate names.
