@@ -71,6 +71,39 @@ export function hasMinimumCallbackLeadTime(iso: string, now: Date = new Date()):
   return !Number.isNaN(target.getTime()) && target.getTime() - now.getTime() >= CALLBACK_MIN_LEAD_MINUTES * 60_000;
 }
 
+/** "MM/DD/YYYY HH:MM:SS AM/PM" of `iso` in the VIEWER's own local time, with
+ * a FIXED date order and zero-padded 12-hour clock regardless of the
+ * browser's own locale — unlike toLocaleString(), which formats using
+ * whatever date order (DD/MM vs MM/DD) and notation the viewer's OS/browser
+ * happens to be configured for. Two recruiters in the same office, same
+ * timezone, could otherwise see the same callback's date written in a
+ * different order from each other purely from an OS locale setting neither
+ * of them set on purpose. Returns "" for an unparsable value rather than
+ * "Invalid Date".
+ *
+ * Deliberately NOT lib/date.ts's formatEasternDateTime, despite the similar
+ * "MM/DD/YYYY ..." shape: that one fixes every report cell to one shared
+ * business timezone (Eastern, 24-hour) so a dashboard reads the same for
+ * every viewer. A callback is the opposite — it's a specific recruiter's own
+ * commitment at a specific moment in THEIR day, so it's shown in each
+ * viewer's own local clock time instead (confirmed product behavior: an IST
+ * tester and an EDT recruiter should each see their own correct local time
+ * for the same underlying instant, not one shared zone). */
+export function formatFixedDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const year = d.getFullYear();
+  const minutes = String(d.getMinutes()).padStart(2, "0");
+  const seconds = String(d.getSeconds()).padStart(2, "0");
+  let hours = d.getHours();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  const hoursStr = String(hours).padStart(2, "0");
+  return `${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
+}
+
 /** "now" in the shape <input type="datetime-local"> expects for its `min`
  * attribute — a browser hint only (see hasMinimumCallbackLeadTime's own
  * docstring for the real enforcement). Previously duplicated by hand in

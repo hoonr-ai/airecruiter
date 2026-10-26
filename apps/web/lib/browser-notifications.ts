@@ -47,7 +47,18 @@ export function shouldShowBrowserPopup(
 //   itself, rather than just focusing the window and going nowhere.
 // - recruiter_handoff_requested: the live join page for that interview -
 //   the whole point of the notification is "the candidate is waiting now".
+// - candidate_callback_reminder: Rankings, not the report — see its own
+//   constant below for why this is a candidate-level type that deliberately
+//   does NOT follow the report rule.
 export const HANDOFF_REQUESTED_TYPE = "recruiter_handoff_requested";
+
+// Candidate-level like candidate_passed (candidate_id is set), but routed to
+// Rankings instead of the report page (PR review) — the Upcoming Callbacks
+// list's own card for this same event already links there, because that's
+// where Reschedule/Mark Done actually live. Landing on the read-only report
+// instead would send the recruiter to act on the callback via a second,
+// unnecessary navigation.
+export const CALLBACK_REMINDER_TYPE = "candidate_callback_reminder";
 
 export function notificationClickPath(
   item: Pick<NotificationItem, "jobdiva_id" | "candidate_id"> & Partial<Pick<NotificationItem, "type" | "metadata">>
@@ -55,6 +66,9 @@ export function notificationClickPath(
   const interviewId = Number(item.metadata?.interview_id);
   if (item.type === HANDOFF_REQUESTED_TYPE && Number.isInteger(interviewId) && interviewId > 0) {
     return `/handoff/${interviewId}`;
+  }
+  if (item.type === CALLBACK_REMINDER_TYPE && item.jobdiva_id) {
+    return `/jobs/${encodeURIComponent(item.jobdiva_id)}/rankings`;
   }
   if (item.jobdiva_id && item.candidate_id) {
     return `/jobs/${encodeURIComponent(item.jobdiva_id)}/report?candidateId=${encodeURIComponent(item.candidate_id)}`;

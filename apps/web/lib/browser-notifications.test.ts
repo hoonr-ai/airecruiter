@@ -77,6 +77,29 @@ describe("notificationClickPath", () => {
     assert.equal(notificationClickPath({ jobdiva_id: "26-14907", candidate_id: null }), "/jobs/26-14907/rankings");
   });
 
+  it("sends a callback reminder to Rankings, not the report, despite having a candidate_id", () => {
+    // Matches the Upcoming Callbacks list's own card for this same event —
+    // Reschedule/Mark Done live on Rankings, not the read-only report.
+    assert.equal(
+      notificationClickPath({
+        jobdiva_id: "26-14907", candidate_id: "123", type: "candidate_callback_reminder",
+      }),
+      "/jobs/26-14907/rankings"
+    );
+  });
+
+  it("falls through to the notifications page for a callback reminder with no jobdiva_id", () => {
+    // An older/malformed row — the callback-reminder branch itself requires
+    // jobdiva_id, so this must fall all the way through, not throw or build
+    // a broken "/jobs/undefined/rankings" link.
+    assert.equal(
+      notificationClickPath({
+        jobdiva_id: null, candidate_id: "123", type: "candidate_callback_reminder",
+      }),
+      "/notifications"
+    );
+  });
+
   it("falls back to the notifications page when jobdiva_id itself is missing", () => {
     assert.equal(notificationClickPath({ jobdiva_id: null, candidate_id: "123" }), "/notifications");
     assert.equal(notificationClickPath({ jobdiva_id: null, candidate_id: null }), "/notifications");

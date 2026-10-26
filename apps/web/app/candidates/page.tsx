@@ -41,7 +41,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { datetimeLocalMin, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
+import { datetimeLocalMin, formatFixedDateTime, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
 import { ApiError, extractErrorMessage } from "@/lib/api-error";
 
 // On-screen column count. The skeleton rows and the empty state span this many
@@ -732,7 +732,7 @@ export default function GlobalCandidatesPage() {
         feedback_type: 'Callback Scheduled',
         callback_at: callbackAtIso,
       });
-      applyLocalFeedback(actionCandidateId, 'Callback Scheduled', `Callback at ${new Date(callbackAtIso).toLocaleString()}`, null);
+      applyLocalFeedback(actionCandidateId, 'Callback Scheduled', `Callback at ${formatFixedDateTime(callbackAtIso)}`, null);
       // Only close/reset on success (PR #841 review) — closing unconditionally
       // in `finally` would also wipe callbackAtInput on a failed save, forcing
       // the recruiter to re-pick the time after an error.

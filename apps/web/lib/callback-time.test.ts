@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   callbackDayLabel,
   callbackRelativeLabel,
+  formatFixedDateTime,
   hasMinimumCallbackLeadTime,
   isCallbackOverdue,
   isValidFutureCallbackTime,
@@ -119,5 +120,27 @@ describe("hasMinimumCallbackLeadTime", () => {
 
   it("is false for an unparsable value", () => {
     assert.equal(hasMinimumCallbackLeadTime("not-a-date", NOW), false);
+  });
+});
+
+describe("formatFixedDateTime", () => {
+  it("formats as MM/DD/YYYY HH:MM:SS AM/PM regardless of locale", () => {
+    assert.equal(formatFixedDateTime(localIso(2026, 9, 26, 20, 43)), "10/26/2026 08:43:00 PM");
+  });
+
+  it("pads single-digit month, day, hour, minute and second", () => {
+    assert.equal(formatFixedDateTime(localIso(2026, 0, 5, 9, 5)), "01/05/2026 09:05:00 AM");
+  });
+
+  it("renders midnight as 12 AM, not 0 AM", () => {
+    assert.equal(formatFixedDateTime(new Date(2026, 0, 1, 0, 0, 0).toISOString()), "01/01/2026 12:00:00 AM");
+  });
+
+  it("renders noon as 12 PM, not 0 PM", () => {
+    assert.equal(formatFixedDateTime(new Date(2026, 0, 1, 12, 0, 0).toISOString()), "01/01/2026 12:00:00 PM");
+  });
+
+  it("returns an empty string for an unparsable value", () => {
+    assert.equal(formatFixedDateTime("not-a-date"), "");
   });
 });

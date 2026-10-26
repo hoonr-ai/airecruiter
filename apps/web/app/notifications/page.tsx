@@ -15,6 +15,7 @@ import type { NotificationItem } from "@/lib/api";
 import { notificationClickPath } from "@/lib/browser-notifications";
 import { NOTIFICATION_FILTERS, matchesNotificationFilter, type NotificationFilter } from "@/lib/notification-filters";
 import { groupNotificationsByDate, formatRelativeTime } from "@/lib/notification-date-groups";
+import { formatFixedDateTime } from "@/lib/callback-time";
 import { NOTIFICATION_SOUND_MUTED_KEY, getSafeStorage, isSoundMuted, setSoundMuted, unlockNotificationSound } from "@/lib/notification-sound";
 import {
   DESKTOP_NOTIFICATION_PREFS_KEY,
@@ -41,18 +42,20 @@ function emptyFilterMessage(filter: NotificationFilter): string {
   }
 }
 
-// "Scheduled callback at 10/26/2026, 7:51:00 PM" in the VIEWER's own local
-// timezone (toLocaleString's default date+time format), from
-// metadata.callback_at (a raw UTC ISO instant — PR review, so the time
-// doesn't read as the recruiter's own local time to anyone outside UTC).
-// Falls back to item.body (the server's pre-formatted "... UTC" string) for
-// a notification created before metadata.callback_at existed.
+// "Scheduled callback at 10/26/2026 7:51:00 PM" in the VIEWER's own local
+// timezone, in the app's one fixed MM/DD/YYYY HH:MM:SS format (not
+// toLocaleString's locale-dependent one — see formatFixedDateTime's own
+// docstring), from metadata.callback_at (a raw UTC ISO instant — PR review,
+// so the time doesn't read as the recruiter's own local time to anyone
+// outside UTC). Falls back to item.body (the server's pre-formatted
+// "... UTC" string) for a notification created before metadata.callback_at
+// existed.
 function callbackReminderTimeLabel(item: NotificationItem): string {
   const raw = item.metadata?.callback_at;
   if (typeof raw === "string") {
-    const parsed = new Date(raw);
-    if (!Number.isNaN(parsed.getTime())) {
-      return `Scheduled callback at ${parsed.toLocaleString()}`;
+    const formatted = formatFixedDateTime(raw);
+    if (formatted) {
+      return `Scheduled callback at ${formatted}`;
     }
   }
   return item.body || "";
