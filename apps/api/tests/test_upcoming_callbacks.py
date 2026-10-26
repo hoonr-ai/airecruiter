@@ -87,11 +87,14 @@ async def test_mark_callback_done_sets_callback_done_at_only(monkeypatch):
     # nothing that would read as an actual outcome on Rankings.
     assert set(payload.keys()) == {"callback_done_at"}
     assert params[1] == 55148489
-    # PR #844 review: the UPDATE itself is scoped to feedback_type =
-    # 'Callback Scheduled' — an atomic guarantee, not just a Python check
-    # before it, so a race with a concurrent Reject/Submit can't stamp
-    # callback_done_at onto a row that's no longer a pending callback.
-    assert "data->>'feedback_type' = 'Callback Scheduled'" in sql
+    # The UPDATE itself is scoped to feedback_type — an atomic guarantee,
+    # not just a Python check before it, so a race with a concurrent
+    # Reject/Submit can't stamp callback_done_at onto a row that's no
+    # longer a pending callback. LOWER(TRIM(...)), matching
+    # list_upcoming_callbacks' own filter (PR review: an exact-string match
+    # here could silently no-op on a row the list still shows, for any
+    # differently-cased or whitespace-padded value).
+    assert "lower(trim(data->>'feedback_type')) = 'callback scheduled'" in sql.lower()
     assert conn.committed is True
 
 
@@ -170,8 +173,8 @@ async def test_cancel_callback_clears_feedback_type_and_both_timestamps(monkeypa
     assert payload == {"feedback_type": None, "callback_scheduled_at": None, "callback_done_at": None}
     assert params[1] == 55148489
     # Scoped at the SQL level to a still-pending "Callback Scheduled" row,
-    # same guarantee /callback/done relies on.
-    assert "data->>'feedback_type' = 'Callback Scheduled'" in sql
+    # same guarantee (and same LOWER(TRIM(...)) match) /callback/done relies on.
+    assert "lower(trim(data->>'feedback_type')) = 'callback scheduled'" in sql.lower()
     assert conn.committed is True
 
 

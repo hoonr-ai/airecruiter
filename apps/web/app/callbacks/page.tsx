@@ -171,13 +171,19 @@ export default function UpcomingCallbacksPage() {
     }
   };
 
+  // Clear all only ever touches already-done rows (product decision + PR
+  // review) — a still-pending callback is a real future obligation with a
+  // reminder still coming, not clutter to sweep away in bulk. Removing one
+  // of those is a deliberate, one-at-a-time action via its own "x" instead.
+  const doneCallbacks = useMemo(() => (callbacks || []).filter((cb) => !!cb.callback_done_at), [callbacks]);
+
   const handleClearAll = async () => {
-    const all = callbacks || [];
-    if (all.length === 0) return;
+    const targets = doneCallbacks;
+    if (targets.length === 0) return;
     if (
       typeof window !== "undefined" &&
       !window.confirm(
-        `Clear all ${all.length} callback${all.length === 1 ? "" : "s"}? Any still pending won't get a reminder, and this can't be undone.`
+        `Clear ${targets.length} completed callback${targets.length === 1 ? "" : "s"} from this list? This can't be undone.`
       )
     ) {
       return;
@@ -188,22 +194,25 @@ export default function UpcomingCallbacksPage() {
     // and a clear failure partway through should still leave state (loading
     // indicator, remaining list) consistent rather than racing N requests
     // against one shared setCallbacks.
-    const failed: UpcomingCallback[] = [];
-    for (const cb of all) {
+    let failedCount = 0;
+    for (const cb of targets) {
       try {
         await api.candidates.cancelCallback(String(cb.job_id), cb.candidate_id);
-        const key = callbackKey(cb);
-        setCallbacks((prev) => (prev || []).filter((c) => callbackKey(c) !== key));
       } catch (err) {
         console.error("Failed to cancel callback during Clear all:", err);
-        failed.push(cb);
+        failedCount += 1;
       }
     }
-    if (failed.length > 0) {
+    // Resync from the server rather than trust N individual optimistic
+    // removals (PR review) — a failure partway through, or anything else
+    // that changed concurrently, would otherwise leave local state drifted
+    // from what the backend actually has.
+    await load();
+    if (failedCount > 0) {
       setActionError(
-        failed.length === all.length
+        failedCount === targets.length
           ? "Failed to clear the callbacks. Please try again."
-          : `Cleared ${all.length - failed.length} of ${all.length} — the rest failed. Please try again.`
+          : `Cleared ${targets.length - failedCount} of ${targets.length} — the rest failed. Please try again.`
       );
     }
     setClearingAll(false);
@@ -284,12 +293,13 @@ export default function UpcomingCallbacksPage() {
       <div className="flex items-center gap-2 mb-6">
         <Clock className="h-5 w-5 text-slate-500" />
         <h1 className="text-xl font-semibold text-slate-900">Upcoming Callbacks</h1>
-        {callbacks !== null && callbacks.length > 0 && (
+        {doneCallbacks.length > 0 && (
           <Button
             variant="outline"
             size="sm"
             onClick={handleClearAll}
             disabled={clearingAll || busyKey !== null}
+            title="Clear completed callbacks from this list"
             className="ml-auto text-slate-500 hover:text-rose-600 hover:border-rose-200"
           >
             {clearingAll ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}

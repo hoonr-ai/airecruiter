@@ -200,16 +200,15 @@ async def lifespan(app: FastAPI):
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
 
-    # Transactional outbox relay (services/task_outbox.py). The arq worker
-    # ALSO runs it when ARQ_ENABLED, but every API worker runs it too,
-    # unconditionally — FOR UPDATE SKIP LOCKED keeps any number of relays
-    # from claiming the same row (task_outbox.py's own docstring), so this
-    # is safe, redundant delivery rather than a race. Previously gated
-    # behind `if not queue_enabled()`, so a dead or never-deployed arq
-    # worker in an ARQ_ENABLED environment meant NOTHING relayed the
-    # outbox — including every candidate_callback_reminder — with only
-    # check_lag's log line to notice. Running it here too makes that a
-    # non-issue instead of an alert someone has to act on.
+    # Transactional outbox relay (services/task_outbox.py). Runs here
+    # unconditionally now, even with ARQ_ENABLED — previously skipped
+    # whenever arq was enabled, so a dead/never-deployed arq worker meant
+    # NOTHING relayed the outbox (including every candidate_callback_
+    # reminder), with only check_lag's log line to notice. Safe to run
+    # alongside the arq worker: FOR UPDATE SKIP LOCKED means any number of
+    # relays can claim rows without double-processing. Dispatch itself
+    # needs nothing worker-only — relay_once() calls each task's plain
+    # function directly, against the same services/DB the API already uses.
     from services import task_outbox as _task_outbox_relay
     scheduler.add_job(
         background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),

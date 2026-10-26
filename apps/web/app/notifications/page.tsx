@@ -41,7 +41,8 @@ function emptyFilterMessage(filter: NotificationFilter): string {
   }
 }
 
-// "Scheduled callback at 7:51 PM" in the VIEWER's own local timezone, from
+// "Scheduled callback at 10/26/2026, 7:51:00 PM" in the VIEWER's own local
+// timezone (toLocaleString's default date+time format), from
 // metadata.callback_at (a raw UTC ISO instant — PR review, so the time
 // doesn't read as the recruiter's own local time to anyone outside UTC).
 // Falls back to item.body (the server's pre-formatted "... UTC" string) for

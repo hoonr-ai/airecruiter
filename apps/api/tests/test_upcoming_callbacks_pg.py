@@ -146,6 +146,33 @@ async def test_list_upcoming_callbacks_includes_a_recently_done_row_but_not_an_o
 
 
 @pytest.mark.anyio
+async def test_list_upcoming_callbacks_survives_a_malformed_callback_done_at(pg):
+    """PR review: the 24h-window cast on callback_done_at must not throw
+    (and fail the whole list for this recruiter) on a garbage value —
+    whether from a bug elsewhere or hand-edited data."""
+    now = datetime.now(timezone.utc)
+    _insert_candidate(pg, candidate_id="c-garbage-done-at", name="Garbage Gail", data={
+        "feedback_type": "Callback Scheduled", "submitted_by": _RECRUITER,
+        "callback_scheduled_at": (now - timedelta(hours=1)).isoformat(),
+        "callback_done_at": "not-a-timestamp",
+    })
+    _insert_candidate(pg, candidate_id="c-fine", name="Fine Fiona", data={
+        "feedback_type": "Callback Scheduled", "submitted_by": _RECRUITER,
+        "callback_scheduled_at": (now + timedelta(hours=1)).isoformat(),
+    })
+
+    user = UserIdentity(email=_RECRUITER, role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+
+    names = [cb["candidate_name"] for cb in res["callbacks"]]
+    assert "Fine Fiona" in names
+    # Treated as "not done" rather than crashing — a garbage value is
+    # neither NULL nor a parseable recent timestamp, so it fails the
+    # inclusion check the same as a real done-and-expired row would.
+    assert "Garbage Gail" not in names
+
+
+@pytest.mark.anyio
 async def test_mark_callback_done_only_updates_a_pending_callback_row(pg):
     pending_id = _insert_candidate(pg, candidate_id="c1", name="Jane Doe", data={
         "feedback_type": "Callback Scheduled", "submitted_by": _RECRUITER,

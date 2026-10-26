@@ -1770,6 +1770,27 @@ def test_create_callback_reminder_skips_when_status_changed_away_from_callback(m
     assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)
 
 
+def test_create_callback_reminder_skips_after_cancel_candidate_callback(monkeypatch):
+    """PR review: an explicit test for /callback/cancel's own effect on an
+    already-queued reminder — cancel_candidate_callback (routers/
+    candidates.py) clears feedback_type to None (not to another feedback
+    type, which the Reject case above already covers) alongside
+    callback_scheduled_at, so the stale-reminder check must skip the same
+    way for that shape too."""
+    callback_at = "2026-01-01T15:00:00+00:00"
+    job_row = {"job_id": "J1", "title": "Data Engineer", "enhanced_title": None, "jobdiva_id": "JD1", "recruiter_emails": None}
+    cand_row = {"name": "Jane Doe", "data": {"feedback_type": None, "callback_scheduled_at": None, "callback_done_at": None}}
+    cur = FakeCursor(fetchone_results=[job_row, cand_row])
+    conn = FakeConn(cur)
+    monkeypatch.setattr("services.notifications_service.get_db_connection", lambda: conn)
+
+    asyncio.run(create_candidate_callback_reminder_notification(
+        job_id="J1", candidate_id="C1", recruiter_email="a@x.com", callback_at=callback_at,
+    ))
+
+    assert not any("INSERT INTO notifications" in sql for sql, _ in cur.executed)
+
+
 def test_create_callback_reminder_falls_back_to_shortly_on_bad_timestamp(monkeypatch):
     """A malformed callback_at must still produce a notification (the
     recruiter still gets reminded) rather than raising — just with a
