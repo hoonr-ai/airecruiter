@@ -408,39 +408,13 @@ def test_launch_enrichment_sends_exactly_the_launch_fields(monkeypatch):
         return {"status": "success", "candidate_id": cid}
     monkeypatch.setattr(rc, "_enrich_candidate_contact_impl", impl)
     items = _items(1) + [{"id": "d1", "source": None, "match_score": True, "linkedin_url": ""},
-                         {"candidate_id": "d2", "match_score": "85", "email": "  ", "full_name": ""}]
+                         {"candidate_id": "d2", "match_score": "85"}]
     _drain(rc.enrich_contacts_for_launch(items, job_id="26-001"))
     by_id = {r.candidate_id: r.model_dump(exclude_none=True) for r in seen}
-    # The item is the request body (rules.build_enrich_request): its seeds go
-    # as they are; a row's own fields ("name", "phone") never do.
     assert by_id["c0"] == {"candidate_id": "c0", "jobdiva_id": "26-001", "source": "LinkedIn-Exa",
-                           "linkedin_url": "https://www.linkedin.com/in/c0", "trigger": "launch", "match_score": 80.0,
-                           "email": "x@y.z"}
+                           "linkedin_url": "https://www.linkedin.com/in/c0", "trigger": "launch", "match_score": 80.0}
     assert by_id["d1"] == {"candidate_id": "d1", "jobdiva_id": "26-001", "trigger": "launch"}
     assert by_id["d2"] == {"candidate_id": "d2", "jobdiva_id": "26-001", "trigger": "launch"}
-
-
-def test_launch_enrichment_passes_the_seeds_and_never_a_phone(monkeypatch):
-    """O9 (2026-10-15): the JobDiva email the row holds, its name and company
-    reach the chain (the browser sends the same: build_enrich_request); a
-    phone never does, even when the row has one."""
-    from services.launch_sessions import rules
-
-    seen: List[Any] = []
-
-    async def impl(cid, item):
-        seen.append(item)
-        return {"status": "success", "candidate_id": cid}
-    monkeypatch.setattr(rc, "_enrich_candidate_contact_impl", impl)
-    row = {"candidate_id": "jd1", "source": "JobDiva-TalentSearch", "match_score": 81, "name": "Jane Doe",
-           "email": "Jane@Gmail.com", "phone": "408-555-1234", "current_company": "Acme Bank"}
-    item = rules.build_enrich_request(row, "jd1", "https://www.linkedin.com/in/jane-doe", "26-001")
-    _drain(rc.enrich_contacts_for_launch([item, {**item, "candidate_id": "x", "phone": "408-555-1234"}],
-                                         job_id="26-001"))
-    by_id = {r.candidate_id: r for r in seen}
-    assert (by_id["jd1"].email, by_id["jd1"].full_name, by_id["jd1"].company_name) == (
-        "jane@gmail.com", "Jane Doe", "Acme Bank")
-    assert by_id["jd1"].phone is None and by_id["x"].phone is None
 
 
 def test_launch_enrichment_outcomes_read_like_the_browser(monkeypatch):

@@ -564,8 +564,7 @@ EXA_AGENT_CONTACT_FIELDS = _os.getenv(
 # `enrich_contact_for_sourcing` falls through to the Exa Agent contact run
 # (still gated by EXA_CONTACT_ENRICH_ENABLED + EXA_API_KEY) for LinkedIn-*
 # sources. Capped per job by EXA_SOURCING_CONTACT_CAP to bound spend
-# (~$0.115/run). Source & Launch's own searches put it off to Launch PAIR
-# (SOURCING_DEFER_PAID_CONTACT_ENABLED below).
+# (~$0.115/run).
 EXA_SOURCING_CONTACT_FALLBACK = _os.getenv(
     "EXA_SOURCING_CONTACT_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
@@ -599,52 +598,9 @@ EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
 # an email Exa is the only source of a phone, and PAIR screens by phone first.
 # The spend is bounded by the eligibility policy (CONTACT_ENRICH_*, launch pass
 # only), and the contact cache means a person's phone is bought at most once.
-# ON between 2026-09-25 and 09-28 to cut Exa spend. Do NOT set it true again:
-# since Launch PAIR sends the JobDiva email it holds (2026-10-15), it would stop
-# the phone lookup for every candidate who has an email.
+# ON between 2026-09-25 and 09-28 to cut Exa spend; set true to go back.
 EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
     "EXA_ONDEMAND_CONTACT_ONLY_WHEN_NO_CONTACT", "false"
-).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
-
-
-# Launch PAIR's deep-search EMAIL run for a candidate who already holds a
-# personal phone (2026-10-14, user decision: a 50/50 holdout for 2 weeks, then
-# decide). The launch gate is phone OR email, so that run (~$0.30 per email
-# found, ~$1.6k a month) never changes who can be launched; it buys a second
-# channel. This share of such people, 0-100 by a hash of their LinkedIn slug
-# (one arm per person across workers and restarts:
-# contact_enrichment.deep_skip_arm), skips it; the rest keep it, and both arms
-# are logged when it is decided (services/contact_holdout.py). 0 = off
-# (everyone keeps the run), 100 = everyone skips it. Only Launch PAIR's lookups
-# (trigger "launch"); a recruiter's click always gets the deep search. Parsed
-# at import (a bad value is 0), read through this attribute at call time.
-# 0 in code until the experiment starts (50, by a one-line change here, so the
-# deploy sets it on every VM: CI writes no EXA_* values): PAIR does not keep
-# the field that says a screen was started by email yet, without which the
-# holdout cannot be read, and a person's first exposure takes their row in
-# contact_deep_skip_holdout for good, so exposures before the window would
-# drop out of the analysis. Start it once that field is persisted (or agreed
-# with PairBot) and Exa is topped up; docs/exa-cost-optimization.md.
-def _env_pct(name: str, default: int) -> int:
-    try:
-        value = int((_os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-    return min(100, max(0, value))
-
-
-EXA_DEEP_SKIP_REACHABLE_PCT = _env_pct("EXA_DEEP_SKIP_REACHABLE_PCT", 0)
-
-# Source & Launch PAIR's full search (the browser's footer run and every
-# relaxed run behind it) and a launch session's S1 put the sourcing-time paid
-# Exa email lookup off to Launch PAIR (SearchCriteria.defer_paid_contact,
-# 2026-10-14): Launch asks Exa for the email and the phone in ONE run instead
-# of an email run now and a phone run minutes later (a second $0.025 base fee,
-# ~8.4k pairs per 15 days), and people never launched cost nothing. Apollo
-# still runs at sourcing, and no miss is recorded, so Launch does a normal run
-# first. Browse-only Step-5 searches keep buying. false = every search buys.
-SOURCING_DEFER_PAID_CONTACT_ENABLED = _os.getenv(
-    "SOURCING_DEFER_PAID_CONTACT_ENABLED", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 # Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate

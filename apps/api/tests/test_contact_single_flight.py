@@ -758,13 +758,10 @@ def test_the_chain_reports_final_misses_and_confirmed_rebuys(events, monkeypatch
     _ask()
     _ask(confirm=True)
 
-    # (Each lookup also ends with its "lookup" summary.)
-    steps = [x for x in _lookups(events) if x["outcome"] != "lookup"]
-    outcomes = [(x["outcome"], x.get("fields_final"), x.get("trigger")) for x in steps]
+    outcomes = [(x["outcome"], x.get("fields_final"), x.get("trigger")) for x in _lookups(events)]
     assert outcomes[0] == ("final_miss", "phone", "click_phone")
     assert outcomes[1] == ("confirm_rebuy", "phone", "click_phone")
-    assert [x["outcome"] for x in steps][2:] == ["passthrough"]   # the deep run (no key here)
-    assert [x["deep_asked"] for x in _lookups(events) if x["outcome"] == "lookup"] == ["-", "phone"]
+    assert [x["outcome"] for x in _lookups(events)][2:] == ["passthrough"]   # the deep run (no key here)
 
 
 # ---------------------------------------------------------------------------

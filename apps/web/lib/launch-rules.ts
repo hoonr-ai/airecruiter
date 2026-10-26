@@ -71,33 +71,6 @@ export function isValidLaunchEmail(value: string | null | undefined): boolean {
   return true;
 }
 
-// The contact lookup's own placeholder test (apps/api/utils/email_utils.py
-// is_placeholder_email), stricter than isValidLaunchEmail: test@gmail.com,
-// jane@example.org, x@jobdiva.local. The lookup drops a seed email it calls
-// a placeholder and buys one instead, so getCandidateSeedEmail never holds
-// one (a held seed keeps the row's own email over the one bought).
-const SERVER_PLACEHOLDER_EMAIL_DOMAINS = new Set([
-  "example.com", "example.org", "example.net", "test.com", "invalid", "localhost", "local",
-]);
-const SERVER_PLACEHOLDER_EMAIL_LOCAL_PARTS = new Set([
-  "your-email", "your_email", "email", "test", "example", "candidate",
-]);
-
-export function isServerPlaceholderEmail(value: unknown): boolean {
-  const email = String(value || "").trim().toLowerCase();
-  if (!email || PLACEHOLDER_LAUNCH_EMAILS.has(email)) return true;
-  if (email.endsWith("@noemail.pair.ai")) return true;
-  const at = email.lastIndexOf("@");
-  if (at < 0) return true;
-  const localPart = email.slice(0, at);
-  const domain = email.slice(at + 1);
-  if (SERVER_PLACEHOLDER_EMAIL_DOMAINS.has(domain)) return true;
-  if (domain.endsWith(".local")) return true;
-  if (SERVER_PLACEHOLDER_EMAIL_LOCAL_PARTS.has(localPart)) return true;
-  // Auto_<id>@jobdiva.com (and any other jobdiva.com address).
-  return domain === "jobdiva.com";
-}
-
 export function launchPhoneDigits(value: string | null | undefined): string {
   return String(value || "").replace(/\D/g, "");
 }
@@ -183,9 +156,6 @@ export function isLaunchableNow(candidate: any): boolean {
 
 // ── Display name (page.tsx 566-591) ─────────────────────────────────────────
 
-// Placeholder names sources give a row with no name.
-const ANONYMOUS_CANDIDATE_NAMES = ["linkedin candidate", "professional candidate", "unknown candidate", "unknown"];
-
 export const getCandidateDisplayName = (candidate: {
   name?: string;
   firstName?: string;
@@ -197,7 +167,7 @@ export const getCandidateDisplayName = (candidate: {
     const cleaned = (value || "").replace(/\s+/g, " ").trim();
     if (!cleaned) return "";
     const lowered = cleaned.toLowerCase();
-    if (ANONYMOUS_CANDIDATE_NAMES.includes(lowered)) {
+    if (["linkedin candidate", "professional candidate", "unknown candidate", "unknown"].includes(lowered)) {
       return "";
     }
     return cleaned;
@@ -312,11 +282,6 @@ export const deduplicateCandidatesUI = (candidatesList: any[]) => {
     const sEmail = String(src.email || "");
     if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmailUI(dEmail) && !isPlaceholderEmailUI(sEmail)))) {
       dst.email = sEmail;
-      // Where an adopted email came from ("jobdiva" | "other"), carried
-      // through later merges: a JobDiva survivor with an empty or Auto_*
-      // email takes a LinkedIn / Dice row's extracted one, which
-      // getCandidateSeedEmail must not send as held.
-      dst.email_source = src.email_source || (candIsJobDivaUI(src) ? "jobdiva" : "other");
     }
     const badResume = (r: any) => { const s = String(r || ""); return !s.trim() || s.includes("Resume content unavailable"); };
     const dR = String(dst.resume_text || "");
@@ -808,46 +773,15 @@ export function resolveLinkedInUrl(c: any): string {
   return linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
 }
 
-// The email a Launch lookup is told the candidate already has: the TOP-LEVEL
-// email of a JobDiva row, when it is a real launch email the lookup keeps as
-// a seed too (not isServerPlaceholderEmail; "" otherwise). The lookup then
-// buys only the phone, and the candidate keeps their own address.
-// Emails on LinkedIn / Dice / Unipile rows are regex- or LLM-extracted
-// (unreliable: apps/api/services/contact_cache.py), and ones a provider found
-// are reused through the contact cache anyway. That holds for one such row's
-// email a JobDiva row took on a merge too (email_source, deduplicateCandidatesUI).
-export function getCandidateSeedEmail(c: any): string {
-  if (!candIsJobDivaUI(c)) return "";
-  if (c.email_source && c.email_source !== "jobdiva") return "";
-  const email = String(c?.email || "").trim().toLowerCase();
-  return isValidLaunchEmail(email) && !isServerPlaceholderEmail(email) ? email : "";
-}
-
-// The name a Launch lookup is told: the row's name, else first + last name;
-// never the title or "LinkedIn profile" that getCandidateDisplayName falls
-// back to, nor a placeholder name ("" = none).
-export function getCandidateLookupName(c: any): string {
-  const clean = (value: unknown) => {
-    const cleaned = String(value || "").replace(/\s+/g, " ").trim();
-    return ANONYMOUS_CANDIDATE_NAMES.includes(cleaned.toLowerCase()) ? "" : cleaned;
-  };
-  return clean(c?.name) || clean([c?.firstName, c?.lastName].filter(Boolean).join(" "));
-}
-
 // One candidate's request to /candidates/enrich-contact(s). Held to the spend
 // policy server-side: LinkedIn/JobDiva sources at or above the score floor
-// only (a skip returns no contact). Seeds (2026-10-15): the JobDiva email the
-// row holds, its name and current company; never the phone (a held number
-// may be a work line, and a personal one is what the lookup is for).
+// only (a skip returns no contact).
 export function buildEnrichRequest(
   c: any,
   candidateId: string,
   linkedinUrl: string,
   jobdivaId: unknown,
 ): Record<string, unknown> {
-  const email = getCandidateSeedEmail(c);
-  const fullName = getCandidateLookupName(c);
-  const company = getCandidateCurrentCompanies(c)[0] || "";
   return {
     candidate_id: candidateId,
     jobdiva_id: jobdivaId,
@@ -855,9 +789,6 @@ export function buildEnrichRequest(
     linkedin_url: linkedinUrl,
     trigger: "launch",
     match_score: typeof c.match_score === "number" ? c.match_score : undefined,
-    email: email || undefined,
-    full_name: fullName || undefined,
-    company_name: company || undefined,
   };
 }
 
@@ -866,13 +797,10 @@ export type EnrichOutcome = "failed" | "succeeded" | "already_reachable" | "not_
 // How the launch reads one lookup answer (page.tsx applyEnrichResult):
 // `override` is the contact it found (it REPLACES the row's own phone/email at
 // launch: override.x || c.x), `lookedUp` marks a real lookup, `kipplo` is the
-// raw lookup.kipplo outcome for the "Kipplo issues" summary. `heldEmail` is
-// the email the request was seeded with (getCandidateSeedEmail): the
-// candidate's own, never replaced by one a provider found.
+// raw lookup.kipplo outcome for the "Kipplo issues" summary.
 export function interpretEnrichAnswer(
   enriched: any,
   launchableNow: boolean,
-  heldEmail = "",
 ): {
   outcome: EnrichOutcome;
   lookedUp: boolean;
@@ -888,7 +816,7 @@ export function interpretEnrichAnswer(
   const kipplo = String(enriched?.lookup?.kipplo || "");
   // `phone` is the candidate's personal number (never a work line).
   const nextPhone = enriched?.phone || enriched?.mobilePhone || "";
-  const nextEmail = heldEmail ? "" : enriched?.email || "";
+  const nextEmail = enriched?.email || "";
   if (nextPhone || nextEmail) {
     return {
       outcome: "succeeded",
@@ -904,7 +832,7 @@ export function interpretEnrichAnswer(
   }
   // Enrichment found nothing new, but the candidate already has a usable
   // phone or email — still launchable, not a miss.
-  if (launchableNow || heldEmail) return { outcome: "already_reachable", lookedUp, kipplo };
+  if (launchableNow) return { outcome: "already_reachable", lookedUp, kipplo };
   // "skipped" = held back by the spend policy (source / score floor).
   return { outcome: enriched?.status === "skipped" ? "not_eligible" : "no_contact", lookedUp, kipplo };
 }
