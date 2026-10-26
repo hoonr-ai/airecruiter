@@ -6214,16 +6214,20 @@ async def save_candidate_feedback(
                 # show this new callback, even though a reminder is about to
                 # fire for it.
                 feedback_data["callback_done_at"] = None
-                # True only when this write is changing the time of a
-                # callback that was already active (scheduled, not yet done)
-                # — i.e. an actual Reschedule, not a fresh Schedule for a
-                # candidate with no callback pending (none yet, or the
-                # previous one already got marked done). data_blob is this
-                # row's data from BEFORE this write's merge (see its own
-                # comment above), so it still reflects the prior state.
-                # list_upcoming_callbacks surfaces this so the UI can tell
-                # the two apart (PR follow-up: recruiters asked for a visual
-                # difference between a first schedule and a reschedule).
+                # True only for an actual Reschedule — changing the time of a
+                # callback that was already active — not a fresh Schedule
+                # (none pending yet, or the previous one was already done).
+                # data_blob is this row's PRE-write data (see its own comment
+                # above). Surfaced by list_upcoming_callbacks for the UI's
+                # Scheduled/Rescheduled badge.
+                #
+                # Read without FOR UPDATE (PR #856 review), so two concurrent
+                # saves for the same row could both read the same prior state
+                # and both compute this the same way. Left as is: the badge
+                # is cosmetic, and adding FOR UPDATE to this SELECT would
+                # also serialize every OTHER feedback_type through the same
+                # lock, for a race that doesn't otherwise corrupt anything
+                # (the UPDATE itself is still a single atomic JSONB merge).
                 feedback_data["callback_is_reschedule"] = bool(
                     data_blob.get("callback_scheduled_at") and not data_blob.get("callback_done_at")
                 )
@@ -6237,6 +6241,11 @@ async def save_candidate_feedback(
                 # notifications_service.create_candidate_callback_reminder_notification)
                 # detect a superseded callback and skip a stale reminder.
                 feedback_data["callback_scheduled_at"] = None
+                # Same reasoning as callback_scheduled_at just above: once
+                # this status moves on, callback_is_reschedule is stale data,
+                # not just unused — a later fresh Schedule shouldn't inherit
+                # whatever this field happened to say before.
+                feedback_data["callback_is_reschedule"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
                 # Fast path: update exactly the row we resolved. updated_at

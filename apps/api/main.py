@@ -200,30 +200,6 @@ async def lifespan(app: FastAPI):
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
 
-    # Transactional outbox relay (services/task_outbox.py). Runs here
-    # unconditionally now, even with ARQ_ENABLED — previously skipped
-    # whenever arq was enabled, so a dead/never-deployed arq worker meant
-    # NOTHING relayed the outbox (including every candidate_callback_
-    # reminder), with only check_lag's log line to notice. Safe to run
-    # alongside the arq worker: FOR UPDATE SKIP LOCKED means any number of
-    # relays can claim rows without double-processing. Dispatch itself
-    # needs nothing worker-only — relay_once() calls each task's plain
-    # function directly, against the same services/DB the API already uses.
-    from services import task_outbox as _task_outbox_relay
-    scheduler.add_job(
-        background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
-        "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
-    )
-    scheduler.add_job(
-        background_transaction("scheduler/task_outbox_purge")(_task_outbox_relay.purge_old),
-        "cron", hour=3, minute=17, id="task_outbox_purge", max_instances=1, coalesce=True,
-    )
-    from services import task_outbox as _task_outbox_lag
-    scheduler.add_job(
-        _task_outbox_lag.check_lag, "interval", minutes=5, id="task_outbox_lag_check",
-        max_instances=1, coalesce=True,
-    )
-
     # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
     # EXCLUSIVE, so running it in all 8 workers (and again on every worker
     # recycle) queued them behind each other. One worker runs the steps under
@@ -318,6 +294,38 @@ async def lifespan(app: FastAPI):
         await run_schema_once("schemas", _init_schemas)
     except Exception as e:  # noqa: BLE001 - schema init must never block boot
         logger.error(f"startup_schema_init_failed: {e}; continuing")
+
+    # Transactional outbox relay (services/task_outbox.py). Registered only
+    # AFTER schema init (above), not before: relay_once() dispatches tasks
+    # whose notification INSERTs target indexes schema init itself creates
+    # (e.g. candidate_callback_reminder's own uniq_notifications_callback_
+    # reminder_occurrence) — scheduling this interval job earlier risked its
+    # very first 10s tick firing before that index existed (PR #856 review:
+    # a worker restart with outbox rows already due could then hit the same
+    # "no unique or exclusion constraint matching the ON CONFLICT
+    # specification" error PR #805's own fix exists to prevent). Runs here
+    # unconditionally now, even with ARQ_ENABLED — previously skipped
+    # whenever arq was enabled, so a dead/never-deployed arq worker meant
+    # NOTHING relayed the outbox (including every candidate_callback_
+    # reminder), with only check_lag's log line to notice. Safe to run
+    # alongside the arq worker: FOR UPDATE SKIP LOCKED means any number of
+    # relays can claim rows without double-processing. Dispatch itself
+    # needs nothing worker-only — relay_once() calls each task's plain
+    # function directly, against the same services/DB the API already uses.
+    from services import task_outbox as _task_outbox_relay
+    scheduler.add_job(
+        background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
+        "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        background_transaction("scheduler/task_outbox_purge")(_task_outbox_relay.purge_old),
+        "cron", hour=3, minute=17, id="task_outbox_purge", max_instances=1, coalesce=True,
+    )
+    from services import task_outbox as _task_outbox_lag
+    scheduler.add_job(
+        _task_outbox_lag.check_lag, "interval", minutes=5, id="task_outbox_lag_check",
+        max_instances=1, coalesce=True,
+    )
 
     # JobDiva BI mirror sync. Every worker schedules it; an advisory lock lets
     # one run each cycle. Delayed like the auto-sync so boot stays uncontested.

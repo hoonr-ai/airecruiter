@@ -122,9 +122,17 @@ documented there:
   only the outbox relay actually calls it when that time comes. Candidate-
   level, single recipient (the recruiter who scheduled it) — its own sync
   helper rather than reusing _create_candidate_notification_for_recipient_sync
-  because the body needs the formatted callback time, not just a title — with
-  no duplicate check of its own, since task_outbox's dedupe_key already
-  guarantees the underlying task runs at most once.
+  because the body needs the formatted callback time, not just a title.
+  Excluded from the candidate-level "once ever" index (ONCE_EVER_EXCLUDED_
+  TYPES) — a recipient legitimately gets many of these over time, one per
+  reschedule, not just the first ever. Confirmed live in QA (PR #856): with
+  this type still under that index and a bare insert, the first reminder a
+  (recipient, candidate, job) combo ever got permanently UniqueViolation'd
+  every later one, so no reschedule's reminder ever fired again. Dedupes
+  instead on its own per-occurrence index, scoped by callback_at
+  (_CONFLICT_CALLBACK_REMINDER) — task_outbox's dedupe_key already keeps a
+  given callback's own task from running twice, so this index only matters
+  for an outright retry of that same run.
 
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
@@ -166,19 +174,9 @@ logger = logging.getLogger(__name__)
 # review-loop lookup index) imports this, so the two can't drift apart.
 REVIEW_LOOP_TYPES = ("candidate_internal_review_requested", "candidate_externally_submitted")
 
-# candidate_callback_reminder is excluded from the "once ever" index below
-# for an unrelated reason: unlike candidate_passed/rejected, the same
-# (recipient, candidate, job) legitimately gets MANY of these over time —
-# every reschedule is a new real-world event, each deserving its own
-# reminder. Before this fix, the very first callback reminder a
-# (recipient, candidate, job) combo ever received permanently blocked every
-# later one (including for a reschedule) with a UniqueViolation that killed
-# the task_outbox row for good — confirmed in QA (PR #855 follow-up): once
-# one reminder had fired, no later reschedule for that candidate ever
-# notified again. Its own, narrower "don't double-fire THIS exact callback"
-# dedup is the separate uniq_notifications_callback_reminder_occurrence
-# index below (_CONFLICT_CALLBACK_REMINDER), scoped by callback_at instead
-# of being permanent.
+# Excluded from the "once ever" index below for an unrelated reason than
+# REVIEW_LOOP_TYPES — see this module's own docstring, candidate_callback_
+# reminder entry.
 CALLBACK_REMINDER_TYPE = "candidate_callback_reminder"
 # Single source of truth for the predicate excluding both of the above from
 # the "once ever" index — imported by routers/notifications.py so the

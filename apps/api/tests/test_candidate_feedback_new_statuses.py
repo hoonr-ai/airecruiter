@@ -456,8 +456,12 @@ async def test_reject_after_callback_scheduled_clears_the_stale_callback_field(m
     """PR #841 review: callback_scheduled_at must not survive a later
     Reject/Submit/Unreachable/Allotment Slot Filled — otherwise the queued
     reminder task (which checks this field before notifying) would still
-    see what looks like a pending callback."""
-    cand_module, _jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+    see what looks like a pending callback. callback_is_reschedule
+    (PR #856 review) gets the same treatment — stale otherwise, since it
+    would survive the JSONB merge the same way."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_WITH_ACTIVE_CALLBACK,
+    )
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
     request = CandidateFeedbackRequest(feedback_type="Reject", reason="Skills do not meet requirements")
 
@@ -474,6 +478,7 @@ async def test_reject_after_callback_scheduled_clears_the_stale_callback_field(m
     _query, params = update_calls[0]
     feedback_payload = json.loads(params[0])
     assert feedback_payload["callback_scheduled_at"] is None
+    assert feedback_payload["callback_is_reschedule"] is None
 
 
 @pytest.mark.anyio

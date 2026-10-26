@@ -41,7 +41,11 @@ from fastapi.responses import StreamingResponse
 from core.auth import UserIdentity, get_current_user
 from core.db import get_db_connection
 from models import NotificationItem, NotificationListResponse, UnreadCountResponse
-from services.notifications_service import REVIEW_LOOP_TYPES, ONCE_EVER_EXCLUDED_TYPES, CALLBACK_REMINDER_TYPE
+from services.notifications_service import (
+    CALLBACK_REMINDER_TYPE,
+    ONCE_EVER_EXCLUDED_TYPES,
+    REVIEW_LOOP_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,39 +173,43 @@ def init_notifications_schema_sync() -> None:
                         ON notifications (recipient_email, candidate_id, jobdiva_id, type);
                     """
                 )
-                # Narrow the index above to exclude the internal-review-loop
-                # types (REVIEW_LOOP_TYPES) and candidate_callback_reminder
-                # (ONCE_EVER_EXCLUDED_TYPES = REVIEW_LOOP_TYPES plus that one):
-                # unlike candidate_passed/rejected, a second review cycle for
-                # the same (recipient, candidate, job) — reject, then
-                # internally resubmit — must still notify, and so must a
-                # reschedule's own reminder. "Once ever" would silently
-                # swallow both. Checked against pg_indexes first so the
-                # DROP+CREATE (and its lock) runs at most once per predicate
-                # change, same as the nullable-column ALTERs above.
-                #
-                # Built from ONCE_EVER_EXCLUDED_TYPES (not a hardcoded literal
-                # list) so this can't drift from _CONFLICT_CANDIDATE_LEVEL's
-                # own predicate in services/notifications_service.py —
-                # exactly that kind of drift broke candidate_passed/rejected
-                # entirely once already (see that module's docstring).
+                # Narrow the index above to exclude REVIEW_LOOP_TYPES and
+                # candidate_callback_reminder (ONCE_EVER_EXCLUDED_TYPES): a
+                # second review cycle and a reschedule's own reminder must
+                # still notify, unlike candidate_passed/rejected's genuine
+                # "once ever". See ONCE_EVER_EXCLUDED_TYPES's own comment in
+                # services/notifications_service.py for why — built from that
+                # same constant (not a hardcoded copy) so the two can't drift,
+                # the way a past drift once broke candidate_passed/rejected
+                # entirely (that module's docstring).
                 #
                 # f-string interpolation (not a bind param) is safe ONLY
-                # because these are fixed, hardcoded module-level constants —
-                # never user input, request data, or anything else that could
-                # carry a quote/injection payload. This must never be built
-                # from anything but another such constant.
+                # because these are fixed, hardcoded module-level constants,
+                # never request data — don't build this from anything else.
+                #
+                # DROP+CREATE runs inside this function's one transaction
+                # (committed once at the end), so there's no window where
+                # concurrent writers see no unique index at all: the DROP's
+                # ACCESS EXCLUSIVE lock simply blocks them until this commits,
+                # same as every other ALTER/index change in this function.
+                # Guarded by the indexdef check below so that lock is paid at
+                # most once per predicate change, not on every boot.
                 review_loop_types_sql = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
                 once_ever_excluded_types_sql = ", ".join(f"'{t}'" for t in ONCE_EVER_EXCLUDED_TYPES)
                 cur.execute(
                     "SELECT indexdef FROM pg_indexes WHERE indexname = 'uniq_notifications_recipient_candidate_job_type'"
                 )
                 idx = cur.fetchone()
-                # Not just "has a WHERE at all": this predicate itself has
-                # already widened once (review-loop types only -> + callback
-                # reminder), so a deploy that only ran the first version would
-                # still have a WHERE clause, just missing the newer exclusion
-                # — check for that literal specifically.
+                # Looks for the literal, not the whole "NOT IN (...)" clause:
+                # Postgres normalizes that to "<> ALL (ARRAY[...])" in
+                # indexdef, but each excluded type still appears quoted
+                # verbatim regardless of which operator form it renders as —
+                # confirmed against a real server, not assumed. A full-text
+                # predicate comparison would be the "more robust" option a
+                # reviewer might reach for instead, but it would have to
+                # tolerate that same reformatting anyway, for no real gain
+                # here (this index has one predicate shape, not several to
+                # tell apart).
                 if idx and f"'{CALLBACK_REMINDER_TYPE}'" not in idx[0]:
                     cur.execute("DROP INDEX IF EXISTS uniq_notifications_recipient_candidate_job_type;")
                     cur.execute(

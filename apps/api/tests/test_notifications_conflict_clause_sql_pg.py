@@ -210,3 +210,74 @@ def test_callback_reminder_and_candidate_passed_have_independent_dedup_slots(pg_
     the exclusion list didn't accidentally merge their dedup scopes."""
     assert _insert(pg_cursor, notification_type="candidate_passed") is True
     assert _insert_reminder(pg_cursor) is True
+
+
+# --- init_notifications_schema_sync's own upgrade path -----------------------
+#
+# PR #856 review: no test covered the migration branch itself — an existing
+# DB that already has uniq_notifications_recipient_candidate_job_type with
+# ONLY REVIEW_LOOP_TYPES excluded (every deploy before this PR) getting
+# upgraded to also exclude CALLBACK_REMINDER_TYPE, plus the new per-occurrence
+# index being created for the first time. Runs the REAL schema-init function
+# against a session-scoped TEMP table (not a hand-rolled copy of its SQL),
+# so a future edit to that function is what this actually guards.
+
+_OLD_PREDICATE_FIXTURE_SQL = f"""
+CREATE TEMP TABLE notifications (
+    id BIGSERIAL PRIMARY KEY,
+    recipient_email TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'candidate_passed',
+    job_id TEXT,
+    jobdiva_id TEXT NOT NULL,
+    candidate_id TEXT,
+    title TEXT NOT NULL,
+    body TEXT,
+    score NUMERIC,
+    metadata JSONB DEFAULT '{{}}'::jsonb,
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uniq_notifications_recipient_candidate_job_type
+    ON notifications (recipient_email, candidate_id, jobdiva_id, type)
+    WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL});
+"""
+
+
+def test_schema_init_upgrades_an_index_still_missing_the_callback_reminder_exclusion(monkeypatch):
+    """Simulates every DB deployed before this PR: the narrowed index exists,
+    but only ever excluded REVIEW_LOOP_TYPES. init_notifications_schema_sync
+    must detect that and widen it, and must also create the new per-
+    occurrence index for the first time — without needing a second boot."""
+    if not _DSN:
+        pytest.skip("NOTIFICATIONS_TEST_DSN not set")
+    try:
+        conn = psycopg2.connect(_DSN, connect_timeout=3)
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"no Postgres reachable at {_DSN!r}: {exc}")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_OLD_PREDICATE_FIXTURE_SQL)
+        conn.commit()
+
+        import routers.notifications as notifications_router
+        # A TEMP table named "notifications" shadows a real one of the same
+        # name for this session (Postgres resolves unqualified names against
+        # the temp schema first) — so the real function's hardcoded
+        # "notifications" table references land on the fixture above, not an
+        # actual production table, as long as it runs on THIS connection.
+        monkeypatch.setattr(notifications_router, "get_db_connection", lambda: conn)
+
+        notifications_router.init_notifications_schema_sync()
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'notifications'"
+            )
+            indexes = dict(cur.fetchall())
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert f"'{CALLBACK_REMINDER_TYPE}'" in indexes["uniq_notifications_recipient_candidate_job_type"]
+    assert "uniq_notifications_callback_reminder_occurrence" in indexes
+    assert "metadata ->> 'callback_at'" in indexes["uniq_notifications_callback_reminder_occurrence"]

@@ -294,11 +294,14 @@ export default function UpcomingCallbacksPage() {
       // Rescheduling also clears callback_done_at server-side
       // (candidates.py), so a row rescheduled right out of its "Marked as
       // Done" state drops that state here too rather than waiting on a
-      // refetch.
+      // refetch. is_reschedule mirrors the backend's own rule (PR #856
+      // review) — only true if THIS row wasn't already done before the
+      // action: rescheduling a done callback is a fresh Schedule, not a
+      // Reschedule, same as save_candidate_feedback computes it.
       setCallbacks((prev) =>
         (prev || []).map((c) =>
           callbackKey(c) === key
-            ? { ...c, callback_at: callbackAtIso, callback_done_at: null, is_reschedule: true }
+            ? { ...c, callback_at: callbackAtIso, callback_done_at: null, is_reschedule: !target.callback_done_at }
             : c
         )
       );
