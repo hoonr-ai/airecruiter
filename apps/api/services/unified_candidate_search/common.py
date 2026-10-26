@@ -188,15 +188,36 @@ logger = logging.getLogger(__name__)
 # counts these rows instead of silently passing them as in-radius.
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
 
+# A broad metro label's one "core city" point stands in for the whole
+# metro, which can span 30-50mi beyond that single point (Fort Worth is
+# ~30mi from the Dallas core both labeled "Dallas-Fort Worth Metroplex").
+# Added to the search radius before a core distance counts as "confirmed
+# far enough to hard-drop," so a real in-metro suburb search isn't wrongly
+# dropped — picked generously enough to still hard-drop a genuinely
+# different same-state metro (DFW vs. Houston is ~225mi, Austin vs. Houston
+# ~146mi, both well past even a 100mi radius + this buffer).
+_BROAD_REGION_CORE_BUFFER_MILES = 50
 
-def _broad_core_inside_radius(broad_locs, required: Dict[str, str], criteria: "SearchCriteria") -> bool:
-    """Whether a metro's core city falls inside this one search circle.
+
+def _broad_core_radius_distance(
+    broad_locs, required: Dict[str, str], criteria: "SearchCriteria"
+) -> Optional[float]:
+    """The closest known metro-core-to-search-point distance among
+    ``broad_locs``, or None if none of them has a resolvable core at all.
+
+    The caller tells "core is known and far" (returns a real mileage, used
+    to hard-drop — e.g. "Dallas-Fort Worth Metroplex" is ~225mi from a
+    Houston search, same state, clearly a different metro) apart from "no
+    core known at all" (returns None, soft-kept — an unrecognized label
+    carries no distance information either way) by checking the return
+    value, not a separate flag: a plain bool here previously conflated
+    "confirmed far" with "unknown," which is the bug this type exists to
+    prevent.
 
     Offline ZIP points only. The broad label is not sent to a geocoder.
     """
     from services import zip_index
 
-    miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
     required_point = None
     if required.get("zip"):
         required_point = zip_index.zip_centroid(required["zip"])
@@ -205,7 +226,8 @@ def _broad_core_inside_radius(broad_locs, required: Dict[str, str], criteria: "S
             required["city"], required["state"]
         )
     if required_point is None:
-        return False
+        return None
+    closest: Optional[float] = None
     for loc in broad_locs:
         core = region_core_city(loc)
         if not core:
@@ -216,9 +238,9 @@ def _broad_core_inside_radius(broad_locs, required: Dict[str, str], criteria: "S
         distance = haversine_miles(
             point[0], point[1], required_point[0], required_point[1]
         )
-        if distance <= miles:
-            return True
-    return False
+        if closest is None or distance < closest:
+            closest = distance
+    return closest
 
 
 def _richer_profile_location(current: str, recovered: str) -> str:

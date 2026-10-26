@@ -983,6 +983,14 @@ function NewJobPageContent() {
   const [sourceTitleInput, setSourceTitleInput] = useState("");
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
+  // Holds either a blocking validation error (bad zip shape/unknown zip —
+  // the location is NOT added) or a non-blocking "couldn't verify" notice
+  // (the lookup itself failed — the location IS still added). See
+  // addSourceLocation's own comment for why this exists.
+  const [sourceLocationError, setSourceLocationError] = useState("");
+  // Guards against a double-click, or Enter then a click, firing a second
+  // add while the first's zip lookup is still in flight (PR #859 review).
+  const [isAddingSourceLocation, setIsAddingSourceLocation] = useState(false);
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
   const sourceLocationMilesRef = useRef(sourceLocationMiles);
   useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
@@ -5512,32 +5520,65 @@ function NewJobPageContent() {
     });
   };
 
-  const addSourceLocation = (value: string) => {
+  const addSourceLocation = async (value: string) => {
     const cleanValue = value.trim();
-    if (!cleanValue) return;
-    excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
-    const nextLocations = [
-      ...sourceLocations,
-      {
-        id: Date.now(),
-        value: cleanValue,
-        radius: `within ${sourceLocationMiles} mi`
+    if (!cleanValue || isAddingSourceLocation) return;
+    setIsAddingSourceLocation(true);
+    setSourceLocationError("");
+    try {
+      // Bare numeric input only — no city name is purely digits, so any
+      // all-digit value here is always meant as a zip. A wrong length
+      // (2-3 digits, 6+) is rejected immediately, no round trip: the
+      // backend doesn't recognize these as a zip attempt at all (see
+      // test_parse_location_short_numeric_string_is_not_recognized_as_a_zip).
+      // An exact 5 digits gets a real lookup instead, since the shape
+      // alone doesn't confirm it's assigned (QA regression: "99999").
+      let unverifiedWarning = "";
+      if (/^\d+$/.test(cleanValue)) {
+        if (cleanValue.length !== 5) {
+          setSourceLocationError("Zip codes must be 5 digits");
+          return;
+        }
+        try {
+          const res = await api.candidates.lookupZip(cleanValue);
+          if (!res?.valid) {
+            setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
+            return;
+          }
+        } catch {
+          // A network/5xx failure here shouldn't block adding the
+          // location, but failing open silently is the original bug from
+          // a different trigger — surface it instead of saying nothing.
+          unverifiedWarning = `Couldn't verify "${cleanValue}" — added anyway`;
+        }
       }
-    ];
-    setSourceLocations(nextLocations);
-    void saveJobDraft({
-      currentStep,
-      saveType: "auto",
-      skipToast: true,
-      sourceLocationsOverride: nextLocations,
-    }).catch(() => {});
-    setSourceLocationInput("");
-    setGeneratedBoolean("");
-    trackEvent("job_wizard_step5_source_location_added", {
-      step: 5,
-      value: truncateForTelemetry(cleanValue),
-      radius_miles: sourceLocationMiles,
-    });
+      excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
+      const nextLocations = [
+        ...sourceLocations,
+        {
+          id: Date.now(),
+          value: cleanValue,
+          radius: `within ${sourceLocationMiles} mi`
+        }
+      ];
+      setSourceLocations(nextLocations);
+      void saveJobDraft({
+        currentStep,
+        saveType: "auto",
+        skipToast: true,
+        sourceLocationsOverride: nextLocations,
+      }).catch(() => {});
+      setSourceLocationInput("");
+      setGeneratedBoolean("");
+      if (unverifiedWarning) setSourceLocationError(unverifiedWarning);
+      trackEvent("job_wizard_step5_source_location_added", {
+        step: 5,
+        value: truncateForTelemetry(cleanValue),
+        radius_miles: sourceLocationMiles,
+      });
+    } finally {
+      setIsAddingSourceLocation(false);
+    }
   };
 
   const addSourceCompany = (value: string) => {
@@ -10184,11 +10225,14 @@ function NewJobPageContent() {
                       <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
                       <Input
                         value={sourceLocationInput}
-                        onChange={(e) => setSourceLocationInput(e.target.value)}
+                        onChange={(e) => {
+                          setSourceLocationInput(e.target.value);
+                          if (sourceLocationError) setSourceLocationError("");
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
                             e.preventDefault();
-                            addSourceLocation(sourceLocationInput);
+                            void addSourceLocation(sourceLocationInput);
                           }
                         }}
                         placeholder="City, state, or zip code..."
@@ -10235,14 +10279,19 @@ function NewJobPageContent() {
                     </div>
                     <Button
                       type="button"
-                      onClick={() => addSourceLocation(sourceLocationInput)}
-                      disabled={!sourceLocationInput.trim()}
+                      onClick={() => void addSourceLocation(sourceLocationInput)}
+                      disabled={!sourceLocationInput.trim() || isAddingSourceLocation}
                       className="h-11 px-4 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[13px] font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Plus className="w-4 h-4 mr-1" />
                       Add
                     </Button>
                   </div>
+                  {sourceLocationError && (
+                    <p role="alert" className="text-[12px] font-medium text-rose-600 mt-1.5">
+                      {sourceLocationError}
+                    </p>
+                  )}
                 </div>
               </section>
 
