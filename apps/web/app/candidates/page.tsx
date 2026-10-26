@@ -42,6 +42,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { isValidFutureCallbackTime } from "@/lib/callback-time";
+import { ApiError, extractErrorMessage } from "@/lib/api-error";
 
 // On-screen column count. The skeleton rows and the empty state span this many
 // cells, so keep it in step with the header row.
@@ -567,6 +568,11 @@ export default function GlobalCandidatesPage() {
   // simpler and lint-clean compared to a useMemo re-triggered off a
   // candidate-id dependency it doesn't actually use in its formula).
   const [callbackAtMin, setCallbackAtMin] = useState("");
+  // Shown inline inside the Schedule Callback modal rather than only as a
+  // toast — a toast can render behind this modal's own overlay (same
+  // z-index) and go effectively unseen while the modal stays open after a
+  // failed save.
+  const [callbackModalError, setCallbackModalError] = useState("");
   // Forces a remount of ONE row's action Select after its modal is
   // cancelled, so its own internal state resets — scoped to {candidateId,
   // nonce} rather than a single counter bumped for every close (PR #840
@@ -655,6 +661,7 @@ export default function GlobalCandidatesPage() {
     setActionCandidateId(null);
     setRejectReason("");
     setCallbackAtInput("");
+    setCallbackModalError("");
   }, [actionCandidateId]);
 
   const handleConfirmReject = async () => {
@@ -711,6 +718,7 @@ export default function GlobalCandidatesPage() {
 
   const handleConfirmCallbackSchedule = async () => {
     if (!actionCandidateId || !callbackAtInput) return;
+    setCallbackModalError("");
     setSyncingCandidateId(actionCandidateId);
     try {
       const jobRef = jobRefFor(actionCandidateId);
@@ -738,8 +746,13 @@ export default function GlobalCandidatesPage() {
       console.error('Error scheduling callback:', error);
       const message = error instanceof Error && error.message === "Callback time must be in the future"
         ? error.message
-        : "Failed to schedule callback. Please try again.";
-      setToast({ message, type: "error" });
+        : error instanceof ApiError
+          ? extractErrorMessage(error.data, "Failed to schedule callback. Please try again.")
+          : "Failed to schedule callback. Please try again.";
+      // Shown inline in the still-open modal (not just a toast, which can
+      // render behind the modal's own overlay) so the recruiter actually
+      // sees why the save failed and can fix the time right there.
+      setCallbackModalError(message);
     } finally {
       setSyncingCandidateId(null);
     }
@@ -1433,6 +1446,7 @@ export default function GlobalCandidatesPage() {
                                 setActionCandidateId(c.id);
                                 setCallbackAtInput("");
                                 setCallbackAtMin(datetimeLocalMin());
+                                setCallbackModalError("");
                                 setIntegrationModalOpen('callback');
                               }
                             }}
@@ -1621,8 +1635,11 @@ export default function GlobalCandidatesPage() {
               className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
               value={callbackAtInput}
               min={callbackAtMin}
-              onChange={e => setCallbackAtInput(e.target.value)}
+              onChange={e => { setCallbackAtInput(e.target.value); setCallbackModalError(""); }}
             />
+            {callbackModalError && (
+              <p role="alert" className="text-sm font-medium text-rose-600">{callbackModalError}</p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeIntegrationModal} className="font-semibold text-slate-600">Cancel</Button>

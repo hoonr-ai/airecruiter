@@ -14,7 +14,8 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { callbackDayLabel, callbackRelativeLabel, isCallbackOverdue } from "@/lib/callback-time";
+import { ApiError, extractErrorMessage } from "@/lib/api-error";
+import { callbackDayLabel, callbackRelativeLabel, isCallbackOverdue, isValidFutureCallbackTime } from "@/lib/callback-time";
 import { cn } from "@/lib/utils";
 
 interface UpcomingCallback {
@@ -60,6 +61,19 @@ export default function UpcomingCallbacksPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<UpcomingCallback | null>(null);
   const [rescheduleAt, setRescheduleAt] = useState("");
+  // Shown inline inside the Reschedule dialog rather than only as the
+  // page-level `actionError` banner — that banner sits in normal document
+  // flow, so the dialog's own full-screen overlay renders on top of it and
+  // hides it while the dialog is open (the same failure mode as Rankings'
+  // Schedule Callback modal).
+  const [rescheduleError, setRescheduleError] = useState("");
+  // Keys of callbacks marked done in this session. The backend already
+  // excludes them from a fresh fetch (callback_done_at is no longer null),
+  // but we keep the row visible locally with a clear "Marked as Done" state
+  // instead of yanking it out of the list the instant the request succeeds
+  // — a bare instant disappearance reads as the action having silently
+  // failed or wiped the record, when the underlying data is untouched.
+  const [doneKeys, setDoneKeys] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -98,9 +112,14 @@ export default function UpcomingCallbacksPage() {
     // Within each day, push already-overdue callbacks to the bottom — an
     // overdue item's own (earlier) time would otherwise rank it above a
     // still-pending one later the same day, burying what's actually next
-    // under something already missed.
+    // under something already missed. Done callbacks sink below both: they
+    // only linger in this list as a brief visual confirmation, not as
+    // something still requiring attention.
     for (const group of out) {
       group.items.sort((a, b) => {
+        const doneA = doneKeys.has(callbackKey(a));
+        const doneB = doneKeys.has(callbackKey(b));
+        if (doneA !== doneB) return doneA ? 1 : -1;
         const overdueA = isCallbackOverdue(a.callback_at);
         const overdueB = isCallbackOverdue(b.callback_at);
         if (overdueA !== overdueB) return overdueA ? 1 : -1;
@@ -108,7 +127,7 @@ export default function UpcomingCallbacksPage() {
       });
     }
     return out;
-  }, [callbacks]);
+  }, [callbacks, doneKeys]);
 
   const handleMarkDone = async (cb: UpcomingCallback) => {
     const key = callbackKey(cb);
@@ -116,7 +135,12 @@ export default function UpcomingCallbacksPage() {
     setActionError(null);
     try {
       await api.candidates.markCallbackDone(String(cb.job_id), cb.candidate_id);
-      setCallbacks((prev) => (prev || []).filter((c) => callbackKey(c) !== key));
+      // Keep the row (data persists either way — this only sets
+      // callback_done_at server-side) but flag it as done so the row below
+      // shows a clear "Marked as Done" state instead of vanishing outright.
+      // It naturally drops off the next time this list is fetched fresh,
+      // once the backend itself excludes it.
+      setDoneKeys((prev) => new Set(prev).add(key));
     } catch (err) {
       console.error("Failed to mark callback done:", err);
       setActionError("Failed to mark this callback done. Please try again.");
@@ -132,6 +156,7 @@ export default function UpcomingCallbacksPage() {
 
   const openReschedule = (cb: UpcomingCallback) => {
     setActionError(null);
+    setRescheduleError("");
     setRescheduleTarget(cb);
     setRescheduleAt("");
   };
@@ -139,15 +164,23 @@ export default function UpcomingCallbacksPage() {
   const closeReschedule = () => {
     setRescheduleTarget(null);
     setRescheduleAt("");
+    setRescheduleError("");
   };
 
   const handleConfirmReschedule = async () => {
     if (!rescheduleTarget || !rescheduleAt) return;
+    setRescheduleError("");
+    // A browser's datetime-local `min` is only a hint, not enforcement
+    // (PR #845 review, mirrored here) — typed input can still submit a past
+    // time, so check it ourselves before round-tripping to the backend.
+    if (!isValidFutureCallbackTime(rescheduleAt)) {
+      setRescheduleError("Callback time must be in the future");
+      return;
+    }
     const target = rescheduleTarget;
     const key = callbackKey(target);
     const callbackAtIso = new Date(rescheduleAt).toISOString();
     setBusyKey(key);
-    setActionError(null);
     try {
       // Same write Rankings' own Reschedule/Callback Scheduled flow makes —
       // this is a new callback time for the same candidate, not a new
@@ -163,10 +196,26 @@ export default function UpcomingCallbacksPage() {
       setCallbacks((prev) =>
         (prev || []).map((c) => (callbackKey(c) === key ? { ...c, callback_at: callbackAtIso } : c))
       );
+      // Rescheduling clears callback_done_at server-side (candidates.py), so
+      // a row rescheduled right out of its "Marked as Done" state should
+      // immediately drop that state here too rather than waiting on a
+      // refetch.
+      setDoneKeys((prev) => {
+        if (!prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
       closeReschedule();
     } catch (err) {
       console.error("Failed to reschedule callback:", err);
-      setActionError("Failed to reschedule this callback. Please try again.");
+      // Shown inline in the still-open dialog (not the page-level
+      // actionError banner, which the dialog's own overlay would hide) so
+      // the recruiter actually sees why the save failed.
+      const message = err instanceof ApiError
+        ? extractErrorMessage(err.data, "Failed to reschedule this callback. Please try again.")
+        : "Failed to reschedule this callback. Please try again.";
+      setRescheduleError(message);
     } finally {
       setBusyKey(null);
     }
@@ -230,13 +279,20 @@ export default function UpcomingCallbacksPage() {
                   const key = callbackKey(cb);
                   const overdue = isCallbackOverdue(cb.callback_at);
                   const busy = busyKey === key;
+                  const done = doneKeys.has(key);
                   return (
-                    <Card key={key} className="p-4 flex flex-row items-center justify-between gap-4">
+                    <Card
+                      key={key}
+                      className={cn(
+                        "p-4 flex flex-row items-center justify-between gap-4",
+                        done && "bg-slate-50 border-slate-100"
+                      )}
+                    >
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <Link
                             href={`/jobs/${encodeURIComponent(cb.job_id)}/rankings`}
-                            className="font-semibold text-slate-900 hover:underline truncate"
+                            className={cn("font-semibold hover:underline truncate", done ? "text-slate-500" : "text-slate-900")}
                           >
                             {cb.candidate_name}
                           </Link>
@@ -246,15 +302,22 @@ export default function UpcomingCallbacksPage() {
                           {cb.job_title}
                           {cb.customer_name ? ` · ${cb.customer_name}` : ""}
                         </p>
-                        <p
-                          className={cn(
-                            "text-xs font-semibold mt-1",
-                            overdue ? "text-rose-600" : "text-sky-600"
-                          )}
-                        >
-                          {overdue && <AlertTriangle className="inline h-3 w-3 mr-1 -mt-0.5" />}
-                          {callbackRelativeLabel(cb.callback_at)} · {new Date(cb.callback_at).toLocaleString()}
-                        </p>
+                        {done ? (
+                          <p className="text-xs font-semibold mt-1 text-emerald-600 flex items-center gap-1">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            Marked as done — was {new Date(cb.callback_at).toLocaleString()}
+                          </p>
+                        ) : (
+                          <p
+                            className={cn(
+                              "text-xs font-semibold mt-1",
+                              overdue ? "text-rose-600" : "text-sky-600"
+                            )}
+                          >
+                            {overdue && <AlertTriangle className="inline h-3 w-3 mr-1 -mt-0.5" />}
+                            {callbackRelativeLabel(cb.callback_at)} · {new Date(cb.callback_at).toLocaleString()}
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <Button
@@ -265,15 +328,17 @@ export default function UpcomingCallbacksPage() {
                         >
                           Reschedule
                         </Button>
-                        <Button
-                          size="sm"
-                          onClick={() => handleMarkDone(cb)}
-                          disabled={busy}
-                          className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                        >
-                          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1.5" />}
-                          {busy ? "" : "Mark done"}
-                        </Button>
+                        {!done && (
+                          <Button
+                            size="sm"
+                            onClick={() => handleMarkDone(cb)}
+                            disabled={busy}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                          >
+                            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1.5" />}
+                            {busy ? "" : "Mark done"}
+                          </Button>
+                        )}
                       </div>
                     </Card>
                   );
@@ -305,8 +370,11 @@ export default function UpcomingCallbacksPage() {
               className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
               value={rescheduleAt}
               min={rescheduleMin}
-              onChange={(e) => setRescheduleAt(e.target.value)}
+              onChange={(e) => { setRescheduleAt(e.target.value); setRescheduleError(""); }}
             />
+            {rescheduleError && (
+              <p role="alert" className="text-sm font-medium text-rose-600">{rescheduleError}</p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeReschedule}>
