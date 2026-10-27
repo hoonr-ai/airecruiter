@@ -145,6 +145,37 @@ def save_monitored_jobs(jobs_data):
 # simple `GET /jobs/monitored` could block for 60-90+ seconds waiting its
 # turn for a no-op migration. Run the DDL once at startup and drop it from
 # the request path.
+def _ensure_monitored_jobs_no_vacuum_truncate(cur) -> None:
+    """Stop (auto)vacuum truncating monitored_jobs' empty tail pages.
+
+    Truncation takes an ACCESS EXCLUSIVE lock on the table — every read and
+    write waits — and this small, constantly rewritten table gave autovacuum
+    a tail to truncate on nearly every run: the likely source of the
+    dashboard's lock timeouts. Keeping the pages costs a few MB at most.
+
+    Checked first so a normal boot takes no lock at all; the ALTER itself
+    (SHARE UPDATE EXCLUSIVE, which doesn't block reads or writes) gives up
+    after 2s rather than hold up startup. Runs in autocommit mode.
+    """
+    try:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM unnest(reloptions) o "
+            "WHERE o ~* '^vacuum_truncate=(false|off|no|0)$') "
+            "FROM pg_class WHERE oid = 'monitored_jobs'::regclass"
+        )
+        row = cur.fetchone()
+        if row is None or row[0]:
+            return
+        cur.execute("SET lock_timeout = '2000ms'")
+        try:
+            cur.execute("ALTER TABLE monitored_jobs SET (vacuum_truncate = off)")
+            logger.info("monitored_jobs: vacuum_truncate turned off")
+        finally:
+            cur.execute("RESET lock_timeout")
+    except Exception as e:  # noqa: BLE001 - retried on the next boot
+        logger.warning(f"monitored_jobs vacuum_truncate not set (will retry next boot): {e}")
+
+
 def _ensure_monitored_jobs_schema() -> None:
     """Synchronous DDL bootstrap. Safe to re-run (all ADD COLUMN IF NOT EXISTS).
 
@@ -354,6 +385,7 @@ def _ensure_monitored_jobs_schema() -> None:
                 cur.execute(stmt)
             except Exception as e:
                 logger.warning(f"monitored_jobs ALTER skipped: {stmt!r}: {e}")
+        _ensure_monitored_jobs_no_vacuum_truncate(cur)
         cur.close()
         conn.close()
         logger.info("monitored_jobs schema ready")
