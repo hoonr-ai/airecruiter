@@ -487,3 +487,118 @@ def test_redis_bucket_burst(redis_keys, monkeypatch):
 
     stamps = asyncio.run(run())
     assert stamps[2] < 0.1 and stamps[3] >= 0.15
+
+
+# ---------------------------------------------------------------------------
+# Every JobDiva call shares the budget (paced_send / the JobDiva client)
+# ---------------------------------------------------------------------------
+import httpx
+
+
+def _jobdiva_client(handler):
+    from services.jobdiva import _JDAsyncClient
+
+    return _JDAsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.jobdiva.test")
+
+
+def test_jobdiva_client_takes_a_slot_for_every_request(monkeypatch):
+    taken = []
+    real_acquire = rl.acquire
+
+    async def counting_acquire(*a, **kw):
+        taken.append(kw.get("label"))
+        return await real_acquire(*a, **kw)
+
+    monkeypatch.setattr(rl, "acquire", counting_acquire)
+
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(200, json={})) as client:
+            await client.post("/apiv2/jobdiva/SearchJob", json={})
+            await client.get("/apiv2/bi/JobDetail")
+
+    asyncio.run(main())
+    assert len(taken) == 2
+
+
+def test_bi_get_through_the_jobdiva_client_takes_one_slot_not_two(monkeypatch):
+    taken = []
+    real_acquire = rl.acquire
+
+    async def counting_acquire(*a, **kw):
+        taken.append(1)
+        return await real_acquire(*a, **kw)
+
+    monkeypatch.setattr(rl, "acquire", counting_acquire)
+
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(200, json={})) as client:
+            return await rl.bi_get(client, "/apiv2/bi/CandidatesDetail", label="t")
+
+    assert asyncio.run(main()).status_code == 200
+    assert len(taken) == 1
+
+
+def test_a_429_on_any_jobdiva_call_starts_the_shared_cooldown_from_retry_after():
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(429, headers={"Retry-After": "7"})) as client:
+            await client.post("/apiv2/jobdiva/updateCandidateQualifications", json={})
+
+    before = time.monotonic()
+    asyncio.run(main())
+    assert rl._local_cooldown_until - before == pytest.approx(7, abs=0.5)
+    assert rl._stats["http_429"] == 1
+
+
+def test_no_slot_in_time_answers_locally_without_calling_jobdiva(monkeypatch):
+    sent = []
+
+    async def never(*_a, **_k):
+        return False
+
+    monkeypatch.setattr(rl, "acquire", never)
+
+    def handler(req):
+        sent.append(req)
+        return httpx.Response(200)
+
+    async def main():
+        async with _jobdiva_client(handler) as client:
+            return await client.get("/apiv2/bi/JobDetail")
+
+    response = asyncio.run(main())
+    assert response.status_code == 429  # "retry later", not a 5xx outage
+    assert response.headers.get(rl.SLOT_TIMEOUT_HEADER) == "1"
+    assert response.headers.get("Retry-After")
+    assert sent == []
+    assert rl._stats["http_429"] == 0  # a local answer starts no cooldown
+
+
+def test_authentication_skips_the_budget(monkeypatch):
+    async def never(*_a, **_k):
+        raise AssertionError("auth must not wait for a slot")
+
+    monkeypatch.setattr(rl, "acquire", never)
+
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(200, text="token")) as client:
+            return await client.get("/api/authenticate", params={"clientid": "x"})
+
+    assert asyncio.run(main()).status_code == 200
+
+
+def test_writes_wait_longer_for_a_slot_than_reads(monkeypatch):
+    waits = []
+
+    async def recording(max_wait, **_k):
+        waits.append(max_wait)
+        return True
+
+    monkeypatch.setattr(rl, "acquire", recording)
+
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(200, json={})) as client:
+            await client.get("/apiv2/bi/JobDetail")
+            await client.post("/apiv2/jobdiva/createCandidateNote", json={})
+
+    asyncio.run(main())
+    assert waits == [rl.CLIENT_INTERACTIVE_MAX_WAIT_S, rl.CLIENT_WRITE_MAX_WAIT_S]

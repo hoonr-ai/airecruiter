@@ -1067,6 +1067,7 @@ async def iter_search_events(
     request: CandidateSearchRequest,
     *,
     schedule_cross_submissions: bool = True,
+    defer_paid_contact: bool = False,
 ) -> AsyncIterator[Dict[str, Any]]:
     """The SAME event dicts /candidates/search streams as NDJSON (candidate,
     candidate_detail incl. the router's gender patches, stage, source_status,
@@ -1075,8 +1076,12 @@ async def iter_search_events(
     there is no fallback search here) and, by default, schedules the
     cross-submissions scan exactly once, as the endpoint does. No access
     check: the caller has authorised the job. Consume with
-    ``contextlib.aclosing`` so a stop cancels every producer."""
+    ``contextlib.aclosing`` so a stop cancels every producer.
+    ``defer_paid_contact``: the search is about to be launched — LinkedIn
+    rows skip the paid Exa contact run (SearchCriteria.defer_paid_contact)."""
     criteria = await asyncio.to_thread(build_search_criteria, request)
+    if defer_paid_contact:
+        criteria.defer_paid_contact = True
     if schedule_cross_submissions:
         _schedule_cross_submissions(str(request.job_id), criteria)
     async with contextlib.aclosing(_search_event_stream(criteria)) as events:

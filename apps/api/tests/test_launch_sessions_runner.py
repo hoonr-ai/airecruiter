@@ -95,6 +95,8 @@ def test_full_search_session_runs_every_stage_to_completed():
     assert s["counts"]["saved"] == s["counts"]["saved_total"] == 3 and s["counts"]["rows_in_saved"] == 0
     assert s["counts"]["failed_batches"] == 0 and s["counts"]["no_interview"] == 0
     assert world.search_calls == [("A0", True), ("A1", False)]
+    # S1 never buys the paid Exa contact run: S3 looks up the selected rows.
+    assert world.search_deferred_contact == [True, True]
 
 
 # ── a crash after every unit ────────────────────────────────────────────────
@@ -174,8 +176,8 @@ def test_an_expired_lease_is_reclaimed_and_the_old_owner_is_fenced_out():
     taken: Dict[str, Any] = {}
     original = world.search_events
 
-    async def hijacking(request, *, schedule_cross_submissions):
-        async for ev in original(request, schedule_cross_submissions=schedule_cross_submissions):
+    async def hijacking(request, *, schedule_cross_submissions, **kw):
+        async for ev in original(request, schedule_cross_submissions=schedule_cross_submissions, **kw):
             if not taken:
                 # A stalls; its lease runs out and B claims the session.
                 store.expire_lease(sid)
@@ -234,8 +236,8 @@ def test_shutdown_releases_the_lease_without_failing_the_session():
     sid = fields["id"]
     original = world.search_events
 
-    async def stopping_mid_stream(request, *, schedule_cross_submissions):
-        async for ev in original(request, schedule_cross_submissions=schedule_cross_submissions):
+    async def stopping_mid_stream(request, *, schedule_cross_submissions, **kw):
+        async for ev in original(request, schedule_cross_submissions=schedule_cross_submissions, **kw):
             core_tasks.mark_stopping()
             yield ev
 
@@ -268,8 +270,8 @@ def test_cancelled_task_releases_synchronously():
         blocker = asyncio.Event()
         original = world.search_events
 
-        async def hang(request, *, schedule_cross_submissions):
-            async for ev in original(request, schedule_cross_submissions=schedule_cross_submissions):
+        async def hang(request, *, schedule_cross_submissions, **kw):
+            async for ev in original(request, schedule_cross_submissions=schedule_cross_submissions, **kw):
                 started.set()
                 await blocker.wait()
                 yield ev
@@ -847,9 +849,9 @@ def test_stop_during_the_search_is_acted_on_at_the_next_flush():
     sid = fields["id"]
     orig = world.search_events
 
-    async def stop_after_first(request, *, schedule_cross_submissions):
+    async def stop_after_first(request, *, schedule_cross_submissions, **kw):
         n = 0
-        async for ev in orig(request, schedule_cross_submissions=schedule_cross_submissions):
+        async for ev in orig(request, schedule_cross_submissions=schedule_cross_submissions, **kw):
             n += 1
             if n == 2:
                 store.cancel_session(sid, "cancelled by user")

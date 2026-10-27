@@ -11,10 +11,12 @@ import threading
 import uuid
 
 import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 from sqlalchemy import text
 
 from core import OPENAI_API_KEY, DATABASE_URL, JOBDIVA_JOB_NOTES_UDF_ID
+from core import monitored_jobs_lock
 from services.ai_service import ai_service
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
@@ -62,6 +64,15 @@ _MONITORED_JOBS_LOCK_TIMEOUT_MS = 2000
 # AbortController to 15s. The pair guarantees the server always responds
 # (success, stale cache, or 200-empty) before the client aborts.
 _MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 5000
+# The 25s background warmer gives up much sooner than a dashboard request:
+# it has nobody waiting on it, and holding a pool connection for 2s on a
+# contended table, on 8 workers, is pure cost. It skips that cycle instead.
+_MONITORED_JOBS_WARMER_LOCK_TIMEOUT_MS = 300
+
+
+class WarmerSkipped(Exception):
+    """The warmer couldn't get in at once (auto-sync is writing
+    monitored_jobs, or a lock wait ran out): skip this cycle."""
 
 
 def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
@@ -134,6 +145,37 @@ def save_monitored_jobs(jobs_data):
 # simple `GET /jobs/monitored` could block for 60-90+ seconds waiting its
 # turn for a no-op migration. Run the DDL once at startup and drop it from
 # the request path.
+def _ensure_monitored_jobs_no_vacuum_truncate(cur) -> None:
+    """Stop (auto)vacuum truncating monitored_jobs' empty tail pages.
+
+    Truncation takes an ACCESS EXCLUSIVE lock on the table — every read and
+    write waits — and this small, constantly rewritten table gave autovacuum
+    a tail to truncate on nearly every run: the likely source of the
+    dashboard's lock timeouts. Keeping the pages costs a few MB at most.
+
+    Checked first so a normal boot takes no lock at all; the ALTER itself
+    (SHARE UPDATE EXCLUSIVE, which doesn't block reads or writes) gives up
+    after 2s rather than hold up startup. Runs in autocommit mode.
+    """
+    try:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM unnest(reloptions) o "
+            "WHERE o ~* '^vacuum_truncate=(false|off|no|0)$') "
+            "FROM pg_class WHERE oid = 'monitored_jobs'::regclass"
+        )
+        row = cur.fetchone()
+        if row is None or row[0]:
+            return
+        cur.execute("SET lock_timeout = '2000ms'")
+        try:
+            cur.execute("ALTER TABLE monitored_jobs SET (vacuum_truncate = off)")
+            logger.info("monitored_jobs: vacuum_truncate turned off")
+        finally:
+            cur.execute("RESET lock_timeout")
+    except Exception as e:  # noqa: BLE001 - retried on the next boot
+        logger.warning(f"monitored_jobs vacuum_truncate not set (will retry next boot): {e}")
+
+
 def _ensure_monitored_jobs_schema() -> None:
     """Synchronous DDL bootstrap. Safe to re-run (all ADD COLUMN IF NOT EXISTS).
 
@@ -343,6 +385,7 @@ def _ensure_monitored_jobs_schema() -> None:
                 cur.execute(stmt)
             except Exception as e:
                 logger.warning(f"monitored_jobs ALTER skipped: {stmt!r}: {e}")
+        _ensure_monitored_jobs_no_vacuum_truncate(cur)
         cur.close()
         conn.close()
         logger.info("monitored_jobs schema ready")
@@ -2416,7 +2459,7 @@ async def remove_job_from_monitoring(job_id: str):
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
-def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
+def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary", *, warmer: bool = False):
     """
     Sync body for the /jobs/monitored endpoint. Runs off the event loop via
     asyncio.to_thread so the psycopg2 round-trip does not stall concurrent
@@ -2429,8 +2472,13 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     try:
         # Fail fast on lock/statement contention rather than hanging dashboard
         # requests for tens of seconds.
-        cursor.execute("SET LOCAL lock_timeout = %s", (f"{_MONITORED_JOBS_LOCK_TIMEOUT_MS}ms",))
+        lock_timeout_ms = _MONITORED_JOBS_WARMER_LOCK_TIMEOUT_MS if warmer else _MONITORED_JOBS_LOCK_TIMEOUT_MS
+        cursor.execute("SET LOCAL lock_timeout = %s", (f"{lock_timeout_ms}ms",))
         cursor.execute("SET LOCAL statement_timeout = %s", (f"{_MONITORED_JOBS_STATEMENT_TIMEOUT_MS}ms",))
+        # The warmer never reads while auto-sync writes monitored_jobs (one
+        # shared lock, core/monitored_jobs_lock); held until the rollback below.
+        if warmer and not monitored_jobs_lock.try_lock_for_read(cursor):
+            raise WarmerSkipped("auto-sync is writing monitored_jobs")
 
         if view == "full":
             select_sql = "SELECT * FROM monitored_jobs"
@@ -2537,8 +2585,18 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             "total_count": len(jobs),
             "source": "database",
         }
+    except psycopg2.errors.LockNotAvailable as e:
+        if warmer:
+            raise WarmerSkipped(str(e)) from e
+        raise
     finally:
         cursor.close()
+        # Read-only: ends the transaction, releasing the warmer's shared lock
+        # before the connection goes back to the pool.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         conn.close()
 
 

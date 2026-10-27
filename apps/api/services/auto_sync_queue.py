@@ -22,11 +22,19 @@ import logging
 import os
 from typing import Any, Dict, List, Sequence
 
+from core import monitored_jobs_lock
+
 logger = logging.getLogger(__name__)
 
-# Seconds of work per cycle. The schedule is every 15 min; leave headroom so
-# a cycle never overlaps the next one.
-CYCLE_BUDGET_S = float(os.getenv("AUTOSYNC_CYCLE_BUDGET_S", "780"))
+# How often a cycle starts (main.py). 30 min (was 15): each cycle spends
+# JobDiva quota shared with live searches, and every job is still picked up
+# in turn — the queue is oldest-synced first.
+INTERVAL_MINUTES = max(1.0, float(os.getenv("AUTOSYNC_INTERVAL_MINUTES", "30")))
+# Seconds of work per cycle; at most 85% of the interval so a cycle never
+# overlaps the next one (and never 0, even for a 1-minute interval).
+CYCLE_BUDGET_S = min(
+    float(os.getenv("AUTOSYNC_CYCLE_BUDGET_S", "780")), INTERVAL_MINUTES * 60 * 0.85
+)
 INACTIVE_RESYNC_HOURS = float(os.getenv("AUTOSYNC_INACTIVE_RESYNC_HOURS", "24"))
 DEFAULT_INACTIVE = "closed,filled,cancelled,canceled,expired,ignored,declined"
 INACTIVE_STATUSES: List[str] = [
@@ -91,6 +99,8 @@ def mark_synced(conn, job_ids: Sequence[str]) -> None:
     if not job_ids:
         return
     with conn.cursor() as cur:
+        # Never alongside the dashboard cache warmer's read (core/monitored_jobs_lock).
+        monitored_jobs_lock.lock_for_write(cur, restore_lock_timeout_ms=2000)
         cur.execute(
             "UPDATE monitored_jobs SET last_auto_sync_at = NOW() WHERE job_id = ANY(%s)",
             (list(job_ids),),

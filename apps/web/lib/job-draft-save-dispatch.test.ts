@@ -8,8 +8,15 @@ describe("decideSaveDispatch", () => {
     assert.deepEqual(decision, { action: "proceed", abort: [] });
   });
 
-  it("an auto-save aborts a stale in-flight auto-save", () => {
+  it("an auto-save queues behind an in-flight auto-save instead of aborting it", () => {
+    // Aborting only cancels the browser side; the server would still run both
+    // saves of the same job, one waiting on the other's row lock.
     const decision = decideSaveDispatch("auto", { explicitInFlight: false, autoInFlight: true });
+    assert.deepEqual(decision, { action: "queue", abort: [] });
+  });
+
+  it("the page-hide (keepalive) auto-save can't wait, so it still aborts the in-flight one", () => {
+    const decision = decideSaveDispatch("auto", { explicitInFlight: false, autoInFlight: true }, { keepalive: true });
     assert.deepEqual(decision, { action: "proceed", abort: ["auto"] });
   });
 

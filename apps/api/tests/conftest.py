@@ -40,6 +40,22 @@ def _block_real_redis(monkeypatch):
         monkeypatch.setattr(lim, "_local_cooldown_until", 0.0)
     # Scripted Unipile fakes make many calls per test; pacing them is just delay.
     monkeypatch.setattr(vendor_limiter.UNIPILE, "min_interval_s", 0.0)
+    # Every JobDiva call is paced now (jobdiva_rate_limit.paced_send): start
+    # each test with a full bucket and no cooldown left over from another.
+    monkeypatch.setattr(jobdiva_rate_limit, "_local_tokens", None)
+    monkeypatch.setattr(jobdiva_rate_limit, "_local_cooldown_until", 0.0)
+    monkeypatch.setattr(jobdiva_rate_limit, "_local_fg_waiting_until", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_jobdiva_read_cache(monkeypatch):
+    """services.jobdiva's read cache is per worker; a value cached by one test
+    must not answer another's lookup. Off by default (TTL 0); the cache's own
+    tests build their own."""
+    from core.bounded_cache import AsyncTTLCache
+    from services import jobdiva
+
+    monkeypatch.setattr(jobdiva, "_read_cache", AsyncTTLCache(maxsize=10, ttl_s=0))
 
 
 @pytest.fixture(autouse=True)

@@ -871,6 +871,7 @@ class FakeWorld:
         # search: attempt label -> list of events
         self.search_script: Dict[str, List[Dict[str, Any]]] = {}
         self.search_calls: List[Tuple[str, bool]] = []
+        self.search_deferred_contact: List[bool] = []
         self.search_raise_after: Dict[str, int] = {}
         # enrichment: candidate_id -> endpoint answer
         self.enrich_answers: Dict[str, Any] = {}
@@ -904,9 +905,10 @@ class FakeWorld:
     def build_search_request(self, payload):
         return dict(payload or {})
 
-    async def search_events(self, request, *, schedule_cross_submissions):
+    async def search_events(self, request, *, schedule_cross_submissions, defer_paid_contact=False):
         label = str(request.get("boolean_string") or "")
         self.search_calls.append((label, bool(schedule_cross_submissions)))
+        self.search_deferred_contact.append(bool(defer_paid_contact))
         raise_after = self.search_raise_after.get(label)
         for n, event in enumerate(self.search_script.get(label, [])):
             if raise_after is not None and n == raise_after:

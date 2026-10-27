@@ -9,11 +9,17 @@ import {
   notificationClickPath,
   shouldShowBrowserPopup,
 } from "@/lib/browser-notifications";
-import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotifications } from "@/lib/notifications-cache";
+import {
+  NOTIFICATIONS_CACHE_KEY,
+  hasUnseenNotifications,
+  readCachedNotifications,
+  writeCachedNotifications,
+} from "@/lib/notifications-cache";
 import { playNotificationChime, unlockNotificationSound } from "@/lib/notification-sound";
 import { isDesktopTypeEnabled } from "@/lib/desktop-notification-preferences";
 import { getSafeLocalStorage } from "@/lib/safe-local-storage";
 import { shouldApplyRefreshResult } from "@/lib/notifications-refresh-guard";
+import { createRefreshGate, type RefreshFn } from "@/lib/notifications-refresh-gate";
 
 export type { BrowserNotificationPermission };
 
@@ -26,6 +32,8 @@ function currentNotificationPermission(): BrowserNotificationPermission {
 // triggers — an active SSE session can update state several times in quick
 // succession, and there's no reason to hit localStorage on every single one.
 const CACHE_WRITE_DEBOUNCE_MS = 500;
+// Minimum gap between background refresh() calls (lib/notifications-refresh-gate.ts).
+const MIN_REFRESH_INTERVAL_MS = 10_000;
 
 interface NotificationsContextType {
   notifications: NotificationItem[];
@@ -47,7 +55,7 @@ interface NotificationsContextType {
   // per-origin in the browser.
   notificationPermission: BrowserNotificationPermission;
   requestNotificationPermission: () => void;
-  refresh: () => void;
+  refresh: (opts?: { force?: boolean }) => void;
   markRead: (id: number) => void;
   markUnread: (id: number) => void;
   markAllRead: () => void;
@@ -84,7 +92,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatWatchdogRef = useRef<NodeJS.Timeout | null>(null);
 
-  const refreshRef = useRef<() => void>(() => {});
+  const refreshRef = useRef<RefreshFn>(async () => {});
   const connectStreamRef = useRef<() => void>(() => {});
   const cacheWriteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // Highest notification id this tab has ever rendered, from either the
@@ -250,7 +258,8 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   // Truth-up fetch: initial load, and re-sync after any reconnect so nothing
   // dropped between a lost connection and the next one is lost for good.
-  const refresh = useCallback(async () => {
+  // Called through refresh() below, never directly.
+  const doRefresh = useCallback(async () => {
     const versionAtStart = localMutationVersionRef.current;
     try {
       const data = await api.notifications.list({ limit: 50 });
@@ -288,6 +297,15 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setIsLoading(false);
     }
   }, []);
+
+  // Merges overlapping calls, spaces background ones, lets `force` through
+  // (lib/notifications-refresh-gate.ts). One gate per provider, made on
+  // first use.
+  const refreshGateRef = useRef<RefreshFn | null>(null);
+  const refresh = useCallback<RefreshFn>((opts) => {
+    refreshGateRef.current ??= createRefreshGate(doRefresh, MIN_REFRESH_INTERVAL_MS);
+    return refreshGateRef.current(opts);
+  }, [doRefresh]);
   refreshRef.current = refresh;
 
   // Seed from the local cache right after mount — never during the initial
@@ -333,13 +351,33 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, [notifications]);
 
   // Cross-tab reconciliation: the `storage` event fires in every OTHER tab
-  // on this origin when one tab writes the cache (never in the tab that
-  // wrote it), so this can't loop. Rather than trying to merge two tabs'
-  // local caches — there's no reliable way to tell which is newer — just
-  // re-ask the server, which both tabs end up agreeing with.
+  // on this origin when one tab writes the cache. Re-fetching on every event
+  // used to feed a loop — each fetch wrote the cache, signalling the other
+  // tab to fetch and write back, forever. Now: when the other tab's list has
+  // notifications this tab hasn't seen, adopt it (no request). Otherwise it
+  // may be OLDER than ours — a background tab that missed SSE pushes still
+  // rewrites its list hourly — so never adopt it: ask the server instead.
+  // That refresh is merged and spaced (lib/notifications-refresh-gate.ts),
+  // and writeCachedNotifications skips the identical write-back it leads to,
+  // so the exchange ends there.
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === NOTIFICATIONS_CACHE_KEY) refreshRef.current();
+      if (e.key !== NOTIFICATIONS_CACHE_KEY) return;
+      // A local mutation still settling wins over whatever the other tab saw.
+      if (inFlightMutationCountRef.current > 0) return;
+      const email = getActiveUserEmail();
+      const cached = email ? readCachedNotifications(window.localStorage, email, Date.now()) : null;
+      if (!cached) return;
+      if (!hasUnseenNotifications(cached.notifications, lastSeenIdRef.current)) {
+        void refreshRef.current();
+        return;
+      }
+      setNotifications(cached.notifications);
+      setUnreadCount(cached.unreadCount);
+      for (const n of cached.notifications) {
+        if (n.id > lastSeenIdRef.current) lastSeenIdRef.current = n.id;
+        notifiedIdsRef.current.add(n.id);
+      }
     };
     window.addEventListener("storage", handleStorage);
     return () => window.removeEventListener("storage", handleStorage);
@@ -519,7 +557,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       inFlightMutationCountRef.current--;
       if (inFlightMutationCountRef.current === 0 && pendingReconcileRef.current) {
         pendingReconcileRef.current = false;
-        refreshRef.current();
+        refreshRef.current({ force: true });
       }
     }
   }, []);
@@ -539,7 +577,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       await settleMutation(() => api.notifications.markRead(id));
     } catch (err) {
       console.error("Failed to mark notification read:", err);
-      refreshRef.current();
+      refreshRef.current({ force: true });
     }
   }, [settleMutation]);
 
@@ -554,7 +592,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       await settleMutation(() => api.notifications.markUnread(id));
     } catch (err) {
       console.error("Failed to mark notification unread:", err);
-      refreshRef.current();
+      refreshRef.current({ force: true });
     }
   }, [settleMutation]);
 
@@ -567,7 +605,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       await settleMutation(() => api.notifications.markAllRead());
     } catch (err) {
       console.error("Failed to mark all notifications read:", err);
-      refreshRef.current();
+      refreshRef.current({ force: true });
     }
   }, [settleMutation]);
 
@@ -589,7 +627,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       // leaving the UI showing "cleared" when the server still has the old
       // list would just reappear confusingly on the next reload anyway.
       setClearError(true);
-      refreshRef.current();
+      refreshRef.current({ force: true });
     }
   }, [settleMutation]);
 

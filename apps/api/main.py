@@ -184,7 +184,10 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"[AutoSync] Sync failed for {jid}: {e}")
                 # Marked even on failure so one broken job can't pin the head
                 # of the queue; it comes round again after the others.
-                await asyncio.to_thread(_db, auto_sync_queue.mark_synced, [jid])
+                try:
+                    await asyncio.to_thread(_db, auto_sync_queue.mark_synced, [jid])
+                except Exception as e:  # noqa: BLE001 - e.g. the monitored_jobs write lock timed out
+                    logger.warning(f"[AutoSync] Could not stamp {jid} as synced: {e}")
                 done += 1
                 await asyncio.sleep(0.5)  # breathing room for Postgres between jobs
 
@@ -197,8 +200,10 @@ async def lifespan(app: FastAPI):
             app.sync_in_progress = False
             await lock.release()
 
-    # Interval: Every 15 minutes
-    scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
+    # Every AUTOSYNC_INTERVAL_MINUTES (default 30; services/auto_sync_queue.py).
+    from services.auto_sync_queue import INTERVAL_MINUTES as _AUTOSYNC_INTERVAL_MINUTES
+
+    scheduler.add_job(auto_sync_all_jobs, "interval", minutes=_AUTOSYNC_INTERVAL_MINUTES, id="always_on_sync")
 
     # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
     # EXCLUSIVE, so running it in all 8 workers (and again on every worker
@@ -409,10 +414,18 @@ async def lifespan(app: FastAPI):
             )
 
     async def _warm_monitored_jobs_cache(sync_fn, setter):
+        skipped = getattr(jobs_router, "WarmerSkipped", ())
         for include_archived in (False, True):
             try:
-                payload = await asyncio.to_thread(sync_fn, include_archived, "summary")
+                payload = await asyncio.to_thread(sync_fn, include_archived, "summary", warmer=True)
                 setter(include_archived, "summary", payload)
+            except skipped as e:
+                # Auto-sync is writing monitored_jobs, or a lock wait ran out
+                # (300ms): skip this cycle rather than hold a connection.
+                # The cache keeps its last payload; the next cycle is 25s away.
+                logger.debug(f"monitored_jobs_cache_warmer skipped a cycle: {e}")
+                record_custom_metric("Custom/Scheduler/monitored_jobs_cache_warmer/skipped", {"count": 1})
+                return
             except Exception as e:  # noqa: BLE001
                 # Escalated from warning → error with traceback. A failing
                 # warmer is the upstream cause of cold-cache → frontend
@@ -425,12 +438,34 @@ async def lifespan(app: FastAPI):
                 )
                 record_custom_metric("Custom/Scheduler/monitored_jobs_cache_warmer/errors", {"count": 1})
 
+    # MONITORED_JOBS_WARMER_SECONDS (default 25, just under the cache's 30s
+    # TTL). Much longer and dashboard loads hit the live query instead.
+    try:
+        _warmer_seconds = max(5, int(os.getenv("MONITORED_JOBS_WARMER_SECONDS", "25")))
+    except ValueError:
+        _warmer_seconds = 25
     scheduler.add_job(
         warm_monitored_jobs_cache,
         "interval",
-        seconds=25,
+        seconds=_warmer_seconds,
         id="monitored_jobs_cache_warmer",
         replace_existing=True,
+    )
+
+    # Per-worker RSS metric, plus tracemalloc growth logs when
+    # PAIR_TRACEMALLOC_FRAMES is set (core/memory_profile.py). Workers grew
+    # to 2.2 GB in 43 min with no record of what was allocating.
+    from core import memory_profile
+
+    memory_profile.start_if_enabled()
+    scheduler.add_job(
+        memory_profile.report,  # sync: APScheduler runs it in its thread pool, off the event loop
+        "interval",
+        minutes=memory_profile.REPORT_MINUTES,
+        id="worker_memory_report",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # Safety net for the webhook/BackgroundTasks-triggered in-app
@@ -778,9 +813,9 @@ async def api_health():
 
 
 # Job monitoring utility functions
-def load_monitored_jobs() -> Dict[str, Any]:
-    """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
-    return jobdiva_service.get_all_monitored_jobs()
+def load_monitored_jobs(include_archived: bool = True) -> Dict[str, Any]:
+    """job_id -> status / customer_name / title / is_archived for every monitored job."""
+    return jobdiva_service.get_all_monitored_jobs(include_archived=include_archived)
 
 # The only fields the legacy "monitored jobs file" callers ever change.
 _LEGACY_SNAPSHOT_FIELDS = ("status", "customer_name", "title")
@@ -847,12 +882,10 @@ async def _run_poll_cycle():
     """The actual poll body — runs in exactly one worker per cycle."""
     logger.info("🔄 Starting job status polling...")
 
-    jobs_data = load_monitored_jobs()
     # Archived jobs are never shown or synced; polling them only spent quota.
-    job_ids = [
-        jid for jid, j in jobs_data.get("jobs", {}).items()
-        if not (j or {}).get("is_archived")
-    ]
+    # Left out in the SQL, not loaded and then dropped.
+    jobs_data = load_monitored_jobs(include_archived=False)
+    job_ids = list(jobs_data.get("jobs", {}))
 
     if not job_ids:
         logger.info("No jobs to monitor")

@@ -519,9 +519,9 @@ def test_s1_binds_every_search_to_the_sessions_job():
     seen = []
     orig = world.search_events
 
-    def spy(request, *, schedule_cross_submissions):
+    def spy(request, *, schedule_cross_submissions, **kw):
         seen.append(request.get("job_id"))
-        return orig(request, schedule_cross_submissions=schedule_cross_submissions)
+        return orig(request, schedule_cross_submissions=schedule_cross_submissions, **kw)
 
     world.search_events = spy
     store.create_session(fields)
