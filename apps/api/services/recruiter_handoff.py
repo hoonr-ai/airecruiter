@@ -105,13 +105,20 @@ def _insert_notification(cur, *, ntype: str, recipient: str, payload: Dict[str, 
     )
 
 
+_NOTIFICATION_FIELD_MAX_CHARS = 200
+
+
 def apply_event(payload: Dict[str, Any]) -> str:
     """Record one webhook. Returns "recorded", or "duplicate" for a retry of
     an event already seen for this interview."""
     event = payload["event"]
     interview_id = int(payload["interview_id"])
-    candidate = payload.get("candidate_name") or "A candidate"
-    role = payload.get("role_position") or "the role"
+    # Capped before landing in notification title/body text: these are
+    # signed (so the risk is low — PR review), but nothing upstream bounds
+    # their length, and an oversized value here would otherwise ride
+    # straight into a user-facing notification unvalidated.
+    candidate = (payload.get("candidate_name") or "A candidate")[:_NOTIFICATION_FIELD_MAX_CHARS]
+    role = (payload.get("role_position") or "the role")[:_NOTIFICATION_FIELD_MAX_CHARS]
     recruiter = (payload.get("recruiter_email") or "").strip().lower()
 
     with get_db_connection() as conn:
@@ -174,7 +181,17 @@ class PairbotHandoffError(Exception):
 
 
 def _base_url() -> str:
-    return os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai").rstrip("/")
+    """Pair-bot's base URL — EXTERNAL_INTERVIEW_API_URL if set, else a
+    default that follows the environment, same pattern already used by
+    routers/live_report.py's _get_external_interview_api_url() for the same
+    variable. Previously defaulted to the QA host unconditionally: a prod
+    deploy missing this one env var would silently send recruiter claims,
+    emails, and state reads to QA's Pair-bot instead of prod's, with no
+    error (PR review).
+    """
+    env = os.getenv("ENVIRONMENT", "").strip().lower()
+    default_url = "https://pairbot.hoonr.ai" if env in {"production", "prod"} else "https://pairbotqa.hoonr.ai"
+    return os.getenv("EXTERNAL_INTERVIEW_API_URL", default_url).rstrip("/")
 
 
 async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None,

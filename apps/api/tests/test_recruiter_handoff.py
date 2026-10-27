@@ -144,6 +144,32 @@ def test_state_hides_who_owns_someone_elses_handoff(as_recruiter, monkeypatch):
     assert body["state"] == "claimed"
 
 
+def test_state_strips_every_sensitive_field_not_just_the_two_emails(as_recruiter, monkeypatch):
+    """PR review (IDOR): interview ids are sequential, and only
+    recruiter_email/claimed_by_email were ever stripped from a non-owner's
+    response — close_reason, close_notes (free text up to 5000 chars),
+    claimed_at, and expires_at all still rode along in full. A non-owner
+    must get back nothing but interview_id/is_your_handoff/state; the join
+    page (joinViewFor in apps/web/lib/handoff.ts) never reads anything else
+    once is_your_handoff is false."""
+    body = _serve_state(monkeypatch, {
+        "state": "closed", "recruiter_email": "other@example.com", "claimed_by_email": "other@example.com",
+        "claimed_at": "2026-10-27T10:00:00Z", "expires_at": "2026-10-27T10:05:00Z",
+        "close_reason": "recruiter_closed", "close_notes": "candidate seemed uninterested, flagged for review",
+    })
+    assert body == {"interview_id": 4242, "is_your_handoff": False, "state": "closed"}
+
+
+def test_state_returns_the_full_object_only_to_the_confirmed_owner(as_recruiter, monkeypatch):
+    body = _serve_state(monkeypatch, {
+        "state": "closed", "recruiter_email": "rec@example.com", "claimed_by_email": "rec@example.com",
+        "claimed_at": "2026-10-27T10:00:00Z", "close_notes": "great call",
+    })
+    assert body["is_your_handoff"] is True
+    assert body["recruiter_email"] == "rec@example.com"
+    assert body["close_notes"] == "great call"
+
+
 def test_state_without_a_recruiter_is_unknown_not_refused(as_recruiter, monkeypatch):
     assert _serve_state(monkeypatch, {"state": None})["is_your_handoff"] is None
     assert _serve_state(monkeypatch, {"state": "closed", "recruiter_email": None})["is_your_handoff"] is None
@@ -302,9 +328,83 @@ def test_review_without_a_handoff_reads_nothing_else(review_env, monkeypatch):
     assert body["state"] is None and body["transcript"] is None and review_env["reads"] == []
 
 
-def test_join_routes_require_login():
+def test_join_routes_require_login(monkeypatch):
+    # A developer's own apps/api/.env commonly sets DEV_USER_EMAIL for local
+    # convenience (core/auth.py's get_current_user falls back to it); loaded
+    # at app import time, it otherwise leaks into this test's "no auth at
+    # all" case on that one machine and silently resolves a user instead of
+    # raising 401 — this guard is what makes the test actually exercise "no
+    # login" everywhere, not just in CI (which has no such file).
+    monkeypatch.delenv("DEV_USER_EMAIL", raising=False)
     app.dependency_overrides.pop(get_current_user, None)
     assert client.post("/api/v1/handoff/4242/claim").status_code in (401, 403)
+
+
+# --- Pair-bot base URL (PR review: silently defaulted to QA in prod) --------
+
+@pytest.mark.parametrize("env,expected", [
+    ("production", "https://pairbot.hoonr.ai"),
+    ("prod", "https://pairbot.hoonr.ai"),
+    ("staging", "https://pairbotqa.hoonr.ai"),
+    ("qa", "https://pairbotqa.hoonr.ai"),
+    ("dev", "https://pairbotqa.hoonr.ai"),
+    ("", "https://pairbotqa.hoonr.ai"),
+])
+def test_base_url_default_follows_environment(monkeypatch, env, expected):
+    monkeypatch.delenv("EXTERNAL_INTERVIEW_API_URL", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", env)
+    assert handoff._base_url() == expected
+
+
+def test_base_url_explicit_override_always_wins(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbot-staging.example.com/")
+    assert handoff._base_url() == "https://pairbot-staging.example.com"
+
+
+# --- notification field length cap (PR review: unvalidated payload fields) --
+
+def test_apply_event_caps_candidate_name_and_role_in_notification_text(monkeypatch):
+    inserted = []
+
+    class _FakeCur:
+        def execute(self, sql, params=None):
+            inserted.append((sql, params))
+
+        def fetchone(self):
+            return (4242,) if "RETURNING" in inserted[-1][0] else None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCur()
+
+        def commit(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(handoff, "get_db_connection", lambda: _FakeConn())
+    huge_name = "A" * 10_000
+    huge_role = "B" * 10_000
+    handoff.apply_event(_event(candidate_name=huge_name, role_position=huge_role))
+    # The notification insert's title/body params carry the capped text.
+    notif_calls = [params for sql, params in inserted if "INSERT INTO notifications" in sql]
+    assert notif_calls, "expected a notification insert"
+    title, body = notif_calls[0][3], notif_calls[0][4]
+    assert len(title) < len(huge_name)
+    assert "A" * handoff._NOTIFICATION_FIELD_MAX_CHARS in title
+    assert "A" * (handoff._NOTIFICATION_FIELD_MAX_CHARS + 1) not in title
+    assert "B" * (handoff._NOTIFICATION_FIELD_MAX_CHARS + 1) not in body
 
 
 def test_pairbot_client_maps_http_errors(monkeypatch):

@@ -47,9 +47,10 @@ async def init_recruiter_handoff_schema() -> None:
 async def receive_handoff_webhook(
     request: Request,
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
+    x_pairbot_timestamp: Optional[str] = Header(None, alias="X-Pairbot-Timestamp"),
 ):
     raw_body = await request.body()
-    if not verify_hmac_signature(raw_body, x_hub_signature_256):
+    if not verify_hmac_signature(raw_body, x_hub_signature_256, x_pairbot_timestamp):
         logger.warning("Pairbot handoff webhook signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid signature")
     try:
@@ -114,13 +115,26 @@ async def get_handoff(interview_id: int, user: UserIdentity = Depends(get_curren
     owner = (state.get("recruiter_email") or "").strip().lower()
     # None when Pair-bot gave no recruiter (no handoff, or an off-contract
     # reply): unknown, so the page lets claim decide rather than refusing.
-    state["is_your_handoff"] = (owner == email) if owner else None
-    if state["is_your_handoff"] is not True:
-        # Interview ids are sequential: other recruiters learn only whether
-        # the handoff is theirs, not who it belongs to.
-        state.pop("recruiter_email", None)
-        state.pop("claimed_by_email", None)
-    return state
+    is_mine = (owner == email) if owner else None
+    if is_mine is True:
+        state["is_your_handoff"] = True
+        return state
+    # Not confirmed to be this recruiter's own handoff (owned by someone
+    # else, or ownership unknown) — return only enough for the join page to
+    # decide whether to offer a Claim button, never Pair-bot's full reply.
+    # Interview ids are sequential, so returning everything here (as before)
+    # let any logged-in recruiter enumerate ids and read a stranger's full
+    # handoff state: close_reason, close_notes (free text up to 5000
+    # chars), claimed_at, expires_at — only recruiter_email/claimed_by_email
+    # were ever stripped (PR review). apps/web/lib/handoff.ts's joinViewFor
+    # already short-circuits to "not_yours" before reading anything but
+    # these three fields for a confirmed non-owner, so nothing here changes
+    # what the join page can show.
+    return {
+        "interview_id": interview_id,
+        "is_your_handoff": is_mine,
+        "state": state.get("state"),
+    }
 
 
 @router.post("/api/v1/handoff/{interview_id}/claim")
