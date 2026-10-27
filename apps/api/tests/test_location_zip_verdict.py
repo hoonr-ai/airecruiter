@@ -683,6 +683,30 @@ def test_parse_location_zip_kept_when_state_agrees(svc):
     assert svc._parse_location("Tempe, AZ 85281")["zip"] == "85281"
 
 
+def test_parse_location_recognizes_zip_plus_four_with_any_separator(svc):
+    """ZIP+4 gap closed entirely: dash, space, or no separator at all are
+    all the same thing ("77002-1234" == "77002 1234" == "770021234"), and
+    all three must extract cleanly with nothing left over — a leftover
+    numeric fragment (the space-separated case, before this) is exactly
+    what let a bad search zip bypass the search_location_unresolvable
+    consistency check below (see
+    test_verdict_space_separated_bad_zip_plus_four_is_still_consistent)."""
+    for value in ("77002-1234", "77002 1234", "770021234"):
+        parsed = svc._parse_location(value)
+        assert parsed["zip"] == "77002", value
+        assert parsed["city"] == "", value
+
+
+def test_parse_location_does_not_over_match_a_ten_digit_run(svc):
+    """A 10-digit run isn't a 5+4 zip in any spacing — must not silently
+    swallow the first 5 digits and leave a mystery digit behind. The
+    whole run should fall through untouched, as a literal city string,
+    not partially consumed."""
+    parsed = svc._parse_location("7700212345")
+    assert parsed["zip"] == ""
+    assert parsed["city"] == "7700212345"
+
+
 def test_parse_location_short_numeric_string_is_not_recognized_as_a_zip(svc):
     """CHARACTERIZATION TEST, not a spec: documents today's backend
     behavior (which the frontend's Step 5 location input now guards
@@ -769,6 +793,55 @@ def test_verdict_zip_plus_four_with_an_unassigned_five_digit_part(svc):
     same input in test_hard_gate_soft_keeps_an_unresolvable_search_location)."""
     result = svc._single_location_match_verdict(
         {"location": "Houston, TX"}, _criteria(location="99999-1234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_space_separated_bad_zip_plus_four_is_still_consistent(svc):
+    """Found while auditing the ZIP+4 fix for other gaps: "99999 1234" (a
+    SPACE before the +4 suffix, not a dash) used to not be stripped as a
+    zip by _parse_location the way the dash form was — only the 5-digit
+    zip got pulled out, leaving "1234" behind as a spurious "city". That
+    defeated the all-blank check above (a non-empty "city" looked like a
+    second, independent location signal), so this exact input bypassed the
+    consistency fix and fell through to a live Nominatim geocode of "1234"
+    — producing a confidently wrong hard-drop instead of an honest "can't
+    tell" for a precise-location candidate. Now fixed at the root
+    (_parse_location consumes the +4 suffix regardless of separator, see
+    test_parse_location_recognizes_zip_plus_four_with_any_separator) —
+    this is a regression guard for that, and for the "no city name is
+    purely digits" belt-and-suspenders check above it, in case some other
+    path ever again leaves a numeric fragment behind."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="99999 1234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_no_separator_bad_zip_plus_four_is_also_consistent(svc):
+    """Last of the ZIP+4 separator forms: no separator at all
+    ("999991234") must behave identically to the dash and space forms —
+    a clean search_location_unresolvable, not a rejected-as-garbage "city"
+    (which _parse_location would have produced before the regex fix) and
+    not a live-geocode-driven hard-drop either."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="999991234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_has_real_city_guard_holds_even_if_parsing_ever_regresses(svc, monkeypatch):
+    """Isolates the has_real_city/isdigit() guard itself, independent of
+    the _parse_location regex fix above: even if some future change to
+    _parse_location ever again left a purely-numeric fragment behind as
+    "city" for an unresolvable zip, that fragment must still not count as
+    a real second location signal."""
+    monkeypatch.setattr(
+        svc, "_parse_location",
+        lambda value: {"city": "1234", "state": "", "zip": "99999", "country": ""},
+    )
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="99999 1234", within_miles=25)
     )
     assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
 

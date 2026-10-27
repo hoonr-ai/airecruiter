@@ -5526,24 +5526,22 @@ function NewJobPageContent() {
     setIsAddingSourceLocation(true);
     setSourceLocationError("");
     try {
-      // A bare zip ("77002") or ZIP+4 ("77002-1234") — one or more digits,
-      // optionally a dash then more digits; no city name looks like this —
-      // is always meant as a zip. PR #860 review: requiring a leading
-      // digit (not just "digits and dashes") better expresses that intent
-      // and correctly excludes a bare "-"/"--". A wrong shape (2-3/6+
-      // digits, a malformed ZIP+4 like "77002-12") is rejected immediately,
+      // A bare zip ("77002") or ZIP+4, with the +4 suffix joined by a
+      // dash, a space, or nothing at all ("77002-1234" == "77002 1234"
+      // == "770021234", matching the backend's own _parse_location) — no
+      // city name looks like this — is always meant as a zip. A wrong
+      // shape (2-3/6+ digits, a malformed ZIP+4) is rejected immediately,
       // no round trip: the backend doesn't recognize these as a zip
       // attempt at all (see
       // test_parse_location_short_numeric_string_is_not_recognized_as_a_zip).
       // A recognized shape extracts its 5-digit part for a real lookup,
-      // since the shape alone doesn't confirm it's assigned (QA
-      // regression: "99999"; ZIP+4 follow-up: "99999-1234" the same way) —
-      // messages below still show the user's own typed value, not just
-      // that extracted part, so "99999-1234" reads back as itself rather
-      // than the bare "99999" that was actually looked up.
+      // since the shape alone doesn't confirm it's assigned — messages
+      // below still show the user's own typed value, not just that
+      // extracted part, so "99999-1234" reads back as itself rather than
+      // the bare "99999" that was actually looked up.
       let unverifiedWarning = "";
-      if (/^\d+(-\d*)?$/.test(cleanValue)) {
-        const zip5 = cleanValue.match(/^(\d{5})(?:-\d{4})?$/)?.[1];
+      if (/^\d+([-\s]\d*)?$/.test(cleanValue)) {
+        const zip5 = cleanValue.match(/^(\d{5})(?:[-\s]?\d{4})?$/)?.[1];
         if (!zip5) {
           setSourceLocationError("Enter a 5-digit zip or ZIP+4 (e.g. 77002-1234)");
           return;

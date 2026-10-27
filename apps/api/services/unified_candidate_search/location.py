@@ -759,7 +759,11 @@ class LocationMixin:
                         "computed; every row is soft-kept as unverified",
                         required["zip"], criteria.location,
                     )
-                if not required["city"] and not required["state"]:
+                # Belt-and-suspenders: no city name is purely digits, so a
+                # numeric leftover never counts as a second location signal
+                # here, even if _parse_location ever again left one behind.
+                has_real_city = bool(required["city"]) and not required["city"].isdigit()
+                if not has_real_city and not required["state"]:
                     # The zip is the ONLY location signal and it doesn't
                     # resolve — every candidate is equally unverifiable
                     # against this search regardless of their OWN location
@@ -1071,14 +1075,18 @@ class LocationMixin:
         text = re.sub(r"\bmetro\b", "", text)
         text = re.sub(r"^must be local to\s+", "", text).strip(" ,")
 
-        # Extract a 5-digit US zip (with optional ZIP+4 suffix) before
-        # splitting on comma. This is a normalization fix for inputs like
-        # "Plano, TX 75024" / "PLANO TX 75024-1234" / "75024" — zip stays
-        # accessible for downstream offline match instead of being stripped.
-        # Take the LAST match: in address-style strings ("10001 W Main St,
-        # Mesa, AZ 85201") the leading 5-digit number is a street number,
-        # and the zip — when present — trails.
-        zip_matches = list(re.finditer(r"\b(\d{5})(?:-\d{4})?\b", text))
+        # Extract a 5-digit US zip, with an optional ZIP+4 suffix in any
+        # form — dash, space, or none at all ("75024-1234" == "75024 1234"
+        # == "750241234"), so none of it is left behind as a spurious
+        # "city" (which used to defeat the search_location_unresolvable
+        # check below for the space form specifically: see
+        # test_verdict_space_separated_bad_zip_plus_four_is_still_consistent).
+        # The trailing lookahead keeps a real street number ("75024 1234
+        # Main St") from being swallowed as if it were a +4 suffix, and —
+        # same mechanism — keeps an address's own LEADING 5-digit street
+        # number ("10001 W Main St, Mesa, AZ 85201") from matching at all,
+        # so "take the last match" below still finds the trailing zip.
+        zip_matches = list(re.finditer(r"\b(\d{5})(?:[-\s]?\d{4})?\b(?!\s*[A-Za-z])", text))
         zip_match = zip_matches[-1] if zip_matches else None
         zip_code = zip_match.group(1) if zip_match else ""
         if zip_code:
