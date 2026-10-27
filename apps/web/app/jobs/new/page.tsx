@@ -5541,9 +5541,13 @@ function NewJobPageContent() {
       // messages below still show the user's own typed value, not just
       // that extracted part, so "99999-1234" reads back as itself rather
       // than the bare "99999" that was actually looked up.
+      // The +4 suffix's dash is itself optional ("770021234" means the
+      // same thing as "77002-1234") — closing the gap where a no-
+      // separator ZIP+4 was wrongly rejected outright instead of having
+      // its 5-digit part looked up like every other shape.
       let unverifiedWarning = "";
       if (/^\d+(-\d*)?$/.test(cleanValue)) {
-        const zip5 = cleanValue.match(/^(\d{5})(?:-\d{4})?$/)?.[1];
+        const zip5 = cleanValue.match(/^(\d{5})(?:-?\d{4})?$/)?.[1];
         if (!zip5) {
           setSourceLocationError("Enter a 5-digit zip or ZIP+4 (e.g. 77002-1234)");
           return;
