@@ -271,16 +271,22 @@ class _RecordingCursor:
     def __init__(self, job_row):
         self._job_row = job_row
         self.updates: List[str] = []
+        self.update_params: List[Any] = []
+        self.statements: List[str] = []
         self._result = None
 
     def execute(self, sql, params=None):
+        self.statements.append(sql)
         if sql.startswith("SET LOCAL"):
+            return
+        if sql.startswith("SELECT pg_advisory_xact_lock"):
             return
         if sql.startswith("SELECT job_id"):
             self._result = self._job_row
             return
         if sql.startswith("UPDATE monitored_jobs"):
             self.updates.append(sql)
+            self.update_params.append(params)
             return
         raise AssertionError(f"unexpected SQL: {sql}")
 
@@ -359,6 +365,7 @@ def _refresh_with(
     monkeypatch.setattr(jd_module, "jobdiva_service", _FakeJobDiva())
 
     asyncio.run(auto_assign_service.refresh_job_performance_metrics("26-25865"))
+    _refresh_with.last_cursor = cursor
     return cursor.updates
 
 
@@ -523,3 +530,28 @@ def test_compute_candidate_counters_answers_none_on_a_db_error(monkeypatch):
         raise RuntimeError("statement timeout")
     monkeypatch.setattr(auto_assign_service, "_get_db_connection", broken)
     assert auto_assign_service._compute_candidate_counters("26-1") is None
+
+
+def test_metrics_update_only_writes_a_changed_row(monkeypatch):
+    """An unconditional UPDATE (updated_at = NOW() making every row "changed")
+    rewrote every monitored_jobs row every cycle — millions of dead tuples.
+    The row is written, and updated_at moved, only when a value differs."""
+    updates = _refresh_with(monkeypatch, ext_subs=2, feedback={"feedback_completed": 7, "pair_submits": 4})
+    sql = updates[0]
+    cursor = _refresh_with.last_cursor
+    set_part, where_part = sql.split(" WHERE ", 1)
+    assert "updated_at = NOW()" in set_part
+    assert "time_to_first_pass IS DISTINCT FROM %s" in where_part
+    assert "pair_external_subs IS DISTINCT FROM %s" in where_part
+    params = cursor.update_params[0]
+    values = params[: set_part.count("%s")]
+    # SET values, then the job id, then the same values again for the guard.
+    assert params == [*values, "31920112", *values]
+
+
+def test_metrics_write_takes_the_lock_the_cache_warmer_shares(monkeypatch):
+    _refresh_with(monkeypatch, ext_subs=2, feedback=None)
+    statements = _refresh_with.last_cursor.statements
+    lock_at = next(i for i, q in enumerate(statements) if q.startswith("SELECT pg_advisory_xact_lock"))
+    update_at = next(i for i, q in enumerate(statements) if q.startswith("UPDATE monitored_jobs"))
+    assert lock_at < update_at

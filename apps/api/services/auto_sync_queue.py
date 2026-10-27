@@ -22,6 +22,8 @@ import logging
 import os
 from typing import Any, Dict, List, Sequence
 
+from core import monitored_jobs_lock
+
 logger = logging.getLogger(__name__)
 
 # Seconds of work per cycle. The schedule is every 15 min; leave headroom so
@@ -91,6 +93,8 @@ def mark_synced(conn, job_ids: Sequence[str]) -> None:
     if not job_ids:
         return
     with conn.cursor() as cur:
+        # Never alongside the dashboard cache warmer's read (core/monitored_jobs_lock).
+        monitored_jobs_lock.lock_for_write(cur, restore_lock_timeout_ms=2000)
         cur.execute(
             "UPDATE monitored_jobs SET last_auto_sync_at = NOW() WHERE job_id = ANY(%s)",
             (list(job_ids),),

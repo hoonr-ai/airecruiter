@@ -11,6 +11,12 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/codebase/airecruiter/apps/api
 Environment=PATH=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin
 Environment=PYTHONPATH=/home/ubuntu/codebase/airecruiter/apps/api
+# glibc gives each thread that allocates its own malloc arena (up to 8 x
+# cores per process); every worker's thread pools (asyncio.to_thread,
+# APScheduler) then hold freed memory in many arenas that are rarely returned
+# to the OS. Two arenas per process trades a little allocator contention for
+# far lower RSS growth across the 8 workers.
+Environment=MALLOC_ARENA_MAX=2
 # --limit-max-requests: a worker exits gracefully after ~5000 requests and the
 # uvicorn supervisor (>= 0.30) starts a fresh one, so slow per-worker memory
 # growth can't reach the kernel OOM killer. Startup work runs once per boot,

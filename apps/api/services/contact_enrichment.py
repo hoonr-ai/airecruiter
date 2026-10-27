@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from core.bounded_cache import BoundedDict
 from core.config import (
     APOLLO_API_KEY as _APOLLO_ENV_KEY,
     EXA_API_KEY,
@@ -160,11 +161,16 @@ if APOLLO_KEY_SOURCE == "legacy_fallback":
         "Apollo enrichment using legacy in-repo key; set APOLLO_API_KEY env var to rotate"
     )
 
+# Per-job counters below gain a key for every job a worker ever enriches;
+# bounded (least recently used job dropped) so a long-lived worker doesn't
+# keep them all. A dropped job just starts its count again.
+_JOB_COUNTER_MAX_JOBS = 5000
+
 # Sourcing-time concurrency + cost guards. Module-level state because the
 # producers in unified_candidate_search.py run as independent asyncio tasks
 # and need a single shared rate-limit budget.
 _PROVIDER_SEMAPHORE = asyncio.Semaphore(8)
-_JOB_ENRICH_COUNTERS: Dict[str, int] = {}
+_JOB_ENRICH_COUNTERS: Dict[str, int] = BoundedDict(_JOB_COUNTER_MAX_JOBS)
 _JOB_ENRICH_LOCK = asyncio.Lock()
 PER_JOB_CAP = 50
 
@@ -175,13 +181,13 @@ PER_JOB_CAP = 50
 # request streams entirely on one worker, so one search sees one budget;
 # re-runs landing on other workers get a fresh one (bounded worst case:
 # workers × cap).
-_JOB_EXA_COUNTERS: Dict[str, int] = {}
+_JOB_EXA_COUNTERS: Dict[str, int] = BoundedDict(_JOB_COUNTER_MAX_JOBS)
 
 # Cumulative Exa runs per job. Deliberately NOT cleared by reset_job_counter:
 # _JOB_EXA_COUNTERS is a per-RUN budget (reset each search so one filled counter
 # doesn't starve enrichment forever), which means it bounds nothing across
 # re-runs. This one is the spend ceiling.
-_JOB_EXA_LIFETIME: Dict[str, int] = {}
+_JOB_EXA_LIFETIME: Dict[str, int] = BoundedDict(_JOB_COUNTER_MAX_JOBS)
 
 # Bounds on in-flight sourcing-time Exa contact runs. The fallback runs outside
 # _PROVIDER_SEMAPHORE (its slow polling would starve the cheap chain), so it

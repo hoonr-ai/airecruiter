@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import logging
+import os
+import weakref
 import re
 import time
 import json
@@ -23,6 +25,7 @@ from core import (
     DEFAULT_SCREENING_LEVEL,
 )
 from services.location_type import resolve_location_type
+from core.bounded_cache import AsyncTTLCache
 from services import jobdiva_rate_limit as _bi_rate_limit
 from services import jobdiva_detail_cache as _detail_cache
 from services import jobdiva_endpoint_breaker as _breakers
@@ -34,6 +37,16 @@ logger = logging.getLogger(__name__)
 # that call's own chunks (incident 2026-09-29, docs/incidents/2026-09-29-jobdiva-429-nginx-503.md). Cross-worker
 # pacing is jobdiva_rate_limit's job; this just caps in-flight requests here.
 _BI_WORKER_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+# Brief per-worker cache of read-only lookups (job, candidate, submittals):
+# a dashboard, a tracker and a metrics refresh asking for the same record
+# within seconds share one JobDiva call. Errors are never cached; writes
+# below drop the entries they change. JOBDIVA_READ_CACHE_TTL_S=0 disables it.
+try:
+    _READ_CACHE_TTL_S = float((os.getenv("JOBDIVA_READ_CACHE_TTL_S") or "").strip() or 30)
+except ValueError:
+    _READ_CACHE_TTL_S = 30.0
+_read_cache = AsyncTTLCache(maxsize=2000, ttl_s=_READ_CACHE_TTL_S)
 
 
 def _bi_worker_semaphore(size: int) -> asyncio.Semaphore:
@@ -155,6 +168,17 @@ async def _jd_on_response(response: "_httpx_module.Response") -> None:
 
 
 class _JDAsyncClient(_httpx_module.AsyncClient):
+    # Every request waits its turn in the shared JobDiva budget and a 429
+    # starts the shared cooldown (jobdiva_rate_limit.paced_send).
+    paces_itself = True
+
+    async def send(self, request, **kwargs):
+        return await _bi_rate_limit.paced_send(
+            lambda req: super(_JDAsyncClient, self).send(req, **kwargs),
+            request,
+            label=_jd_metric_path(request.url.path),
+        )
+
     def __init__(self, *args, **kwargs):
         hooks = kwargs.pop("event_hooks", None) or {}
         request_hooks = list(hooks.get("request", [])) + [_jd_on_request]
@@ -163,14 +187,84 @@ class _JDAsyncClient(_httpx_module.AsyncClient):
         super().__init__(*args, **kwargs)
 
 
+# One long-lived JobDiva client per event loop (in practice, per worker).
+# Every call used to build its own `async with httpx.AsyncClient(...)`: a new
+# SSL context (CA bundle loaded again), connection pool and TLS handshake per
+# request — a steady allocation churn memray put among a worker's largest
+# (2026-10-28), on top of the handshake latency.
+_SHARED_JD_CLIENTS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _JDAsyncClient]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _shared_jd_client() -> _JDAsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _SHARED_JD_CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = _SHARED_JD_CLIENTS[loop] = _JDAsyncClient()
+    return client
+
+
+class _SharedJDClient:
+    """What ``httpx.AsyncClient(timeout=...)`` gives code in this module: a
+    handle on the shared client that applies its own timeout to each request.
+    ``async with`` / ``aclose()`` leave the shared client open."""
+
+    paces_itself = True
+
+    def __init__(self, timeout: Any):
+        self._timeout = timeout
+
+    async def __aenter__(self) -> "_SharedJDClient":
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    def _call(self, method: str, url: Any, **kwargs: Any):
+        kwargs.setdefault("timeout", self._timeout)
+        return getattr(_shared_jd_client(), method)(url, **kwargs)
+
+    def get(self, url: Any, **kwargs: Any):
+        return self._call("get", url, **kwargs)
+
+    def post(self, url: Any, **kwargs: Any):
+        return self._call("post", url, **kwargs)
+
+    def put(self, url: Any, **kwargs: Any):
+        return self._call("put", url, **kwargs)
+
+    def patch(self, url: Any, **kwargs: Any):
+        return self._call("patch", url, **kwargs)
+
+    def delete(self, url: Any, **kwargs: Any):
+        return self._call("delete", url, **kwargs)
+
+    def request(self, method: str, url: Any, **kwargs: Any):
+        kwargs.setdefault("timeout", self._timeout)
+        return _shared_jd_client().request(method, url, **kwargs)
+
+
+def _jd_async_client(*args: Any, **kwargs: Any) -> Any:
+    """``httpx.AsyncClient`` for this module. Timeout-only construction (every
+    call site) shares the per-worker client; anything else gets its own."""
+    if args or set(kwargs) - {"timeout"}:
+        return _JDAsyncClient(*args, **kwargs)
+    return _SharedJDClient(kwargs.get("timeout", _httpx_module.Timeout(5.0)))
+
+
 class _JDHttpxProxy:
     """Module-local stand-in for the `httpx` module.
 
-    AsyncClient is overridden to inject New Relic logging hooks; every other
+    AsyncClient is overridden to share one client per worker, inject New
+    Relic logging hooks and the shared JobDiva pacing; every other
     attribute (TimeoutException, ConnectError, Request, ...) falls through
     to the real httpx module untouched.
     """
-    AsyncClient = _JDAsyncClient
+    AsyncClient = staticmethod(_jd_async_client)
 
     def __getattr__(self, name):
         return getattr(_httpx_module, name)
@@ -3648,6 +3742,11 @@ class JobDivaService:
         }
     
     async def get_candidate_by_id(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        return await _read_cache.get_or_load(
+            ("candidate", str(candidate_id)), lambda: self._get_candidate_by_id_uncached(candidate_id)
+        )
+
+    async def _get_candidate_by_id_uncached(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific candidate by ID from JobDiva."""
         logger.info(f"Fetching Candidate ID: {candidate_id}")
         token = await self.authenticate()
@@ -3670,6 +3769,9 @@ class JobDivaService:
             return None
 
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
+        return await _read_cache.get_or_load(("job", str(job_id)), lambda: self._get_job_by_id_uncached(job_id))
+
+    async def _get_job_by_id_uncached(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific job by ID from JobDiva, including AI UDFs."""
         # Versioned refs (26-06182-v2) are local clones that share the original
         # JobDiva job — strip the -vN suffix so the external SearchJob lookup
@@ -4419,6 +4521,7 @@ class JobDivaService:
 
     async def update_job_user_fields(self, job_id: str, fields: list) -> bool:
         """Update JobDiva UDFs with detailed logging."""
+        _read_cache.invalidate(("job", str(job_id)))  # its cached read is stale now
         token = await self.authenticate()
         if not token: 
             logger.error("❌ Sync failed: Could not authenticate with JobDiva")
@@ -4724,12 +4827,26 @@ class JobDivaService:
             logger.error(f"Error fetching locally monitored job from DB: {e}")
         return {}
         
-    def get_all_monitored_jobs(self) -> dict:
+    # The only columns get_all_monitored_jobs' callers read: the job-status
+    # poll and the legacy snapshot helpers in main.py (which write back just
+    # status / customer_name / title).
+    _MONITORED_JOBS_SNAPSHOT_COLUMNS = ("job_id", "status", "customer_name", "title", "is_archived")
+
+    def get_all_monitored_jobs(self, include_archived: bool = True) -> dict:
+        """job_id -> {status, customer_name, title, is_archived} for every job.
+
+        Not ``SELECT *``: the 5-minute poll loaded every column of every job
+        (descriptions, rubrics, notes) — the largest repeated allocation in a
+        worker (memray, 2026-10-28), and memory glibc then kept per thread.
+        """
         if not self.engine:
             return {"jobs": {}}
         try:
             with self.engine.connect() as conn:
-                res = conn.execute(text("SELECT * FROM monitored_jobs"))
+                sql = f"SELECT {', '.join(self._MONITORED_JOBS_SNAPSHOT_COLUMNS)} FROM monitored_jobs"
+                if not include_archived:
+                    sql += " WHERE is_archived IS NOT TRUE"
+                res = conn.execute(text(sql))
                 rows = res.fetchall()
                 jobs = {}
                 for row in rows:
@@ -5037,6 +5154,7 @@ class JobDivaService:
         """
         Update a candidate qualification in JobDiva (apiv2/jobdiva/updateCandidateQualifications).
         """
+        _read_cache.invalidate(("candidate", str(candidate_id)))  # its cached read is stale now
         token = await self.authenticate()
         if not token:
             return {"status": "error", "message": "Authentication failed"}
@@ -5344,6 +5462,7 @@ class JobDivaService:
         the response as a boolean, so a 2xx whose body is literally ``false`` is
         a refusal and is logged with the id pair.
         """
+        _read_cache.invalidate(("submittals", str(job_id)))  # its cached read is stale now
         try:
             cid = int(str(candidate_id).strip())
         except (TypeError, ValueError):
@@ -5481,6 +5600,7 @@ class JobDivaService:
         carries ``.path`` / ``.found_via_search`` / ``.matched_existing`` for
         provenance stamping.
         """
+        _read_cache.invalidate(("submittals", str(job_id)))  # its cached read is stale now
         resume_source_id = jobdiva_pair_resume_source_id(origin_source)
         token = await self.authenticate()
         if not token:
@@ -5932,6 +6052,7 @@ class JobDivaService:
         """POST /apiv2/jobdiva/updateCandidateSNLinks {id, socialnetworks: [{name, link}]}
         -> boolean. ``name`` is one of JobDiva's social-network types
         (``JOBDIVA_SOCIAL_NETWORK_FIELDS``). Logged and swallowed on failure."""
+        _read_cache.invalidate(("candidate", str(candidate_id)))  # its cached read is stale now
         try:
             cid = int(str(candidate_id).strip())
         except (TypeError, ValueError):
@@ -6019,6 +6140,7 @@ class JobDivaService:
         landed (the email may have been dropped), False otherwise; the names of
         the fields JobDiva would not take are appended to ``refused``.
         """
+        _read_cache.invalidate(("candidate", str(candidate_id)))  # its cached read is stale now
         url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
         try:
             candidate_id = int(str(candidate_id).strip())
@@ -6153,6 +6275,16 @@ class JobDivaService:
         return False
 
     async def get_job_submittals(self, job_id, none_on_error: bool = False) -> Optional[List[Dict[str, Any]]]:
+        # Loaded with none_on_error=True so a failure (None) is never cached
+        # as an empty list.
+        result = await _read_cache.get_or_load(
+            ("submittals", str(job_id)), lambda: self._get_job_submittals_uncached(job_id, none_on_error=True)
+        )
+        if result is None and not none_on_error:
+            return []
+        return result
+
+    async def _get_job_submittals_uncached(self, job_id, none_on_error: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
         Fetch manual candidate submittals for a job from JobDiva BI endpoint.
         Uses /apiv2/bi/JobSubmittalsDetail. Returns list of submittal records.
