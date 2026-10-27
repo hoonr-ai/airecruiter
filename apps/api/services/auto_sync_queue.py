@@ -26,9 +26,15 @@ from core import monitored_jobs_lock
 
 logger = logging.getLogger(__name__)
 
-# Seconds of work per cycle. The schedule is every 15 min; leave headroom so
-# a cycle never overlaps the next one.
-CYCLE_BUDGET_S = float(os.getenv("AUTOSYNC_CYCLE_BUDGET_S", "780"))
+# How often a cycle starts (main.py). 30 min (was 15): each cycle spends
+# JobDiva quota shared with live searches, and every job is still picked up
+# in turn — the queue is oldest-synced first.
+INTERVAL_MINUTES = max(1.0, float(os.getenv("AUTOSYNC_INTERVAL_MINUTES", "30")))
+# Seconds of work per cycle; less than the interval so a cycle never
+# overlaps the next one.
+CYCLE_BUDGET_S = min(
+    float(os.getenv("AUTOSYNC_CYCLE_BUDGET_S", "780")), INTERVAL_MINUTES * 60 - 60
+)
 INACTIVE_RESYNC_HOURS = float(os.getenv("AUTOSYNC_INACTIVE_RESYNC_HOURS", "24"))
 DEFAULT_INACTIVE = "closed,filled,cancelled,canceled,expired,ignored,declined"
 INACTIVE_STATUSES: List[str] = [

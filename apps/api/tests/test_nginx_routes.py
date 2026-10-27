@@ -266,3 +266,30 @@ def test_the_tokenizer_port_matches_nginx_on_the_blocker():
     assert statements[1][1] == [("36}/candidates$", False)] and statements[1][2] == "{"
     assert _ngx_statements('add_header X "${a}{b}";')[0][1][2] == ("${a}{b}", True)
     assert _ngx_statements("set $x ${y}z;")[0][1] == [("set", False), ("$x", False), ("${y}z", False)]
+
+
+def test_notifications_are_limited_per_browser_session_not_per_ip():
+    """Offices put many recruiters behind one NAT IP; the notifications
+    endpoints are keyed on the Bearer token's signature, with a per-IP
+    ceiling only as a backstop against made-up tokens."""
+    repo = Path(__file__).resolve().parents[3]
+    upstreams = (repo / "nginx-upstreams.conf").read_text(encoding="utf-8")
+    m = re.search(r"map \$http_authorization \$notifications_session_key \{(.*?)\n\}", upstreams, re.S)
+    assert m, "notifications session-key map is missing"
+    pattern = re.search(r'"~\*(.*?)"\s+\$notif_jwt_sig;', m.group(1)).group(1)
+    pattern = pattern.replace("(?<", "(?P<")  # nginx PCRE named group -> Python
+    sig = re.match(pattern, "Bearer aaa.bbb.c-c_c", re.I)
+    assert sig and sig.group("notif_jwt_sig") == "c-c_c"
+    assert re.match(pattern, "Basic dXNlcg==", re.I) is None
+    assert "default" in m.group(1) and "$binary_remote_addr" in m.group(1)
+    assert re.search(r"limit_req_zone \$notifications_session_key zone=notifications_session_limit:\S+ rate=\d+r/m;", upstreams)
+    assert re.search(r"limit_req_zone \$binary_remote_addr zone=notifications_ip_limit:\S+ rate=\d+r/m;", upstreams)
+
+    conf = (repo / "nginx-app-locations.conf").read_text(encoding="utf-8")
+    loc = re.search(r"location /api/v1/notifications \{(.*?)\n    \}", conf, re.S)
+    assert loc, "notifications location is missing"
+    body = loc.group(1)
+    assert "zone=notifications_session_limit" in body and "zone=notifications_ip_limit" in body
+    assert "api_read_limit" not in body and "api_write_limit" not in body
+    assert "proxy_pass http://airecruiter_api;" in body
+    assert "proxy_read_timeout 86400;" in body  # the SSE stream stays open

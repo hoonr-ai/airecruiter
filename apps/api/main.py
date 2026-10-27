@@ -200,8 +200,10 @@ async def lifespan(app: FastAPI):
             app.sync_in_progress = False
             await lock.release()
 
-    # Interval: Every 15 minutes
-    scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
+    # Every AUTOSYNC_INTERVAL_MINUTES (default 30; services/auto_sync_queue.py).
+    from services.auto_sync_queue import INTERVAL_MINUTES as _AUTOSYNC_INTERVAL_MINUTES
+
+    scheduler.add_job(auto_sync_all_jobs, "interval", minutes=_AUTOSYNC_INTERVAL_MINUTES, id="always_on_sync")
 
     # 3. Schema init. Every step is idempotent DDL; ALTER TABLE takes ACCESS
     # EXCLUSIVE, so running it in all 8 workers (and again on every worker
@@ -436,10 +438,16 @@ async def lifespan(app: FastAPI):
                 )
                 record_custom_metric("Custom/Scheduler/monitored_jobs_cache_warmer/errors", {"count": 1})
 
+    # MONITORED_JOBS_WARMER_SECONDS (default 25, just under the cache's 30s
+    # TTL). Much longer and dashboard loads hit the live query instead.
+    try:
+        _warmer_seconds = max(5, int(os.getenv("MONITORED_JOBS_WARMER_SECONDS", "25")))
+    except ValueError:
+        _warmer_seconds = 25
     scheduler.add_job(
         warm_monitored_jobs_cache,
         "interval",
-        seconds=25,
+        seconds=_warmer_seconds,
         id="monitored_jobs_cache_warmer",
         replace_existing=True,
     )
