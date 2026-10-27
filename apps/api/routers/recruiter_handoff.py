@@ -47,9 +47,10 @@ async def init_recruiter_handoff_schema() -> None:
 async def receive_handoff_webhook(
     request: Request,
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
+    x_pairbot_timestamp: Optional[str] = Header(None, alias="X-Pairbot-Timestamp"),
 ):
     raw_body = await request.body()
-    if not verify_hmac_signature(raw_body, x_hub_signature_256):
+    if not verify_hmac_signature(raw_body, x_hub_signature_256, x_pairbot_timestamp):
         logger.warning("Pairbot handoff webhook signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid signature")
     try:
@@ -114,13 +115,34 @@ async def get_handoff(interview_id: int, user: UserIdentity = Depends(get_curren
     owner = (state.get("recruiter_email") or "").strip().lower()
     # None when Pair-bot gave no recruiter (no handoff, or an off-contract
     # reply): unknown, so the page lets claim decide rather than refusing.
-    state["is_your_handoff"] = (owner == email) if owner else None
-    if state["is_your_handoff"] is not True:
-        # Interview ids are sequential: other recruiters learn only whether
-        # the handoff is theirs, not who it belongs to.
-        state.pop("recruiter_email", None)
-        state.pop("claimed_by_email", None)
-    return state
+    is_mine = (owner == email) if owner else None
+    if is_mine is True:
+        state["is_your_handoff"] = True
+        return state
+    if is_mine is False:
+        # Confirmed someone else's — apps/web/lib/handoff.ts's joinViewFor
+        # checks `is_your_handoff === false` BEFORE it ever reads `state`,
+        # so the join page has no legitimate use for it here. Omitting it
+        # closes the smaller enumeration leak PR #864 review flagged:
+        # interview ids are sequential, so even a bare state value let
+        # anyone logged in learn which ids currently have a handoff in
+        # flight, without needing to own any of them.
+        return {"interview_id": interview_id, "is_your_handoff": False}
+    # Ownership unknown (no recruiter_email on Pair-bot's reply at all) —
+    # unlike the confirmed case above, joinViewFor DOES read `state` here
+    # (is_your_handoff is null, not false, so it reaches the state-based
+    # switch instead of short-circuiting), e.g. to show "waiting" so the
+    # page can offer Claim. Interview ids are sequential, so returning
+    # everything else here (as before this PR's own IDOR fix) let any
+    # logged-in recruiter enumerate ids and read a stranger's full handoff
+    # state: close_reason, close_notes (free text up to 5000 chars),
+    # claimed_at, expires_at — only recruiter_email/claimed_by_email were
+    # ever stripped (PR #863 review).
+    return {
+        "interview_id": interview_id,
+        "is_your_handoff": None,
+        "state": state.get("state"),
+    }
 
 
 @router.post("/api/v1/handoff/{interview_id}/claim")

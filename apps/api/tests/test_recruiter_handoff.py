@@ -141,7 +141,51 @@ def test_state_hides_who_owns_someone_elses_handoff(as_recruiter, monkeypatch):
                                       "claimed_by_email": "other@example.com", "expires_at": "x"})
     assert body["is_your_handoff"] is False
     assert "recruiter_email" not in body and "claimed_by_email" not in body
-    assert body["state"] == "claimed"
+    # Confirmed not-theirs: not even `state` rides along (PR #864 review —
+    # see test_state_strips_every_sensitive_field_not_just_the_two_emails
+    # for why that closes a sequential-id enumeration leak too).
+    assert "state" not in body
+    assert body == {"interview_id": 4242, "is_your_handoff": False}
+
+
+def test_state_strips_every_sensitive_field_not_just_the_two_emails(as_recruiter, monkeypatch):
+    """PR #863 review (IDOR): interview ids are sequential, and only
+    recruiter_email/claimed_by_email were ever stripped from a non-owner's
+    response — close_reason, close_notes (free text up to 5000 chars),
+    claimed_at, and expires_at all still rode along in full. A confirmed
+    non-owner must get back nothing but interview_id/is_your_handoff: the
+    join page (joinViewFor in apps/web/lib/handoff.ts) checks
+    is_your_handoff === false and returns before ever reading `state` or
+    anything else, and PR #864 review additionally flagged that even a bare
+    `state` value let anyone enumerate which sequential ids have a handoff
+    in flight at all."""
+    body = _serve_state(monkeypatch, {
+        "state": "closed", "recruiter_email": "other@example.com", "claimed_by_email": "other@example.com",
+        "claimed_at": "2026-10-27T10:00:00Z", "expires_at": "2026-10-27T10:05:00Z",
+        "close_reason": "recruiter_closed", "close_notes": "candidate seemed uninterested, flagged for review",
+    })
+    assert body == {"interview_id": 4242, "is_your_handoff": False}
+
+
+def test_state_is_still_returned_for_unknown_ownership_the_join_page_needs_it(as_recruiter, monkeypatch):
+    """Unlike a CONFIRMED non-owner (above), unknown ownership
+    (is_your_handoff is None, not False) must still carry `state` —
+    joinViewFor only short-circuits past reading it on an explicit
+    `false`; a null falls through to the state-based switch that decides
+    waiting/over/none, e.g. so the page can still offer a Claim button."""
+    body = _serve_state(monkeypatch, {"state": "requested", "recruiter_email": None})
+    assert body["is_your_handoff"] is None
+    assert body["state"] == "requested"
+
+
+def test_state_returns_the_full_object_only_to_the_confirmed_owner(as_recruiter, monkeypatch):
+    body = _serve_state(monkeypatch, {
+        "state": "closed", "recruiter_email": "rec@example.com", "claimed_by_email": "rec@example.com",
+        "claimed_at": "2026-10-27T10:00:00Z", "close_notes": "great call",
+    })
+    assert body["is_your_handoff"] is True
+    assert body["recruiter_email"] == "rec@example.com"
+    assert body["close_notes"] == "great call"
 
 
 def test_state_without_a_recruiter_is_unknown_not_refused(as_recruiter, monkeypatch):
@@ -302,9 +346,175 @@ def test_review_without_a_handoff_reads_nothing_else(review_env, monkeypatch):
     assert body["state"] is None and body["transcript"] is None and review_env["reads"] == []
 
 
-def test_join_routes_require_login():
+def test_join_routes_require_login(monkeypatch):
+    # A developer's own apps/api/.env commonly sets DEV_USER_EMAIL for local
+    # convenience (core/auth.py's get_current_user falls back to it); loaded
+    # at app import time, it otherwise leaks into this test's "no auth at
+    # all" case on that one machine and silently resolves a user instead of
+    # raising 401 — this guard is what makes the test actually exercise "no
+    # login" everywhere, not just in CI (which has no such file).
+    monkeypatch.delenv("DEV_USER_EMAIL", raising=False)
     app.dependency_overrides.pop(get_current_user, None)
     assert client.post("/api/v1/handoff/4242/claim").status_code in (401, 403)
+
+
+# --- Pair-bot base URL (PR #863 review: silently defaulted to QA in prod) ---
+
+@pytest.mark.parametrize("env,expected", [
+    ("production", "https://pairbot.hoonr.ai"),
+    ("prod", "https://pairbot.hoonr.ai"),
+    ("staging", "https://pairbotqa.hoonr.ai"),
+    ("qa", "https://pairbotqa.hoonr.ai"),
+    ("dev", "https://pairbotqa.hoonr.ai"),
+])
+def test_base_url_default_follows_environment(monkeypatch, env, expected):
+    monkeypatch.delenv("EXTERNAL_INTERVIEW_API_URL", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", env)
+    assert handoff._base_url() == expected
+
+
+@pytest.mark.parametrize("env", ["Production", "PROD", " production ", "production "])
+def test_base_url_normalizes_case_and_whitespace_for_production(monkeypatch, caplog, env):
+    """Locks in that these resolve to the prod host without warning —
+    distinct from the genuinely unrecognized values tested below."""
+    monkeypatch.delenv("EXTERNAL_INTERVIEW_API_URL", raising=False)
+    monkeypatch.setattr(handoff, "_WARNED_UNKNOWN_BASE_URL_ENVS", set())
+    monkeypatch.setenv("ENVIRONMENT", env)
+    with caplog.at_level("ERROR"):
+        assert handoff._base_url() == "https://pairbot.hoonr.ai"
+    assert "unrecognized ENVIRONMENT" not in caplog.text
+
+
+def test_base_url_explicit_override_always_wins(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbot-staging.example.com/")
+    assert handoff._base_url() == "https://pairbot-staging.example.com"
+
+
+@pytest.mark.parametrize("env", ["", "live", "prd", "stage"])
+def test_base_url_logs_loudly_for_an_unrecognized_environment(monkeypatch, caplog, env):
+    """PR #864 review: the first fix still silently defaulted to QA for
+    anything that wasn't an exact "production"/"prod" match (after
+    case/whitespace normalization — "Production"/" prod " are already
+    handled correctly, so aren't "unrecognized" here) — the review's own
+    words were "the test matrix currently asserts '' maps to QA, which
+    locks in the unsafe default," and an empty/missing value is included
+    here for exactly that reason. Still defaults to QA (a hard raise would
+    take down every handoff call on a simple env-var typo), but now logs an
+    ERROR loud enough that a real prod host with a bad ENVIRONMENT can't
+    stay silent about talking to QA."""
+    monkeypatch.delenv("EXTERNAL_INTERVIEW_API_URL", raising=False)
+    monkeypatch.setattr(handoff, "_WARNED_UNKNOWN_BASE_URL_ENVS", set())
+    monkeypatch.setenv("ENVIRONMENT", env)
+    with caplog.at_level("ERROR"):
+        assert handoff._base_url() == "https://pairbotqa.hoonr.ai"
+    assert "unrecognized ENVIRONMENT" in caplog.text
+
+
+def test_base_url_unrecognized_environment_warns_once_not_per_call(monkeypatch, caplog):
+    monkeypatch.delenv("EXTERNAL_INTERVIEW_API_URL", raising=False)
+    monkeypatch.setattr(handoff, "_WARNED_UNKNOWN_BASE_URL_ENVS", set())
+    monkeypatch.setenv("ENVIRONMENT", "live")
+    with caplog.at_level("ERROR"):
+        handoff._base_url()
+        handoff._base_url()
+        handoff._base_url()
+    assert caplog.text.count("unrecognized ENVIRONMENT") == 1
+
+
+@pytest.mark.parametrize("env", ["staging", "qa", "dev", "local", "test"])
+def test_base_url_known_non_prod_envs_never_warn(monkeypatch, caplog, env):
+    monkeypatch.delenv("EXTERNAL_INTERVIEW_API_URL", raising=False)
+    monkeypatch.setattr(handoff, "_WARNED_UNKNOWN_BASE_URL_ENVS", set())
+    monkeypatch.setenv("ENVIRONMENT", env)
+    with caplog.at_level("ERROR"):
+        handoff._base_url()
+    assert "unrecognized ENVIRONMENT" not in caplog.text
+
+
+# --- notification field length cap (PR review: unvalidated payload fields) --
+
+class _FakeCur:
+    def __init__(self, inserted):
+        self._inserted = inserted
+
+    def execute(self, sql, params=None):
+        self._inserted.append((sql, params))
+
+    def fetchone(self):
+        return (4242,) if "RETURNING" in self._inserted[-1][0] else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, inserted):
+        self._inserted = inserted
+
+    def cursor(self):
+        return _FakeCur(self._inserted)
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _apply_event_capturing_notifications(monkeypatch, **event_kwargs):
+    """Runs apply_event with the DB faked out and _insert_notification
+    spied on directly, so assertions read title/body by keyword rather
+    than indexing into a raw SQL params tuple (PR #864 review: the old
+    version asserted on notif_calls[0][3]/[4], which breaks quietly if the
+    INSERT's column order ever changes)."""
+    inserted: list = []
+    monkeypatch.setattr(handoff, "get_db_connection", lambda: _FakeConn(inserted))
+    calls = []
+    real_insert = handoff._insert_notification
+
+    def spy(cur, **kwargs):
+        calls.append(kwargs)
+        return real_insert(cur, **kwargs)
+
+    monkeypatch.setattr(handoff, "_insert_notification", spy)
+    handoff.apply_event(_event(**event_kwargs))
+    return calls
+
+
+def test_apply_event_caps_candidate_name_and_role_in_notification_text(monkeypatch):
+    huge_name = "A" * 10_000
+    huge_role = "B" * 10_000
+    calls = _apply_event_capturing_notifications(
+        monkeypatch, candidate_name=huge_name, role_position=huge_role
+    )
+    assert calls, "expected a notification insert"
+    title, body = calls[0]["title"], calls[0]["body"]
+    assert len(title) < len(huge_name)
+    assert "A" * handoff._NOTIFICATION_FIELD_MAX_CHARS in title
+    assert "A" * (handoff._NOTIFICATION_FIELD_MAX_CHARS + 1) not in title
+    assert "B" * (handoff._NOTIFICATION_FIELD_MAX_CHARS + 1) not in body
+
+
+@pytest.mark.parametrize("bad_name,bad_role", [(12345, ["x"]), (["a", "b"], 42), (0, False)])
+def test_apply_event_tolerates_non_string_payload_fields(monkeypatch, bad_name, bad_role):
+    """PR #864 review: candidate_name/role_position were sliced with [:200]
+    after an `or` fallback that only replaces an empty/falsy value — a
+    truthy non-string (an int, a list) from a malformed-but-signed payload
+    reached the slice and raised TypeError, which the webhook route turns
+    into an unhelpful 500. str(...) first means any JSON-serializable value
+    is tolerated."""
+    calls = _apply_event_capturing_notifications(
+        monkeypatch, candidate_name=bad_name, role_position=bad_role
+    )
+    assert calls, "expected a notification insert despite the malformed fields"
+    assert isinstance(calls[0]["title"], str) and isinstance(calls[0]["body"], str)
 
 
 def test_pairbot_client_maps_http_errors(monkeypatch):
