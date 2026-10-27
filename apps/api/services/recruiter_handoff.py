@@ -116,9 +116,13 @@ def apply_event(payload: Dict[str, Any]) -> str:
     # Capped before landing in notification title/body text: these are
     # signed (so the risk is low — PR review), but nothing upstream bounds
     # their length, and an oversized value here would otherwise ride
-    # straight into a user-facing notification unvalidated.
-    candidate = (payload.get("candidate_name") or "A candidate")[:_NOTIFICATION_FIELD_MAX_CHARS]
-    role = (payload.get("role_position") or "the role")[:_NOTIFICATION_FIELD_MAX_CHARS]
+    # straight into a user-facing notification unvalidated. str(...) first
+    # (PR #864 review): a malformed-but-signed payload could carry a
+    # non-string value (an int, a list) here — "or" only replaces an empty/
+    # falsy one, so a truthy non-string would reach the [:N] slice and raise
+    # TypeError on anything that isn't subscriptable.
+    candidate = str(payload.get("candidate_name") or "A candidate")[:_NOTIFICATION_FIELD_MAX_CHARS]
+    role = str(payload.get("role_position") or "the role")[:_NOTIFICATION_FIELD_MAX_CHARS]
     recruiter = (payload.get("recruiter_email") or "").strip().lower()
 
     with get_db_connection() as conn:
@@ -180,6 +184,14 @@ class PairbotHandoffError(Exception):
         self.detail = detail
 
 
+# Non-prod environment values this host might legitimately report. Anything
+# else (unset, misspelled, "live", ...) is genuinely ambiguous — see
+# _base_url's own docstring for why that still defaults to QA but now logs
+# loudly instead of staying silent about it (PR #864 review).
+_KNOWN_NON_PROD_ENVS = frozenset({"staging", "qa", "dev", "development", "local", "test"})
+_WARNED_UNKNOWN_BASE_URL_ENVS: set = set()
+
+
 def _base_url() -> str:
     """Pair-bot's base URL — EXTERNAL_INTERVIEW_API_URL if set, else a
     default that follows the environment, same pattern already used by
@@ -187,11 +199,36 @@ def _base_url() -> str:
     variable. Previously defaulted to the QA host unconditionally: a prod
     deploy missing this one env var would silently send recruiter claims,
     emails, and state reads to QA's Pair-bot instead of prod's, with no
-    error (PR review).
+    error (PR #863 review).
+
+    Only an EXACT "production"/"prod" ENVIRONMENT selects the prod host —
+    everything else, including one that's unset or misspelled, still falls
+    back to QA (PR #864 review: this is the same fail-open shape the #863
+    fix just closed for the webhook, just not yet closed here). A hard
+    raise would take down every handoff call on a simple env-var typo,
+    which is a worse outcome than defaulting to QA for a feature that's
+    still toggle-hidden in prod — so this logs an ERROR once per distinct
+    unrecognized value instead (same "warn once, not once per request"
+    shape as _WARNED_UNRESOLVABLE_SEARCH_ZIPS in
+    unified_candidate_search/location.py), loud enough that a real prod
+    host with a bad ENVIRONMENT can't silently keep talking to QA unnoticed.
     """
+    explicit = os.getenv("EXTERNAL_INTERVIEW_API_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
     env = os.getenv("ENVIRONMENT", "").strip().lower()
-    default_url = "https://pairbot.hoonr.ai" if env in {"production", "prod"} else "https://pairbotqa.hoonr.ai"
-    return os.getenv("EXTERNAL_INTERVIEW_API_URL", default_url).rstrip("/")
+    if env in {"production", "prod"}:
+        return "https://pairbot.hoonr.ai"
+    if env not in _KNOWN_NON_PROD_ENVS and env not in _WARNED_UNKNOWN_BASE_URL_ENVS:
+        _WARNED_UNKNOWN_BASE_URL_ENVS.add(env)
+        logger.error(
+            "recruiter_handoff._base_url: unrecognized ENVIRONMENT=%r with no "
+            "EXTERNAL_INTERVIEW_API_URL set — defaulting to the QA Pair-bot host; "
+            "if this is actually prod, recruiter claims/emails/state reads are "
+            "silently going to QA instead",
+            env or "(unset)",
+        )
+    return "https://pairbotqa.hoonr.ai"
 
 
 async def _call(method: str, path: str, body: Optional[Dict[str, Any]] = None,
