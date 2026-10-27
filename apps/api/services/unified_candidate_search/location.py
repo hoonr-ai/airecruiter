@@ -1,7 +1,7 @@
 """UnifiedCandidateSearch methods: location."""
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from services.location import haversine_miles, inferred_region_states, is_broad_region_location, normalize_location_string, sanitize_candidate_location, within_radius
+from services.location import haversine_miles, inferred_region_states, is_broad_region_location, is_labeled_region, normalize_location_string, sanitize_candidate_location, within_radius
 from .common import (
     LocationEntry,
     SearchCriteria,
@@ -815,18 +815,59 @@ class LocationMixin:
                 precise_candidate_locs.append(loc)
         if broad_locs and not direct_zip and not precise_locs:
             known_states = set()
+            # States contributed only by a BARE state code/name ("NJ"
+            # alone), as opposed to a curated multi-state metro label from
+            # _REGION_STATE_LABELS (is_labeled_region) — see the
+            # state_mismatch demotion below.
+            unlabeled_states = set()
             for loc in broad_locs:
+                labeled = is_labeled_region(loc)
                 state = self._parse_location(loc).get("state") or ""
                 # Ignore a leftover token such as "united" from
                 # "New York, United States". Only a real state code counts,
                 # plus the LinkedIn region table (Chicago → IL, Detroit → MI).
                 if len(state) == 2 and state.upper() in self._US_STATE_CODES:
                     known_states.add(state.lower())
+                    if not labeled:
+                        unlabeled_states.add(state.lower())
                 for code in inferred_region_states(loc):
                     known_states.add(code.lower())
+                    if not labeled:
+                        unlabeled_states.add(code.lower())
             state_mismatch = bool(
                 required.get("state") and known_states and required["state"] not in known_states
             )
+            # A bare state ("NJ" alone) has no curated adjacency the way a
+            # named metro label does (e.g. "greater philadelphia area"
+            # already lists PA/NJ/DE) — a state is huge, and one next door
+            # to the search's state routinely has towns a few miles across
+            # the line (QA-confirmed: NJ candidates a few mi from NYC must
+            # stay soft-kept, not hard-dropped, even though "NJ" != "NY").
+            # Only demote when EVERY contributing state for this mismatch
+            # came from a bare, unlabeled state AND it's the search's own
+            # state or a neighbor of it — a bare state nowhere near the
+            # search (e.g. "CA" alone on a NY search) still hard-drops.
+            if (
+                state_mismatch
+                and unlabeled_states
+                and not (known_states - unlabeled_states)
+                and required.get("state")
+            ):
+                # _ADJACENT_STATES (above) is hand-curated and only lists the
+                # metros recruiters actually ask about — a search state
+                # that's missing from it (most are) simply has no adjacency
+                # entries, so .get(..., set()) is empty and every bare state
+                # other than an exact match still hard-drops below. That's
+                # the deliberately conservative fallback: an unlisted pair
+                # falls back to today's behavior (hard-drop) rather than
+                # silently guessing at adjacency, same trade-off as every
+                # other "we don't have data for this, so don't soft-keep
+                # past it" choice in this module (e.g. an unrecognized broad
+                # label's core city in _REGION_CORE_CITY).
+                nearby = {s.upper() for s in self._ADJACENT_STATES.get(required["state"].upper(), set())}
+                nearby.add(required["state"].upper())
+                if all(s.upper() in nearby for s in unlabeled_states):
+                    state_mismatch = False
             # Checked regardless of whether the state matches: a state is
             # huge (same-state ≠ same metro — "Dallas-Fort Worth Metroplex"
             # is ~225mi from a Houston ZIP, both TX), so a known core city

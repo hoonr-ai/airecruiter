@@ -36,14 +36,14 @@ def _patch(monkeypatch):
     notif_calls = []
     spawn_calls = []
 
-    def fake_enqueue(task_name, job_id, searcher_email):
-        notif_calls.append({"task": task_name, "job_id": job_id, "searcher_email": searcher_email})
+    def fake_enqueue(job_id, searcher_email):
+        notif_calls.append({"job_id": job_id, "searcher_email": searcher_email})
         return "sentinel-coro"
 
     def fake_spawn(coro, name=None):
         spawn_calls.append((coro, name))
 
-    monkeypatch.setattr(cand_module, "enqueue", fake_enqueue)
+    monkeypatch.setattr(cand_module, "_enqueue_zero_match_notification", fake_enqueue)
     monkeypatch.setattr(cand_module, "_spawn_task", fake_spawn)
     return notif_calls, spawn_calls
 
@@ -56,7 +56,6 @@ def test_queues_notification_on_zero_candidates_in_a_full_search(monkeypatch):
     cand_module._maybe_notify_zero_match(request, criteria, _summary_event(0), _user)
 
     assert len(notif_calls) == 1
-    assert notif_calls[0]["task"] == "zero_match_notification"
     assert notif_calls[0]["job_id"] == "J1"
     assert notif_calls[0]["searcher_email"] == "recruiter@x.com"
     assert len(spawn_calls) == 1
@@ -116,7 +115,7 @@ def test_swallows_errors_without_raising(monkeypatch):
     """Must never break the NDJSON stream still being delivered to the client."""
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
-    monkeypatch.setattr(cand_module, "enqueue", _boom)
+    monkeypatch.setattr(cand_module, "_enqueue_zero_match_notification", _boom)
     monkeypatch.setattr(cand_module, "_spawn_task", lambda *a, **k: None)
 
     request = SimpleNamespace(job_id="J1")
@@ -158,7 +157,7 @@ def test_does_not_queue_when_all_sources_failed(monkeypatch):
 
 
 def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
-    """PR review follow-up: enqueue(...) is a real
+    """PR review follow-up: _enqueue_zero_match_notification(...) is a real
     coroutine object by the time _spawn_task sees it — if spawn itself
     raises (not the notification logic once running), the coroutine must
     be closed explicitly so it isn't left never-awaited."""
@@ -168,7 +167,7 @@ def test_closes_the_coroutine_if_spawn_raises(monkeypatch):
         def close(self):
             closed.append(True)
 
-    monkeypatch.setattr(cand_module, "enqueue", lambda *args, **kwargs: _FakeCoro())
+    monkeypatch.setattr(cand_module, "_enqueue_zero_match_notification", lambda *args, **kwargs: _FakeCoro())
 
     def _boom_spawn(coro, name=None):
         raise RuntimeError("no running event loop")
@@ -186,7 +185,7 @@ def test_logs_a_warning_not_a_debug_line_on_failure(monkeypatch):
     production logs, not only at debug level."""
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
-    monkeypatch.setattr(cand_module, "enqueue", _boom)
+    monkeypatch.setattr(cand_module, "_enqueue_zero_match_notification", _boom)
     monkeypatch.setattr(cand_module, "_spawn_task", lambda *a, **k: None)
 
     warning_calls = []
@@ -199,6 +198,67 @@ def test_logs_a_warning_not_a_debug_line_on_failure(monkeypatch):
 
     assert len(warning_calls) == 1
     assert "zero_match_warning" in warning_calls[0]
+
+
+# --- _enqueue_zero_match_notification_sync (QA 2026-10-27 regression) -------
+
+def test_enqueue_zero_match_notification_routes_through_task_outbox(monkeypatch):
+    """QA regression: zero_match_warning had zero rows ever in `notifications`
+    despite a genuine 0-candidate full search, because the old implementation
+    enqueued straight onto arq's queue (core.queue.enqueue) with no fallback —
+    unlike candidate_callback_reminder, which task_outbox's dual relay (API
+    scheduler + arq worker cron) protects against a dead/stale worker. This
+    must now go through task_outbox.add on the same cursor/commit shape every
+    other durable side-effect in this file uses, not a bare queue enqueue."""
+    add_calls = []
+    committed = []
+    closed = []
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def commit(self):
+            committed.append(True)
+
+        def close(self):
+            closed.append(True)
+
+    def fake_add(cur, task_name, *args, **kwargs):
+        add_calls.append((task_name, args, kwargs))
+        return 1
+
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: _FakeConn())
+    import services.task_outbox as task_outbox_module
+    monkeypatch.setattr(task_outbox_module, "add", fake_add)
+
+    cand_module._enqueue_zero_match_notification_sync("J1", "recruiter@x.com")
+
+    assert len(add_calls) == 1
+    task_name, args, kwargs = add_calls[0]
+    assert (task_name, args) == ("zero_match_notification", ("J1", "recruiter@x.com"))
+    # PR review: a dedupe_key so a retried request can't double-insert the
+    # outbox row. Minute-grain (not date.today()) so it only collapses a
+    # near-simultaneous retry of the SAME request, not every zero-result
+    # search this recruiter runs on this job for the rest of the day — see
+    # _enqueue_zero_match_notification_sync's own docstring/comment for why
+    # a coarser key would regress create_zero_match_notification's
+    # documented "a fresh search is a fresh, separately-worth-notifying
+    # result" semantics.
+    import re
+    assert re.fullmatch(
+        r"zero_match:J1:recruiter@x\.com:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}",
+        kwargs["dedupe_key"],
+    ), kwargs["dedupe_key"]
+    assert committed == [True]
+    assert closed == [True]
 
 
 # --- stream_candidates() itself (PR review follow-up) ------------------------
@@ -242,7 +302,6 @@ def test_stream_fires_zero_match_on_a_real_zero_summary_event(monkeypatch):
     _consume(_request(), user)
 
     assert len(notif_calls) == 1
-    assert notif_calls[0]["task"] == "zero_match_notification"
     assert notif_calls[0]["job_id"] == "J1"
     assert notif_calls[0]["searcher_email"] == "recruiter@x.com"
     assert len(spawn_calls) == 1
