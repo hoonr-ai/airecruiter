@@ -30,10 +30,12 @@ const CHANNEL_NAME = "pair.launchTracker";
 type TrackerMessage =
   // poller -> others: the latest /launch-sessions/mine result
   | { type: "sessions"; sessions: TrackedSession[] }
-  // other -> poller: a tab opened, became visible or started a launch; poll now
-  | { type: "poll" }
-  // other -> poller, every ACTIVE_POLL_MS while visible: keep the fast rate
-  | { type: "visible" };
+  // other -> poller: poll now. Sent when a tab opens, becomes visible or
+  // starts a launch, and every ACTIVE_POLL_MS from a visible tab while a
+  // launch runs: the poller may be a hidden tab, whose own timers browsers
+  // throttle to about once a minute, but channel messages still reach it
+  // at once.
+  | { type: "poll" };
 
 function failureDelay(failures: number): number {
   const base = Math.min(FAILURE_MAX_MS, ACTIVE_POLL_MS * 2 ** failures);
@@ -144,14 +146,18 @@ export function LaunchTracker() {
   // Whether this tab is the one that polls (see POLLER_LOCK).
   const isPoller = useRef(true);
   const channel = useRef<BroadcastChannel | null>(null);
-  // Last time another tab said it is visible: the poller keeps the fast rate
+  // Last time another tab asked for a poll: the poller keeps the fast rate
   // for a visible tab even when it is hidden itself.
   const peerVisibleAt = useRef(0);
+  const lastPollAt = useRef(0);
+  // Whether the last list had a running launch (every tab keeps this).
+  const anyRunning = useRef(false);
 
   const applySessions = useCallback((list: TrackedSession[]) => {
     const nowRunning = new Set(list.filter(isRunning).map((s) => s.id));
     const finished = [...prevRunning.current].filter((id) => !nowRunning.has(id));
     prevRunning.current = nowRunning;
+    anyRunning.current = nowRunning.size > 0;
     if (finished.length) setFresh((f) => [...f, ...finished]);
     setSessions(list);
     return nowRunning;
@@ -162,6 +168,7 @@ export function LaunchTracker() {
     // launch can all ask for a poll at once. Only the poller tab fetches.
     if (inFlight.current || !mounted.current || !isPoller.current) return;
     inFlight.current = true;
+    lastPollAt.current = Date.now();
     clearTimeout(timer.current);
     let delay = IDLE_POLL_MS;
     try {
@@ -213,9 +220,9 @@ export function LaunchTracker() {
           applySessions(msg.sessions);
         } else if (msg?.type === "poll" && isPoller.current) {
           peerVisibleAt.current = Date.now();
-          void poll();
-        } else if (msg?.type === "visible") {
-          peerVisibleAt.current = Date.now();
+          // Several visible windows each ask every ACTIVE_POLL_MS: one poll
+          // per half-interval answers them all.
+          if (Date.now() - lastPollAt.current >= ACTIVE_POLL_MS / 2) void poll();
         }
       };
       // Held until this tab unmounts; the next waiting tab then takes over.
@@ -231,9 +238,11 @@ export function LaunchTracker() {
         .catch(() => {
           /* aborted on unmount */
         });
+      // This tab's own timer runs at full rate while it is visible, unlike a
+      // hidden poller's: drive the fast polling from here.
       visibleBeat = setInterval(() => {
-        if (!isPoller.current && document.visibilityState === "visible") {
-          ch.postMessage({ type: "visible" } satisfies TrackerMessage);
+        if (!isPoller.current && anyRunning.current && document.visibilityState === "visible") {
+          ch.postMessage({ type: "poll" } satisfies TrackerMessage);
         }
       }, ACTIVE_POLL_MS);
       // A tab opened after the poller: get the current list without waiting

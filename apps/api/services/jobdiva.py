@@ -1,5 +1,8 @@
 import asyncio
 import base64
+import functools
+import http.cookiejar
+import inspect
 import logging
 import os
 import weakref
@@ -25,7 +28,8 @@ from core import (
     DEFAULT_SCREENING_LEVEL,
 )
 from services.location_type import resolve_location_type
-from core.bounded_cache import AsyncTTLCache
+from core import config as _core_config
+from core.bounded_cache import BYPASS, AsyncTTLCache, BoundedDict
 from services import jobdiva_rate_limit as _bi_rate_limit
 from services import jobdiva_detail_cache as _detail_cache
 from services import jobdiva_endpoint_breaker as _breakers
@@ -40,13 +44,89 @@ _BI_WORKER_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 # Brief per-worker cache of read-only lookups (job, candidate, submittals):
 # a dashboard, a tracker and a metrics refresh asking for the same record
-# within seconds share one JobDiva call. Errors are never cached; writes
-# below drop the entries they change. JOBDIVA_READ_CACHE_TTL_S=0 disables it.
+# within seconds share one JobDiva call. Errors are never cached.
+# JOBDIVA_READ_CACHE_TTL_S=0 disables it. Small on purpose: these are full
+# JobDiva payloads, and worker memory is the thing being saved.
 try:
     _READ_CACHE_TTL_S = float((os.getenv("JOBDIVA_READ_CACHE_TTL_S") or "").strip() or 30)
 except ValueError:
     _READ_CACHE_TTL_S = 30.0
-_read_cache = AsyncTTLCache(maxsize=2000, ttl_s=_READ_CACHE_TTL_S)
+_read_cache = AsyncTTLCache(maxsize=200, ttl_s=_READ_CACHE_TTL_S)
+
+# Read-after-write across the 8 workers: every JobDiva write bumps a
+# generation counter in Redis (@_invalidates_reads), and a cached value only
+# answers while the generation it was stored under is still current. Bumped
+# before AND after the write, so a read racing the write can't re-store the
+# old value either. Candidates are per record; jobs and submittals for the
+# whole kind, because callers name a job by reference code or numeric id
+# interchangeably and a per-id key would miss one of the two.
+_READ_GEN_PREFIX = "jobdiva:readcache:gen:"
+_READ_GEN_TTL_S = 3600  # far longer than any cached value lives
+# Used when no Redis is configured (dev, tests): one process, so local is exact.
+_local_read_gens: Dict[str, int] = BoundedDict(20000)
+
+
+def _read_gen_names(kind: str, ident: Any) -> List[str]:
+    if kind == "candidate":
+        return [f"candidate:{ident}"]
+    return [f"{kind}:*"]
+
+
+async def _read_cache_token(kind: str, ident: Any) -> Any:
+    names = _read_gen_names(kind, ident)
+    client = _bi_rate_limit._get_redis()
+    if client is None:
+        if getattr(_core_config, "REDIS_URL", ""):
+            return BYPASS  # configured but unreachable: can't tell what's stale
+        return tuple(_local_read_gens.get(n, 0) for n in names)
+    try:
+        return tuple(await client.mget([_READ_GEN_PREFIX + n for n in names]))
+    except Exception as exc:  # noqa: BLE001
+        _bi_rate_limit._mark_redis_down(exc)
+        return BYPASS
+
+
+async def _bump_read_gens(names: List[str]) -> None:
+    """Never raises: a failed bump must not fail the write."""
+    for n in names:
+        _local_read_gens[n] = _local_read_gens.get(n, 0) + 1
+    client = _bi_rate_limit._get_redis()
+    if client is None or not names:
+        return
+    try:
+        pipe = client.pipeline(transaction=False)
+        for n in names:
+            pipe.incr(_READ_GEN_PREFIX + n)
+            pipe.expire(_READ_GEN_PREFIX + n, _READ_GEN_TTL_S)
+        await pipe.execute()
+    except Exception as exc:  # noqa: BLE001
+        _bi_rate_limit._mark_redis_down(exc)
+
+
+def _invalidates_reads(*specs: Tuple[str, str]):
+    """Mark a JobDiva write: ``(kind, argument name)`` pairs say which cached
+    reads it makes stale (see _read_gen_names)."""
+
+    def decorate(fn):
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            arguments = sig.bind_partial(*args, **kwargs).arguments
+            names: List[str] = []
+            for kind, arg in specs:
+                ident = arguments.get(arg)
+                if ident not in (None, ""):
+                    names.extend(n for n in _read_gen_names(kind, ident) if n not in names)
+            await _bump_read_gens(names)
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                await _bump_read_gens(names)
+
+        return wrapper
+
+    return decorate
 
 
 def _bi_worker_semaphore(size: int) -> asyncio.Semaphore:
@@ -202,6 +282,10 @@ def _shared_jd_client() -> _JDAsyncClient:
     client = _SHARED_JD_CLIENTS.get(loop)
     if client is None or client.is_closed:
         client = _SHARED_JD_CLIENTS[loop] = _JDAsyncClient()
+        # Shared by every caller on this worker: never carry a cookie JobDiva
+        # sets for one request into another's (each call used to get a fresh,
+        # empty jar). Auth is the Bearer header, not a cookie.
+        client.cookies.jar.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
     return client
 
 
@@ -243,9 +327,16 @@ class _SharedJDClient:
     def delete(self, url: Any, **kwargs: Any):
         return self._call("delete", url, **kwargs)
 
+    def head(self, url: Any, **kwargs: Any):
+        return self._call("head", url, **kwargs)
+
     def request(self, method: str, url: Any, **kwargs: Any):
         kwargs.setdefault("timeout", self._timeout)
         return _shared_jd_client().request(method, url, **kwargs)
+
+    def stream(self, method: str, url: Any, **kwargs: Any):
+        kwargs.setdefault("timeout", self._timeout)
+        return _shared_jd_client().stream(method, url, **kwargs)
 
 
 def _jd_async_client(*args: Any, **kwargs: Any) -> Any:
@@ -3743,7 +3834,9 @@ class JobDivaService:
     
     async def get_candidate_by_id(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         return await _read_cache.get_or_load(
-            ("candidate", str(candidate_id)), lambda: self._get_candidate_by_id_uncached(candidate_id)
+            ("candidate", str(candidate_id)),
+            lambda: self._get_candidate_by_id_uncached(candidate_id),
+            token_fn=lambda: _read_cache_token("candidate", candidate_id),
         )
 
     async def _get_candidate_by_id_uncached(self, candidate_id: str) -> Optional[Dict[str, Any]]:
@@ -3769,7 +3862,11 @@ class JobDivaService:
             return None
 
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
-        return await _read_cache.get_or_load(("job", str(job_id)), lambda: self._get_job_by_id_uncached(job_id))
+        return await _read_cache.get_or_load(
+            ("job", str(job_id)),
+            lambda: self._get_job_by_id_uncached(job_id),
+            token_fn=lambda: _read_cache_token("job", job_id),
+        )
 
     async def _get_job_by_id_uncached(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific job by ID from JobDiva, including AI UDFs."""
@@ -4360,6 +4457,7 @@ class JobDivaService:
             "status": "sourced"
         }
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def update_candidate_resume_text(self, candidate_id: str) -> bool:
         """Update resume text for an existing candidate using new CandidateResumesDetail → ResumesTextDetail flow."""
         try:
@@ -4519,9 +4617,9 @@ class JobDivaService:
             results.append(await self.get_job_status(job_id))
         return results
 
+    @_invalidates_reads(("job", "job_id"))
     async def update_job_user_fields(self, job_id: str, fields: list) -> bool:
         """Update JobDiva UDFs with detailed logging."""
-        _read_cache.invalidate(("job", str(job_id)))  # its cached read is stale now
         token = await self.authenticate()
         if not token: 
             logger.error("❌ Sync failed: Could not authenticate with JobDiva")
@@ -5039,6 +5137,7 @@ class JobDivaService:
             logger.error(f"❌ TalentSearch API call failed: {e}")
             return []
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def create_candidate_note(
         self, 
         candidate_id: str, 
@@ -5101,6 +5200,7 @@ class JobDivaService:
             logger.error(f"❌ Exception creating JobDiva note: {e}")
             return {"status": "error", "message": str(e)}
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def create_candidate_sticky_note(
         self, 
         candidate_id: str, 
@@ -5142,6 +5242,7 @@ class JobDivaService:
             logger.error(f"❌ Exception creating JobDiva sticky note: {e}")
             return {"status": "error", "message": str(e)}
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def update_candidate_qualification(
         self,
         candidate_id: str,
@@ -5154,7 +5255,6 @@ class JobDivaService:
         """
         Update a candidate qualification in JobDiva (apiv2/jobdiva/updateCandidateQualifications).
         """
-        _read_cache.invalidate(("candidate", str(candidate_id)))  # its cached read is stale now
         token = await self.authenticate()
         if not token:
             return {"status": "error", "message": "Authentication failed"}
@@ -5441,6 +5541,7 @@ class JobDivaService:
         except (TypeError, ValueError):
             return 0
 
+    @_invalidates_reads(("candidate", "candidate_id"), ("submittals", "job_id"))
     async def link_candidate_to_job(
         self, candidate_id: Any, job_id: Any, resume_source_id: Optional[int] = None
     ) -> bool:
@@ -5462,7 +5563,6 @@ class JobDivaService:
         the response as a boolean, so a 2xx whose body is literally ``false`` is
         a refusal and is logged with the id pair.
         """
-        _read_cache.invalidate(("submittals", str(job_id)))  # its cached read is stale now
         try:
             cid = int(str(candidate_id).strip())
         except (TypeError, ValueError):
@@ -5529,6 +5629,7 @@ class JobDivaService:
             logger.error(f"❌ createJobApplication exception for candidateid={cid} jobid={resolved_job_id}: {e}")
         return False
 
+    @_invalidates_reads(("candidate", "candidate_id"), ("submittals", "job_id"))
     async def create_job_application_with_resume(
         self,
         candidate_id: Any,
@@ -5600,7 +5701,6 @@ class JobDivaService:
         carries ``.path`` / ``.found_via_search`` / ``.matched_existing`` for
         provenance stamping.
         """
-        _read_cache.invalidate(("submittals", str(job_id)))  # its cached read is stale now
         resume_source_id = jobdiva_pair_resume_source_id(origin_source)
         token = await self.authenticate()
         if not token:
@@ -5867,6 +5967,7 @@ class JobDivaService:
             logger.warning(f"⚠️ could not read résumés for candidateId={candidate_id}: {exc}")
             return None
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def upload_resume(
         self,
         candidate_id: Any,
@@ -5954,6 +6055,7 @@ class JobDivaService:
             logger.error(f"❌ uploadResume exception for candidateId={cid}: {exc}")
         return result
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def _complete_created_profile(
         self,
         token: str,
@@ -6048,11 +6150,11 @@ class JobDivaService:
                 await self._update_candidate_profile(token, candidate_id, {"alternateemail": fields["email"]})
         return {"ok": ok, "refused": refused, "email_held_elsewhere": held_elsewhere}
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def update_candidate_social_links(self, candidate_id: Any, socialnetworks: List[Dict[str, str]]) -> bool:
         """POST /apiv2/jobdiva/updateCandidateSNLinks {id, socialnetworks: [{name, link}]}
         -> boolean. ``name`` is one of JobDiva's social-network types
         (``JOBDIVA_SOCIAL_NETWORK_FIELDS``). Logged and swallowed on failure."""
-        _read_cache.invalidate(("candidate", str(candidate_id)))  # its cached read is stale now
         try:
             cid = int(str(candidate_id).strip())
         except (TypeError, ValueError):
@@ -6092,6 +6194,7 @@ class JobDivaService:
             logger.warning(f"⚠️ updateCandidateSNLinks exception for {cid}: {exc}")
             return False
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def _update_candidate_name(
         self,
         token: str,
@@ -6121,6 +6224,7 @@ class JobDivaService:
                 fields[key] = value
         return await self._update_candidate_profile(token, candidate_id, fields)
 
+    @_invalidates_reads(("candidate", "candidate_id"))
     async def _update_candidate_profile(
         self,
         token: str,
@@ -6140,7 +6244,6 @@ class JobDivaService:
         landed (the email may have been dropped), False otherwise; the names of
         the fields JobDiva would not take are appended to ``refused``.
         """
-        _read_cache.invalidate(("candidate", str(candidate_id)))  # its cached read is stale now
         url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
         try:
             candidate_id = int(str(candidate_id).strip())
@@ -6278,7 +6381,9 @@ class JobDivaService:
         # Loaded with none_on_error=True so a failure (None) is never cached
         # as an empty list.
         result = await _read_cache.get_or_load(
-            ("submittals", str(job_id)), lambda: self._get_job_submittals_uncached(job_id, none_on_error=True)
+            ("submittals", str(job_id)),
+            lambda: self._get_job_submittals_uncached(job_id, none_on_error=True),
+            token_fn=lambda: _read_cache_token("submittals", job_id),
         )
         if result is None and not none_on_error:
             return []
