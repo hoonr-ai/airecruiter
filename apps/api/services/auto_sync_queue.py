@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 # JobDiva quota shared with live searches, and every job is still picked up
 # in turn — the queue is oldest-synced first.
 INTERVAL_MINUTES = max(1.0, float(os.getenv("AUTOSYNC_INTERVAL_MINUTES", "30")))
-# Seconds of work per cycle; less than the interval so a cycle never
-# overlaps the next one.
+# Seconds of work per cycle; at most 85% of the interval so a cycle never
+# overlaps the next one (and never 0, even for a 1-minute interval).
 CYCLE_BUDGET_S = min(
-    float(os.getenv("AUTOSYNC_CYCLE_BUDGET_S", "780")), INTERVAL_MINUTES * 60 - 60
+    float(os.getenv("AUTOSYNC_CYCLE_BUDGET_S", "780")), INTERVAL_MINUTES * 60 * 0.85
 )
 INACTIVE_RESYNC_HOURS = float(os.getenv("AUTOSYNC_INACTIVE_RESYNC_HOURS", "24"))
 DEFAULT_INACTIVE = "closed,filled,cancelled,canceled,expired,ignored,declined"

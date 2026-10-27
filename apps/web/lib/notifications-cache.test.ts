@@ -6,6 +6,7 @@ import {
   NOTIFICATIONS_CACHE_MAX_ITEMS,
   NOTIFICATIONS_CACHE_REWRITE_AFTER_MS,
   clearCachedNotifications,
+  hasUnseenNotifications,
   readCachedNotifications,
   writeCachedNotifications,
 } from "./notifications-cache.ts";
@@ -126,5 +127,16 @@ describe("notifications cache", () => {
     // ...but still refreshes savedAt periodically so a live feed never ages out.
     writeCachedNotifications(counting, "b@example.com", [item({ read_at: "2026-10-12T09:01:00.000Z" })], NOW + 3000 + NOTIFICATIONS_CACHE_REWRITE_AFTER_MS);
     assert.equal(writes, 4);
+  });
+});
+
+describe("hasUnseenNotifications", () => {
+  it("is true only when the other tab's list has an id this tab hasn't seen", () => {
+    const list = [item({ id: 7 }), item({ id: 5 })];
+    assert.equal(hasUnseenNotifications(list, 6), true);
+    assert.equal(hasUnseenNotifications(list, 7), false);
+    // An older list (a background tab that missed pushes) is never "newer".
+    assert.equal(hasUnseenNotifications([item({ id: 3 })], 9), false);
+    assert.equal(hasUnseenNotifications([], 0), false);
   });
 });

@@ -9,7 +9,12 @@ import {
   notificationClickPath,
   shouldShowBrowserPopup,
 } from "@/lib/browser-notifications";
-import { NOTIFICATIONS_CACHE_KEY, readCachedNotifications, writeCachedNotifications } from "@/lib/notifications-cache";
+import {
+  NOTIFICATIONS_CACHE_KEY,
+  hasUnseenNotifications,
+  readCachedNotifications,
+  writeCachedNotifications,
+} from "@/lib/notifications-cache";
 import { playNotificationChime, unlockNotificationSound } from "@/lib/notification-sound";
 import { isDesktopTypeEnabled } from "@/lib/desktop-notification-preferences";
 import { getSafeLocalStorage } from "@/lib/safe-local-storage";
@@ -346,12 +351,15 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, [notifications]);
 
   // Cross-tab reconciliation: the `storage` event fires in every OTHER tab
-  // on this origin when one tab writes the cache. Re-fetching from the server
-  // here used to feed a loop — this tab's fetch wrote the cache, signalling
-  // the other tab to fetch and write back, forever. Instead adopt what the
-  // other tab just wrote (it came from the server, an SSE push, or a user
-  // action there); writeCachedNotifications skips the identical write-back
-  // this triggers, so the exchange ends here.
+  // on this origin when one tab writes the cache. Re-fetching on every event
+  // used to feed a loop — each fetch wrote the cache, signalling the other
+  // tab to fetch and write back, forever. Now: when the other tab's list has
+  // notifications this tab hasn't seen, adopt it (no request). Otherwise it
+  // may be OLDER than ours — a background tab that missed SSE pushes still
+  // rewrites its list hourly — so never adopt it: ask the server instead.
+  // That refresh is merged and spaced (lib/notifications-refresh-gate.ts),
+  // and writeCachedNotifications skips the identical write-back it leads to,
+  // so the exchange ends there.
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
       if (e.key !== NOTIFICATIONS_CACHE_KEY) return;
@@ -360,6 +368,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       const email = getActiveUserEmail();
       const cached = email ? readCachedNotifications(window.localStorage, email, Date.now()) : null;
       if (!cached) return;
+      if (!hasUnseenNotifications(cached.notifications, lastSeenIdRef.current)) {
+        void refreshRef.current();
+        return;
+      }
       setNotifications(cached.notifications);
       setUnreadCount(cached.unreadCount);
       for (const n of cached.notifications) {

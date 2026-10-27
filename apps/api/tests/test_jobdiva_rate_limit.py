@@ -566,6 +566,39 @@ def test_no_slot_in_time_answers_locally_without_calling_jobdiva(monkeypatch):
             return await client.get("/apiv2/bi/JobDetail")
 
     response = asyncio.run(main())
-    assert response.status_code == rl.SLOT_TIMEOUT_STATUS
+    assert response.status_code == 429  # "retry later", not a 5xx outage
     assert response.headers.get(rl.SLOT_TIMEOUT_HEADER) == "1"
+    assert response.headers.get("Retry-After")
     assert sent == []
+    assert rl._stats["http_429"] == 0  # a local answer starts no cooldown
+
+
+def test_authentication_skips_the_budget(monkeypatch):
+    async def never(*_a, **_k):
+        raise AssertionError("auth must not wait for a slot")
+
+    monkeypatch.setattr(rl, "acquire", never)
+
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(200, text="token")) as client:
+            return await client.get("/api/authenticate", params={"clientid": "x"})
+
+    assert asyncio.run(main()).status_code == 200
+
+
+def test_writes_wait_longer_for_a_slot_than_reads(monkeypatch):
+    waits = []
+
+    async def recording(max_wait, **_k):
+        waits.append(max_wait)
+        return True
+
+    monkeypatch.setattr(rl, "acquire", recording)
+
+    async def main():
+        async with _jobdiva_client(lambda req: httpx.Response(200, json={})) as client:
+            await client.get("/apiv2/bi/JobDetail")
+            await client.post("/apiv2/jobdiva/createCandidateNote", json={})
+
+    asyncio.run(main())
+    assert waits == [rl.CLIENT_INTERACTIVE_MAX_WAIT_S, rl.CLIENT_WRITE_MAX_WAIT_S]

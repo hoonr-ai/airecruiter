@@ -120,3 +120,11 @@ export function clearCachedNotifications(storage: NotificationsStorage | null | 
     // nothing to do
   }
 }
+
+/** Whether `notifications` (another tab's cached list) has any id above the
+ * highest one this tab has seen — i.e. it is known to be newer. A list with
+ * nothing new may just as well be older (a background tab that missed SSE
+ * pushes), so it must not replace this tab's own. */
+export function hasUnseenNotifications(notifications: NotificationItem[], lastSeenId: number): boolean {
+  return notifications.some((n) => n.id > lastSeenId);
+}

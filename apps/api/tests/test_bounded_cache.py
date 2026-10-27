@@ -134,3 +134,70 @@ def test_ttl_cache_off_when_ttl_is_zero():
 
     asyncio.run(main())
     assert len(calls) == 2
+
+
+def test_ttl_cache_hit_needs_the_current_token():
+    from core.bounded_cache import BYPASS
+
+    gen = {"v": 0}
+    calls = []
+    cache = AsyncTTLCache(maxsize=10, ttl_s=30, clock=_Clock())
+
+    async def token():
+        return gen["v"]
+
+    async def load():
+        calls.append(1)
+        return {"n": len(calls)}
+
+    async def main():
+        a = await cache.get_or_load("k", load, token_fn=token)
+        b = await cache.get_or_load("k", load, token_fn=token)
+        gen["v"] += 1  # a write somewhere (another worker)
+        c = await cache.get_or_load("k", load, token_fn=token)
+        return a, b, c
+
+    a, b, c = asyncio.run(main())
+    assert a == b == {"n": 1} and c == {"n": 2}
+
+
+def test_ttl_cache_does_not_store_a_load_a_write_overtook():
+    gen = {"v": 0}
+    calls = []
+    cache = AsyncTTLCache(maxsize=10, ttl_s=30, clock=_Clock())
+
+    async def token():
+        return gen["v"]
+
+    async def load():
+        calls.append(1)
+        if len(calls) == 1:
+            gen["v"] += 1  # the write lands while the first read is in flight
+        return {"n": len(calls)}
+
+    async def main():
+        await cache.get_or_load("k", load, token_fn=token)
+        return await cache.get_or_load("k", load, token_fn=token)
+
+    assert asyncio.run(main()) == {"n": 2}  # the pre-write value wasn't kept
+
+
+def test_ttl_cache_bypass_token_skips_the_cache():
+    from core.bounded_cache import BYPASS
+
+    calls = []
+    cache = AsyncTTLCache(maxsize=10, ttl_s=30)
+
+    async def token():
+        return BYPASS
+
+    async def load():
+        calls.append(1)
+        return 1
+
+    async def main():
+        await cache.get_or_load("k", load, token_fn=token)
+        await cache.get_or_load("k", load, token_fn=token)
+
+    asyncio.run(main())
+    assert len(calls) == 2
