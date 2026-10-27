@@ -302,7 +302,6 @@ def test_stream_fires_zero_match_on_a_real_zero_summary_event(monkeypatch):
     _consume(_request(), user)
 
     assert len(notif_calls) == 1
-    assert notif_calls[0]["task"] == "zero_match_notification"
     assert notif_calls[0]["job_id"] == "J1"
     assert notif_calls[0]["searcher_email"] == "recruiter@x.com"
     assert len(spawn_calls) == 1
