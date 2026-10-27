@@ -51,7 +51,7 @@ def test_search_and_enrich(monkeypatch):
     assert req.boolean_string == "java"
     calls = _recorder(monkeypatch, rc, "iter_search_events", [{"type": "candidate"}], is_gen=True)
     assert asyncio.run(_drain(fx.search_events(req, schedule_cross_submissions=False))) == [{"type": "candidate"}]
-    assert calls[0][1] == {"schedule_cross_submissions": False}
+    assert calls[0][1] == {"schedule_cross_submissions": False, "defer_paid_contact": False}
     calls = _recorder(monkeypatch, rc, "enrich_contacts_for_launch", [{"index": 0}], is_gen=True)
     items = [{"candidate_id": "a", "source": "LinkedIn", "linkedin_url": "u", "match_score": 70}]
     assert asyncio.run(_drain(fx.enrich(items, job_id="26-001", concurrency=5))) == [{"index": 0}]

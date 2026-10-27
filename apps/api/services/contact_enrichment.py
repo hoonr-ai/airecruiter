@@ -33,6 +33,7 @@ Two surfaces:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -49,6 +50,7 @@ from core.config import (
     EXA_CONTACT_DEEP_EFFORT,
     EXA_CONTACT_DEEP_TIMEOUT_S,
     EXA_CONTACT_ENRICH_CONCURRENCY,
+    EXA_CONTACT_ENRICH_WORKER_CONCURRENCY,
     EXA_CONTACT_ENRICH_EFFORT,
     EXA_ONDEMAND_CONTACT_CONCURRENCY,
     EXA_CONTACT_ENRICH_ENABLED,
@@ -181,18 +183,42 @@ _JOB_EXA_COUNTERS: Dict[str, int] = {}
 # re-runs. This one is the spend ceiling.
 _JOB_EXA_LIFETIME: Dict[str, int] = {}
 
-# Bound on in-flight sourcing-time Exa contact runs. The fallback runs outside
+# Bounds on in-flight sourcing-time Exa contact runs. The fallback runs outside
 # _PROVIDER_SEMAPHORE (its slow polling would starve the cheap chain), so it
-# gets its own bound: EXA_CONTACT_ENRICH_CONCURRENCY. It used to borrow the
+# gets its own: EXA_CONTACT_ENRICH_WORKER_CONCURRENCY per worker (Exa's
+# per-account cap on active runs) and EXA_CONTACT_ENRICH_CONCURRENCY per job,
+# so one job's lookups never queue behind another job's. It used to borrow the
 # deep-search agent's EXA_AGENT_CONCURRENCY (1), which queued a job's contact
 # lookups one at a time behind each other.
 def _exa_semaphore() -> asyncio.Semaphore:
     global _EXA_SEMAPHORE
     if _EXA_SEMAPHORE is None:
-        _EXA_SEMAPHORE = asyncio.Semaphore(max(1, int(EXA_CONTACT_ENRICH_CONCURRENCY or 1)))
+        _EXA_SEMAPHORE = asyncio.Semaphore(max(1, int(EXA_CONTACT_ENRICH_WORKER_CONCURRENCY or 1)))
     return _EXA_SEMAPHORE
 
 _EXA_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+# job key -> [semaphore, holders + waiters]; dropped when its last user leaves.
+_JOB_EXA_SEMAPHORES: Dict[str, List[Any]] = {}
+
+
+@contextlib.asynccontextmanager
+async def _exa_slot(job_key: str):
+    """One sourcing-time Exa run's slot: the job's bound, then the worker's
+    (job first, so a job at its own bound never holds a worker slot)."""
+    entry = _JOB_EXA_SEMAPHORES.get(job_key)
+    if entry is None:
+        entry = _JOB_EXA_SEMAPHORES[job_key] = [
+            asyncio.Semaphore(max(1, int(EXA_CONTACT_ENRICH_CONCURRENCY or 1))), 0,
+        ]
+    entry[1] += 1
+    try:
+        async with entry[0], _exa_semaphore():
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] <= 0 and _JOB_EXA_SEMAPHORES.get(job_key) is entry:
+            del _JOB_EXA_SEMAPHORES[job_key]
 
 # Per event loop, so the bound never outlives the loop it was made on.
 _ONDEMAND_EXA_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
@@ -1677,7 +1703,7 @@ async def enrich_contact_for_sourcing(
                 if not have and (want_phone or field != "phone")
             )
             try:
-                async with _exa_semaphore():
+                async with _exa_slot(job_key):
                     exa_result = await exa_enrich_by_linkedin(
                         exa_label, linkedin_url, full_name or "", company or "",
                         fields=exa_fields,
