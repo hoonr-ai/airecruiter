@@ -14,6 +14,7 @@ import { playNotificationChime, unlockNotificationSound } from "@/lib/notificati
 import { isDesktopTypeEnabled } from "@/lib/desktop-notification-preferences";
 import { getSafeLocalStorage } from "@/lib/safe-local-storage";
 import { shouldApplyRefreshResult } from "@/lib/notifications-refresh-guard";
+import { createRefreshGate, type RefreshFn } from "@/lib/notifications-refresh-gate";
 
 export type { BrowserNotificationPermission };
 
@@ -26,7 +27,7 @@ function currentNotificationPermission(): BrowserNotificationPermission {
 // triggers — an active SSE session can update state several times in quick
 // succession, and there's no reason to hit localStorage on every single one.
 const CACHE_WRITE_DEBOUNCE_MS = 500;
-// Minimum gap between background refresh() calls (see refresh below).
+// Minimum gap between background refresh() calls (lib/notifications-refresh-gate.ts).
 const MIN_REFRESH_INTERVAL_MS = 10_000;
 
 interface NotificationsContextType {
@@ -86,10 +87,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatWatchdogRef = useRef<NodeJS.Timeout | null>(null);
 
-  const refreshRef = useRef<(opts?: { force?: boolean }) => Promise<void>>(async () => {});
-  const refreshInFlightRef = useRef<Promise<void> | null>(null);
-  const queuedForcedRefreshRef = useRef<Promise<void> | null>(null);
-  const lastRefreshAtRef = useRef(0);
+  const refreshRef = useRef<RefreshFn>(async () => {});
   const connectStreamRef = useRef<() => void>(() => {});
   const cacheWriteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // Highest notification id this tab has ever rendered, from either the
@@ -295,28 +293,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // refresh() is triggered from many places at once — mount, tab focus,
-  // stream reconnect, the heartbeat watchdog, the retry timer — so overlapping
-  // calls share one request and background ones are spaced at least
-  // MIN_REFRESH_INTERVAL_MS apart. `force` (user actions and mutation
-  // follow-ups) skips the spacing; if a request is already in flight it runs
-  // one more right after it, since that one may have read the server before
-  // the caller's own change committed.
-  const refresh = useCallback(async (opts?: { force?: boolean }) => {
-    if (refreshInFlightRef.current) {
-      if (!opts?.force) return refreshInFlightRef.current;
-      queuedForcedRefreshRef.current ??= refreshInFlightRef.current.then(() => {
-        queuedForcedRefreshRef.current = null;
-        return refreshRef.current({ force: true });
-      });
-      return queuedForcedRefreshRef.current;
-    }
-    if (!opts?.force && Date.now() - lastRefreshAtRef.current < MIN_REFRESH_INTERVAL_MS) return;
-    lastRefreshAtRef.current = Date.now();
-    refreshInFlightRef.current = doRefresh().finally(() => {
-      refreshInFlightRef.current = null;
-    });
-    return refreshInFlightRef.current;
+  // Merges overlapping calls, spaces background ones, lets `force` through
+  // (lib/notifications-refresh-gate.ts). One gate per provider, made on
+  // first use.
+  const refreshGateRef = useRef<RefreshFn | null>(null);
+  const refresh = useCallback<RefreshFn>((opts) => {
+    refreshGateRef.current ??= createRefreshGate(doRefresh, MIN_REFRESH_INTERVAL_MS);
+    return refreshGateRef.current(opts);
   }, [doRefresh]);
   refreshRef.current = refresh;
 

@@ -20,6 +20,12 @@ Shared state, in Redis so every worker sees it:
   waiting. Background callers (hydration, AutoSync, backfills) don't take a
   free slot while it is set, so user-facing requests go first.
 
+Every JobDiva call shares this one budget, not only the BI candidate
+endpoints: services/jobdiva.py's client sends each request through
+``paced_send`` (searches, job lookups, writes, auth), so the whole account
+quota is paced across all workers and any 429 starts the shared cooldown.
+``bi_get`` marks its own request so it never takes a second slot.
+
 When ``REDIS_URL`` is empty the same logic runs in-process (per worker). When
 Redis errors, it is skipped for ``_REDIS_RETRY_S`` and then tried again; in
 that window each worker paces at ``MIN_INTERVAL_S × LOCAL_WORKERS`` so all
@@ -37,7 +43,7 @@ import logging
 import os
 import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 import httpx
 
@@ -94,6 +100,20 @@ def background_context():
 
 def in_background() -> bool:
     return _priority_ctx.get() == BACKGROUND
+
+
+# Set while bi_get sends, so paced_send (the JobDiva client's own pacing)
+# doesn't take a second slot for a request that already has one.
+_paced_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("jobdiva_paced", default=False)
+
+# How long a request paced by paced_send waits for a slot before giving up
+# with SLOT_TIMEOUT_STATUS. Interactive callers have someone waiting.
+CLIENT_INTERACTIVE_MAX_WAIT_S = _env_float("JOBDIVA_INTERACTIVE_MAX_WAIT_S", 20.0)
+CLIENT_BACKGROUND_MAX_WAIT_S = _env_float("JOBDIVA_BACKGROUND_MAX_WAIT_S", 120.0)
+# paced_send's answer when no slot came up: a local 503 (never sent to
+# JobDiva), so callers take their normal failed-request path.
+SLOT_TIMEOUT_STATUS = 503
+SLOT_TIMEOUT_HEADER = "X-Pair-JobDiva-Slot-Timeout"
 
 
 class SlotTimeout(Exception):
@@ -433,7 +453,11 @@ async def bi_get(
     """
     if not await acquire(max_wait_s, priority=priority, label=label):
         return None
-    response = await client.get(url, **kwargs)
+    token = _paced_ctx.set(True)
+    try:
+        response = await client.get(url, **kwargs)
+    finally:
+        _paced_ctx.reset(token)
     if response.status_code == 429:
         await note_429(response.headers.get("Retry-After"), label=label, priority=priority)
     return response
@@ -462,6 +486,33 @@ async def bg_get(
             raise SlotTimeout(f"no JobDiva slot for {label} within {max_wait_s:.0f}s")
         return response
     response = await client.get(url, **kwargs)
-    if response.status_code == 429:
+    # A JobDiva client (services/jobdiva.py) paces itself and has already
+    # started the cooldown.
+    if response.status_code == 429 and not getattr(client, "paces_itself", False):
         await note_429(response.headers.get("Retry-After"), label=label, priority=INTERACTIVE)
+    return response
+
+
+async def paced_send(
+    send: Callable[[httpx.Request], Awaitable[httpx.Response]],
+    request: httpx.Request,
+    *,
+    label: str,
+) -> httpx.Response:
+    """Send one JobDiva request within the shared budget.
+
+    Waits for a slot (background priority inside ``background_context()``),
+    then sends; a 429 starts the shared cooldown (honouring Retry-After).
+    A request ``bi_get`` already paced goes straight through. No slot within
+    the wait budget: a local SLOT_TIMEOUT_STATUS response, nothing sent.
+    """
+    if _paced_ctx.get():
+        return await send(request)
+    priority = BACKGROUND if in_background() else INTERACTIVE
+    max_wait = CLIENT_BACKGROUND_MAX_WAIT_S if priority == BACKGROUND else CLIENT_INTERACTIVE_MAX_WAIT_S
+    if not await acquire(max_wait, priority=priority, label=label):
+        return httpx.Response(SLOT_TIMEOUT_STATUS, request=request, headers={SLOT_TIMEOUT_HEADER: "1"})
+    response = await send(request)
+    if response.status_code == 429:
+        await note_429(response.headers.get("Retry-After"), label=label, priority=priority)
     return response
