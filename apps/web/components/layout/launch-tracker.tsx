@@ -18,6 +18,29 @@ type TrackedSession = LaunchSessionView & { job_title?: string | null };
 const ACTIVE_POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
 const AUTH_BACKOFF_MS = 5 * 60_000;
+// After failures: 10s, 20s, 40s ... up to 5 min, with jitter so tabs and
+// users that failed together don't retry together.
+const FAILURE_MAX_MS = 5 * 60_000;
+// One tab per browser polls (it holds this Web Lock) and shares each result
+// with the others over the channel, so a recruiter with ten tabs open costs
+// one poll, not ten. Without Web Locks / BroadcastChannel every tab polls.
+const POLLER_LOCK = "pair.launchTracker.poller";
+const CHANNEL_NAME = "pair.launchTracker";
+
+type TrackerMessage =
+  // poller -> others: the latest /launch-sessions/mine result
+  | { type: "sessions"; sessions: TrackedSession[] }
+  // other -> poller: poll now. Sent when a tab opens, becomes visible or
+  // starts a launch, and every ACTIVE_POLL_MS from a visible tab while a
+  // launch runs: the poller may be a hidden tab, whose own timers browsers
+  // throttle to about once a minute, but channel messages still reach it
+  // at once.
+  | { type: "poll" };
+
+function failureDelay(failures: number): number {
+  const base = Math.min(FAILURE_MAX_MS, ACTIVE_POLL_MS * 2 ** failures);
+  return Math.round(base * (0.8 + Math.random() * 0.4));
+}
 const DISMISSED_KEY = "pair.launchTracker.dismissed";
 const COLLAPSED_KEY = "pair.launchTracker.collapsed";
 
@@ -120,12 +143,32 @@ export function LaunchTracker() {
   const mounted = useRef(true);
   const inFlight = useRef(false);
   const failures = useRef(0);
+  // Whether this tab is the one that polls (see POLLER_LOCK).
+  const isPoller = useRef(true);
+  const channel = useRef<BroadcastChannel | null>(null);
+  // Last time another tab asked for a poll: the poller keeps the fast rate
+  // for a visible tab even when it is hidden itself.
+  const peerVisibleAt = useRef(0);
+  const lastPollAt = useRef(0);
+  // Whether the last list had a running launch (every tab keeps this).
+  const anyRunning = useRef(false);
+
+  const applySessions = useCallback((list: TrackedSession[]) => {
+    const nowRunning = new Set(list.filter(isRunning).map((s) => s.id));
+    const finished = [...prevRunning.current].filter((id) => !nowRunning.has(id));
+    prevRunning.current = nowRunning;
+    anyRunning.current = nowRunning.size > 0;
+    if (finished.length) setFresh((f) => [...f, ...finished]);
+    setSessions(list);
+    return nowRunning;
+  }, []);
 
   const poll = useCallback(async () => {
     // One request at a time: the timer, a tab becoming visible and a new
-    // launch can all ask for a poll at once.
-    if (inFlight.current || !mounted.current) return;
+    // launch can all ask for a poll at once. Only the poller tab fetches.
+    if (inFlight.current || !mounted.current || !isPoller.current) return;
     inFlight.current = true;
+    lastPollAt.current = Date.now();
     clearTimeout(timer.current);
     let delay = IDLE_POLL_MS;
     try {
@@ -134,37 +177,87 @@ export function LaunchTracker() {
       if (res.ok && res.data) {
         failures.current = 0;
         const list = res.data.sessions;
-        const nowRunning = new Set(list.filter(isRunning).map((s) => s.id));
-        const finished = [...prevRunning.current].filter((id) => !nowRunning.has(id));
-        prevRunning.current = nowRunning;
-        if (finished.length) setFresh((f) => [...f, ...finished]);
-        setSessions(list);
-        if (nowRunning.size > 0 && document.visibilityState === "visible") delay = ACTIVE_POLL_MS;
+        const nowRunning = applySessions(list);
+        channel.current?.postMessage({ type: "sessions", sessions: list } satisfies TrackerMessage);
+        const someoneWatching =
+          document.visibilityState === "visible" || Date.now() - peerVisibleAt.current < 2 * ACTIVE_POLL_MS;
+        if (nowRunning.size > 0 && someoneWatching) delay = ACTIVE_POLL_MS;
       } else if (res.status === 401 || res.status === 403) {
         // Signed out or token expired: the auth flow handles it; don't hammer.
         delay = AUTH_BACKOFF_MS;
       } else {
         failures.current += 1;
-        delay = Math.min(IDLE_POLL_MS, ACTIVE_POLL_MS * 2 ** failures.current);
+        delay = failureDelay(failures.current);
       }
     } finally {
       inFlight.current = false;
     }
     if (mounted.current) timer.current = setTimeout(() => void pollRef.current(), delay);
-  }, []);
+  }, [applySessions]);
   useEffect(() => {
     pollRef.current = poll;
   }, [poll]);
 
   useEffect(() => {
     mounted.current = true;
-    timer.current = setTimeout(() => void poll(), 0);
+    // In the poller tab, poll now; elsewhere, ask the poller to.
+    const requestPoll = () => {
+      if (isPoller.current) void poll();
+      else channel.current?.postMessage({ type: "poll" } satisfies TrackerMessage);
+    };
+
+    let releaseLock: (() => void) | undefined;
+    const lockAbort = new AbortController();
+    let visibleBeat: ReturnType<typeof setInterval> | undefined;
+    const canShare = typeof BroadcastChannel !== "undefined" && typeof navigator !== "undefined" && !!navigator.locks;
+    if (canShare) {
+      isPoller.current = false;
+      const ch = new BroadcastChannel(CHANNEL_NAME);
+      channel.current = ch;
+      ch.onmessage = (e: MessageEvent<TrackerMessage>) => {
+        const msg = e.data;
+        if (msg?.type === "sessions" && !isPoller.current) {
+          applySessions(msg.sessions);
+        } else if (msg?.type === "poll" && isPoller.current) {
+          peerVisibleAt.current = Date.now();
+          // Several visible windows each ask every ACTIVE_POLL_MS: one poll
+          // per half-interval answers them all.
+          if (Date.now() - lastPollAt.current >= ACTIVE_POLL_MS / 2) void poll();
+        }
+      };
+      // Held until this tab unmounts; the next waiting tab then takes over.
+      navigator.locks
+        .request(POLLER_LOCK, { signal: lockAbort.signal }, () => {
+          if (!mounted.current) return;
+          isPoller.current = true;
+          void poll();
+          return new Promise<void>((resolve) => {
+            releaseLock = resolve;
+          });
+        })
+        .catch(() => {
+          /* aborted on unmount */
+        });
+      // This tab's own timer runs at full rate while it is visible, unlike a
+      // hidden poller's: drive the fast polling from here.
+      visibleBeat = setInterval(() => {
+        if (!isPoller.current && anyRunning.current && document.visibilityState === "visible") {
+          ch.postMessage({ type: "poll" } satisfies TrackerMessage);
+        }
+      }, ACTIVE_POLL_MS);
+      // A tab opened after the poller: get the current list without waiting
+      // for its next poll.
+      ch.postMessage({ type: "poll" } satisfies TrackerMessage);
+    } else {
+      timer.current = setTimeout(() => void poll(), 0);
+    }
+
     const onVisible = () => {
-      if (document.visibilityState === "visible") void poll();
+      if (document.visibilityState === "visible") requestPoll();
     };
     // The job page fires this right after it starts a session, so the dock
     // picks it up without waiting for the idle poll.
-    const onStarted = () => void poll();
+    const onStarted = () => requestPoll();
     // Keep dismiss / collapse in step across tabs.
     const onStorage = (e: StorageEvent) => {
       if (e.key === DISMISSED_KEY) setDismissed(readJson<string[]>(DISMISSED_KEY, []));
@@ -176,11 +269,17 @@ export function LaunchTracker() {
     return () => {
       mounted.current = false;
       clearTimeout(timer.current);
+      clearInterval(visibleBeat);
+      lockAbort.abort();
+      releaseLock?.();
+      isPoller.current = true;
+      channel.current?.close();
+      channel.current = null;
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener(LAUNCH_STARTED_EVENT, onStarted);
       window.removeEventListener("storage", onStorage);
     };
-  }, [poll]);
+  }, [poll, applySessions]);
 
   const toggle = () => {
     setFresh([]); // seen

@@ -8,6 +8,8 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
+
+from core.bounded_cache import BoundedDict
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
@@ -21,7 +23,8 @@ router = APIRouter(tags=["Live Report"])
 _BULK_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.:]+$")
 
 # In-memory cache for accessible jobdiva_ids per user (60s TTL)
-_USER_ACCESSIBLE_CACHE: Dict[str, Tuple[float, Set[str]]] = {}
+# Per user; bounded so a long-lived worker never holds every user ever seen.
+_USER_ACCESSIBLE_CACHE: Dict[str, Tuple[float, Set[str]]] = BoundedDict(1000)
 _CACHE_TTL_SECONDS = 60.0
 
 

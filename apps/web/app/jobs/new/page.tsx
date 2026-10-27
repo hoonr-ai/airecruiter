@@ -2916,6 +2916,10 @@ function NewJobPageContent() {
   // race this fixes.
   const explicitSaveAbortControllerRef = useRef<AbortController | null>(null);
   const autoSaveAbortControllerRef = useRef<AbortController | null>(null);
+  // The in-flight auto-save's completion, and a counter that picks the
+  // newest auto-save waiting on it (see the "queue" case in saveJobDraft).
+  const autoSaveSettledRef = useRef<Promise<void> | null>(null);
+  const autoSaveTicketRef = useRef(0);
   const saveJobDraft = async (stepData: {
     currentStep: number,
     saveType?: string,
@@ -2953,11 +2957,27 @@ function NewJobPageContent() {
     // whatever's in flight (auto or explicit) since it reflects the most
     // current data and the user is waiting on its result.
     const isAutoSave = stepData.saveType === "auto";
-    const dispatch = decideSaveDispatch(isAutoSave ? "auto" : "explicit", {
-      explicitInFlight: explicitSaveAbortControllerRef.current !== null,
-      autoInFlight: autoSaveAbortControllerRef.current !== null,
-    });
-    if (dispatch.action === "skip") {
+    const decide = () =>
+      decideSaveDispatch(
+        isAutoSave ? "auto" : "explicit",
+        {
+          explicitInFlight: explicitSaveAbortControllerRef.current !== null,
+          autoInFlight: autoSaveAbortControllerRef.current !== null,
+        },
+        { keepalive: stepData.keepalive }
+      );
+    let dispatch = decide();
+    if (dispatch.action === "queue") {
+      // Another auto-save of this job is in flight: wait for it rather than
+      // sending a second save the server would run alongside it. Only the
+      // newest waiter goes out — it carries the latest edits, which cover
+      // every older waiter's (the body is the whole draft).
+      const ticket = ++autoSaveTicketRef.current;
+      while (autoSaveSettledRef.current) await autoSaveSettledRef.current;
+      if (ticket !== autoSaveTicketRef.current) return { ok: false, superseded: true };
+      dispatch = decide();
+    }
+    if (dispatch.action !== "proceed") {
       // An explicit save is already in flight for this same job — it will
       // persist data at least as current as this auto-save's, so skip
       // rather than race it. The caller (useStepAutosave) restores its
@@ -2976,6 +2996,10 @@ function NewJobPageContent() {
     const saveController = new AbortController();
     const saveControllerRef = isAutoSave ? autoSaveAbortControllerRef : explicitSaveAbortControllerRef;
     saveControllerRef.current = saveController;
+    // Resolved in the finally below; queued auto-saves wait on it.
+    let markSettled = () => {};
+    const settled = new Promise<void>((resolve) => { markSettled = resolve; });
+    if (isAutoSave) autoSaveSettledRef.current = settled;
 
     // Bound the save fetch — the backend save now caps its transaction at
     // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
@@ -3078,6 +3102,8 @@ function NewJobPageContent() {
     } finally {
       clearTimeout(saveTimeoutId);
       clearIfCurrent(saveControllerRef, saveController);
+      clearIfCurrent(autoSaveSettledRef, settled);
+      markSettled();
     }
   };
 

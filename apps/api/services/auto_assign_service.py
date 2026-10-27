@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from services import jobdiva_rate_limit as _bi_rate_limit
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from core.db import get_db_connection
+from core import monitored_jobs_lock
 from services.feedback_metrics import count_feedback_metrics
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
@@ -402,8 +403,12 @@ class AutoAssignService:
                 detail_url = f"{jobdiva_service.api_url}/apiv2/bi/JobDetail"
                 headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
                 async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.get(detail_url, params={"jobIds": [int(numeric_job_id)]}, headers=headers)
-                    if resp.status_code == 200:
+                    # Within the shared JobDiva budget, like every other call.
+                    resp = await _bi_rate_limit.bi_get(
+                        client, detail_url, label="JobDetail",
+                        params={"jobIds": [int(numeric_job_id)]}, headers=headers,
+                    )
+                    if resp is not None and resp.status_code == 200:
                         contact_known = True
                         det_data = resp.json()
                         det_list = det_data.get("data", []) if isinstance(det_data, dict) else det_data
@@ -415,7 +420,8 @@ class AutoAssignService:
                             logger.debug(f"📋 Job {numeric_job_id} contact: '{contact_name}'")
                     else:
                         logger.warning(
-                            f"[ExternalSubs] JobDetail returned {resp.status_code} for job "
+                            f"[ExternalSubs] JobDetail returned "
+                            f"{'no JobDiva slot' if resp is None else resp.status_code} for job "
                             f"{numeric_job_id} — leaving pair_external_subs unchanged"
                         )
         except Exception as e:
@@ -1270,45 +1276,48 @@ class AutoAssignService:
                         )
                         return
                     resolved_job_id, resolved_jobdiva_ref = row[0], row[1]
-                    set_clauses = ["time_to_first_pass = %s"]
-                    params: List[Any] = [time_to_pass]
+                    # (column, value) pairs to write; see the UPDATE below.
+                    assignments: List[Tuple[str, Any]] = [("time_to_first_pass", time_to_pass)]
                     # None = "couldn't determine" (DB error / timeout): keep the
                     # last-known counters rather than writing zeros.
                     if counters is not None:
                         for col in ("candidates_sourced", "candidates_launched",
                                     "complete_submissions", "pass_submissions"):
-                            set_clauses.append(f"{col} = %s")
-                            params.append(counters[col])
+                            assignments.append((col, counters[col]))
                     # Same guard the JobDiva total already had: a None from
                     # either counter means "couldn't determine", not "zero".
                     # Writing the 0 anyway is what made PAIR EXTERNAL SUBS /
                     # FEEDBACK COMPLETED drop back to 0 on a bad cycle.
                     if ext_subs is not None:
-                        set_clauses.append("pair_external_subs = %s")
-                        params.append(ext_subs)
+                        assignments.append(("pair_external_subs", ext_subs))
                     if feedback_metrics is not None:
-                        set_clauses.append("feedback_completed = %s")
-                        params.append(feedback_metrics["feedback_completed"])
-                        set_clauses.append("pair_submits = %s")
-                        params.append(feedback_metrics["pair_submits"])
+                        assignments.append(("feedback_completed", feedback_metrics["feedback_completed"]))
+                        assignments.append(("pair_submits", feedback_metrics["pair_submits"]))
                     # Only overwrite jobdiva_total_subs when this cycle got a
                     # real snapshot — a failed fetch (None) keeps the
                     # last-known total instead of zeroing the dashboard.
                     if submittals is not None:
-                        set_clauses.append("jobdiva_total_subs = %s")
-                        params.append(len(submittals))
+                        assignments.append(("jobdiva_total_subs", len(submittals)))
                     # F7: only overwrite `jobdiva_criteria_unconfigured` when
                     # we have a fresh boolean from this run's summary. Callers
                     # that don't run a search (manual backfills) pass None and
                     # leave the flag at its last-known value.
                     if jobdiva_criteria_unconfigured is not None:
-                        set_clauses.append("jobdiva_criteria_unconfigured = %s")
-                        params.append(bool(jobdiva_criteria_unconfigured))
-                    set_clauses.append("updated_at = NOW()")
-                    params.append(resolved_job_id)
+                        assignments.append(("jobdiva_criteria_unconfigured", bool(jobdiva_criteria_unconfigured)))
+                    # Only when a value actually differs: most cycles change
+                    # nothing, and the unconditional UPDATE (with updated_at =
+                    # NOW() alone making every row "changed") was millions of
+                    # dead-tuple writes on monitored_jobs. updated_at moves
+                    # only with a real change.
+                    set_sql = ", ".join(f"{col} = %s" for col, _ in assignments)
+                    differs_sql = " OR ".join(f"{col} IS DISTINCT FROM %s" for col, _ in assignments)
+                    values = [value for _, value in assignments]
+                    # Never alongside the dashboard cache warmer's read.
+                    monitored_jobs_lock.lock_for_write(cur)
                     cur.execute(
-                        "UPDATE monitored_jobs SET " + ", ".join(set_clauses) + " WHERE job_id = %s",
-                        params,
+                        f"UPDATE monitored_jobs SET {set_sql}, updated_at = NOW() "
+                        f"WHERE job_id = %s AND ({differs_sql})",
+                        [*values, resolved_job_id, *values],
                     )
                     conn.commit()
 

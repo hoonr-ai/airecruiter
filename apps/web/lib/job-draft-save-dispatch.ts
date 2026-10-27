@@ -12,6 +12,12 @@
 // controllers: an auto-save never cancels a save the user is actively
 // waiting on, while an explicit save still supersedes anything in flight
 // (auto or explicit), since it reflects the most current data.
+//
+// Auto-saves no longer abort each other: aborting only drops the browser's
+// side of the request, and the server kept running the old save, so two
+// saves of the same job still queued on its row lock. A newer auto-save now
+// waits for the one in flight ("queue"), and only the newest waiter is sent.
+// The page-hide flush (keepalive) can't wait, so it still aborts.
 
 export type SaveKind = "auto" | "explicit";
 
@@ -24,15 +30,22 @@ export interface SaveDispatchDecision {
   // "skip": an explicit save is already in flight for this job — don't
   // race it with a background auto-save. The caller must leave its own
   // dirty bookkeeping alone so the edit is retried later, not dropped.
+  // "queue": an auto-save is in flight — wait for it to settle, then ask
+  // again (the caller drops this save if a newer one queued meanwhile).
   // "proceed": start this save, after aborting whatever's named in `abort`.
-  action: "skip" | "proceed";
+  action: "skip" | "queue" | "proceed";
   abort: SaveKind[];
 }
 
-export function decideSaveDispatch(kind: SaveKind, state: SaveInFlightState): SaveDispatchDecision {
+export function decideSaveDispatch(
+  kind: SaveKind,
+  state: SaveInFlightState,
+  opts: { keepalive?: boolean } = {}
+): SaveDispatchDecision {
   if (kind === "auto") {
     if (state.explicitInFlight) return { action: "skip", abort: [] };
-    return { action: "proceed", abort: state.autoInFlight ? ["auto"] : [] };
+    if (!state.autoInFlight) return { action: "proceed", abort: [] };
+    return opts.keepalive ? { action: "proceed", abort: ["auto"] } : { action: "queue", abort: [] };
   }
   const abort: SaveKind[] = [];
   if (state.autoInFlight) abort.push("auto");

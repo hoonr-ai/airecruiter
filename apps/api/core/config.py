@@ -184,12 +184,22 @@ EXA_CONTACT_ENRICH_ENABLED = get_env_bool("EXA_CONTACT_ENRICH_ENABLED", True)
 # phone hit took 52s. A timed-out run is still billed (we stop polling; Exa
 # keeps going), so a short budget is paying for results we discard. Sourcing
 # runs these after the row is on screen, so the wait no longer delays Step 5.
-EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "90"))
+# 60s (was 90) still fits the measured 52s phone hit. On Launch PAIR's path a
+# run still going is watched in the background (EXA_LATE_RESULT_WAIT_S).
+EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "60"))
 # In-flight contact runs per worker. Separate from EXA_AGENT_CONCURRENCY (the
 # deep-search agent, default 1): with the contact lookups sharing that single
 # slot, a 25-row job queued them one at a time for minutes. Create-time 429s
 # are retried with backoff in exa_enrich_by_linkedin.
-EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "3")))
+# Per JOB: one job's lookups no longer queue behind another job's, and a
+# 25-row job no longer waits 3 at a time (2026-10-27: 30 lookups held a
+# launch's search open ~7 min).
+EXA_CONTACT_ENRICH_CONCURRENCY = max(1, int(get_env_with_default("EXA_CONTACT_ENRICH_CONCURRENCY", "5")))
+# ...and per worker across jobs, so a burst of searches stays under Exa's
+# per-account cap on active runs (50, shared — see below).
+EXA_CONTACT_ENRICH_WORKER_CONCURRENCY = max(
+    1, int(get_env_with_default("EXA_CONTACT_ENRICH_WORKER_CONCURRENCY", "10"))
+)
 # The same bound for the on-demand chain (Launch PAIR, the phone button), per
 # worker. Launch PAIR's grouped lookup (/candidates/enrich-contacts) runs a whole
 # group in one worker, and Exa caps active agent runs per account (50, shared
@@ -208,7 +218,9 @@ EXA_CONTACT_DEEP_EFFORT = get_env_with_default("EXA_CONTACT_DEEP_EFFORT", "mediu
 # QA 2026-09-29 saw 14s-3.5min with Fiber attached). One window, no second:
 # a run still going after it is watched in the background instead
 # (EXA_LATE_RESULT_WAIT_S), so the Launch pass is not held up by it.
-EXA_CONTACT_DEEP_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_DEEP_TIMEOUT_S", "240"))
+# 120s (was 240): S3 waited up to 90s + 240s per row, the longest leg of a
+# launch; a deep run still going is watched in the background.
+EXA_CONTACT_DEEP_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_DEEP_TIMEOUT_S", "120"))
 # How long a run we stopped waiting for is still watched in the background:
 # it is billed anyway, so what it finds goes to the contact cache and the
 # candidate's sourced rows for the next Launch / phone click. 0 = off.
