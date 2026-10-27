@@ -4,6 +4,7 @@ import {
   NOTIFICATIONS_CACHE_KEY,
   NOTIFICATIONS_CACHE_MAX_AGE_MS,
   NOTIFICATIONS_CACHE_MAX_ITEMS,
+  NOTIFICATIONS_CACHE_REWRITE_AFTER_MS,
   clearCachedNotifications,
   readCachedNotifications,
   writeCachedNotifications,
@@ -109,5 +110,21 @@ describe("notifications cache", () => {
     writeCachedNotifications(s, "a@example.com", [item()], NOW);
     clearCachedNotifications(s);
     assert.equal(readCachedNotifications(s, "a@example.com", NOW), null);
+  });
+
+  it("skips rewriting an unchanged feed, so other tabs get no storage event", () => {
+    const s = memoryStorage();
+    let writes = 0;
+    const counting = { ...s, setItem: (k: string, v: string) => { writes++; s.setItem(k, v); } };
+    writeCachedNotifications(counting, "a@example.com", [item()], NOW);
+    writeCachedNotifications(counting, "A@example.com", [item()], NOW + 1000);
+    assert.equal(writes, 1);
+    writeCachedNotifications(counting, "a@example.com", [item({ read_at: "2026-10-12T09:01:00.000Z" })], NOW + 2000);
+    assert.equal(writes, 2);
+    writeCachedNotifications(counting, "b@example.com", [item({ read_at: "2026-10-12T09:01:00.000Z" })], NOW + 3000);
+    assert.equal(writes, 3);
+    // ...but still refreshes savedAt periodically so a live feed never ages out.
+    writeCachedNotifications(counting, "b@example.com", [item({ read_at: "2026-10-12T09:01:00.000Z" })], NOW + 3000 + NOTIFICATIONS_CACHE_REWRITE_AFTER_MS);
+    assert.equal(writes, 4);
   });
 });

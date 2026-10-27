@@ -447,7 +447,7 @@ export default function NotificationsPage() {
             <AlertCircle className="h-4 w-4 shrink-0" />
             Couldn&apos;t refresh notifications — showing the last loaded data.
           </span>
-          <Button variant="ghost" size="sm" className="h-7 text-amber-700 hover:text-amber-900" onClick={refresh}>
+          <Button variant="ghost" size="sm" className="h-7 text-amber-700 hover:text-amber-900" onClick={() => refresh({ force: true })}>
             Retry
           </Button>
         </div>

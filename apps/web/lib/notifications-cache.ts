@@ -26,6 +26,9 @@ export const NOTIFICATIONS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // unbounded local list (every SSE push ever appended) would just grow
 // forever in storage for a very long-lived tab.
 export const NOTIFICATIONS_CACHE_MAX_ITEMS = 50;
+// An unchanged feed is not rewritten (see writeCachedNotifications) until the
+// stored copy is at least this old.
+export const NOTIFICATIONS_CACHE_REWRITE_AFTER_MS = 60 * 60 * 1000;
 
 export interface NotificationsStorage {
   getItem(key: string): string | null;
@@ -82,10 +85,27 @@ export function writeCachedNotifications(
 ): void {
   if (!storage || !email) return;
   try {
+    const sliced = notifications.slice(0, NOTIFICATIONS_CACHE_MAX_ITEMS);
+    // Skip identical writes: savedAt alone would make every write "new",
+    // firing a `storage` event in every other tab, which re-syncs and writes
+    // back — an endless cross-tab ping-pong. Still rewritten once an hour so
+    // savedAt never ages a live feed out of NOTIFICATIONS_CACHE_MAX_AGE_MS.
+    const prevRaw = storage.getItem(NOTIFICATIONS_CACHE_KEY);
+    if (prevRaw) {
+      const prev = JSON.parse(prevRaw) as Partial<Stored>;
+      if (
+        prev.email === norm(email) &&
+        typeof prev.savedAt === "number" &&
+        now - prev.savedAt < NOTIFICATIONS_CACHE_REWRITE_AFTER_MS &&
+        JSON.stringify(prev.notifications) === JSON.stringify(sliced)
+      ) {
+        return;
+      }
+    }
     const stored: Stored = {
       email: norm(email),
       savedAt: now,
-      notifications: notifications.slice(0, NOTIFICATIONS_CACHE_MAX_ITEMS),
+      notifications: sliced,
     };
     storage.setItem(NOTIFICATIONS_CACHE_KEY, JSON.stringify(stored));
   } catch {
